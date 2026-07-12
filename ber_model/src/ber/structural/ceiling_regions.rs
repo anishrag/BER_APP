@@ -545,17 +545,27 @@ impl CeilingRegions {
         self.with_apexes_hinted_unfanned(apexes, hints, &[])
     }
 
-    /// Like [`with_apexes_hinted`](Self::with_apexes_hinted), plus the
-    /// tap-to-unfan escape hatch: `unfanned` (the storey's durable
-    /// `ceiling_unfanned` set, as plan points) names ring vertices that must
-    /// NOT anchor a fan plane of their own. The fan/ridge triangulations lift
-    /// each matched vertex onto the chord plane through its nearest fanned
-    /// neighbours and its hub apex (`lift_unfanned` in `ceiling_geom` — the
-    /// normative semantics doc), so the coplanar merge folds its would-be fan
-    /// planes into the neighbours' single plane. Empty `unfanned` (every old
-    /// record, and both delegating forms above) is byte-identical to before.
-    /// The 4-corner RECT (pavilion) branch has no per-vertex fan and ignores
-    /// the set.
+    /// Like [`with_apexes_hinted`](Self::with_apexes_hinted), plus the unfan
+    /// machinery: `unfanned` (the storey's durable `ceiling_unfanned` set,
+    /// as plan points) holds the assessor's MANUAL fan toggles.
+    ///
+    /// - A TRUE-GABLE ridge (both endpoints on its region's boundary — the
+    ///   assign-time gable-end snap) solves each side as ONE PLANE through
+    ///   the ridge and the side's nearest eave corner; every other vertex
+    ///   (bay/notch corners, gable-wall extras) EMBEDS on that plane, so the
+    ///   roof is two planes with zero taps (`gable_plan_classify` +
+    ///   `embed_gable_sides` in `ceiling_geom` — the normative docs). The
+    ///   stored set TOGGLES against that auto baseline: re-fan an embedded
+    ///   corner (pin it at its own z) or unfan an anchor (pitch to the next
+    ///   wall).
+    /// - Any other fan/ridge: only stored-set vertices stop being fan
+    ///   targets, each embedded on the plane of the EFFECTIVE solve's face
+    ///   across it (`lift_unfanned_fan` / `lift_unfanned_hip_ridge`), so the
+    ///   coplanar merge folds its facets into the neighbours' plane.
+    ///
+    /// Empty `unfanned` + non-gable ridges (every old record before the
+    /// gable-end snap existed) are byte-identical to before. The 4-corner
+    /// RECT (pavilion) branch has no per-vertex fan and ignores the set.
     pub fn with_apexes_hinted_unfanned(
         self,
         apexes: &[CeilingApex],
@@ -815,8 +825,33 @@ impl CeilingRegions {
                 // base_z from the members, warn-excluding disagreement.
                 let mut base_z: Option<f64> = None;
                 let mut merge: Vec<&CeilingRegion> = Vec::new();
+                // For a 2-apex RIDGE group, each member face may be a TRUE
+                // GABLE slope (both apexes on its own ring) carrying
+                // AUTO-EMBEDDED eave vertices (`embed_gable_sides`) — the
+                // base recovery must skip those exactly like the stored set,
+                // or a gable with bays on BOTH sides has no voting member at
+                // all (base_z would collapse to 0 with a warn on every call).
+                let gable_pair = (apex_idxs.len() == 2)
+                    .then(|| (apexes[apex_idxs[0]].point, apexes[apex_idxs[1]].point));
                 for &ri in &region_idxs {
                     let r = &self.regions[ri];
+                    let mut excluded: Vec<Point2f64> = unfanned.to_vec();
+                    if let Some((pa, pb)) = gable_pair {
+                        let plan: Vec<Point2f64> = r
+                            .polygon
+                            .exterior
+                            .iter()
+                            .map(|v| Point2f64::new(v.x, v.y))
+                            .collect();
+                        if let Some(cls) = gable_plan_classify(&plan, pa, pb, unfanned) {
+                            excluded.extend(
+                                plan.iter()
+                                    .zip(&cls.fanned)
+                                    .filter(|(_, fanned)| !**fanned)
+                                    .map(|(p, _)| *p),
+                            );
+                        }
+                    }
                     // A member whose EVERY vertex is apex-matching (the
                     // rect ridge's flat TOP) has no base of its own: it
                     // joins the merge WITHOUT voting on base_z — excluding
@@ -834,12 +869,28 @@ impl CeilingRegions {
                         merge.push(r);
                         continue;
                     }
-                    match (r.fan_base_z_excluding(apexes, unfanned), base_z) {
+                    let planar = face_plane(&r.polygon.exterior)
+                        .map(|(nrm, d)| {
+                            r.polygon.exterior.iter().all(|v| {
+                                (nrm.x * v.x + nrm.y * v.y + nrm.z * v.z - d).abs() <= EPS_M
+                            })
+                        })
+                        .unwrap_or(false);
+                    match (r.fan_base_z_excluding(apexes, &excluded), base_z) {
                         (Some(z), None) => {
                             base_z = Some(z);
                             merge.push(r);
                         }
                         (Some(z), Some(b)) if (z - b).abs() <= EPS_M => merge.push(r),
+                        // A PLANAR slope face with no recoverable base: a
+                        // gable side whose eave vertices are EMBEDDED
+                        // off-base (auto-unfanned bay/notch corners —
+                        // `embed_gable_sides`). A genuine roof member (it
+                        // carries an apex corner, or it wouldn't be in this
+                        // group): keep it in the merged ring — the embedded
+                        // corners must stay tappable as markers — while the
+                        // level-based members vote base_z.
+                        (None, _) if planar => merge.push(r),
                         (got, _) => log::warn!(
                             "ceiling apex group: region base z {got:?} disagrees with the \
                              group's base {base_z:?} — excluded from the merged ring"

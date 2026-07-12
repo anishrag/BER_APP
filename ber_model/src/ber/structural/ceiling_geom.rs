@@ -1,7 +1,7 @@
 use geo::{LineString, Polygon};
 
 use crate::ber::common::ItemId;
-use domain::points::{Point2f64, Point3f64, Vector3f64};
+use domain::points::{point_to_segment_distance, Point2f64, Point3f64, Vector3f64};
 
 #[allow(unused_imports)]
 use super::*;
@@ -82,37 +82,36 @@ fn is_unfanned(v: &Point3f64, unfanned: &[Point2f64]) -> bool {
         .any(|u| (v.x - u.x).abs() <= UNFAN_MATCH_EPS_M && (v.y - u.y).abs() <= UNFAN_MATCH_EPS_M)
 }
 
-/// The UNFAN LIFT — the tap-to-unfan escape hatch, run right after
-/// [`pre_lift`] (and, for a ridge, BEFORE the midline split, so synthetic
-/// split vertices never join the walk): every ring vertex plan-matching a
-/// point of `unfanned` (within [`UNFAN_MATCH_EPS_M`]) and NOT plan-matching
-/// an applied apex (apex corners belong to `pre_lift`) stops being a fan
-/// target. Its z is RE-COMPUTED on the CHORD PLANE through its nearest
-/// fanned ring neighbours `u`/`w` (the closest non-unfanned vertices walking
-/// the ring each way, at their current — pre-lifted — z) and the hub apex
-/// the vertex would rise to (`hub_of`; THE apex for a fan, the nearer-by-
-/// ridge-parameter hub for a ridge). The triangulation then emits its usual
-/// per-edge hub triangles over the SAME plan ring — any z assignment tiles
-/// watertight — and the coplanar merge collapses the now-coplanar pieces
-/// into the neighbours' single plane: the surface re-solves as if the vertex
-/// weren't a fan target, and the boundary between it and the eave becomes a
-/// straight raking edge (the wall below rises to meet the lifted z).
-///
-/// Degenerate cases keep the vertex's current z (warn where surprising):
-/// fewer than two fanned vertices left on the ring (no chord to span), or a
-/// chord plane that is vertical / degenerate over plan (|n·ẑ| ≈ 0 — e.g. a
-/// chord endpoint that IS the hub, as happens when re-applying to a face
-/// whose ring carries the apex as a corner: the vertex was already lifted on
-/// the first pass, so keeping its z is exactly the re-apply identity).
-fn lift_unfanned(
-    mut ext: Vec<Point3f64>,
+/// Evaluate the plane through 3 points at plan position `(x, y)`; `None`
+/// when the plane is vertical / degenerate over plan (|n·ẑ| ≈ 0).
+/// `pub(crate)`: the roof-area overhang solve evaluates the SAME gable side
+/// planes over its offset ring.
+pub(crate) fn plane_z_at(
+    p0: Point3f64,
+    p1: Point3f64,
+    p2: Point3f64,
+    x: f64,
+    y: f64,
+) -> Option<f64> {
+    let nrm = (p1 - p0).cross(&(p2 - p0));
+    if nrm.z.abs() <= 1e-9 {
+        return None;
+    }
+    Some(p0.z - (nrm.x * (x - p0.x) + nrm.y * (y - p0.y)) / nrm.z)
+}
+
+/// The per-vertex UNFAN targets of a ring: plan-matches the `unfanned` set
+/// and is NOT an apex corner (apex corners belong to `pre_lift`). `None`
+/// (nothing to lift) when the set misses the ring entirely or fewer than two
+/// fanned vertices would remain (no span to embed against — warned).
+fn unfan_targets(
+    ext: &[Point3f64],
     unfanned: &[Point2f64],
     apexes: &[&CeilingApex],
-    hub_of: impl Fn(&Point3f64) -> Point3f64,
-) -> Vec<Point3f64> {
+) -> Option<Vec<bool>> {
     const EPS_M: f64 = 1e-6;
     if unfanned.is_empty() || ext.len() < 3 {
-        return ext;
+        return None;
     }
     let is_apex = |v: &Point3f64| {
         apexes
@@ -124,15 +123,46 @@ fn lift_unfanned(
         .map(|v| is_unfanned(v, unfanned) && !is_apex(v))
         .collect();
     if !target.iter().any(|t| *t) {
-        return ext;
+        return None;
     }
     if target.iter().filter(|t| !**t).count() < 2 {
         log::warn!(
             "unfan: fewer than two fanned vertices would remain on a ceiling ring — \
              ignoring the unfanned set for this region"
         );
-        return ext;
+        return None;
     }
+    Some(target)
+}
+
+/// The UNFAN EMBED for a single-apex FAN — the tap-to-unfan escape hatch,
+/// run right after [`pre_lift`]: every unfanned ring vertex
+/// ([`unfan_targets`]) stops being a fan target, and its z is RE-COMPUTED on
+/// the plane of the face the EFFECTIVE solve (the fan over only the FANNED
+/// vertices) spans across it: the plane through its nearest fanned ring
+/// neighbours `u`/`w` (at their current — pre-lifted — z) and the apex. That
+/// is exactly the effective fan's `(u, w, apex)` hub face extended over the
+/// vertex's sector, so the vertex lands ON the solved slope by construction.
+/// The triangulation then emits its usual per-edge hub triangles over the
+/// SAME plan ring — any z assignment tiles watertight — and the coplanar
+/// merge folds the vertex's facets into that single plane: the surface
+/// re-solves as if the vertex weren't a fan target, and the wall below rises
+/// (or the plane keeps falling past the eave line, for a corner poking
+/// beyond the chord — the "roof continues over the bay" reading).
+///
+/// Degenerate cases keep the vertex's current z: a vertical chord plane
+/// (e.g. a chord endpoint that IS the apex, as happens when re-applying to a
+/// face carrying the apex as a corner — the vertex was already embedded on
+/// the first pass, so keeping its z is exactly the re-apply identity).
+fn lift_unfanned_fan(
+    mut ext: Vec<Point3f64>,
+    unfanned: &[Point2f64],
+    apex: &CeilingApex,
+    apex_v: Point3f64,
+) -> Vec<Point3f64> {
+    let Some(target) = unfan_targets(&ext, unfanned, &[apex]) else {
+        return ext;
+    };
     let n = ext.len();
     let orig = ext.clone();
     for i in 0..n {
@@ -148,15 +178,263 @@ fn lift_unfanned(
         while target[k] {
             k = (k + 1) % n;
         }
-        let (u, w) = (orig[j], orig[k]);
-        let h = hub_of(&orig[i]);
-        // The chord plane through (u, w, h); skip when vertical/degenerate
-        // over plan (keeps the current z — see the doc above).
-        let nrm = (w - u).cross(&(h - u));
-        if nrm.z.abs() <= 1e-9 {
+        if let Some(z) = plane_z_at(orig[j], orig[k], apex_v, ext[i].x, ext[i].y) {
+            ext[i].z = z;
+        }
+    }
+    ext
+}
+
+/// The UNFAN EMBED for a NON-GABLE (hip / interior-endpoint) ridge: like
+/// [`lift_unfanned_fan`], but the effective solve's face across an unfanned
+/// vertex depends on the ridge MIDLINE. With fanned neighbours `u`/`w`, the
+/// effective ridge solve splits the chord `u→w` at the midline crossing `m`
+/// (z interpolated along the chord) and spans `(u′, m, hub A)` on A's side
+/// and `(m, w′, hub B)` on B's — the vertex embeds on the plane of the
+/// sub-face on ITS side of the midline (by its own ridge parameter). A chord
+/// that doesn't cross keeps one plane `(u, w, hub)`. Vertical/degenerate
+/// planes keep the current z (the re-apply-identity posture).
+fn lift_unfanned_hip_ridge(
+    mut ext: Vec<Point3f64>,
+    unfanned: &[Point2f64],
+    a: &CeilingApex,
+    b: &CeilingApex,
+) -> Vec<Point3f64> {
+    let Some(target) = unfan_targets(&ext, unfanned, &[a, b]) else {
+        return ext;
+    };
+    let (dx, dy) = (b.point.x - a.point.x, b.point.y - a.point.y);
+    let d2 = dx * dx + dy * dy;
+    let a3 = Point3f64::new(a.point.x, a.point.y, a.z_m);
+    let b3 = Point3f64::new(b.point.x, b.point.y, b.z_m);
+    if d2 < 1e-12 {
+        // Degenerate ridge — the caller will fan to `a`; embed like a fan.
+        return lift_unfanned_fan(ext, unfanned, a, a3);
+    }
+    let t_of = |p: &Point3f64| ((p.x - a.point.x) * dx + (p.y - a.point.y) * dy) / d2;
+    let n = ext.len();
+    let orig = ext.clone();
+    for i in 0..n {
+        if !target[i] {
             continue;
         }
-        ext[i].z = u.z - (nrm.x * (ext[i].x - u.x) + nrm.y * (ext[i].y - u.y)) / nrm.z;
+        let mut j = (i + n - 1) % n;
+        while target[j] {
+            j = (j + n - 1) % n;
+        }
+        let mut k = (i + 1) % n;
+        while target[k] {
+            k = (k + 1) % n;
+        }
+        let (u, w) = (orig[j], orig[k]);
+        let (tu, tw, tv) = (t_of(&u), t_of(&w), t_of(&orig[i]));
+        let v_is_b = tv >= 0.5;
+        let (p0, p1, h) = if (tu - 0.5) * (tw - 0.5) < 0.0 {
+            // The chord crosses the midline: embed on the sub-face of the
+            // vertex's own side.
+            let s = (0.5 - tu) / (tw - tu);
+            let m = u + s * (w - u);
+            let u_is_b = tu >= 0.5;
+            if v_is_b == u_is_b {
+                (u, m, if v_is_b { b3 } else { a3 })
+            } else {
+                (m, w, if v_is_b { b3 } else { a3 })
+            }
+        } else {
+            (u, w, if v_is_b { b3 } else { a3 })
+        };
+        if let Some(z) = plane_z_at(p0, p1, h, ext[i].x, ext[i].y) {
+            ext[i].z = z;
+        }
+    }
+    ext
+}
+
+/// Distance tie tolerance (m) for the gable anchor election and side
+/// classification — same order as [`APEX_BOUNDARY_EPS_M`]: real eave walls
+/// differ by centimetres or more; boolean noise by ~1e-7.
+pub(crate) const GABLE_DIST_EPS_M: f64 = 1e-4;
+
+/// Per-vertex classification of a TRUE-GABLE ridge over a plan ring — the
+/// zero-taps automatic rule behind "a gable is just two planes":
+///
+/// Detection: BOTH ridge endpoints lie on the ring's boundary (within
+/// [`APEX_BOUNDARY_EPS_M`] — the assign-time gable-end snap puts them exactly
+/// on). Otherwise `None`, and the ridge keeps the hip/fan solve.
+///
+/// Classification, per ring vertex:
+/// - `side`: signed perpendicular offset from the ridge LINE (m).
+/// - `eligible`: the vertex owns at least one NON-GABLE boundary edge — an
+///   edge whose hub triangle has real plan width (its hub is off the edge's
+///   line by more than the epsilon). Vertices whose every incident edge is
+///   part of a vertical gable END (edges collinear with their hub — e.g. an
+///   extra vertex on the gable wall) never anchor a slope and their z never
+///   surfaces (their faces are all slivers).
+/// - `fanned`: the AUTO baseline XOR the stored manual toggles. The baseline
+///   fans exactly the eligible vertices at their side's MINIMUM ridge
+///   distance (within [`GABLE_DIST_EPS_M`]) — the eave the slope plane is
+///   pitched to; every other vertex is auto-unfanned and EMBEDS on the side
+///   plane ([`ridge_triangles`]). A stored entry ([`UNFAN_MATCH_EPS_M`]
+///   match) FLIPS its vertex: unfan an anchor (pitch to the next wall) or
+///   re-fan an embedded corner (pin it back to its own z). Old records with
+///   a stored set keep their unfan meaning wherever the baseline is empty
+///   (every non-gable roof).
+pub(crate) struct GablePlanClass {
+    pub side: Vec<f64>,
+    pub eligible: Vec<bool>,
+    pub fanned: Vec<bool>,
+}
+
+pub(crate) fn gable_plan_classify(
+    ring: &[Point2f64],
+    a: Point2f64,
+    b: Point2f64,
+    stored_unfanned: &[Point2f64],
+) -> Option<GablePlanClass> {
+    let n = ring.len();
+    if n < 3 {
+        return None;
+    }
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let d2 = dx * dx + dy * dy;
+    if d2 < 1e-12 {
+        return None;
+    }
+    let len = d2.sqrt();
+    let on_boundary = |p: Point2f64| {
+        (0..n).any(|i| {
+            let (u, w) = (ring[i], ring[(i + 1) % n]);
+            point_to_segment_distance(p.x, p.y, u.x, u.y, w.x, w.y) <= APEX_BOUNDARY_EPS_M
+        })
+    };
+    if !(on_boundary(a) && on_boundary(b)) {
+        return None;
+    }
+    // Signed side offset from the ridge line.
+    let side: Vec<f64> = ring
+        .iter()
+        .map(|v| (dx * (v.y - a.y) - dy * (v.x - a.x)) / len)
+        .collect();
+    // A GABLE edge: its hub triangle is plan-degenerate (the hub sits on the
+    // edge's line — the edge is part of a vertical gable end).
+    let edge_gable: Vec<bool> = (0..n)
+        .map(|i| {
+            let (p, q) = (ring[i], ring[(i + 1) % n]);
+            let (mx, my) = ((p.x + q.x) / 2.0, (p.y + q.y) / 2.0);
+            let t = ((mx - a.x) * dx + (my - a.y) * dy) / d2;
+            let h = if t >= 0.5 { b } else { a };
+            let cross2 = (q.x - p.x) * (h.y - p.y) - (q.y - p.y) * (h.x - p.x);
+            let el = ((q.x - p.x).powi(2) + (q.y - p.y).powi(2)).sqrt();
+            el <= 1e-9 || cross2.abs() / el <= APEX_BOUNDARY_EPS_M
+        })
+        .collect();
+    // Vertex i touches edges (i−1) and i.
+    let eligible: Vec<bool> = (0..n)
+        .map(|i| !edge_gable[(i + n - 1) % n] || !edge_gable[i])
+        .collect();
+    // Per-side minimum ridge distance among eligible vertices off the line.
+    let mut min_side = [f64::INFINITY, f64::INFINITY]; // [negative side, positive side]
+    for i in 0..n {
+        if eligible[i] && side[i].abs() > GABLE_DIST_EPS_M {
+            let s = usize::from(side[i] > 0.0);
+            min_side[s] = min_side[s].min(side[i].abs());
+        }
+    }
+    let fanned: Vec<bool> = (0..n)
+        .map(|i| {
+            let baseline = eligible[i]
+                && side[i].abs() > GABLE_DIST_EPS_M
+                && side[i].abs() <= min_side[usize::from(side[i] > 0.0)] + GABLE_DIST_EPS_M;
+            let stored = stored_unfanned.iter().any(|u| {
+                (ring[i].x - u.x).abs() <= UNFAN_MATCH_EPS_M
+                    && (ring[i].y - u.y).abs() <= UNFAN_MATCH_EPS_M
+            });
+            baseline ^ stored
+        })
+        .collect();
+    Some(GablePlanClass {
+        side,
+        eligible,
+        fanned,
+    })
+}
+
+/// The EFFECTIVE fanned flag per ring vertex of a TRUE-GABLE ridge (both
+/// endpoints on the ring boundary), or `None` for any other ridge — the
+/// public face of [`gable_plan_classify`] for the document layer's
+/// tap-to-unfan markers, so the markers show exactly what the solve does.
+pub fn gable_effective_fanned(
+    ring: &[Point2f64],
+    a: Point2f64,
+    b: Point2f64,
+    stored_unfanned: &[Point2f64],
+) -> Option<Vec<bool>> {
+    gable_plan_classify(ring, a, b, stored_unfanned).map(|c| c.fanned)
+}
+
+/// The TRUE-GABLE embed (both ridge endpoints on the region boundary): each
+/// side of the ridge is ONE PLANE through the ridge line and that side's
+/// ANCHOR — the nearest effective-fanned eligible vertex
+/// ([`gable_plan_classify`]) at its own z, i.e. the slope meets base height
+/// at the eave wall closest to the ridge and CONTINUES over anything
+/// further out (the assessor's "one of them extends a bit more over the
+/// bay"). When the assessor unfanned every eave vertex on a side, the
+/// nearest eligible vertex still anchors (warned — a slope must be pitched
+/// to something). Every vertex that is NOT effective-fanned embeds at the
+/// side plane's z over its plan position; fanned vertices keep their own z
+/// (a re-fanned bay corner pins the surface locally — the escape in the fan
+/// direction). The hub triangulation then runs unchanged; on a plain side
+/// every triangle (and every midline split point, interpolated along
+/// on-plane edges) lies on the side plane, so the coplanar merge folds the
+/// whole side into ONE face — the classic two-plane gable, bays and notches
+/// embedded.
+fn embed_gable_sides(
+    mut ext: Vec<Point3f64>,
+    cls: &GablePlanClass,
+    a: &CeilingApex,
+    b: &CeilingApex,
+) -> Vec<Point3f64> {
+    const EPS_M: f64 = 1e-6;
+    let a3 = Point3f64::new(a.point.x, a.point.y, a.z_m);
+    let b3 = Point3f64::new(b.point.x, b.point.y, b.z_m);
+    let n = ext.len();
+    let is_hub = |v: &Point3f64| {
+        [(a.point), (b.point)]
+            .iter()
+            .any(|p| (v.x - p.x).abs() <= EPS_M && (v.y - p.y).abs() <= EPS_M)
+    };
+    for s in [false, true] {
+        let on_side = |i: usize| (cls.side[i] > 0.0) == s && cls.side[i].abs() > GABLE_DIST_EPS_M;
+        // The side's anchor: nearest fanned eligible vertex; nearest eligible
+        // (warned) when every one was unfanned; none → nothing to pitch, the
+        // side keeps its z (its faces are gable slivers anyway).
+        let candidates = |need_fanned: bool| {
+            (0..n)
+                .filter(|&i| on_side(i) && cls.eligible[i] && (!need_fanned || cls.fanned[i]))
+                .min_by(|&i, &j| cls.side[i].abs().total_cmp(&cls.side[j].abs()))
+        };
+        let anchor = candidates(true).or_else(|| {
+            let fallback = candidates(false);
+            if fallback.is_some() {
+                log::warn!(
+                    "gable: every eave vertex on one side is unfanned — \
+                     pitching to the nearest corner anyway"
+                );
+            }
+            fallback
+        });
+        let Some(ai) = anchor else {
+            continue;
+        };
+        let (p0, p1, p2) = (a3, b3, ext[ai]);
+        for i in 0..n {
+            if !on_side(i) || cls.fanned[i] || i == ai || is_hub(&ext[i]) {
+                continue;
+            }
+            if let Some(z) = plane_z_at(p0, p1, p2, ext[i].x, ext[i].y) {
+                ext[i].z = z;
+            }
+        }
     }
     ext
 }
@@ -201,9 +479,9 @@ fn ring_signed_plan_area(ext: &[Point3f64]) -> f64 {
 
 /// FAN a region to a single `apex` (the 1-apex branch of
 /// [`CeilingRegions::with_apexes`], where the semantics are documented):
-/// pre-lift, unfan-lift ([`lift_unfanned`] — vertices of the `unfanned` set
-/// rise onto their neighbours' chord plane instead of anchoring the fan),
-/// then one triangle per boundary edge `(vᵢ, vᵢ₊₁, apex)`, dropping
+/// pre-lift, unfan-embed ([`lift_unfanned_fan`] — vertices of the `unfanned`
+/// set land on the effective fan's face plane instead of anchoring their
+/// own), then one triangle per boundary edge `(vᵢ, vᵢ₊₁, apex)`, dropping
 /// sub-[`SLIVER_AREA_M2`] slivers — exactly the degenerate pair incident to
 /// an apex that is already a corner. Fresh ids, default `opes`, inherited
 /// `construction_id`.
@@ -216,7 +494,7 @@ pub(crate) fn fan_triangles(
     let exposure = region.exposure;
     let apex_v = Point3f64::new(apex.point.x, apex.point.y, apex.z_m);
     let ext = pre_lift(region.polygon.exterior, &[apex]);
-    let ext = lift_unfanned(ext, unfanned, &[apex], |_| apex_v);
+    let ext = lift_unfanned_fan(ext, unfanned, apex, apex_v);
     let n = ext.len();
     let mut out = Vec::new();
     for i in 0..n {
@@ -362,17 +640,22 @@ pub(crate) fn ridge_triangles(
     let cid = region.construction_id;
     let exposure = region.exposure;
     let ext = pre_lift(region.polygon.exterior, &[a, b]);
-    // Unfan-lift BEFORE the midline split: the walk to a vertex's fanned
-    // neighbours must see only REAL ring vertices, and the split then
-    // interpolates z along the already-lifted edges. Hub choice matches the
-    // per-edge rule: the vertex's own ridge parameter, tie → B.
-    let ext = lift_unfanned(ext, unfanned, &[a, b], |v| {
-        let (dx, dy) = (b.point.x - a.point.x, b.point.y - a.point.y);
-        let d2 = dx * dx + dy * dy;
-        let is_b = d2 >= 1e-12 && ((v.x - a.point.x) * dx + (v.y - a.point.y) * dy) / d2 >= 0.5;
-        let h = if is_b { b } else { a };
-        Point3f64::new(h.point.x, h.point.y, h.z_m)
-    });
+    // Z ASSIGNMENT, before the midline split (the embed walks/planes must
+    // see only REAL ring vertices; the split then interpolates z along the
+    // already-embedded edges, staying on their planes):
+    // - TRUE GABLE (both endpoints on the region boundary,
+    //   [`gable_plan_classify`]): each side embeds onto its single slope
+    //   plane ([`embed_gable_sides`]) — two planes with zero taps, bays and
+    //   notches carried along; the stored unfanned set toggles against the
+    //   auto baseline.
+    // - otherwise (hip / interior endpoints): only stored-unfanned vertices
+    //   embed, on the effective solve's containing sub-face
+    //   ([`lift_unfanned_hip_ridge`]).
+    let plan_ring: Vec<Point2f64> = ext.iter().map(|v| Point2f64::new(v.x, v.y)).collect();
+    let ext = match gable_plan_classify(&plan_ring, a.point, b.point, unfanned) {
+        Some(cls) => embed_gable_sides(ext, &cls, a, b),
+        None => lift_unfanned_hip_ridge(ext, unfanned, a, b),
+    };
     let ext = ridge_split_ring(ext, a.point, b.point);
     let plan: Vec<(f64, f64)> = ext.iter().map(|v| (v.x, v.y)).collect();
     let Some(hubs) = ridge_edge_hubs(&plan, a.point, b.point) else {

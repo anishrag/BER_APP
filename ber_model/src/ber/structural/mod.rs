@@ -2179,6 +2179,257 @@ mod tests {
         }
     }
 
+    /// The field-report drawing (bug ee77622f, 2026-07-12): rectangle
+    /// x[1.52, 6.52] × y[2.31, 7.31] plus a south-east BAY x[5.52, 6.52] ×
+    /// y[7.31, 8.31], gable ridge (1.52, 4.66)–(6.52, 4.66) at 3.0 over base
+    /// 2.0.
+    fn bay_gable_ring() -> Vec<Point2f64> {
+        vec![
+            Point2f64::new(1.52, 2.31),
+            Point2f64::new(6.52, 2.31),
+            Point2f64::new(6.52, 8.31),
+            Point2f64::new(5.52, 8.31),
+            Point2f64::new(5.52, 7.31),
+            Point2f64::new(1.52, 7.31),
+        ]
+    }
+
+    fn bay_gable_apexes() -> Vec<CeilingApex> {
+        vec![
+            CeilingApex {
+                point: Point2f64::new(1.52, 4.66),
+                z_m: 3.0,
+            },
+            CeilingApex {
+                point: Point2f64::new(6.52, 4.66),
+                z_m: 3.0,
+            },
+        ]
+    }
+
+    /// THE ee77622f REGRESSION (the assessor's voice note: "it should just
+    /// be two planes, one of them extends a bit more over the bay"): the
+    /// gable over the bay footprint solves to EXACTLY 2 planes with ZERO
+    /// taps — the south plane is pitched to the MAIN south wall (base z at
+    /// y = 7.31) and CONTINUES over the bay, whose corners embed BELOW base
+    /// on the same plane; no midline-split break, no bay fan facets.
+    #[test]
+    fn gable_over_bay_is_two_planes_with_bay_embedded_below_base() {
+        let cid = ItemId::default();
+        let apexes = bay_gable_apexes();
+        let out = CeilingRegions::default_for_footprint(vec![bay_gable_ring()], 2.0, cid)
+            .with_apexes(&apexes); // EMPTY stored unfanned set — all automatic
+        assert_eq!(
+            out.regions.len(),
+            2,
+            "two planes, nothing else: {:?}",
+            out.regions.iter().map(|r| &r.polygon).collect::<Vec<_>>()
+        );
+        let total: f64 = out.regions.iter().map(plan_area).sum();
+        assert!((total - 26.0).abs() < 1e-6, "rect + bay fully covered");
+        for r in &out.regions {
+            assert!(is_planar(r), "non-planar face: {:?}", r.polygon);
+            assert!(r.flat_z().is_none(), "each face genuinely slopes");
+        }
+        // The south plane: z = 3.0 − (y − 4.66)/2.65 → 1.6226… at the bay's
+        // far wall (y = 8.31), BELOW the 2.0 base.
+        let z_bay = 3.0 - 3.65 / 2.65;
+        let south = out
+            .regions
+            .iter()
+            .find(|r| {
+                r.polygon
+                    .exterior
+                    .iter()
+                    .any(|v| (v.x - 5.52).abs() <= 1e-9 && (v.y - 8.31).abs() <= 1e-9)
+            })
+            .expect("the south plane reaches the bay");
+        let at = |x: f64, y: f64| {
+            south
+                .polygon
+                .exterior
+                .iter()
+                .find(|v| (v.x - x).abs() <= 1e-9 && (v.y - y).abs() <= 1e-9)
+                .unwrap_or_else(|| panic!("south plane misses ({x}, {y}): {:?}", south.polygon))
+        };
+        for (x, y) in [(5.52, 8.31), (6.52, 8.31)] {
+            let v = at(x, y);
+            assert!(
+                (v.z - z_bay).abs() <= 1e-9 && v.z < 2.0 - 0.1,
+                "bay corner ({x}, {y}) embeds below base on the plane, got z = {}",
+                v.z
+            );
+        }
+        assert!(
+            (at(1.52, 7.31).z - 2.0).abs() <= 1e-9 && (at(5.52, 7.31).z - 2.0).abs() <= 1e-9,
+            "the main south wall stays the eave (base z)"
+        );
+        // No midline-split artifact survives: nothing at x = 4.02 off-plane
+        // (the merge's collinear pass folds the on-plane split point away).
+        assert!(
+            south
+                .polygon
+                .exterior
+                .iter()
+                .all(|v| (v.x - 4.02).abs() > 1e-6),
+            "the midline split point must merge away: {:?}",
+            south.polygon
+        );
+
+        // RE-APPLY identity: the two planes reproduce themselves.
+        let again = out.clone().with_apexes(&apexes);
+        assert_eq!(again.regions.len(), 2, "re-apply keeps the two planes");
+        let total: f64 = again.regions.iter().map(plan_area).sum();
+        assert!((total - 26.0).abs() < 1e-6);
+
+        // The dump's ACTUAL stored state — the assessor had already tapped
+        // (5.52, 7.31): the toggle re-pins a vertex that sits ON the south
+        // plane anyway, so the roof stays exactly the SAME two planes.
+        let stored = vec![Point2f64::new(5.52, 7.31)];
+        let out = CeilingRegions::default_for_footprint(vec![bay_gable_ring()], 2.0, cid)
+            .with_apexes_hinted_unfanned(&apexes, &[], &stored);
+        assert_eq!(
+            out.regions.len(),
+            2,
+            "the field dump's stored set still solves to 2 planes"
+        );
+        let south = out
+            .regions
+            .iter()
+            .find(|r| {
+                r.polygon
+                    .exterior
+                    .iter()
+                    .any(|v| (v.x - 5.52).abs() <= 1e-9 && (v.y - 8.31).abs() <= 1e-9)
+            })
+            .expect("south plane present under the stored set");
+        for v in &south.polygon.exterior {
+            let expect = if (v.y - 4.66).abs() <= 1e-9 {
+                3.0 // the ridge
+            } else if (v.y - 7.31).abs() <= 1e-9 {
+                2.0 // the main-wall eave (incl. the re-pinned (5.52, 7.31))
+            } else {
+                z_bay // the bay's far wall, below base on the plane
+            };
+            assert!(
+                (v.z - expect).abs() <= 1e-9,
+                "stored-set south plane vertex {v:?} expected z {expect}"
+            );
+        }
+    }
+
+    /// Fix for the reviewer's base_z collapse: a gable with bays on BOTH
+    /// sides auto-embeds eave corners on BOTH member faces, so neither has a
+    /// level base off its apex corners alone — the group base recovery must
+    /// skip the AUTO-embedded vertices (not just the stored set) so the
+    /// anchors still vote and `base_z` stays sane (no warn-collapse to 0).
+    #[test]
+    fn double_bay_gable_group_recovers_base_z() {
+        let cid = ItemId::default();
+        // 10×5 rectangle with a 2×1 bay off BOTH long walls.
+        let ring = vec![
+            Point2f64::new(0.0, 0.0),
+            Point2f64::new(4.0, 0.0),
+            Point2f64::new(4.0, -1.0),
+            Point2f64::new(6.0, -1.0),
+            Point2f64::new(6.0, 0.0),
+            Point2f64::new(10.0, 0.0),
+            Point2f64::new(10.0, 5.0),
+            Point2f64::new(6.0, 5.0),
+            Point2f64::new(6.0, 6.0),
+            Point2f64::new(4.0, 6.0),
+            Point2f64::new(4.0, 5.0),
+            Point2f64::new(0.0, 5.0),
+        ];
+        let apexes = vec![
+            CeilingApex {
+                point: Point2f64::new(0.0, 2.5),
+                z_m: 4.0,
+            },
+            CeilingApex {
+                point: Point2f64::new(10.0, 2.5),
+                z_m: 4.0,
+            },
+        ];
+        let out = CeilingRegions::default_for_footprint(vec![ring], 2.0, cid).with_apexes(&apexes);
+        assert_eq!(out.regions.len(), 2, "two planes, both bays embedded");
+        let groups = out.apex_groups(&apexes);
+        assert_eq!(groups.len(), 1);
+        assert!(
+            (groups[0].base_z - 2.0).abs() <= 1e-9,
+            "the eave anchors still vote the base: got {}",
+            groups[0].base_z
+        );
+        // Both faces stay in the merged ring (rect 50 + 2 bays of 2 m²).
+        let ring_area: f64 = groups[0]
+            .merged_rings
+            .iter()
+            .map(|ring| {
+                let n = ring.len();
+                (0..n)
+                    .map(|i| {
+                        let (p, q) = (ring[i], ring[(i + 1) % n]);
+                        p.x * q.y - q.x * p.y
+                    })
+                    .sum::<f64>()
+                    .abs()
+                    / 2.0
+            })
+            .sum();
+        assert!(
+            (ring_area - 54.0).abs() < 1e-6,
+            "merged ring keeps both embedded faces (got {ring_area})"
+        );
+    }
+
+    /// A ridge with INTERIOR endpoints keeps the hip solve — no gable
+    /// auto-unfan: every boundary corner stays a fan target at base z.
+    #[test]
+    fn interior_ridge_keeps_the_hip_fan_to_all_corners() {
+        let cid = ItemId::default();
+        let hex = vec![
+            Point2f64::new(0.0, 0.0),
+            Point2f64::new(4.0, 0.0),
+            Point2f64::new(6.0, 2.0),
+            Point2f64::new(4.0, 4.0),
+            Point2f64::new(0.0, 4.0),
+            Point2f64::new(-2.0, 2.0),
+        ];
+        let apexes = vec![
+            CeilingApex {
+                point: Point2f64::new(1.0, 2.0),
+                z_m: 4.5,
+            },
+            CeilingApex {
+                point: Point2f64::new(3.0, 2.0),
+                z_m: 4.5,
+            },
+        ];
+        let out =
+            CeilingRegions::default_for_footprint(vec![hex.clone()], 2.4, cid).with_apexes(&apexes);
+        assert!(
+            out.regions.len() > 2,
+            "an interior ridge is a hip, not a gable ({} faces)",
+            out.regions.len()
+        );
+        // Every hexagon corner keeps its base z somewhere in the output —
+        // nothing was auto-embedded.
+        for p in &hex {
+            assert!(
+                out.regions.iter().any(|r| {
+                    r.polygon.exterior.iter().any(|v| {
+                        (v.x - p.x).abs() <= 1e-9
+                            && (v.y - p.y).abs() <= 1e-9
+                            && (v.z - 2.4).abs() <= 1e-9
+                    })
+                }),
+                "corner {p:?} must stay a base-z fan target"
+            );
+        }
+        let total: f64 = out.regions.iter().map(plan_area).sum();
+        assert!((total - 24.0).abs() < 1e-6);
+    }
+
     /// `Storey::ceiling_unfanned` is serde-ADDITIVE: an old record without
     /// the field loads with an empty set (today's fan-everything behaviour),
     /// and a populated set round-trips.

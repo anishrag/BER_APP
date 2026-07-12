@@ -47,8 +47,8 @@
 use crate::StoreyDoc;
 use ber_model::ber::common::ItemId;
 use ber_model::ber::structural::{
-    rect_hip_switches, ridge_hub_switches, strip_collinear, CeilingApex, CeilingApexGroup,
-    CeilingRegion, Storey, APEX_BOUNDARY_EPS_M, UNFAN_MATCH_EPS_M,
+    gable_effective_fanned, rect_hip_switches, ridge_hub_switches, strip_collinear, CeilingApex,
+    CeilingApexGroup, CeilingRegion, Storey, APEX_BOUNDARY_EPS_M, UNFAN_MATCH_EPS_M,
 };
 use domain::points::{ring_area, to_f32, Point2f32, Point2f64};
 use manip_plan::ParameterAxis;
@@ -927,18 +927,25 @@ pub struct CeilingFanMarker {
 }
 
 /// The tap-to-unfan MARKERS for the storey's resolved roofs — the generic
-/// escape hatch when the automatic gable rule doesn't apply: every non-apex,
-/// non-collinear vertex of each fan/ridge group's merged ring, flagged
-/// fanned/unfanned against `storey.ceiling_unfanned`. Semantics of unfanning
-/// live in the resolve (`ceiling_geom::lift_unfanned`): the vertex's fan
-/// plane folds into its neighbours' chord plane.
+/// escape hatch on top of the automatic gable rule: every non-apex,
+/// non-collinear vertex of each fan/ridge group's merged ring, flagged with
+/// the EFFECTIVE fanned state the solve uses:
+///
+/// - a TRUE-GABLE ridge (both endpoints on the merged ring's boundary):
+///   [`gable_effective_fanned`] — the auto baseline (each side's nearest
+///   eave corners fanned, everything else embedded on the side plane) XOR
+///   the stored `ceiling_unfanned` toggles;
+/// - any other fan/ridge: fanned unless in the stored set (embedding
+///   semantics in `ceiling_geom::lift_unfanned_fan` /
+///   `lift_unfanned_hip_ridge`).
 ///
 /// A group contributes markers only when they are actionable: MORE THAN 4
 /// vertices currently fanned (a 4-corner roof is already the minimal shape —
-/// no clutter on a plain gable/hip), OR any vertex already unfanned (its
-/// marker must stay tappable to RE-fan, even at 4 or fewer). Only 1-apex
-/// (fan) and 2-apex (ridge) groups participate — the 4-corner pavilion loft
-/// has no per-vertex fan. Collinear ring vertices are stripped
+/// no clutter on a plain gable/hip), OR any vertex unfanned/embedded (its
+/// marker must stay tappable to RE-fan, even at 4 or fewer — a gable over a
+/// bay shows its embedded bay corners struck). Only 1-apex (fan) and 2-apex
+/// (ridge) groups participate — the 4-corner pavilion loft has no
+/// per-vertex fan. Collinear ring vertices are stripped
 /// ([`strip_collinear`]): they contribute no fan plane, so unfanning them
 /// would change nothing. Empty when the storey has no shaped ceiling.
 pub fn ceiling_fan_markers(storey: &Storey) -> Vec<CeilingFanMarker> {
@@ -954,17 +961,30 @@ pub fn ceiling_fan_markers(storey: &Storey) -> Vec<CeilingFanMarker> {
         if !matches!(g.apex_idxs.len(), 1 | 2) {
             continue; // pavilion / degenerate group — no per-vertex fan
         }
+        let ridge = (g.apex_idxs.len() == 2).then(|| {
+            (
+                storey.ceiling_apexes[g.apex_idxs[0]].point,
+                storey.ceiling_apexes[g.apex_idxs[1]].point,
+            )
+        });
         let mut markers = Vec::new();
         for ring in &g.merged_rings {
-            for v in strip_collinear(ring) {
+            let ring = strip_collinear(ring);
+            // The gable classification when this ring IS a true gable —
+            // index-parallel to `ring`.
+            let gable = ridge.and_then(|(pa, pb)| gable_effective_fanned(&ring, pa, pb, &unfanned));
+            for (i, v) in ring.iter().enumerate() {
                 if g.apex_idxs
                     .iter()
                     .any(|&ia| near(&storey.ceiling_apexes[ia].point, v.x, v.y))
                 {
                     continue; // a gable-end hub on the boundary — not a fan target
                 }
-                let fanned = !unfanned.iter().any(|u| near(u, v.x, v.y));
-                markers.push(CeilingFanMarker { pos: v, fanned });
+                let fanned = match &gable {
+                    Some(flags) => flags[i],
+                    None => !unfanned.iter().any(|u| near(u, v.x, v.y)),
+                };
+                markers.push(CeilingFanMarker { pos: *v, fanned });
             }
         }
         let fanned_count = markers.iter().filter(|m| m.fanned).count();
@@ -1781,6 +1801,56 @@ mod tests {
         let unf: Vec<_> = markers.iter().filter(|m| !m.fanned).collect();
         assert_eq!(unf.len(), 1);
         assert_eq!(unf[0].pos, Point2f64::new(6.0, 2.0));
+    }
+
+    /// The markers on the ee77622f gable-over-a-bay drawing mirror the
+    /// AUTOMATIC solve: the two bay corners are auto-embedded (struck
+    /// markers, tappable to re-pin), the four eave anchors show fanned —
+    /// so the marker set is visible even though only 4 vertices fan.
+    #[test]
+    fn fan_markers_flag_auto_embedded_bay_corners_on_a_gable() {
+        let ring = vec![
+            Point2f64::new(1.52, 2.31),
+            Point2f64::new(6.52, 2.31),
+            Point2f64::new(6.52, 8.31),
+            Point2f64::new(5.52, 8.31),
+            Point2f64::new(5.52, 7.31),
+            Point2f64::new(1.52, 7.31),
+        ];
+        let mut storey = storey_with_flat_ring(ring, 2.0);
+        apply_apexes(
+            &mut storey,
+            vec![
+                CeilingApex {
+                    point: Point2f64::new(1.52, 4.66),
+                    z_m: 3.0,
+                },
+                CeilingApex {
+                    point: Point2f64::new(6.52, 4.66),
+                    z_m: 3.0,
+                },
+            ],
+        );
+        let markers = ceiling_fan_markers(&storey);
+        assert_eq!(markers.len(), 6, "all six footprint corners are markers");
+        let unfanned: Vec<Point2f64> = markers
+            .iter()
+            .filter(|m| !m.fanned)
+            .map(|m| m.pos)
+            .collect();
+        assert_eq!(
+            unfanned.len(),
+            2,
+            "exactly the two bay corners are auto-embedded: {markers:?}"
+        );
+        for p in [Point2f64::new(5.52, 8.31), Point2f64::new(6.52, 8.31)] {
+            assert!(
+                unfanned
+                    .iter()
+                    .any(|u| (u.x - p.x).abs() <= 1e-6 && (u.y - p.y).abs() <= 1e-6),
+                "bay corner {p:?} shows as embedded"
+            );
+        }
     }
 
     /// A 10×4 footprint with a deep SLOT cut from the right (y ∈ [1, 3],

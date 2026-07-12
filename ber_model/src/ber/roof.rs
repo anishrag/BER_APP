@@ -17,7 +17,10 @@
 use serde::{Deserialize, Serialize};
 
 use crate::ber::common::ItemId;
-use crate::ber::structural::{CeilingApex, CeilingConstructionType, CeilingRegion, CeilingRegions};
+use crate::ber::structural::{
+    gable_plan_classify, plane_z_at, CeilingApex, CeilingConstructionType, CeilingExposure,
+    CeilingRegion, CeilingRegions, Opes, Polygon3D, GABLE_DIST_EPS_M,
+};
 use domain::points::{Point2f64, Point3f64};
 
 /// Default eave overhang in metres — the roof oversails the walls by this much
@@ -287,6 +290,17 @@ impl RoofArea {
             return CeilingRegions::default_for_footprint(merged, self.eave_z, construction_id)
                 .with_apexes(&self.apexes);
         }
+        // TRUE GABLE (ridge endpoints on the UN-OFFSET merged boundary — the
+        // committed Gable / eave-snapped ridge): the overhang solve must
+        // produce THE SAME TWO PLANES as the overhang-0 solve that
+        // `derive_roof_voids` / `follows_ceiling` consume, or the void split
+        // and coincidence checks disagree with the drawn roof on
+        // non-rectangular footprints (the classification would flip once the
+        // offset ring puts the endpoints 0.3 m inside). The classification is
+        // therefore carried from the un-offset ring into the offset solve.
+        if let Some(regions) = self.gable_overhang_regions(&merged, overhang_m, construction_id) {
+            return regions;
+        }
         let footprint: Vec<Vec<Point2f64>> = merged
             .iter()
             .map(|ring| offset_ring_outward(ring, overhang_m))
@@ -295,6 +309,145 @@ impl RoofArea {
         let base_z = self.eave_z - overhang_m * self.effective_slope();
         CeilingRegions::default_for_footprint(footprint, base_z, construction_id)
             .with_apexes(&self.apexes)
+    }
+
+    /// The TRUE-GABLE overhang solve: `None` unless this area is a 2-apex
+    /// ridge whose endpoints lie on ONE merged ring's boundary AND both
+    /// ridge sides have an electable eave anchor (a mono-pitch — one empty
+    /// side — keeps the legacy offset path). Otherwise the roof is the SAME
+    /// two planes the un-offset solve produces, continued `overhang_m` past
+    /// the walls:
+    ///
+    /// - the side planes are built from the UN-OFFSET classification
+    ///   ([`gable_plan_classify`] on the merged ring, where the ridge
+    ///   actually ends): through the ridge line and each side's nearest
+    ///   eligible eave corner AT `eave_z` — exactly the planes
+    ///   `regions(0.0, …)`'s gable embed anchors to, so the two overhang
+    ///   variants are coplanar by construction (the single
+    ///   `effective_slope`-lowered base of the legacy path only
+    ///   approximates them);
+    /// - the ridge endpoints EXTEND along the ridge line onto the offset
+    ///   ring boundary (the barge overhang — the ridge board continues past
+    ///   the gable walls), so the offset solve is itself a true gable with
+    ///   no end fan;
+    /// - every offset-ring vertex is PRE-EMBEDDED at its side plane's z, so
+    ///   the gable path inside [`with_apexes`] re-elects anchors already ON
+    ///   those planes and reproduces them exactly → two faces.
+    ///
+    /// Other merged rings (a disjoint footprint piece the apexes don't
+    /// claim) keep the legacy offset + lowered base.
+    fn gable_overhang_regions(
+        &self,
+        merged: &[Vec<Point2f64>],
+        overhang_m: f64,
+        construction_id: ItemId,
+    ) -> Option<CeilingRegions> {
+        if self.apexes.len() != 2 {
+            return None;
+        }
+        let (a, b) = (&self.apexes[0], &self.apexes[1]);
+        let (gi, cls) = merged.iter().enumerate().find_map(|(i, ring)| {
+            gable_plan_classify(ring, a.point, b.point, &[]).map(|c| (i, c))
+        })?;
+        let ring = &merged[gi];
+        let a3 = Point3f64::new(a.point.x, a.point.y, a.z_m);
+        let b3 = Point3f64::new(b.point.x, b.point.y, b.z_m);
+        // The two side planes of the UN-OFFSET gable, keyed by side sign.
+        let mut planes: [Option<(Point3f64, Point3f64, Point3f64)>; 2] = [None, None];
+        for s in [false, true] {
+            let on_side: Vec<usize> = (0..ring.len())
+                .filter(|&i| (cls.side[i] > 0.0) == s && cls.side[i].abs() > GABLE_DIST_EPS_M)
+                .collect();
+            if on_side.is_empty() {
+                continue; // a mono-pitch's empty side — no plane needed there
+            }
+            let anchor = on_side
+                .iter()
+                .copied()
+                .filter(|&i| cls.eligible[i] && cls.fanned[i])
+                .min_by(|&i, &j| cls.side[i].abs().total_cmp(&cls.side[j].abs()))?;
+            planes[usize::from(s)] = Some((
+                a3,
+                b3,
+                Point3f64::new(ring[anchor].x, ring[anchor].y, self.eave_z),
+            ));
+        }
+        if planes.iter().all(|p| p.is_none()) {
+            return None; // nothing to pitch — degenerate
+        }
+        // Extend the ridge endpoints along the ridge LINE onto the OFFSET
+        // gable ring's boundary: the nearest crossings outside [0, 1].
+        let offset: Vec<Vec<Point2f64>> = merged
+            .iter()
+            .map(|r| offset_ring_outward(r, overhang_m))
+            .collect();
+        let oring = &offset[gi];
+        let (dx, dy) = (b.point.x - a.point.x, b.point.y - a.point.y);
+        let (mut t_lo, mut t_hi): (Option<f64>, Option<f64>) = (None, None);
+        let n = oring.len();
+        for i in 0..n {
+            let (p, q) = (oring[i], oring[(i + 1) % n]);
+            let (ex, ey) = (q.x - p.x, q.y - p.y);
+            let denom = dx * ey - dy * ex;
+            if denom.abs() <= 1e-12 {
+                continue;
+            }
+            let (wx, wy) = (p.x - a.point.x, p.y - a.point.y);
+            let t = (wx * ey - wy * ex) / denom;
+            let s = (wx * dy - wy * dx) / denom;
+            if !(-1e-9..=1.0 + 1e-9).contains(&s) {
+                continue;
+            }
+            if t <= 0.0 && t_lo.is_none_or(|c| t > c) {
+                t_lo = Some(t);
+            }
+            if t >= 1.0 && t_hi.is_none_or(|c| t < c) {
+                t_hi = Some(t);
+            }
+        }
+        let (t_lo, t_hi) = (t_lo?, t_hi?);
+        let ext_apex = |t: f64| CeilingApex {
+            point: Point2f64::new(a.point.x + t * dx, a.point.y + t * dy),
+            z_m: a.z_m + t * (b.z_m - a.z_m),
+        };
+        let extended = vec![ext_apex(t_lo), ext_apex(t_hi)];
+        // Build the offset regions: the gable ring PRE-EMBEDDED on the
+        // un-offset side planes; other rings on the legacy lowered base.
+        let base_z = self.eave_z - overhang_m * self.effective_slope();
+        let mk_region = |verts: Vec<Point3f64>| CeilingRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(verts),
+            opes: Opes::default(),
+            construction_id,
+            exposure: CeilingExposure::default(),
+        };
+        let mut regions = Vec::new();
+        for (i, oring) in offset.iter().enumerate() {
+            if oring.len() < 3 {
+                continue;
+            }
+            let verts: Vec<Point3f64> = if i == gi {
+                oring
+                    .iter()
+                    .map(|p| {
+                        let sd = dx * (p.y - a.point.y) - dy * (p.x - a.point.x);
+                        let plane = planes[usize::from(sd > 0.0)]
+                            .or(planes[usize::from(sd <= 0.0)])
+                            .expect("at least one side plane exists (checked above)");
+                        let z =
+                            plane_z_at(plane.0, plane.1, plane.2, p.x, p.y).unwrap_or(self.eave_z);
+                        Point3f64::new(p.x, p.y, z)
+                    })
+                    .collect()
+            } else {
+                oring
+                    .iter()
+                    .map(|p| Point3f64::new(p.x, p.y, base_z))
+                    .collect()
+            };
+            regions.push(mk_region(verts));
+        }
+        Some(CeilingRegions { regions }.with_apexes(&extended))
     }
 
     /// True when this roof area COINCIDES with the ceiling it covers — the roof
@@ -1007,6 +1160,70 @@ mod tests {
             "overhang eave dips below the 2.4 wall-top to ~2.1: {zmin}"
         );
         assert!((zmax - 7.4).abs() < 0.05, "ridge height unchanged: {zmax}");
+    }
+
+    /// NO ROOF-AREA SPLIT-BRAIN (adversarial-review fix): a Gable roof area
+    /// over a NON-RECTANGULAR merged footprint (the ee77622f rect + bay)
+    /// solves to the SAME two planes at overhang 0 (what `derive_roof_voids`
+    /// and `follows_ceiling` consume) and at the rendered
+    /// [`DEFAULT_OVERHANG_M`] — same classification, two faces each,
+    /// coplanar between the variants (identical plane coefficients), with
+    /// the overhang variant genuinely oversailing.
+    #[test]
+    fn gable_overhang_solve_is_coplanar_with_the_void_solve_on_a_bay_footprint() {
+        use crate::ber::structural::region_plane;
+        let ring = vec![
+            Point2f64::new(1.52, 2.31),
+            Point2f64::new(6.52, 2.31),
+            Point2f64::new(6.52, 8.31),
+            Point2f64::new(5.52, 8.31),
+            Point2f64::new(5.52, 7.31),
+            Point2f64::new(1.52, 7.31),
+        ];
+        let (a, b) = (Point2f64::new(1.52, 4.66), Point2f64::new(6.52, 4.66));
+        let area = RoofArea {
+            id: ItemId::default(),
+            storey_idx: 0,
+            covered_storeys: Vec::new(),
+            shape: RoofShape::Gable,
+            pitch_deg: 20.0,
+            eave_z: 2.0,
+            ridge: Some((a, b)),
+            footprint: vec![ring],
+            apexes: vec![
+                CeilingApex { point: a, z_m: 3.0 },
+                CeilingApex { point: b, z_m: 3.0 },
+            ],
+        };
+        let base = area.regions(0.0, ItemId::default());
+        assert_eq!(base.regions.len(), 2, "void/coincidence solve: two planes");
+        let over = area.regions(DEFAULT_OVERHANG_M, ItemId::default());
+        assert_eq!(
+            over.regions.len(),
+            2,
+            "rendered solve: the SAME two planes, not an end/bay fan: {:?}",
+            over.regions.iter().map(|r| &r.polygon).collect::<Vec<_>>()
+        );
+        // Coplanar between variants: each overhang face lies on exactly the
+        // plane of an un-offset face (z = c0 + cx·x + cy·y).
+        for r in &over.regions {
+            let (c0, cx, cy) = region_plane(r).expect("planar overhang face");
+            assert!(
+                base.regions.iter().any(|f| {
+                    let (d0, dx, dy) = region_plane(f).expect("planar base face");
+                    (c0 - d0).abs() <= 1e-6 && (cx - dx).abs() <= 1e-6 && (cy - dy).abs() <= 1e-6
+                }),
+                "overhang face plane ({c0:.4}, {cx:.4}, {cy:.4}) has no un-offset twin"
+            );
+        }
+        // And the overhang genuinely oversails the walls.
+        let plan = |rs: &CeilingRegions| rs.regions.iter().map(|r| r.area()).sum::<f64>();
+        assert!(
+            plan(&over) > plan(&base) + 1.0,
+            "the overhang footprint is larger: {} vs {}",
+            plan(&over),
+            plan(&base)
+        );
     }
 
     /// The perpendicular reach is LOCAL and split per side: a ridge at x = 3
