@@ -626,47 +626,48 @@ pub(crate) fn group_editor_ui<F: FnMut(UiEvent)>(
             default_plus_ui(ui, group_index, g, *extra_insulation_mm, enabled, on_event);
         }
     }
-    // Photos (next line): the camera button opens the photos view (thumbnails +
-    // add). Shows a count when there are any.
-    let cam = if g.photos.is_empty() {
-        "📷".to_string()
-    } else {
-        format!("📷 {}", g.photos.len())
-    };
-    if ui
-        .add_enabled(enabled, egui::Button::new(cam))
-        .on_hover_text("Photos")
-        .clicked()
-    {
-        on_event(UiEvent::Sketch(SketchEvent::BeginViewPhotos {
-            group: group_index,
-        }));
-    }
-    // Bottom-right RESET — on EVERY box, fresh or attributed: reselecting an
-    // already-attributed surface after Done must still offer starting again
-    // from scratch. It detaches THIS selection's attribution only (a shared
-    // construction — its other members, name, photos — is untouched) and
-    // returns the box to the two-mode entry so the assessor can choose again.
-    // On an attributed box it sits alongside the "Add to existing group…"
-    // combo above: moving to a group and resetting to nothing are different
-    // intents (the combo lives at the top, Reset at the bottom right — no
-    // crowding).
-    ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+    // Bottom line: the camera button (photos view; shows a count when there
+    // are any) on the left, RESET on the right — one shared row. Reset is on
+    // EVERY box, fresh or attributed: reselecting an already-attributed
+    // surface after Done must still offer starting again from scratch. It
+    // detaches THIS selection's attribution only (a shared construction — its
+    // other members, name, photos — is untouched) and returns the box to the
+    // two-mode entry so the assessor can choose again. On an attributed box it
+    // sits alongside the "Add to existing group…" combo above: moving to a
+    // group and resetting to nothing are different intents (the combo lives at
+    // the top, Reset at the bottom right — no crowding).
+    ui.horizontal(|ui| {
+        let cam = if g.photos.is_empty() {
+            "📷".to_string()
+        } else {
+            format!("📷 {}", g.photos.len())
+        };
         if ui
-            .add_enabled(
-                enabled,
-                egui::Button::new(egui::RichText::new("Reset").size(EDITOR_FONT)).small(),
-            )
-            .on_hover_text(
-                "Back to \"Existing group / New group\" — un-attributes this \
-                 selection (an existing group itself is untouched)",
-            )
+            .add_enabled(enabled, egui::Button::new(cam))
+            .on_hover_text("Photos")
             .clicked()
         {
-            on_event(UiEvent::Sketch(SketchEvent::ResetStructureGroup {
+            on_event(UiEvent::Sketch(SketchEvent::BeginViewPhotos {
                 group: group_index,
             }));
         }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+            if ui
+                .add_enabled(
+                    enabled,
+                    egui::Button::new(egui::RichText::new("Reset").size(EDITOR_FONT)).small(),
+                )
+                .on_hover_text(
+                    "Back to \"Existing group / New group\" — un-attributes this \
+                     selection (an existing group itself is untouched)",
+                )
+                .clicked()
+            {
+                on_event(UiEvent::Sketch(SketchEvent::ResetStructureGroup {
+                    group: group_index,
+                }));
+            }
+        });
     });
 }
 
