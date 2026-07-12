@@ -17,7 +17,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::ber::common::ItemId;
-use crate::ber::structural::{CeilingApex, CeilingRegion, CeilingRegions};
+use crate::ber::structural::{CeilingApex, CeilingConstructionType, CeilingRegion, CeilingRegions};
 use domain::points::{Point2f64, Point3f64};
 
 /// Default eave overhang in metres — the roof oversails the walls by this much
@@ -655,6 +655,95 @@ impl Roof {
             .filter(|a| a.covers_storey(storey_idx))
             .flat_map(|a| a.footprint.iter())
             .any(|ring| ring_polygon(ring).contains(&pt))
+    }
+}
+
+/// The ceiling ROOF TYPE the drawn geometry implies for one ceiling region —
+/// the region's own shape (flat / sloped) crossed with the dwelling roof area
+/// covering it. RUNTIME-ONLY (derived fresh per query, deliberately not
+/// serialized): the pick stored on the region's `CeilingConstruction` stays
+/// the only durable truth, and this inference merely seeds/hints the
+/// Structure-phase type dropdown and splits attribute groups by geometry — an
+/// assessor's manual pick always wins over it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InferredRoofType {
+    /// The geometry pins the type down: flat ceiling under a flat (or
+    /// coinciding) roof → `FlatRoof`; a sloped ceiling whose rafters ARE the
+    /// roof surface → `SlopedInsOnRafter`.
+    Definite(CeilingConstructionType),
+    /// A pitched roof stands over a flat ceiling (an attic void between
+    /// them): the insulation could sit on the ceiling, on the rafters, or
+    /// both — only the assessor knows. The dropdown opens unset with a hint.
+    Ambiguous,
+    /// No roof area covers the region — or the combination says nothing —
+    /// so behave exactly as before inference existed (free dropdown).
+    Unknown,
+}
+
+impl crate::ber::ber_struct::Ber {
+    /// Infer the roof type of ceiling `region` on storey `storey_idx` from
+    /// the dwelling roof drawn over it ([`Roof`] on `Ber`). The covering
+    /// [`RoofArea`] is matched like [`Roof::covers_on`]: it must cover the
+    /// storey and plan-contain the region's centroid. Then:
+    ///
+    /// - flat region + `Flat` roof (or a `FollowCeiling`/coinciding pitched
+    ///   roof) → `Definite(FlatRoof)`;
+    /// - sloped region + `FollowCeiling`, or a `Hip`/`Gable` that COINCIDES
+    ///   with the ceiling plane ([`RoofArea::follows_ceiling`]) →
+    ///   `Definite(SlopedInsOnRafter)` (the rafters are the surface);
+    /// - flat region + a `Hip`/`Gable` that departs from it (attic void) →
+    ///   `Ambiguous`;
+    /// - no covering area → `Unknown`.
+    ///
+    /// Combinations outside those (e.g. a flat roof drawn over a sloped
+    /// ceiling) infer nothing → `Unknown`, i.e. today's free-dropdown
+    /// behaviour rather than a wrong guess.
+    pub fn inferred_ceiling_roof_type(
+        &self,
+        storey_idx: usize,
+        region: &CeilingRegion,
+    ) -> InferredRoofType {
+        use geo::Contains;
+        let c = region.centroid();
+        let pt = geo::Point::new(c.x, c.y);
+        let Some(area) = self.roof.areas.iter().find(|a| {
+            a.covers_storey(storey_idx)
+                && a.footprint
+                    .iter()
+                    .any(|ring| ring_polygon(ring).contains(&pt))
+        }) else {
+            return InferredRoofType::Unknown;
+        };
+        let flat = region.flat_z().is_some();
+        use CeilingConstructionType as T;
+        match area.shape {
+            RoofShape::Flat if flat => InferredRoofType::Definite(T::FlatRoof),
+            RoofShape::Flat => InferredRoofType::Unknown,
+            RoofShape::FollowCeiling => InferredRoofType::Definite(if flat {
+                T::FlatRoof
+            } else {
+                T::SlopedInsOnRafter
+            }),
+            RoofShape::Gable | RoofShape::Hip => {
+                // Same coincidence test (and same arguments) the 3D views use
+                // to suppress a roof that adds no geometry over its ceiling.
+                let coincides = self
+                    .storeys
+                    .get(area.storey_idx)
+                    .is_some_and(|s| area.follows_ceiling(&s.ceilings, &area.dormer_patches(self)));
+                if coincides {
+                    InferredRoofType::Definite(if flat {
+                        T::FlatRoof
+                    } else {
+                        T::SlopedInsOnRafter
+                    })
+                } else if flat {
+                    InferredRoofType::Ambiguous
+                } else {
+                    InferredRoofType::Unknown
+                }
+            }
+        }
     }
 }
 
@@ -1414,6 +1503,166 @@ mod tests {
             (patches[0].1 - expected).abs() < 1e-9,
             "top z re-based onto the base storey: expected {expected}, got {}",
             patches[0].1
+        );
+    }
+
+    // ─── Inferred ceiling roof type ──────────────────────────────────────────
+
+    /// A `Ber` with one storey whose ceilings are given, for inference tests.
+    fn ber_with_ceilings(ceilings: CeilingRegions) -> crate::ber::ber_struct::Ber {
+        use crate::ber::structural::Storey;
+        let mut ber = crate::ber::ber_struct::Ber::default();
+        let mut storey = Storey::default();
+        storey.ceiling_height_m = Some(2.4);
+        storey.ceilings = ceilings;
+        ber.storeys.push(storey);
+        ber
+    }
+
+    fn flat_area() -> RoofArea {
+        RoofArea {
+            id: ItemId::default(),
+            storey_idx: 0,
+            covered_storeys: Vec::new(),
+            shape: RoofShape::Flat,
+            pitch_deg: 0.0,
+            eave_z: 2.4,
+            ridge: None,
+            footprint: square_10(),
+            apexes: Vec::new(),
+        }
+    }
+
+    fn gable_area() -> RoofArea {
+        let ridge = (Point2f64::new(5.0, 0.0), Point2f64::new(5.0, 10.0));
+        let apexes = RoofArea::ridge_apexes(ridge, 45.0, 2.4, &square_10());
+        RoofArea {
+            id: ItemId::default(),
+            storey_idx: 0,
+            covered_storeys: Vec::new(),
+            shape: RoofShape::Gable,
+            pitch_deg: 45.0,
+            eave_z: 2.4,
+            ridge: Some(ridge),
+            footprint: square_10(),
+            apexes,
+        }
+    }
+
+    /// A flat ceiling region under a FLAT roof pins the type down: FlatRoof.
+    #[test]
+    fn flat_ceiling_under_flat_roof_infers_flat_roof() {
+        let mut ber = ber_with_ceilings(CeilingRegions::default_for_footprint(
+            square_10(),
+            2.4,
+            ItemId::default(),
+        ));
+        ber.roof.areas.push(flat_area());
+        let region = &ber.storeys[0].ceilings.regions[0];
+        assert_eq!(
+            ber.inferred_ceiling_roof_type(0, region),
+            InferredRoofType::Definite(CeilingConstructionType::FlatRoof)
+        );
+    }
+
+    /// A SLOPED ceiling under a FollowCeiling roof: the rafters ARE the
+    /// ceiling — insulation on the rafter.
+    #[test]
+    fn sloped_ceiling_under_follow_roof_infers_ins_on_rafter() {
+        // The gable fan makes genuinely sloped ceiling regions.
+        let ceilings = gable_area().regions(0.0, ItemId::default());
+        let mut ber = ber_with_ceilings(ceilings);
+        let mut follow = flat_area();
+        follow.shape = RoofShape::FollowCeiling;
+        ber.roof.areas.push(follow);
+        let region = ber.storeys[0]
+            .ceilings
+            .regions
+            .iter()
+            .find(|r| r.flat_z().is_none())
+            .expect("a sloped region");
+        assert_eq!(
+            ber.inferred_ceiling_roof_type(0, region),
+            InferredRoofType::Definite(CeilingConstructionType::SlopedInsOnRafter)
+        );
+    }
+
+    /// A SLOPED ceiling under a pitched roof that COINCIDES with it (the roof
+    /// surface is the ceiling surface) → insulation on the rafter too.
+    #[test]
+    fn sloped_ceiling_under_coinciding_gable_infers_ins_on_rafter() {
+        let area = gable_area();
+        let ceilings = area.regions(0.0, ItemId::default());
+        let mut ber = ber_with_ceilings(ceilings);
+        ber.roof.areas.push(area);
+        let region = ber.storeys[0]
+            .ceilings
+            .regions
+            .iter()
+            .find(|r| r.flat_z().is_none())
+            .expect("a sloped region");
+        assert_eq!(
+            ber.inferred_ceiling_roof_type(0, region),
+            InferredRoofType::Definite(CeilingConstructionType::SlopedInsOnRafter)
+        );
+    }
+
+    /// A FLAT ceiling under a pitched roof that departs from it — the attic
+    /// void — is AMBIGUOUS: the insulation could sit on the ceiling, the
+    /// rafters, or both.
+    #[test]
+    fn flat_ceiling_under_departing_gable_is_ambiguous() {
+        let mut ber = ber_with_ceilings(CeilingRegions::default_for_footprint(
+            square_10(),
+            2.4,
+            ItemId::default(),
+        ));
+        ber.roof.areas.push(gable_area());
+        let region = &ber.storeys[0].ceilings.regions[0];
+        assert_eq!(
+            ber.inferred_ceiling_roof_type(0, region),
+            InferredRoofType::Ambiguous
+        );
+    }
+
+    /// No roof drawn over the region (none at all, or none containing its
+    /// centroid, or one on another storey) → UNKNOWN: today's behaviour.
+    #[test]
+    fn ceiling_with_no_covering_roof_is_unknown() {
+        let mut ber = ber_with_ceilings(CeilingRegions::default_for_footprint(
+            square_10(),
+            2.4,
+            ItemId::default(),
+        ));
+        let region = &ber.storeys[0].ceilings.regions[0];
+        assert_eq!(
+            ber.inferred_ceiling_roof_type(0, region),
+            InferredRoofType::Unknown,
+            "no roof at all"
+        );
+        // A roof over a DISJOINT footprint doesn't cover the region either.
+        let mut elsewhere = flat_area();
+        elsewhere.footprint = vec![vec![
+            Point2f64::new(20.0, 0.0),
+            Point2f64::new(30.0, 0.0),
+            Point2f64::new(30.0, 10.0),
+            Point2f64::new(20.0, 10.0),
+        ]];
+        ber.roof.areas.push(elsewhere);
+        let region = &ber.storeys[0].ceilings.regions[0];
+        assert_eq!(
+            ber.inferred_ceiling_roof_type(0, region),
+            InferredRoofType::Unknown,
+            "covering is by plan containment of the centroid"
+        );
+        // A roof covering only ANOTHER storey doesn't cover this one.
+        ber.roof.areas[0].footprint = square_10();
+        ber.roof.areas[0].storey_idx = 1;
+        let region = &ber.storeys[0].ceilings.regions[0];
+        assert_eq!(
+            ber.inferred_ceiling_roof_type(0, region),
+            InferredRoofType::Unknown,
+            "covering is per-storey"
         );
     }
 }

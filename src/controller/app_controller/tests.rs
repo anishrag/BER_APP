@@ -2229,6 +2229,123 @@ fn ceilings_checklist_requires_insulation_spec() {
     );
 }
 
+/// The compacted ceiling editor's data mapping. Its combined "Default"
+/// dropdown emits make-up `Default` + the chosen `CeilingInsulation`
+/// ("unknown" → declared-unknown extra insulation, X mm → a measured
+/// thickness), and with the separate insulation row gone the OTHER make-ups
+/// must complete on the build-up rules alone: `?` (Unknown) with no
+/// insulation spec ticks outright, and a legacy `DefaultPlus` record —
+/// which the new dropdown can't produce — keeps its stored make-up untouched
+/// until the assessor picks again, which normalizes onto `Default` + the
+/// insulation spec.
+#[test]
+fn ceiling_combined_default_dropdown_mapping() {
+    use ber_model::ber::structural::{
+        CeilingConstructionType, CeilingInsulation, ConstructionMakeup, ConstructionType,
+    };
+    let mut c = dimensioned_square_controller();
+    c.set_default_ceiling_height(2.7).unwrap();
+    c.materialize();
+
+    let ceiling_state = |c: &AppController| {
+        let rec = c.current_record.as_ref().unwrap();
+        let cid = rec.data.storeys[0].ceilings.regions[0].construction_id;
+        let con = rec.data.ceiling_construction(cid).unwrap();
+        (con.base.construction_makeup.clone(), con.insulation)
+    };
+
+    // Dropdown pick "150 mm" = the two events the UI emits: attrs (Default)
+    // then the insulation spec. The store holds exactly that state.
+    set_only_kind(&mut c, SurfaceKind::Ceilings);
+    c.set_structure_select_mode(Some(SelectMode::All));
+    c.begin_structure_edit();
+    c.set_structure_group_attrs(
+        0,
+        ConstructionType::Ceiling(CeilingConstructionType::FlatRoof),
+        ConstructionMakeup::Default,
+        Default::default(),
+    );
+    c.set_structure_group_insulation(0, Some(CeilingInsulation::ThicknessMm(150.0)));
+    assert_eq!(
+        ceiling_state(&c),
+        (
+            ConstructionMakeup::Default,
+            Some(CeilingInsulation::ThicknessMm(150.0))
+        ),
+        "X mm pick = plain Default make-up + a measured thickness"
+    );
+    assert!(
+        !c.structure_edit().unwrap().groups[0].is_complete(),
+        "a measured thickness still needs its backing photo"
+    );
+
+    // Dropdown pick "unknown" — the TRUE default (era construction, extra
+    // insulation unknown): complete without a photo.
+    c.set_structure_group_insulation(0, Some(CeilingInsulation::Unknown));
+    assert!(c.structure_edit().unwrap().groups[0].is_complete());
+
+    // `?` (Unknown build-up): with the insulation row gone, no insulation
+    // spec is demanded — the group ticks on the build-up choice alone.
+    c.set_structure_group_attrs(
+        0,
+        ConstructionType::Ceiling(CeilingConstructionType::FlatRoof),
+        ConstructionMakeup::Unknown,
+        Default::default(),
+    );
+    c.set_structure_group_insulation(0, None);
+    assert!(
+        c.structure_edit().unwrap().groups[0].is_complete(),
+        "Unknown make-up completes without an insulation spec"
+    );
+
+    // LEGACY: a record holding `DefaultPlus` (the retired ceiling ✓+ picker).
+    // Nothing rewrites it while the assessor only looks — and completeness
+    // follows the build-up rules (photo-gated), not the insulation gate.
+    c.set_structure_group_attrs(
+        0,
+        ConstructionType::Ceiling(CeilingConstructionType::FlatRoof),
+        ConstructionMakeup::DefaultPlus {
+            extra_insulation_mm: 100,
+        },
+        Default::default(),
+    );
+    c.materialize();
+    assert_eq!(
+        ceiling_state(&c),
+        (
+            ConstructionMakeup::DefaultPlus {
+                extra_insulation_mm: 100
+            },
+            None
+        ),
+        "the legacy make-up stays stored as-is"
+    );
+    assert!(
+        !c.structure_edit().unwrap().groups[0].is_complete(),
+        "legacy DefaultPlus still photo-gated"
+    );
+    // …until a dropdown pick, which normalizes onto Default + the spec.
+    c.set_structure_group_attrs(
+        0,
+        ConstructionType::Ceiling(CeilingConstructionType::FlatRoof),
+        ConstructionMakeup::Default,
+        Default::default(),
+    );
+    c.set_structure_group_insulation(0, Some(CeilingInsulation::Unknown));
+    assert_eq!(
+        ceiling_state(&c),
+        (
+            ConstructionMakeup::Default,
+            Some(CeilingInsulation::Unknown)
+        ),
+        "picking again lands the normalized Default + spec state"
+    );
+    assert!(c.structure_edit().unwrap().groups[0].is_complete());
+    c.end_structure_edit();
+    c.materialize();
+    assert_eq!(c.structure_progress().ceilings, (1, 1));
+}
+
 /// `ingest_photo` returns a provisional photo IMMEDIATELY (a fast byte-copy, no
 /// decode) and finishes the heavy work on a background thread; once the job
 /// lands, `apply_finished_photos` swaps the recompressed file + thumbnail into
@@ -3300,6 +3417,140 @@ fn flat_roof_eave_snaps_to_the_resolved_ceiling_z() {
     assert!(
         area.follows_ceiling(&record.data.storeys[0].ceilings, &[]),
         "a flat roof at its ceiling's z coincides with it"
+    );
+}
+
+/// Ceiling attribute groups follow the GEOMETRY: two same-phase flat ceiling
+/// pieces — one under a flat roof (`Definite(FlatRoof)`), one under a
+/// departing gable (`Ambiguous`) — split into two groups even though both
+/// stored types are still `Uninitialised`. The Definite group's type arrives
+/// PREFILLED and persists through the normal attrs path; the Ambiguous
+/// group's dropdown stays unset. A manual override then survives re-entering
+/// the session — inference never overwrites a stored pick.
+#[test]
+fn ceiling_groups_split_by_inferred_roof_type_and_prefill_never_clobbers() {
+    use ber_model::ber::roof::InferredRoofType;
+    use ber_model::ber::structural::{CeilingConstructionType, ConstructionType};
+
+    // A 10×10 storey with a ceiling STEP at x = 4 (right side raised 0.3) —
+    // two flat ceiling regions.
+    let mut c = ceiling_ready_controller();
+    ceiling_step_to_amount_at_x4(&mut c);
+    c.assign_ceiling_step_delta(0.3).expect("amount applies");
+    c.materialize();
+
+    // FLAT roof over the raised right piece; GABLE (departing) over the left.
+    c.set_roof_mode(true);
+    c.confirm_all_storeys_added_roof();
+    c.roof_region_tap(7.0, 5.0, 0.5);
+    c.pick_roof_area_shape(RoofShape::Flat);
+    c.roof_region_tap(2.0, 5.0, 0.5);
+    c.pick_roof_area_shape(RoofShape::Gable);
+    c.apply_roof_area_ridge(&[(2.0, 3.0), (2.0, 7.0)]).unwrap();
+    c.assign_roof_area_pitch(45.0).unwrap();
+    c.set_roof_mode(false);
+    c.materialize();
+
+    set_only_kind(&mut c, SurfaceKind::Ceilings);
+    c.set_structure_select_mode(Some(SelectMode::All));
+    assert_eq!(
+        c.structure_selected_ids().len(),
+        2,
+        "both ceiling pieces selected"
+    );
+    c.begin_structure_edit();
+    {
+        let e = c.structure_edit().expect("session opened");
+        assert_eq!(
+            e.groups.len(),
+            2,
+            "different inferred classes split the same-phase ceilings"
+        );
+        let flat = e
+            .groups
+            .iter()
+            .find(|g| g.inferred == InferredRoofType::Definite(CeilingConstructionType::FlatRoof))
+            .expect("a Definite(FlatRoof) group");
+        assert_eq!(
+            flat.ty,
+            ConstructionType::Ceiling(CeilingConstructionType::FlatRoof),
+            "the Definite inference prefills the type dropdown"
+        );
+        assert!(
+            flat.show_editor && !flat.fresh,
+            "a prefilled group opens attributed (editor shown, join combo kept)"
+        );
+        let ambiguous = e
+            .groups
+            .iter()
+            .find(|g| g.inferred == InferredRoofType::Ambiguous)
+            .expect("an Ambiguous group (gable over a flat ceiling)");
+        assert_eq!(
+            ambiguous.ty,
+            ConstructionType::Ceiling(CeilingConstructionType::Uninitialised),
+            "Ambiguous never guesses — the dropdown opens unset"
+        );
+    }
+    c.end_structure_edit();
+    c.materialize();
+
+    // The prefill went through the normal attrs path → it PERSISTS on the
+    // raised piece's construction (centroid x > 4).
+    {
+        let rec = c.current_record.as_ref().unwrap();
+        let right = rec.data.storeys[0]
+            .ceilings
+            .regions
+            .iter()
+            .find(|r| r.centroid().x > 4.0)
+            .expect("the raised right piece");
+        assert_eq!(
+            rec.data
+                .ceiling_construction(right.construction_id)
+                .expect("a construction stamped")
+                .construction_type,
+            CeilingConstructionType::FlatRoof,
+            "the prefilled type persisted"
+        );
+    }
+
+    // OVERRIDE the prefilled group to Ins-on-ceiling, close, re-enter: the
+    // override stands (no re-prefill), and the groups don't re-shuffle.
+    c.set_structure_select_mode(Some(SelectMode::All));
+    c.begin_structure_edit();
+    let overridden = {
+        let e = c.structure_edit().expect("session re-opened");
+        e.groups
+            .iter()
+            .position(|g| {
+                g.inferred == InferredRoofType::Definite(CeilingConstructionType::FlatRoof)
+            })
+            .expect("the flat-roof group again")
+    };
+    c.set_structure_group_attrs(
+        overridden,
+        ConstructionType::Ceiling(CeilingConstructionType::SlopedInsOnCeiling),
+        Default::default(),
+        Default::default(),
+    );
+    c.end_structure_edit();
+    c.materialize();
+
+    c.set_structure_select_mode(Some(SelectMode::All));
+    c.begin_structure_edit();
+    let e = c
+        .structure_edit()
+        .expect("session re-opened after override");
+    assert_eq!(e.groups.len(), 2, "the override re-shuffles nothing");
+    let flat = e
+        .groups
+        .iter()
+        .find(|g| g.inferred == InferredRoofType::Definite(CeilingConstructionType::FlatRoof))
+        .expect("the geometry still infers Definite(FlatRoof)");
+    assert_eq!(
+        flat.ty,
+        ConstructionType::Ceiling(CeilingConstructionType::SlopedInsOnCeiling),
+        "the manual pick is displayed, never clobbered by inference"
     );
 }
 
@@ -11840,7 +12091,7 @@ fn place_door_sidelights_via_controller() {
 /// above the door).
 #[test]
 fn place_door_sidelights_overall_mode() {
-    use ber_model::ber::fenestration::{OpeningPlacement, Overshading};
+    use ber_model::ber::fenestration::Overshading;
     use ber_model::ber::openings::SidelightLayout;
     let mut c = dimensioned_square_controller();
     c.materialize();
@@ -12616,6 +12867,7 @@ fn structure_group_tick_predicate_matches_completeness() {
         insulation,
         show_editor: true,
         fresh: false,
+        inferred: ber_model::ber::roof::InferredRoofType::Unknown,
     };
     let wall = |t, m, p| group(ConstructionType::Wall(t), m, p, None);
     use ConstructionMakeup as M;
@@ -12636,26 +12888,65 @@ fn structure_group_tick_predicate_matches_completeness() {
     );
     assert!(wall(W::CavityWall, M::Layers(vec![]), vec![Photo::default()]).is_complete());
 
-    // Ceilings: the insulation gate on top of type + build-up.
-    let ceiling = |insulation, photos| {
+    // Ceilings: the insulation gate on top of type + build-up — demanded
+    // exactly for the plain `Default` make-up (the combined "Default"
+    // dropdown's open question).
+    let ceiling = |makeup, insulation, photos| {
         group(
             ConstructionType::Ceiling(CeilingConstructionType::FlatRoof),
-            M::Default,
+            makeup,
             photos,
             insulation,
         )
     };
     assert!(
-        !ceiling(None, vec![]).is_complete(),
+        !ceiling(M::Default, None, vec![]).is_complete(),
         "insulation unspecified blocks the tick"
     );
-    assert!(ceiling(Some(CeilingInsulation::Unknown), vec![]).is_complete());
+    assert!(ceiling(M::Default, Some(CeilingInsulation::Unknown), vec![]).is_complete());
     assert!(
-        !ceiling(Some(CeilingInsulation::ThicknessMm(150.0)), vec![]).is_complete(),
+        !ceiling(
+            M::Default,
+            Some(CeilingInsulation::ThicknessMm(150.0)),
+            vec![]
+        )
+        .is_complete(),
         "a thickness needs a backing photo"
     );
     assert!(ceiling(
+        M::Default,
         Some(CeilingInsulation::ThicknessMm(150.0)),
+        vec![Photo::default()]
+    )
+    .is_complete());
+    // Non-`Default` make-ups answer the insulation question themselves — the
+    // compacted ceiling editor has no separate insulation row, so ? / ℹ (and
+    // a legacy ✓+) must tick on the ordinary build-up rules alone.
+    assert!(
+        ceiling(M::Unknown, None, vec![]).is_complete(),
+        "declared-unknown build-up: insulation not demanded"
+    );
+    assert!(
+        !ceiling(M::Layers(vec![]), None, vec![]).is_complete(),
+        "a specified stack still needs its backing photo"
+    );
+    assert!(ceiling(M::Layers(vec![]), None, vec![Photo::default()]).is_complete());
+    assert!(
+        !ceiling(
+            M::DefaultPlus {
+                extra_insulation_mm: 150
+            },
+            None,
+            vec![]
+        )
+        .is_complete(),
+        "legacy DefaultPlus still needs its backing photo"
+    );
+    assert!(ceiling(
+        M::DefaultPlus {
+            extra_insulation_mm: 150
+        },
+        None,
         vec![Photo::default()]
     )
     .is_complete());

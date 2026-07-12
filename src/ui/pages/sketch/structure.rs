@@ -13,10 +13,12 @@
 
 use crate::ui::widgets::{metre_input, text_input};
 use ber_model::ber::common::ConstructionPhase;
+use ber_model::ber::roof::InferredRoofType;
 use ber_model::ber::structural::{
     CeilingConstructionType, CeilingExposure, CeilingInsulation, ConstructionLayer,
     ConstructionMakeup, ConstructionType, FloorConstructionType, FloorExposure, SurfaceExposure,
-    WallConstructionType, WallExposure, DEAP_INSULATION_THICKNESS_MM,
+    WallConstructionType, WallExposure, CEILING_INSULATION_THICKNESS_MM,
+    DEAP_INSULATION_THICKNESS_MM,
 };
 
 use super::SketchEvent;
@@ -255,20 +257,20 @@ fn edit_session<F: FnMut(UiEvent)>(
     // Done ALWAYS closes the session — an untouched/half-filled group is a
     // legitimate exit (the assessor may reselect and attribute one by one).
     // It just stays INCOMPLETE: no tick, still counted by `Remaining` and the
-    // checklist. The group boxes keep their inline warn hints (e.g. the
-    // ceiling-insulation row's) as guidance, not a lock.
+    // checklist — the group-status colouring carries the nudge, not a lock.
     if ui.add_enabled(enabled, egui::Button::new("Done")).clicked() {
         on_event(UiEvent::Sketch(SketchEvent::EndStructureEdit));
     }
 }
 
-/// One group's attribute editor: a two-level heading (the surface KIND, then the
-/// group's editable NAME), the derived phase (read-only), the construction TYPE
-/// (a dropdown whose default text doubles as the field heading, e.g. "Wall
-/// type"), and the build-up row (Default / Unknown / Specify…). Each control
-/// emits the matching event for `group_index`. Shared by the side panel
-/// (exploded view's active group) and the canvas's floating per-group windows
-/// (the default in-place view), so both edit a group identically.
+/// One group's attribute editor: the heading (the surface KIND plus the
+/// group's editable NAME — two levels for walls/floors, ONE merged "Roof (n)
+/// — name" line for ceilings), the phase/exposure/type dropdowns, and the
+/// build-up row (✓ | ✓+ | ? | ℹ | ▤ for walls/floors; the compact combined
+/// "Default" dropdown | ? | ℹ for ceilings). Each control emits the matching
+/// event for `group_index`. Shared by the side panel (exploded view's active
+/// group) and the canvas's floating per-group windows (the default in-place
+/// view), so both edit a group identically.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn group_editor_ui<F: FnMut(UiEvent)>(
     ui: &mut egui::Ui,
@@ -283,18 +285,26 @@ pub(crate) fn group_editor_ui<F: FnMut(UiEvent)>(
     name_error: Option<&str>,
     on_event: &mut F,
 ) {
+    let relevant: Vec<&ExistingGroup> = existing.iter().filter(|e| e.ty.kind() == kind).collect();
+    // CEILINGS get a COMPACT box: whenever the full editor shows (not the
+    // two-mode entry), the title and the name textbox merge onto ONE line
+    // ("Roof (n) — [name]") instead of a centred heading plus a name row.
+    let merged_title = kind == SurfaceKind::Ceilings && (g.show_editor || relevant.is_empty());
+
     // Heading level 1: the surface kind + the group's surface COUNT — centred,
     // bold (e.g. "Wall (3)"). When every attribute of the group's construction
     // is fully set ([`EditGroup::is_complete`] — same predicate as the
     // checklist, incl. the ceiling-insulation gate), a tick sits at the TOP
     // RIGHT of the box (the checklist's green, same glyph).
-    ui.vertical_centered(|ui| {
-        ui.label(
-            egui::RichText::new(format!("{} ({})", kind_heading(kind), g.ids.len()))
-                .size(EDITOR_FONT + 2.0)
-                .strong(),
-        );
-    });
+    if !merged_title {
+        ui.vertical_centered(|ui| {
+            ui.label(
+                egui::RichText::new(format!("{} ({})", kind_heading(kind), g.ids.len()))
+                    .size(EDITOR_FONT + 2.0)
+                    .strong(),
+            );
+        });
+    }
     if g.is_complete() {
         let top_right = ui.max_rect().right_top();
         ui.painter().text(
@@ -306,8 +316,6 @@ pub(crate) fn group_editor_ui<F: FnMut(UiEvent)>(
             egui::Color32::from_rgb(80, 180, 95),
         );
     }
-
-    let relevant: Vec<&ExistingGroup> = existing.iter().filter(|e| e.ty.kind() == kind).collect();
 
     // TWO-MODE ENTRY for a fresh group (nothing attributed yet, and there IS
     // something to join): just an "Existing group…" dropdown — picking one
@@ -345,14 +353,35 @@ pub(crate) fn group_editor_ui<F: FnMut(UiEvent)>(
         return;
     }
 
-    // Heading level 2: the editable group name (defaults to "Group N").
+    // Heading level 2: the editable group name (defaults to "Group N"). On a
+    // ceiling box this row IS the title — "Roof (n) — [name]" on one line
+    // (`merged_title`); walls/floors keep the separate name row under the
+    // centred heading.
     let mut name = g.name.clone();
-    let renamed = ui
-        .push_id(("structure_group_name", group_index), |ui| {
+    let renamed = if merged_title {
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(format!("{} ({}) —", kind_heading(kind), g.ids.len()))
+                    .size(EDITOR_FONT + 2.0)
+                    .strong(),
+            );
+            // Fill the rest of the line, leaving the top-right corner clear
+            // for the completeness tick painted above.
+            let w = (ui.available_width() - 16.0).clamp(40.0, EDIT_NAME_W);
+            ui.push_id(("structure_group_name", group_index), |ui| {
+                crate::ui::widgets::pads::text_input(ui, &mut name, w, "name")
+            })
+            .inner
+            .changed
+        })
+        .inner
+    } else {
+        ui.push_id(("structure_group_name", group_index), |ui| {
             crate::ui::widgets::pads::text_input(ui, &mut name, EDIT_NAME_W, "name")
         })
         .inner
-        .changed;
+        .changed
+    };
     if renamed {
         on_event(UiEvent::Sketch(SketchEvent::SetStructureGroupName {
             group: group_index,
@@ -521,16 +550,145 @@ pub(crate) fn group_editor_ui<F: FnMut(UiEvent)>(
                 }
             });
     });
+    // An AMBIGUOUS inference (a pitched roof drawn over a flat ceiling — the
+    // attic void) can't pick the type for the assessor: the dropdown above
+    // opens unset, with a short nudge toward the insulation question. A
+    // Definite inference needs no hint here — it arrives already committed
+    // on the group (`g.ty`), so the dropdown simply shows it; and a manual
+    // pick is never overwritten either way.
+    if matches!(g.inferred, InferredRoofType::Ambiguous) {
+        ui.label(
+            egui::RichText::new(
+                "Pitched roof over a flat ceiling — pick where the insulation sits",
+            )
+            .size(EDITOR_FONT - 2.5)
+            .weak(),
+        );
+    }
+    if kind == SurfaceKind::Ceilings {
+        // CEILINGS: a COMPACT build-up row of exactly three controls — the
+        // combined "Default" button-with-dropdown (era-default construction
+        // plus an extra-insulation pick: "unknown" or a thickness — it
+        // carries what the retired separate "Insulation [mm] / unknown" row
+        // held), Unknown (?), and Specify… (ℹ, the layer editor). No ✓/✓+
+        // pair and no ▤ quick picker here — those stay on walls/floors.
+        ui.horizontal_wrapped(|ui| {
+            ceiling_default_dropdown_ui(ui, group_index, g, enabled, on_event);
+            let sel = g.makeup == ConstructionMakeup::Unknown;
+            if ui
+                .add_enabled(
+                    enabled,
+                    egui::Button::selectable(sel, egui::RichText::new("?").size(EDITOR_FONT + 3.0)),
+                )
+                .on_hover_text("Unknown")
+                .clicked()
+            {
+                on_event(UiEvent::Sketch(SketchEvent::SetStructureGroupAttrs {
+                    group: group_index,
+                    ty: g.ty,
+                    makeup: ConstructionMakeup::Unknown,
+                    phase: g.phase.clone(),
+                }));
+            }
+            let specify_sel = matches!(g.makeup, ConstructionMakeup::Layers(_));
+            if ui
+                .add_enabled(
+                    enabled,
+                    egui::Button::selectable(
+                        specify_sel,
+                        egui::RichText::new("ℹ").size(EDITOR_FONT + 3.0),
+                    ),
+                )
+                .on_hover_text("Specify…")
+                .clicked()
+            {
+                on_event(UiEvent::Sketch(SketchEvent::BeginSpecifyLayers {
+                    group: group_index,
+                }));
+            }
+        });
+    } else {
+        walls_floors_build_up_row_ui(ui, group_index, g, enabled, on_event);
+    }
+    // DEFAULT-PLUS ONLY (walls/floors): the free-entry row for the
+    // extra-insulation thickness — the preset dropdown above is the shortcut,
+    // typing stays possible — plus the photo hint (a measured added thickness
+    // needs a backing photo, same gate as a specified build-up). A ceiling
+    // box never grows this row: its combined "Default" dropdown owns the
+    // thickness there, and a legacy ceiling `DefaultPlus` record just shows
+    // its value on that button (incompleteness surfaces via the group
+    // colouring alone).
+    if kind != SurfaceKind::Ceilings {
+        if let ConstructionMakeup::DefaultPlus {
+            extra_insulation_mm,
+        } = &g.makeup
+        {
+            default_plus_ui(ui, group_index, g, *extra_insulation_mm, enabled, on_event);
+        }
+    }
+    // Photos (next line): the camera button opens the photos view (thumbnails +
+    // add). Shows a count when there are any.
+    let cam = if g.photos.is_empty() {
+        "📷".to_string()
+    } else {
+        format!("📷 {}", g.photos.len())
+    };
+    if ui
+        .add_enabled(enabled, egui::Button::new(cam))
+        .on_hover_text("Photos")
+        .clicked()
+    {
+        on_event(UiEvent::Sketch(SketchEvent::BeginViewPhotos {
+            group: group_index,
+        }));
+    }
+    // Bottom-right RESET — on EVERY box, fresh or attributed: reselecting an
+    // already-attributed surface after Done must still offer starting again
+    // from scratch. It detaches THIS selection's attribution only (a shared
+    // construction — its other members, name, photos — is untouched) and
+    // returns the box to the two-mode entry so the assessor can choose again.
+    // On an attributed box it sits alongside the "Add to existing group…"
+    // combo above: moving to a group and resetting to nothing are different
+    // intents (the combo lives at the top, Reset at the bottom right — no
+    // crowding).
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+        if ui
+            .add_enabled(
+                enabled,
+                egui::Button::new(egui::RichText::new("Reset").size(EDITOR_FONT)).small(),
+            )
+            .on_hover_text(
+                "Back to \"Existing group / New group\" — un-attributes this \
+                 selection (an existing group itself is untouched)",
+            )
+            .clicked()
+        {
+            on_event(UiEvent::Sketch(SketchEvent::ResetStructureGroup {
+                group: group_index,
+            }));
+        }
+    });
+}
+
+/// The WALLS/FLOORS build-up row — unchanged by the ceiling compaction:
+/// build-up as ICON buttons/pickers (no label — hover for the meaning).
+/// Default (✓) and Unknown (?) set the make-up directly; Default plus (✓+) is
+/// a PRESET dropdown — the default construction PLUS a measured extra
+/// insulation thickness (DEAP's standard options), so the make-up always
+/// lands with a real measurement; Specify (ℹ) opens the LAYER editor (the
+/// `Layers` build-up); ▤ is the quick plasterboard+insulation dropdown — a
+/// two-layer `Layers` build-up without the editor (Specify… stays the
+/// free-form path). The unset `Tbd` default isn't offered. (Ceilings render
+/// their own compact three-control row instead — see
+/// [`ceiling_default_dropdown_ui`].)
+fn walls_floors_build_up_row_ui<F: FnMut(UiEvent)>(
+    ui: &mut egui::Ui,
+    group_index: usize,
+    g: &EditGroup,
+    enabled: bool,
+    on_event: &mut F,
+) {
     ui.horizontal_wrapped(|ui| {
-        // Build-up as ICON buttons/pickers (no label — hover for the meaning).
-        // Default (✓) and Unknown (?) set the make-up directly; Default plus
-        // (✓+) is a PRESET dropdown — the default construction PLUS a measured
-        // extra insulation thickness (DEAP's standard options), so the make-up
-        // always lands with a real measurement; Specify (ℹ) opens the LAYER
-        // editor (the `Layers` build-up); ▤ is the quick plasterboard+
-        // insulation dropdown — a two-layer `Layers` build-up without the
-        // editor (Specify… stays the free-form path). The unset `Tbd` default
-        // isn't offered.
         for (icon, tip, mk) in [
             ("✓", "Default", ConstructionMakeup::Default),
             ("?", "Unknown", ConstructionMakeup::Unknown),
@@ -650,167 +808,112 @@ pub(crate) fn group_editor_ui<F: FnMut(UiEvent)>(
                 .on_hover_text("Plasterboard + insulation (quick build-up)");
         });
     });
-    // DEFAULT-PLUS ONLY: the free-entry row for the extra-insulation
-    // thickness — the preset dropdown above is the shortcut, typing stays
-    // possible — plus the photo hint (a measured added thickness needs a
-    // backing photo, same gate as a specified build-up).
-    if let ConstructionMakeup::DefaultPlus {
-        extra_insulation_mm,
-    } = &g.makeup
-    {
-        default_plus_ui(ui, group_index, g, *extra_insulation_mm, enabled, on_event);
-    }
-    // CEILINGS ONLY: the insulation row — an "Insulation … mm" thickness box
-    // plus an "unknown" checkbox, mutually exclusive (typing a thickness
-    // unchecks "unknown"; checking it clears the box). One of the two must be
-    // given before the session's Done enables, and a specified thickness also
-    // needs a photo (the camera button just below) — the inline hint under the
-    // row says which is missing.
-    if kind == SurfaceKind::Ceilings {
-        ceiling_insulation_ui(ui, group_index, g, enabled, on_event);
-    }
-    // Photos (next line): the camera button opens the photos view (thumbnails +
-    // add). Shows a count when there are any.
-    let cam = if g.photos.is_empty() {
-        "📷".to_string()
-    } else {
-        format!("📷 {}", g.photos.len())
-    };
-    if ui
-        .add_enabled(enabled, egui::Button::new(cam))
-        .on_hover_text("Photos")
-        .clicked()
-    {
-        on_event(UiEvent::Sketch(SketchEvent::BeginViewPhotos {
-            group: group_index,
-        }));
-    }
-    // Bottom-right RESET — on EVERY box, fresh or attributed: reselecting an
-    // already-attributed surface after Done must still offer starting again
-    // from scratch. It detaches THIS selection's attribution only (a shared
-    // construction — its other members, name, photos — is untouched) and
-    // returns the box to the two-mode entry so the assessor can choose again.
-    // On an attributed box it sits alongside the "Add to existing group…"
-    // combo above: moving to a group and resetting to nothing are different
-    // intents (the combo lives at the top, Reset at the bottom right — no
-    // crowding).
-    ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-        if ui
-            .add_enabled(
-                enabled,
-                egui::Button::new(egui::RichText::new("Reset").size(EDITOR_FONT)).small(),
-            )
-            .on_hover_text(
-                "Back to \"Existing group / New group\" — un-attributes this \
-                 selection (an existing group itself is untouched)",
-            )
-            .clicked()
-        {
-            on_event(UiEvent::Sketch(SketchEvent::ResetStructureGroup {
-                group: group_index,
-            }));
-        }
-    });
 }
 
-/// The CEILING insulation row of the group editor: the thickness box (mm) +
-/// the "unknown" checkbox, plus the inline hint while the spec blocks the
-/// session from completing. The text buffer lives in egui memory keyed by the
-/// group, stored TOGETHER with the model value it corresponds to: when the
-/// group's value changes underneath it (a fresh session, the checkbox, undo)
-/// the buffer re-seeds from the model, while in-flight typing — whose partial
-/// text ("12.") intentionally parses to the same `None` it just emitted —
-/// stays untouched. Both render sites (side panel + canvas window) share the
-/// buffer, so the field reads the same wherever the group is edited.
-fn ceiling_insulation_ui<F: FnMut(UiEvent)>(
+/// The CEILINGS build-up row's combined "Default" control: a selectable
+/// button that opens the extra-insulation dropdown — "unknown" (the TRUE era
+/// default: era construction, extra insulation unknown) or a measured
+/// thickness in 25 mm steps ([`CEILING_INSULATION_THICKNESS_MM`]). A pick
+/// writes the make-up `Default` plus the matching [`CeilingInsulation`], so
+/// this one control carries what the retired separate "Insulation [mm] /
+/// unknown" row held; while active the button renders SELECTED with the
+/// chosen value in compact icon form ("✓ unk" / "✓ 150", mm implied —
+/// ✓ is the app's Default glyph, matching the wall row). Legacy states the
+/// dropdown can't produce (a `DefaultPlus` make-up from the retired ✓+
+/// picker) still render as their nearest label here WITHOUT rewriting the
+/// stored data — until the assessor picks again, which normalizes onto
+/// `Default` + the insulation spec.
+fn ceiling_default_dropdown_ui<F: FnMut(UiEvent)>(
     ui: &mut egui::Ui,
     group_index: usize,
     g: &EditGroup,
     enabled: bool,
     on_event: &mut F,
 ) {
-    let store = egui::Id::new(("ceiling_insulation", group_index));
-    let (mut text, mut synced) = ui
-        .ctx()
-        .data_mut(|d| d.get_temp::<(String, Option<CeilingInsulation>)>(store))
-        .filter(|(_, synced)| *synced == g.insulation)
-        .unwrap_or_else(|| {
-            let t = match g.insulation {
-                Some(CeilingInsulation::ThicknessMm(v)) => format_mm(v),
-                _ => String::new(),
-            };
-            (t, g.insulation)
-        });
-    ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("Insulation").size(EDITOR_FONT));
-        ui.add_enabled_ui(enabled, |ui| {
-            if crate::ui::widgets::pads::metre_input(ui, &mut text, 46.0, "mm").changed {
-                // Typing owns the value: a valid positive number specifies the
-                // thickness (which also unchecks "unknown"); anything else
-                // clears back to unspecified.
-                let parsed = text
-                    .trim()
-                    .parse::<f32>()
-                    .ok()
-                    .filter(|v| v.is_finite() && *v > 0.0)
-                    .map(CeilingInsulation::ThicknessMm);
-                synced = parsed;
-                on_event(UiEvent::Sketch(SketchEvent::SetStructureGroupInsulation {
-                    group: group_index,
-                    insulation: parsed,
-                }));
-            }
-        });
-        ui.label(egui::RichText::new("mm").size(EDITOR_FONT));
-        let mut unknown = matches!(synced, Some(CeilingInsulation::Unknown));
+    let (sel, label) = match (&g.makeup, g.insulation) {
+        (
+            ConstructionMakeup::DefaultPlus {
+                extra_insulation_mm,
+            },
+            _,
+        ) => (true, format!("✓ {extra_insulation_mm}")),
+        (ConstructionMakeup::Default, Some(CeilingInsulation::ThicknessMm(v))) => {
+            (true, format!("✓ {}", format_mm(v)))
+        }
+        (ConstructionMakeup::Default, Some(CeilingInsulation::Unknown)) => {
+            (true, "✓ unk".to_string())
+        }
+        _ => (false, "✓".to_string()),
+    };
+    let resp = ui
+        .add_enabled(
+            enabled,
+            // Sized like its ? / ℹ siblings — this is an ICON button.
+            egui::Button::selectable(sel, egui::RichText::new(label).size(EDITOR_FONT + 3.0)),
+        )
+        .on_hover_text("Default construction — tap to set added insulation");
+    egui::Popup::menu(&resp).show(|ui| {
+        let unk_sel = g.makeup == ConstructionMakeup::Default
+            && g.insulation == Some(CeilingInsulation::Unknown);
         if ui
-            .add_enabled(
-                enabled,
-                egui::Checkbox::new(
-                    &mut unknown,
-                    egui::RichText::new("unknown").size(EDITOR_FONT),
-                ),
-            )
-            .changed()
+            .selectable_label(unk_sel, egui::RichText::new("unknown").size(EDITOR_FONT))
+            .clicked()
         {
-            let next = if unknown {
-                text.clear();
-                Some(CeilingInsulation::Unknown)
-            } else {
-                None
-            };
-            synced = next;
-            on_event(UiEvent::Sketch(SketchEvent::SetStructureGroupInsulation {
-                group: group_index,
-                insulation: next,
-            }));
+            emit_ceiling_default_pick(on_event, group_index, g, Some(CeilingInsulation::Unknown));
+        }
+        for mm in CEILING_INSULATION_THICKNESS_MM {
+            let mm_sel = g.makeup == ConstructionMakeup::Default
+                && matches!(g.insulation, Some(CeilingInsulation::ThicknessMm(v))
+                    if v == *mm as f32);
+            if ui
+                .selectable_label(
+                    mm_sel,
+                    egui::RichText::new(format!("{mm} mm")).size(EDITOR_FONT),
+                )
+                .clicked()
+            {
+                emit_ceiling_default_pick(
+                    on_event,
+                    group_index,
+                    g,
+                    Some(CeilingInsulation::ThicknessMm(*mm as f32)),
+                );
+            }
         }
     });
-    // The inline "why not done" hint, from the EFFECTIVE state this frame
-    // (`synced` — the value just emitted, one frame fresher than `g`).
-    if !CeilingInsulation::spec_done(synced, !g.photos.is_empty()) {
-        let hint = match synced {
-            Some(CeilingInsulation::ThicknessMm(_)) => "a photo of the insulation is required",
-            _ => "enter the insulation thickness or mark it unknown",
-        };
-        ui.label(
-            egui::RichText::new(hint)
-                .size(EDITOR_FONT - 1.5)
-                .color(ui.visuals().warn_fg_color),
-        );
-    }
-    ui.ctx().data_mut(|d| d.insert_temp(store, (text, synced)));
 }
 
-/// The DEFAULT-PLUS extra-insulation row of the group editor: a free-entry
-/// thickness box (mm) for the measured insulation added over the default
-/// construction — the preset dropdown in the build-up row is the shortcut;
-/// this keeps any measured value typable — plus the inline photo hint while
-/// the measurement lacks its evidence. Shares the ceiling insulation row's
-/// buffer idiom: the text lives in egui memory keyed by the group, stored
-/// together with the model value it corresponds to, so it re-seeds when the
-/// value changes underneath (a preset pick, undo) but leaves in-flight typing
-/// alone.
+/// Emit the two events a combined-"Default" dropdown pick means: make-up
+/// `Default` (normalizing whatever the group held — the attrs write also
+/// snapshots for undo) followed by the chosen insulation spec (which the
+/// controller lands on the now-current construction — it materializes first).
+fn emit_ceiling_default_pick<F: FnMut(UiEvent)>(
+    on_event: &mut F,
+    group_index: usize,
+    g: &EditGroup,
+    insulation: Option<CeilingInsulation>,
+) {
+    on_event(UiEvent::Sketch(SketchEvent::SetStructureGroupAttrs {
+        group: group_index,
+        ty: g.ty,
+        makeup: ConstructionMakeup::Default,
+        phase: g.phase.clone(),
+    }));
+    on_event(UiEvent::Sketch(SketchEvent::SetStructureGroupInsulation {
+        group: group_index,
+        insulation,
+    }));
+}
+
+/// The DEFAULT-PLUS extra-insulation row of the group editor (WALLS/FLOORS —
+/// a ceiling's thickness lives on its combined "Default" dropdown instead): a
+/// free-entry thickness box (mm) for the measured insulation added over the
+/// default construction — the preset dropdown in the build-up row is the
+/// shortcut; this keeps any measured value typable — plus the inline photo
+/// hint while the measurement lacks its evidence. Buffer idiom: the text
+/// lives in egui memory keyed by the group, stored together with the model
+/// value it corresponds to, so it re-seeds when the value changes underneath
+/// (a preset pick, undo) but leaves in-flight typing alone.
 fn default_plus_ui<F: FnMut(UiEvent)>(
     ui: &mut egui::Ui,
     group_index: usize,
@@ -862,8 +965,9 @@ fn default_plus_ui<F: FnMut(UiEvent)>(
     ui.ctx().data_mut(|d| d.insert_temp(store, (text, synced)));
 }
 
-/// Compact mm display for the insulation box's seed: whole numbers without a
-/// decimal tail ("150"), fractional values as typed ("112.5").
+/// Compact mm display for the ceiling "Default" button's value: whole numbers
+/// without a decimal tail ("150"), fractional values as typed ("112.5" — a
+/// legacy free-typed thickness).
 fn format_mm(v: f32) -> String {
     if v.fract().abs() < 1e-4 {
         format!("{v:.0}")
@@ -1115,6 +1219,7 @@ mod tests {
             makeup: ConstructionMakeup::Default,
             phase: ConstructionPhase::default(),
             name: Some("Brick".into()),
+            inferred: InferredRoofType::Unknown,
         };
         assert_eq!(existing_group_label(&named), "Brick");
         let unnamed = ExistingGroup {

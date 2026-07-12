@@ -35,8 +35,8 @@ pub use geom::{
     fit_axis_rect, fit_axis_segment, fit_segment, interior_perpendicular_offset,
     interior_split_edge, intersect_circles, lerp_along, nearest_parallel_edge_distance,
     point_in_polygon, point_on_segment, project_distance_along, project_to_circle,
-    ring_contains_point, ring_within_ring, segment_len, segment_on_ring, snap_on_face,
-    solve_axis_wall, subdivide_face, FaceSnap,
+    ring_contains_point, ring_interior_point, ring_within_ring, segment_len, segment_on_ring,
+    snap_on_face, solve_axis_wall, subdivide_face, FaceSnap,
 };
 pub use parametric::{Axis, CollinearitySuggestion, ParameterAxis, ParameterId, VertexId};
 pub use poly3d::{Polygon3D, SplitLine3D};

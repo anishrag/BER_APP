@@ -14,6 +14,7 @@
 //! regions live on the BER record, not the editing `Document`).
 use super::*;
 use ber_model::ber::common::{ConstructionPhase, Photo};
+use ber_model::ber::roof::InferredRoofType;
 use ber_model::ber::structural::{
     CeilingConstructionType, CeilingExposure, CeilingInsulation, ConstructionMakeup,
     ConstructionType, FloorConstructionType, FloorExposure, Storey, SurfaceExposure, WallExposure,
@@ -52,14 +53,15 @@ pub struct EditGroup {
     /// The group construction's attached photos (session copy, seeded from the
     /// construction; the photos view shows these and the camera button appends).
     pub photos: Vec<Photo>,
-    /// CEILINGS ONLY: the group's insulation spec (session copy, seeded from
-    /// the construction) — the "Insulation thickness (mm)" box + "unknown"
-    /// checkbox in the ceiling attribute editor. Always `None` for walls and
-    /// floors (they carry no such spec). On a ceiling group `None` means "not
-    /// yet specified", which keeps the group INCOMPLETE
-    /// ([`EditGroup::is_complete`]) — no tick, counted by `Remaining`, the
-    /// checklist row stays red — but never blocks closing the session (the
-    /// box's inline hint is guidance, not a lock).
+    /// CEILINGS ONLY: the group's extra-insulation spec (session copy, seeded
+    /// from the construction) — the combined "Default" dropdown in the
+    /// ceiling attribute editor (unknown / a measured thickness). Always
+    /// `None` for walls and floors (they carry no such spec). On a
+    /// plain-`Default` ceiling group `None` means "not yet specified", which
+    /// keeps the group INCOMPLETE ([`EditGroup::is_complete`]) — no tick,
+    /// counted by `Remaining`, the checklist row stays red — but never blocks
+    /// closing the session; other make-ups answer the insulation question
+    /// themselves ([`CeilingInsulation::spec_done_for`]).
     pub insulation: Option<CeilingInsulation>,
     /// Whether the box shows the FULL attribute editor. A FRESH group (its
     /// selection carries no attribution yet — type and build-up both unset)
@@ -81,6 +83,16 @@ pub struct EditGroup {
     /// [`show_editor`](Self::show_editor) it never flips on an attribute
     /// apply. Session UI-flow state, not persisted.
     pub fresh: bool,
+    /// CEILINGS ONLY: the roof type the drawn GEOMETRY implies for this
+    /// group's regions (the region's flat/sloped shape × the dwelling roof
+    /// over it — `Ber::inferred_ceiling_roof_type`). Part of the grouping
+    /// key, so geometrically different ceilings never merge into one group —
+    /// grouping follows geometry, and a manual dropdown override (which only
+    /// changes the STORED type) never re-shuffles it. Drives the type
+    /// dropdown's prefill (`Definite` + still-unset stored type) and the
+    /// `Ambiguous` hint. Always `Unknown` for walls/floors. Runtime-only,
+    /// like the rest of the session.
+    pub inferred: InferredRoofType,
 }
 
 impl EditGroup {
@@ -88,9 +100,9 @@ impl EditGroup {
     /// the group window's top-right tick. Composes the SAME ber_model
     /// primitives the per-construction `is_complete` tests use (a real type;
     /// a chosen build-up, photo-backed when it's a specified custom stack;
-    /// and — ceilings only — the insulation gate), evaluated over the
-    /// session's mirrored fields so the tick appears the moment the last
-    /// attribute lands, without waiting for a re-resolve.
+    /// and — plain-`Default` ceilings only — the extra-insulation gate),
+    /// evaluated over the session's mirrored fields so the tick appears the
+    /// moment the last attribute lands, without waiting for a re-resolve.
     pub fn is_complete(&self) -> bool {
         let type_set = match self.ty {
             ConstructionType::Wall(t) => t.is_set(),
@@ -100,7 +112,11 @@ impl EditGroup {
         let build_up_done =
             self.makeup.is_set() && (!self.makeup.requires_photo() || !self.photos.is_empty());
         let insulation_done = self.ty.kind() != SurfaceKind::Ceilings
-            || CeilingInsulation::spec_done(self.insulation, !self.photos.is_empty());
+            || CeilingInsulation::spec_done_for(
+                &self.makeup,
+                self.insulation,
+                !self.photos.is_empty(),
+            );
         type_set && build_up_done && insulation_done
     }
 }
@@ -156,6 +172,12 @@ pub struct ExistingGroup {
     pub makeup: ConstructionMakeup,
     pub phase: ConstructionPhase,
     pub name: Option<String>,
+    /// CEILINGS ONLY: the inferred-roof-type class of the region(s) this
+    /// offer was read from (`Ber::inferred_ceiling_roof_type`) — part of the
+    /// dedup key, mirroring [`EditGroup::inferred`], so geometrically
+    /// different ceilings never collapse onto one offer. Always `Unknown`
+    /// for walls/floors.
+    pub inferred: InferredRoofType,
 }
 
 /// A dimensioned structure carve STAGED as a pending selection (not yet split):
@@ -253,9 +275,13 @@ impl AppController {
             makeup: ConstructionMakeup,
             phase: ConstructionPhase,
             name: Option<String>,
+            inferred: InferredRoofType,
         ) {
             // Name is part of the identity: same-fabric groups with different
             // names are distinct offers ("Porch roof" vs "Main house roof").
+            // The inferred-roof-type CLASS is too (ceilings): grouping follows
+            // geometry, so same-fabric ceilings under different roof geometry
+            // stay distinct offers.
             let norm = |n: &Option<String>| {
                 n.as_deref()
                     .map(str::trim)
@@ -263,7 +289,11 @@ impl AppController {
                     .map(str::to_string)
             };
             if out.iter().any(|g| {
-                g.ty == ty && g.makeup == makeup && g.phase == phase && norm(&g.name) == norm(&name)
+                g.ty == ty
+                    && g.makeup == makeup
+                    && g.phase == phase
+                    && norm(&g.name) == norm(&name)
+                    && g.inferred == inferred
             }) {
                 return;
             }
@@ -272,13 +302,14 @@ impl AppController {
                 makeup,
                 phase,
                 name,
+                inferred,
             });
         }
         let mut out = Vec::new();
         let Some(record) = self.current_record.as_ref() else {
             return out;
         };
-        for storey in &record.data.storeys {
+        for (idx, storey) in record.data.storeys.iter().enumerate() {
             for r in &storey.walls.regions {
                 // Out-of-scope walls (non-heat-loss / inter-storey) don't
                 // participate in the Structure phase — a construction referenced
@@ -294,6 +325,7 @@ impl AppController {
                             c.base.construction_makeup.clone(),
                             c.base.construction_phase.clone(),
                             c.base.name.clone(),
+                            InferredRoofType::Unknown,
                         );
                     }
                 }
@@ -310,6 +342,7 @@ impl AppController {
                             c.base.construction_makeup.clone(),
                             c.base.construction_phase.clone(),
                             c.base.name.clone(),
+                            InferredRoofType::Unknown,
                         );
                     }
                 }
@@ -326,6 +359,7 @@ impl AppController {
                             c.base.construction_makeup.clone(),
                             c.base.construction_phase.clone(),
                             c.base.name.clone(),
+                            record.data.inferred_ceiling_roof_type(idx, r),
                         );
                     }
                 }
@@ -760,6 +794,7 @@ impl AppController {
             Option<String>,
             Vec<Photo>,
             Option<CeilingInsulation>, // ceilings only; None for walls/floors
+            InferredRoofType,          // ceilings only; Unknown for walls/floors
         );
         let document = &self.document;
         let attrs_of = |id: ItemId| -> Option<Attrs> {
@@ -816,6 +851,7 @@ impl AppController {
                         name,
                         photos,
                         None,
+                        InferredRoofType::Unknown,
                     ))
                 }
                 SurfaceKind::Floors => {
@@ -851,6 +887,7 @@ impl AppController {
                         name,
                         photos,
                         None,
+                        InferredRoofType::Unknown,
                     ))
                 }
                 SurfaceKind::Ceilings => {
@@ -888,6 +925,9 @@ impl AppController {
                         name,
                         photos,
                         insulation,
+                        // The roof type the drawn geometry implies for THIS
+                        // region — the geometry axis of the grouping key.
+                        record.data.inferred_ceiling_roof_type(idx, r),
                     ))
                 }
             }
@@ -895,8 +935,17 @@ impl AppController {
         let mut groups: Vec<EditGroup> = Vec::new();
         for id in &self.structure_selected {
             // Skip ids that no longer resolve to a live region of any kind.
-            let Some((ty, makeup, phase, exposure, exposure_locked, cname, photos, insulation)) =
-                attrs_of(*id)
+            let Some((
+                ty,
+                makeup,
+                phase,
+                exposure,
+                exposure_locked,
+                cname,
+                photos,
+                insulation,
+                inferred,
+            )) = attrs_of(*id)
             else {
                 continue;
             };
@@ -905,7 +954,10 @@ impl AppController {
             // construction — the dropdown's enabled-ness must be uniform per group.
             // The NAME is part of the key too: same-fabric groups with
             // different names are DIFFERENT groups ("Porch roof" vs "Main
-            // house roof") and must never merge in a session.
+            // house roof") and must never merge in a session. So is the
+            // INFERRED roof-type class (ceilings): grouping follows geometry,
+            // so two same-phase ceilings whose drawn roofs imply different
+            // types split even while both stored types are still unset.
             let explicit_name = cname
                 .as_deref()
                 .map(str::trim)
@@ -918,17 +970,23 @@ impl AppController {
                     && g.exposure == exposure
                     && g.exposure_locked == exposure_locked
                     && g.explicit_name == explicit_name
+                    && g.inferred == inferred
             }) {
                 Some(g) => g.ids.push(*id),
                 None => {
                     // A FRESH group (nothing attributed yet) opens on the
                     // two-mode entry — existing-group dropdown or "New group"
-                    // — instead of the full editor.
+                    // — instead of the full editor. A group about to be
+                    // PREFILLED (a Definite inference over a still-unset
+                    // stored type — the seed pass below) opens attributed:
+                    // straight to the editor, keeping the in-editor join
+                    // combo (its two-mode entry never showed).
                     let type_set = match ty {
                         ConstructionType::Wall(t) => t.is_set(),
                         ConstructionType::Floor(t) => t.is_set(),
                         ConstructionType::Ceiling(t) => t.is_set(),
                     };
+                    let seeded = !type_set && matches!(inferred, InferredRoofType::Definite(_));
                     groups.push(EditGroup {
                         ids: vec![*id],
                         ty,
@@ -942,8 +1000,9 @@ impl AppController {
                         explicit_name,
                         photos,
                         insulation,
-                        show_editor: type_set || makeup.is_set(),
-                        fresh: !(type_set || makeup.is_set()),
+                        show_editor: type_set || makeup.is_set() || seeded,
+                        fresh: !(type_set || makeup.is_set() || seeded),
+                        inferred,
                     })
                 }
             }
@@ -963,6 +1022,39 @@ impl AppController {
                 viewing_photos: None,
                 name_error: None,
             });
+            // PREFILL: a group whose geometry pins the roof type down
+            // (`Definite`) while its stored type is still unset gets the
+            // inferred type committed through the NORMAL attrs path — so it
+            // persists and counts toward completeness exactly like a
+            // hand-picked value, and the dropdown opens pre-selected. A
+            // stored pick (anything non-`Uninitialised`) is never touched:
+            // this only fires on `Uninitialised`, so an assessor override
+            // always stands.
+            let seeds: Vec<(
+                usize,
+                CeilingConstructionType,
+                ConstructionMakeup,
+                ConstructionPhase,
+            )> = self
+                .structure_edit
+                .as_ref()
+                .map(|e| {
+                    e.groups
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, g)| match (g.ty, g.inferred) {
+                            (
+                                ConstructionType::Ceiling(CeilingConstructionType::Uninitialised),
+                                InferredRoofType::Definite(t),
+                            ) => Some((i, t, g.makeup.clone(), g.phase.clone())),
+                            _ => None,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            for (i, t, makeup, phase) in seeds {
+                self.set_structure_group_attrs(i, ConstructionType::Ceiling(t), makeup, phase);
+            }
         }
     }
 

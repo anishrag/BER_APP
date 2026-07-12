@@ -101,6 +101,15 @@ pub enum ConstructionMakeup {
 /// via the layer editor / the free-entry box.
 pub const DEAP_INSULATION_THICKNESS_MM: &[u32] = &[10, 20, 25, 30, 40, 50, 60, 70, 80];
 
+/// The CEILING attribute editor's extra-insulation THICKNESS options, in mm —
+/// the option list of the combined "Default" dropdown (era-default
+/// construction + this much measured insulation, in 25 mm steps; the
+/// dropdown's other entry, "unknown", is the TRUE default: era construction,
+/// extra insulation unknown). Distinct from the walls' DEAP dry-lining table
+/// above — loft insulation runs much thicker.
+pub const CEILING_INSULATION_THICKNESS_MM: &[u32] =
+    &[25, 50, 75, 100, 125, 150, 175, 200, 225, 250, 275, 300];
+
 /// Nominal plasterboard slab thickness for the quick plasterboard+insulation
 /// build-up, in whole mm (the standard 12.5 mm slab, rounded up —
 /// [`ConstructionLayer::thickness_mm`] is integral mm).
@@ -527,10 +536,11 @@ pub struct FloorConstruction {
 }
 
 /// The assessor's INSULATION spec for a ceiling/roof construction — the
-/// Structure "Edit attributes" dialog's "Insulation thickness (mm)" box plus
-/// its "unknown" checkbox. `None` on the construction means "not yet
-/// specified" (old records load as that via `#[serde(default)]`), which keeps
-/// the ceiling incomplete until one of the two is given.
+/// Structure "Edit attributes" dialog's combined "Default" dropdown (extra
+/// insulation over the era-default construction: a measured thickness, or
+/// declared unknown). `None` on the construction means "not yet specified"
+/// (old records load as that via `#[serde(default)]`), which keeps a
+/// plain-`Default` ceiling incomplete until one of the two is given.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum CeilingInsulation {
     /// The assessor DECLARED the thickness unknown — a real choice; counts as
@@ -555,6 +565,26 @@ impl CeilingInsulation {
         }
     }
 
+    /// Whether a ceiling's insulation question is ANSWERED for the given
+    /// build-up. Only the plain `Default` make-up asks it — the era-default
+    /// construction is exactly the state where the extra loft insulation is a
+    /// separate open question (the combined "Default" dropdown's unknown /
+    /// thickness choice, stored in [`CeilingConstruction::insulation`]). Every
+    /// other make-up already carries its own answer: `DefaultPlus` holds the
+    /// measured extra thickness, `Layers` specifies the stack,
+    /// `Unknown`/`NonHeatLoss` declare there is nothing further to specify —
+    /// and the unset `Tbd` is caught by the build-up gate, not this one. The
+    /// per-make-up successor to bare [`spec_done`](Self::spec_done) in
+    /// [`CeilingConstruction::is_complete`] and the Structure editor's group
+    /// tick.
+    pub fn spec_done_for(
+        makeup: &ConstructionMakeup,
+        spec: Option<CeilingInsulation>,
+        has_photo: bool,
+    ) -> bool {
+        !matches!(makeup, ConstructionMakeup::Default) || Self::spec_done(spec, has_photo)
+    }
+
     /// Normalize a spec at the model boundary: a non-positive or non-finite
     /// thickness is no measurement at all, so it collapses to `None`
     /// (unspecified). The dialog only sends valid parses — belt-and-braces.
@@ -571,9 +601,12 @@ impl CeilingInsulation {
 pub struct CeilingConstruction {
     pub base: ConstructionBase,
     pub construction_type: CeilingConstructionType,
-    /// Ceiling insulation as specified in the Structure attribute dialog.
-    /// `None` = not yet specified (and the default for records saved before
-    /// the field existed). Ceilings only — walls/floors carry no such spec.
+    /// Extra insulation as specified in the Structure attribute dialog's
+    /// combined "Default" dropdown. `None` = not yet specified (and the
+    /// default for records saved before the field existed). Only consulted
+    /// while the make-up is the plain `Default`
+    /// ([`CeilingInsulation::spec_done_for`]); other make-ups carry their own
+    /// answer. Ceilings only — walls/floors carry no such spec.
     #[serde(default)]
     pub insulation: Option<CeilingInsulation>,
 }
@@ -616,13 +649,21 @@ impl FloorConstruction {
 
 impl CeilingConstruction {
     /// A ceiling/roof construction is DONE once its type is set, its build-up
-    /// is done (see [`WallConstruction::is_complete`]), AND its insulation is
-    /// specified ([`CeilingInsulation::spec_done`] — a thickness needs a
-    /// backing photo; declared-unknown doesn't; unspecified never counts).
+    /// is done (see [`WallConstruction::is_complete`]), AND — for the plain
+    /// `Default` make-up only — its extra insulation is specified
+    /// ([`CeilingInsulation::spec_done_for`] — a thickness needs a backing
+    /// photo; declared-unknown doesn't; unspecified never counts). Any other
+    /// make-up (`Unknown`, `Layers`, `DefaultPlus`, `NonHeatLoss`) already
+    /// answers the insulation question itself, so only the build-up rules
+    /// (incl. its photo gate) apply.
     pub fn is_complete(&self) -> bool {
         self.construction_type.is_set()
             && self.base.build_up_done()
-            && CeilingInsulation::spec_done(self.insulation, !self.base.photos.is_empty())
+            && CeilingInsulation::spec_done_for(
+                &self.base.construction_makeup,
+                self.insulation,
+                !self.base.photos.is_empty(),
+            )
     }
 }
 
@@ -1143,9 +1184,10 @@ impl Ber {
 mod tests {
     use super::*;
 
-    /// Ceiling completeness now includes the INSULATION spec: unspecified
-    /// blocks; declared-unknown completes without a photo; a specified
-    /// thickness completes only once a photo backs it.
+    /// Ceiling completeness demands the INSULATION spec exactly when the
+    /// make-up is the plain `Default` (the combined "Default" dropdown's open
+    /// question): unspecified blocks; declared-unknown completes without a
+    /// photo; a specified thickness completes only once a photo backs it.
     #[test]
     fn ceiling_completeness_requires_insulation_spec() {
         let mut c = CeilingConstruction {
@@ -1163,6 +1205,63 @@ mod tests {
         assert!(!c.is_complete(), "a thickness needs a backing photo");
         c.base.photos.push(Photo::default());
         assert!(c.is_complete(), "thickness + photo completes");
+    }
+
+    /// Every NON-`Default` make-up answers the ceiling insulation question
+    /// itself, so completeness falls back to the ordinary build-up rules
+    /// (photo-gated for the fabric-asserting ones) with `insulation` left
+    /// unspecified — the state the compacted ceiling editor produces, and the
+    /// state legacy records with any old makeup/insulation combination load
+    /// into.
+    #[test]
+    fn ceiling_completeness_non_default_makeups_skip_insulation() {
+        let ceiling = |makeup: ConstructionMakeup, photo: bool| {
+            let mut c = CeilingConstruction {
+                construction_type: CeilingConstructionType::FlatRoof,
+                ..Default::default()
+            };
+            c.base.construction_makeup = makeup;
+            if photo {
+                c.base.photos.push(Photo::default());
+            }
+            c
+        };
+        assert!(
+            ceiling(ConstructionMakeup::Unknown, false).is_complete(),
+            "declared-unknown build-up: insulation not demanded"
+        );
+        assert!(
+            !ceiling(ConstructionMakeup::Layers(vec![]), false).is_complete(),
+            "a specified stack still needs its backing photo"
+        );
+        assert!(
+            ceiling(ConstructionMakeup::Layers(vec![]), true).is_complete(),
+            "layers + photo complete without a separate insulation spec"
+        );
+        assert!(
+            !ceiling(
+                ConstructionMakeup::DefaultPlus {
+                    extra_insulation_mm: 150
+                },
+                false
+            )
+            .is_complete(),
+            "a measured added thickness still needs its backing photo"
+        );
+        assert!(
+            ceiling(
+                ConstructionMakeup::DefaultPlus {
+                    extra_insulation_mm: 150
+                },
+                true
+            )
+            .is_complete(),
+            "legacy DefaultPlus + photo completes without the insulation field"
+        );
+        assert!(
+            !ceiling(ConstructionMakeup::Tbd, false).is_complete(),
+            "the unset placeholder stays incomplete via the build-up gate"
+        );
     }
 
     /// Old records predate the `insulation` field → they load as `None`

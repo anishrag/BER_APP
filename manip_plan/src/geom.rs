@@ -990,6 +990,82 @@ fn point_in_ring_f64(pts: &[Point2f64], x: f64, y: f64) -> bool {
     inside
 }
 
+/// A representative point guaranteed STRICTLY INSIDE a simple ring (open or
+/// closed form; `None` for degenerate rings with under three distinct
+/// vertices or no interior row). A plain centroid fails for concave shapes —
+/// an L, a U, or the band a boolean carve leaves behind can all put their
+/// vertex average (and even their area centroid) OUTSIDE the ring — so this
+/// falls back to a scanline sweep: for each horizontal row midway between two
+/// consecutive distinct vertex heights (rows through vertices would graze),
+/// the even-odd crossings pair into interior spans, and the midpoint of the
+/// WIDEST span over all rows is returned — a pole-of-inaccessibility-lite
+/// that lands in the fattest part of the shape. The area centroid is still
+/// preferred when it IS inside (it reads most natural for convex regions).
+pub fn ring_interior_point(ring: &[Point2f64]) -> Option<Point2f64> {
+    let mut pts = ring;
+    if pts.len() >= 2 && pts[0] == pts[pts.len() - 1] {
+        pts = &pts[..pts.len() - 1];
+    }
+    if pts.len() < 3 {
+        return None;
+    }
+    // The area (shoelace) centroid, when it lies inside, is the nicest anchor.
+    let c = ring_area_centroid(pts);
+    if point_in_ring_f64(pts, c.x, c.y) {
+        return Some(c);
+    }
+    // Scanline fallback: rows BETWEEN consecutive distinct vertex heights
+    // never pass through a vertex, so every edge either cleanly crosses the
+    // row or misses it — the even-odd pairing of the crossing xs is exact.
+    let mut ys: Vec<f64> = pts.iter().map(|p| p.y).collect();
+    ys.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    ys.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+    let mut best: Option<(f64, Point2f64)> = None;
+    for w in ys.windows(2) {
+        let y = (w[0] + w[1]) * 0.5;
+        let mut xs: Vec<f64> = Vec::new();
+        let n = pts.len();
+        for i in 0..n {
+            let (a, b) = (pts[i], pts[(i + 1) % n]);
+            if (a.y > y) != (b.y > y) {
+                xs.push(a.x + (y - a.y) / (b.y - a.y) * (b.x - a.x));
+            }
+        }
+        xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        for pair in xs.chunks_exact(2) {
+            let width = pair[1] - pair[0];
+            let mid_x = (pair[0] + pair[1]) * 0.5;
+            if width > best.map_or(0.0, |(bw, _)| bw) && point_in_ring_f64(pts, mid_x, y) {
+                best = Some((width, Point2f64::new(mid_x, y)));
+            }
+        }
+    }
+    best.map(|(_, p)| p)
+}
+
+/// The area (shoelace) centroid of an OPEN simple ring; falls back to the
+/// vertex average for zero-area (collinear/degenerate) rings so the caller
+/// always gets a finite point to test.
+fn ring_area_centroid(pts: &[Point2f64]) -> Point2f64 {
+    let n = pts.len();
+    let (mut area2, mut cx, mut cy) = (0.0_f64, 0.0_f64, 0.0_f64);
+    for i in 0..n {
+        let (a, b) = (pts[i], pts[(i + 1) % n]);
+        let cross = a.x * b.y - b.x * a.y;
+        area2 += cross;
+        cx += (a.x + b.x) * cross;
+        cy += (a.y + b.y) * cross;
+    }
+    if area2.abs() < 1e-12 {
+        let inv = 1.0 / n as f64;
+        return Point2f64::new(
+            pts.iter().map(|p| p.x).sum::<f64>() * inv,
+            pts.iter().map(|p| p.y).sum::<f64>() * inv,
+        );
+    }
+    Point2f64::new(cx / (3.0 * area2), cy / (3.0 * area2))
+}
+
 /// Whether f64 segments `a1→a2` and `b1→b2` cross at a single strictly-interior
 /// point (the f64, point-discarding analogue of [`segment_crossing`]): excludes
 /// shared endpoints and collinear touches, so a coincident/shared boundary edge
@@ -1343,6 +1419,63 @@ mod tests {
 
     fn pt(x: f64, y: f64) -> Point2f64 {
         Point2f64::new(x, y)
+    }
+
+    /// `ring_interior_point`: always strictly inside the ring — the convex
+    /// case takes the area centroid; concave shapes whose centroid falls
+    /// OUTSIDE (a U, and the wrap-around band an inter-storey carve leaves
+    /// behind) fall back to the widest-span scanline; degenerates yield None.
+    #[test]
+    fn ring_interior_point_stays_inside_concave_rings() {
+        // Convex square → the centroid itself.
+        let square = ring64(&[(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0)]);
+        let p = ring_interior_point(&square).expect("square has an interior");
+        assert!(
+            (p.x - 2.0).abs() < 1e-9 && (p.y - 2.0).abs() < 1e-9,
+            "{p:?}"
+        );
+
+        // A U-shape: both the vertex average and the area centroid sit in the
+        // notch (outside); the interior point must not.
+        let u = ring64(&[
+            (0.0, 0.0),
+            (6.0, 0.0),
+            (6.0, 4.0),
+            (5.0, 4.0),
+            (5.0, 1.0),
+            (1.0, 1.0),
+            (1.0, 4.0),
+            (0.0, 4.0),
+        ]);
+        let p = ring_interior_point(&u).expect("U has an interior");
+        assert!(point_in_ring_f64(&u, p.x, p.y), "outside the U: {p:?}");
+        // The fattest part of the U is the bottom bar — the anchor lands there,
+        // not in one of the thin arms.
+        assert!(p.y < 1.0, "expected the wide bottom bar, got {p:?}");
+
+        // The carve-remainder band: a big square with a slightly-inset square
+        // carved out of it, leaving a C-shaped band (the porch-region shape).
+        // Every centroid flavour lands in the carved hole; the interior point
+        // must land in the band itself.
+        let band = ring64(&[
+            (0.0, 0.0),
+            (10.0, 0.0),
+            (10.0, 10.0),
+            (0.0, 10.0),
+            (0.0, 9.0),
+            (9.0, 9.0),
+            (9.0, 1.0),
+            (0.0, 1.0),
+        ]);
+        let p = ring_interior_point(&band).expect("band has an interior");
+        assert!(point_in_ring_f64(&band, p.x, p.y), "in the hole: {p:?}");
+
+        // A closed ring (closing duplicate) works the same; degenerate rings
+        // yield nothing.
+        let closed = ring64(&[(0.0, 0.0), (2.0, 0.0), (2.0, 2.0), (0.0, 0.0)]);
+        assert!(ring_interior_point(&closed).is_some());
+        assert!(ring_interior_point(&ring64(&[(0.0, 0.0), (1.0, 0.0)])).is_none());
+        assert!(ring_interior_point(&[]).is_none());
     }
 
     /// `point_on_segment`: interior + endpoint hits; off-line and past-the-end

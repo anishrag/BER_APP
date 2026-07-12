@@ -812,9 +812,9 @@ pub enum SketchEvent {
         group: usize,
         layers: Vec<ber_model::ber::structural::ConstructionLayer>,
     },
-    /// Structure phase: set (or clear with `None`) a CEILING group's insulation
-    /// spec — the attribute dialog's "Insulation thickness (mm)" box and its
-    /// "unknown" checkbox.
+    /// Structure phase: set (or clear with `None`) a CEILING group's
+    /// extra-insulation spec — the attribute dialog's combined "Default"
+    /// dropdown ("unknown" or a measured thickness).
     SetStructureGroupInsulation {
         group: usize,
         insulation: Option<ber_model::ber::structural::CeilingInsulation>,

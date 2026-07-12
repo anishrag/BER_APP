@@ -15,17 +15,17 @@ use ber_model::ber::ber_struct::Ber;
 use ber_model::ber::structural::WallExposure;
 use domain::sketch::{EditTools, SketchMode};
 
-/// Estimated width an in-place "Edit attributes" window occupies, and the
-/// vertical slot each is stacked into. egui sizes the windows lazily, so the
-/// layout reserves space from these estimates; the slot is generous enough that
-/// stacked windows don't overlap, and the window's own content is capped to
-/// `EDIT_BOX_W` so it stays narrow (construction type is a dropdown).
+/// Width an in-place "Edit attributes" window occupies (the window's own
+/// content is capped so the OUTER frame lands on this width), and the
+/// fallback height estimate used until the box has rendered once — after the
+/// first frame the layout uses each box's MEASURED height (egui remembers
+/// every `Area`'s rect frame to frame).
 const EDIT_BOX_W: f32 = 165.0;
 const EDIT_SLOT_H: f32 = 155.0;
 /// Gap between a window column and the canvas edge.
 const EDIT_COL_PAD: f32 = 10.0;
-/// Clear gap kept BETWEEN adjacent floaties along an edge, so the de-clutter
-/// pitch exceeds the window box and they never touch/overlap.
+/// Clear gap kept BETWEEN adjacent floaties along an edge, so boxes never
+/// touch/overlap.
 const EDIT_GAP: f32 = 12.0;
 /// Top/bottom inset reserved for the window columns.
 const EDIT_TOP_PAD: f32 = 12.0;
@@ -33,14 +33,24 @@ const EDIT_TOP_PAD: f32 = 12.0;
 /// (the floating bar at `center_top + 8` and the banner just under it), so the
 /// top row of attribute windows and the side columns don't sit on top of them.
 const EDIT_TOP_SAFE: f32 = 84.0;
+/// Footprint of a collapsed CHIP — the compact title-bar a group degrades to
+/// when the margins can't fit its full box without intersecting another
+/// (group colour + name; tap to expand). Chips pack shelf-wise into a band
+/// along the canvas bottom.
+const CHIP_W: f32 = 120.0;
+const CHIP_H: f32 = 30.0;
 
 /// One in-place attribute window's placement (see [`compute_structure_edit_layout`]).
 struct EditWindow {
     group_index: usize,
     /// Top-left of the floating `Area` (screen px).
     pos: egui::Pos2,
-    /// Where the connector leaves the window — its inner-edge midpoint (screen px).
-    inner_anchor: egui::Pos2,
+    /// The box footprint the layout reserved (measured height for a full box,
+    /// the chip footprint for a chip) — what the no-intersect packing packs.
+    size: egui::Vec2,
+    /// Collapsed to a compact title-bar chip (margins over capacity — tap to
+    /// expand; expanding one may collapse another rather than overlap).
+    chip: bool,
     /// The group's connector target (world, in its storey's own frame).
     centroid: (f64, f64),
     /// Which storey CELL `centroid` lives in — `Some` on the all-storeys
@@ -50,64 +60,177 @@ struct EditWindow {
     color: egui::Color32,
 }
 
-/// The in-place "Edit attributes" layout: the per-group windows distributed to
-/// the canvas margins (nearest edge to each group), plus the view that fits the
-/// plan into the gap left in the middle.
+/// The in-place "Edit attributes" layout: the per-group windows (prescriptive
+/// slots on the single-storey view, margin packing on all-storeys), plus the
+/// view that fits the plan into the space left over.
 struct StructureEditLayout {
     view: ViewParams,
     windows: Vec<EditWindow>,
     /// ALL-STOREYS only: the inner rect the storey ROW is fitted into (the gap
-    /// between the reserved margins). The row's per-cell fit is rect-driven
+    /// between the reserved margins, shrunk clear of any user-dragged boxes —
+    /// the plan never renders under a box). The row's per-cell fit is rect-driven
     /// (`all_storeys_2d::cell_transforms`), so the canvas renders + inverts
     /// the row against THIS rect — the rect-shrink is the all-storeys
     /// equivalent of the single-storey layout's zoomed-out `view`. `None` on
     /// the single-storey layout.
     all_storeys_inner: Option<egui::Rect>,
+    /// SINGLE-STOREY only: how many groups past the prescriptive layout's
+    /// [`MAX_SLOTS`] are NOT displayed — drives the small canvas note
+    /// ("not all groups shown — N more"). Always 0 on the all-storeys layout
+    /// (its overflow degrades to chips instead).
+    hidden_groups: usize,
 }
 
-/// Place items (window top-left coords, given in their PREFERRED order) along one
-/// axis with no overlap: a forward pass pushes each to at least `spacing` past
-/// the previous (and ≥ `lo`), a backward pass pulls any that overran `hi` back
-/// (keeping `spacing`). The result keeps each near its preferred spot while
-/// staying inside `[lo, hi]`. OVER CAPACITY (more items than fit at `spacing`)
-/// the pitch shrinks to the even cascade that exactly spans `[lo, hi]`, so
-/// every item keeps a deterministic `(hi - lo)/(n - 1)` sliver visible —
-/// never the old full stack at the `lo` end, which could hide an item
-/// entirely (the boxes rendered over a cascade raise on tap, so a buried one
-/// is always reachable via its sliver).
-fn declutter_axis(prefs: &mut [f32], spacing: f32, lo: f32, hi: f32) {
+/// Slots per band of the PRESCRIPTIVE single-storey layout
+/// ([`place_windows_prescriptive`]): 3 across the top, then up to 5 down the
+/// right side (the right column owns both right corners), then 3 along the
+/// bottom — [`MAX_SLOTS`] at most; groups beyond that are not displayed (a
+/// small canvas note says how many).
+const SLOTS_TOP: usize = 3;
+const SLOTS_RIGHT: usize = 5;
+const MAX_SLOTS: usize = SLOTS_TOP + SLOTS_RIGHT + 3;
+
+/// One group's input to the prescriptive layout: identity + colour + the
+/// connector anchor (like [`MarginSeed`]), its measured box height, and any
+/// user-dragged position.
+struct SlotSeed {
+    group_index: usize,
+    color: egui::Color32,
+    anchor: (f64, f64),
+    h: f32,
+    pinned: Option<egui::Pos2>,
+}
+
+/// The PRESCRIPTIVE single-storey slot layout (the all-storeys tab keeps the
+/// adaptive margin packing, [`place_windows_in_margins`]). Slots are assigned
+/// in GROUP ORDER — top row left→right, then right column top→bottom, then
+/// bottom row left→right — each `EDIT_BOX_W` wide and sized to its box's
+/// measured height, packed from the band's start with the usual gap.
+/// Predictability over connector aesthetics: a group's box is always where
+/// its number says. A user-dragged box goes exactly where it was dropped and
+/// leaves its slot EMPTY — later boxes never reflow into a vacated slot
+/// (stability over density; the column even keeps the vacated slot's
+/// vertical space). Returns the windows, the inner rect the OCCUPIED bands
+/// leave for the plan (top band = tallest in-slot top-row box, right band =
+/// the column width, bottom band = tallest in-slot bottom-row box; pinned
+/// rects are subtracted by the caller), and how many groups past
+/// [`MAX_SLOTS`] are hidden.
+fn place_windows_prescriptive(
+    rect: egui::Rect,
+    seeds: &[SlotSeed],
+) -> (Vec<EditWindow>, egui::Rect, usize) {
+    let shown = seeds.len().min(MAX_SLOTS);
+    let hidden = seeds.len() - shown;
+    let col_x = rect.right() - EDIT_COL_PAD - EDIT_BOX_W;
+    let top_y = rect.top() + EDIT_TOP_SAFE;
+
+    let mut windows = Vec::with_capacity(shown);
+    let (mut top_band, mut bottom_band) = (0.0f32, 0.0f32);
+    let mut col_occupied = false;
+    let mut col_y = top_y;
+    for (slot, s) in seeds.iter().take(shown).enumerate() {
+        let slot_pos = if slot < SLOTS_TOP {
+            egui::pos2(
+                rect.left() + EDIT_COL_PAD + slot as f32 * (EDIT_BOX_W + EDIT_GAP),
+                top_y,
+            )
+        } else if slot < SLOTS_TOP + SLOTS_RIGHT {
+            let pos = egui::pos2(col_x, col_y);
+            // The slot keeps its vertical space even when its box is dragged
+            // away — the column below it never reflows upward.
+            col_y += s.h + EDIT_GAP;
+            pos
+        } else {
+            let b = slot - SLOTS_TOP - SLOTS_RIGHT;
+            egui::pos2(
+                rect.left() + EDIT_COL_PAD + b as f32 * (EDIT_BOX_W + EDIT_GAP),
+                rect.bottom() - EDIT_TOP_PAD - s.h,
+            )
+        };
+        let pos = match s.pinned {
+            Some(p) => p,
+            None => {
+                // Only a box actually SITTING in its slot reserves its band.
+                if slot < SLOTS_TOP {
+                    top_band = top_band.max(s.h);
+                } else if slot < SLOTS_TOP + SLOTS_RIGHT {
+                    col_occupied = true;
+                } else {
+                    bottom_band = bottom_band.max(s.h);
+                }
+                slot_pos
+            }
+        };
+        windows.push(EditWindow {
+            group_index: s.group_index,
+            pos,
+            size: egui::vec2(EDIT_BOX_W, s.h),
+            chip: false,
+            centroid: s.anchor,
+            storey_idx: None,
+            color: s.color,
+        });
+    }
+
+    let top_h = if top_band > 0.0 {
+        EDIT_TOP_SAFE + top_band + EDIT_TOP_PAD
+    } else {
+        EDIT_TOP_PAD
+    };
+    let right_w = if col_occupied {
+        EDIT_BOX_W + 2.0 * EDIT_COL_PAD
+    } else {
+        EDIT_COL_PAD
+    };
+    let bottom_h = if bottom_band > 0.0 {
+        bottom_band + 2.0 * EDIT_TOP_PAD
+    } else {
+        EDIT_TOP_PAD
+    };
+    let inner = egui::Rect::from_min_max(
+        egui::pos2(rect.left() + EDIT_COL_PAD, rect.top() + top_h),
+        egui::pos2(rect.right() - right_w, rect.bottom() - bottom_h),
+    );
+    (windows, inner, hidden)
+}
+
+/// Place items (window top-left coords, given in their PREFERRED order) along
+/// one axis with NO overlap: each item spans `exts[i]` from its coordinate,
+/// and a forward pass pushes each to at least `gap` past the previous item's
+/// far edge (and ≥ `lo`), then a backward pass pulls any whose span overran
+/// `hi` back (keeping `gap`). The result keeps each near its preferred spot
+/// while every span stays inside `[lo, hi]`. The caller guarantees capacity —
+/// `Σ exts + (n−1)·gap ≤ hi − lo` (the margin assignment sends anything past
+/// capacity to the chip band instead) — so the two passes can never be forced
+/// to overlap; the final clamp is a numeric safety net only.
+fn declutter_extents(prefs: &mut [f32], exts: &[f32], gap: f32, lo: f32, hi: f32) {
     let n = prefs.len();
     if n == 0 {
         return;
     }
     let hi = hi.max(lo);
-    // No-op under capacity: the cascade pitch is only smaller than `spacing`
-    // when (n - 1) · spacing exceeds the range.
-    let spacing = if n > 1 {
-        spacing.min((hi - lo) / (n - 1) as f32)
-    } else {
-        spacing
-    };
     for i in 0..n {
-        let floor = if i == 0 { lo } else { prefs[i - 1] + spacing };
+        let floor = if i == 0 {
+            lo
+        } else {
+            prefs[i - 1] + exts[i - 1] + gap
+        };
         if prefs[i] < floor {
             prefs[i] = floor;
         }
     }
     for i in (0..n).rev() {
         let ceil = if i + 1 == n {
-            hi
+            hi - exts[i]
         } else {
-            prefs[i + 1] - spacing
+            prefs[i + 1] - gap - exts[i]
         };
         if prefs[i] > ceil {
             prefs[i] = ceil;
         }
     }
-    // Safety clamp — a no-op in the over-capacity case (the shrunken pitch
-    // fits the range exactly), kept so nothing can ever land off-screen.
-    for p in prefs.iter_mut() {
-        *p = p.clamp(lo, hi);
+    for (p, e) in prefs.iter_mut().zip(exts) {
+        *p = p.clamp(lo, (hi - e).max(lo));
     }
 }
 
@@ -126,54 +249,53 @@ struct MarginSeed {
     storey_idx: Option<usize>,
     /// The anchor under the full-rect fit (pre-reservation).
     screen: egui::Pos2,
+    /// The box's height on screen — measured from its `Area` rect last frame,
+    /// `EDIT_SLOT_H` until it has rendered once (width is fixed: `EDIT_BOX_W`).
+    h: f32,
 }
 
 /// The margin-placement CORE shared by the single-storey and all-storeys
 /// layouts: lay the in-place attribute windows into the canvas MARGINS,
 /// leaving the gap in the middle for the plan. Each group's window goes to
 /// whichever canvas EDGE its group is nearest (top / bottom / left / right)
-/// and is positioned along that edge close to the group's own spot
-/// (de-cluttered so windows on the same edge don't overlap). Spreading across
-/// all four margins — rather than forcing every window into one pair of
-/// gutters — keeps each connector short and roughly radial and keeps the plan
-/// large in the centre. Corners are kept clear by confining the side columns
-/// to the un-reserved height and the top/bottom rows to the un-reserved
-/// width. Returns the placed windows plus the inner rect left for the plan;
-/// `None` when the canvas is too small.
+/// and is positioned along that edge close to the group's own spot. Spreading
+/// across all four margins — rather than forcing every window into one pair
+/// of gutters — keeps each connector short and roughly radial and keeps the
+/// plan large in the centre. Corners are kept clear by confining the side
+/// columns to the un-reserved height and the top/bottom rows to the
+/// un-reserved width.
+///
+/// NO BOX EVER INTERSECTS ANOTHER — auto-placed or PINNED (user-dragged,
+/// `pinned` rects): every edge packs only what fits edge-to-edge at real
+/// (measured) box sizes with an `EDIT_GAP` gap into the free segments AROUND
+/// the pinned rects (a dropped box evicts whatever auto boxes sat under it —
+/// they repack elsewhere or demote), and any group past capacity COLLAPSES
+/// to a compact title-bar CHIP instead — shelf-packed, also gap-separated
+/// and pinned-avoiding, into a band along the canvas bottom (tap a chip to
+/// expand it; the expansion demotes whichever full box then falls past
+/// capacity, rather than overlapping). `expand_first` names the group
+/// guaranteed a full box (the one the user just expanded). Returns the
+/// placed windows plus the inner rect left for the plan; `None` when the
+/// canvas is too small.
 fn place_windows_in_margins(
     rect: egui::Rect,
     plan_centre: egui::Pos2,
     seeds: &[MarginSeed],
+    expand_first: Option<usize>,
+    pinned: &[egui::Rect],
 ) -> Option<(Vec<EditWindow>, egui::Rect)> {
     let col_w = EDIT_BOX_W + 2.0 * EDIT_COL_PAD;
-    let band_h = EDIT_SLOT_H + 2.0 * EDIT_TOP_PAD;
 
     // Assign each group to a side by WHERE IT SITS RELATIVE TO THE PLAN'S OWN
     // CENTRE (its quadrant), not the nearest canvas edge — otherwise a
     // letterboxed plan (wide → tall side gaps, or tall → wide top/bottom gaps)
     // pushes every group onto the same axis and we're back to two-sided.
     //
-    // But the quadrant is only a PREFERENCE: an edge that can't fit all the
-    // groups that want it would just overlap-compress them while other edges sit
-    // empty. So each edge has a capacity, and groups are placed onto their most
-    // preferred edge that still has room — decisive groups (clearly on one side)
-    // claim their edge first, and ones near a corner spill to a perpendicular
-    // edge that's free. Edge codes: 0 = left, 1 = right, 2 = top, 3 = bottom.
-    //
-    // Rough per-edge capacities from the full canvas (the exact reserved margins
-    // depend on the assignment we're computing, so estimate from the whole rect).
-    let col_pitch = EDIT_SLOT_H + EDIT_GAP;
-    let row_pitch = EDIT_BOX_W + EDIT_GAP;
-    let cap_v =
-        (((rect.height() - EDIT_TOP_SAFE - EDIT_TOP_PAD) / col_pitch).floor() as usize).max(1);
-    // A top/bottom row only has the width BETWEEN the side columns — subtract a
-    // column on each side, else rows get over-filled and the windows overlap
-    // when columns are also occupied.
-    let cap_h = (((rect.width() - 2.0 * col_w) / row_pitch).floor() as usize).max(1);
-    let cap = [cap_v, cap_v, cap_h, cap_h];
-
-    // Each group's edge preference order (most→least wanted) + how decisively it
-    // belongs to its first choice (bigger = more one-sided, less corner-like).
+    // But the quadrant is only a PREFERENCE: each edge holds only what fits at
+    // full size, and groups are placed onto their most preferred edge that
+    // still has room — decisive groups (clearly on one side) claim their edge
+    // first, and ones near a corner spill to a perpendicular edge that's
+    // free. Edge codes: 0 = left, 1 = right, 2 = top, 3 = bottom.
     let pref_and_decisiveness = |p: egui::Pos2| -> ([usize; 4], f32) {
         let (dx, dy) = (p.x - plan_centre.x, p.y - plan_centre.y);
         let (h, opp_h) = if dx < 0.0 { (0, 1) } else { (1, 0) };
@@ -186,158 +308,480 @@ fn place_windows_in_margins(
         (prefs, (dx.abs() - dy.abs()).abs())
     };
 
-    // Decisive groups first, so corner-ish ones are the ones that spill over.
+    // Decisive groups first, so corner-ish ones are the ones that spill over —
+    // but the group the user just expanded from a chip goes FIRST of all: it
+    // must get a full box, whatever else that displaces.
     let mut order: Vec<usize> = (0..seeds.len()).collect();
     order.sort_by(|&a, &b| {
         let da = pref_and_decisiveness(seeds[a].screen).1;
         let db = pref_and_decisiveness(seeds[b].screen).1;
         db.partial_cmp(&da).unwrap_or(std::cmp::Ordering::Equal)
     });
-
-    let (mut left, mut right, mut top, mut bottom): (
-        Vec<usize>,
-        Vec<usize>,
-        Vec<usize>,
-        Vec<usize>,
-    ) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    let mut counts = [0usize; 4];
-    for k in order {
-        let (prefs, _) = pref_and_decisiveness(seeds[k].screen);
-        // First preferred edge with spare room; if all are full, fall back to the
-        // first choice (an unavoidable overlap, but only once every edge is full —
-        // the de-clutter cascade keeps a visible sliver of every box even then).
-        let edge = prefs
-            .into_iter()
-            .find(|&e| counts[e] < cap[e])
-            .unwrap_or(prefs[0]);
-        counts[edge] += 1;
-        match edge {
-            0 => left.push(k),
-            1 => right.push(k),
-            2 => top.push(k),
-            _ => bottom.push(k),
+    if let Some(g) = expand_first {
+        if let Some(pos) = order.iter().position(|&k| seeds[k].group_index == g) {
+            let k = order.remove(pos);
+            order.insert(0, k);
         }
     }
 
-    // Reserve a margin only on edges that actually hold a window.
-    let left_w = if left.is_empty() { EDIT_COL_PAD } else { col_w };
-    let right_w = if right.is_empty() {
-        EDIT_COL_PAD
-    } else {
-        col_w
-    };
-    // A top row sits BELOW the signpost, so the plan must clear the signpost band
-    // PLUS the row height; the bottom has no overlay, so a normal band suffices.
-    let top_h = if top.is_empty() {
-        EDIT_TOP_PAD
-    } else {
-        EDIT_TOP_SAFE + EDIT_SLOT_H + EDIT_TOP_PAD
-    };
-    let bottom_h = if bottom.is_empty() {
-        EDIT_TOP_PAD
-    } else {
-        band_h
-    };
-    let inner = egui::Rect::from_min_max(
-        egui::pos2(rect.left() + left_w, rect.top() + top_h),
-        egui::pos2(rect.right() - right_w, rect.bottom() - bottom_h),
-    );
-    if inner.width() < 60.0 || inner.height() < 60.0 {
-        return None;
-    }
+    // The tallest box in play — the conservative cross-extent of the top /
+    // bottom row strips for the pinned-obstacle overlap test.
+    let max_h_all = seeds.iter().map(|s| s.h).fold(EDIT_SLOT_H, f32::max);
+    // Full-width chips per shelf row — the fallback when pinned boxes block
+    // the whole band (some overlap is then unavoidable; the user's box wins).
+    let per_chip_row_full = (((rect.width() - 2.0 * EDIT_COL_PAD + EDIT_GAP) / (CHIP_W + EDIT_GAP))
+        .floor() as usize)
+        .max(1);
 
-    let mut windows = Vec::with_capacity(seeds.len());
+    let mk_window = |k: usize, pos: egui::Pos2, size: egui::Vec2, chip: bool| EditWindow {
+        group_index: seeds[k].group_index,
+        pos,
+        size,
+        chip,
+        centroid: seeds[k].anchor,
+        storey_idx: seeds[k].storey_idx,
+        color: seeds[k].color,
+    };
 
-    // LEFT / RIGHT columns: window y tracks the group's screen y. Columns flank
-    // the plan for the full height (below the signpost), and never collide with
-    // the top/bottom rows because those are confined to the inner WIDTH — see
-    // `row_lo`/`row_hi` below — which excludes the column x-ranges.
-    let col_lo = rect.top() + EDIT_TOP_SAFE;
-    let col_hi = (rect.bottom() - EDIT_TOP_PAD - EDIT_SLOT_H).max(col_lo);
-    for (col, left_side) in [(&mut left, true), (&mut right, false)] {
-        col.sort_by(|&a, &b| {
-            seeds[a]
-                .screen
-                .y
-                .partial_cmp(&seeds[b].screen.y)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        let mut ys: Vec<f32> = col
-            .iter()
-            .map(|&k| seeds[k].screen.y - EDIT_SLOT_H * 0.5)
-            .collect();
-        declutter_axis(&mut ys, col_pitch, col_lo, col_hi);
-        let x = if left_side {
-            rect.left() + EDIT_COL_PAD
-        } else {
-            rect.right() - EDIT_COL_PAD - EDIT_BOX_W
-        };
-        for (slot, &k) in col.iter().enumerate() {
-            let y = ys[slot];
-            let inner_anchor = if left_side {
-                egui::pos2(x + EDIT_BOX_W, y + EDIT_SLOT_H * 0.5)
+    // One packing attempt with the trailing `forced` groups in `order` sent
+    // straight to chips. PINNED (user-dragged) boxes are OBSTACLES: each
+    // margin band packs its boxes into the free SEGMENTS around every pinned
+    // rect that intrudes on it ([`free_segments`]), so an auto box under a
+    // dropped box repacks elsewhere or demotes to a chip; the chip shelves
+    // likewise skip pinned rects. Iterated to a fixpoint on the chip band's
+    // ROW count: more rows → a taller band → shorter columns / a higher
+    // bottom row → possibly more chips → possibly more rows; rows never need
+    // to shrink mid-attempt, so it terminates (≤ one iteration per seed).
+    // Returns the fully-placed windows (boxes + chips), the band height and
+    // the inner rect the margins leave for the plan.
+    let attempt = |forced: usize| -> (Vec<EditWindow>, egui::Rect) {
+        let mut chip_rows = 0usize;
+        loop {
+            let band = chip_rows as f32 * (CHIP_H + EDIT_GAP);
+            let col_lo = rect.top() + EDIT_TOP_SAFE;
+            let col_hi = (rect.bottom() - band - EDIT_TOP_PAD).max(col_lo);
+            // A top/bottom row only has the width BETWEEN the side columns —
+            // else rows over-fill when columns are also occupied. The top row
+            // hangs below the signpost clearance; the bottom row bottom-aligns
+            // on the columns' lower bound (just above the chip band).
+            let row_lo = rect.left() + col_w;
+            let row_hi = (rect.right() - col_w).max(row_lo);
+            let row_top_y = rect.top() + EDIT_TOP_SAFE;
+            let row_bot_base = col_hi;
+
+            // The strip each edge's boxes occupy — a pinned box overlapping a
+            // strip blocks its interval of that edge's run.
+            let strips = [
+                egui::Rect::from_min_max(
+                    egui::pos2(rect.left(), col_lo),
+                    egui::pos2(rect.left() + col_w, col_hi),
+                ),
+                egui::Rect::from_min_max(
+                    egui::pos2(rect.right() - col_w, col_lo),
+                    egui::pos2(rect.right(), col_hi),
+                ),
+                egui::Rect::from_min_max(
+                    egui::pos2(row_lo, row_top_y),
+                    egui::pos2(row_hi, row_top_y + max_h_all),
+                ),
+                egui::Rect::from_min_max(
+                    egui::pos2(row_lo, row_bot_base - max_h_all),
+                    egui::pos2(row_hi, row_bot_base),
+                ),
+            ];
+            let mut edges: Vec<Vec<RunSegment>> = (0..4)
+                .map(|e| {
+                    let along_y = e < 2;
+                    let (lo, hi) = if along_y {
+                        (col_lo, col_hi)
+                    } else {
+                        (row_lo, row_hi)
+                    };
+                    let blocks = pinned
+                        .iter()
+                        .filter(|p| rects_strictly_overlap(**p, strips[e]))
+                        .map(|p| {
+                            if along_y {
+                                (p.min.y - EDIT_GAP, p.max.y + EDIT_GAP)
+                            } else {
+                                (p.min.x - EDIT_GAP, p.max.x + EDIT_GAP)
+                            }
+                        })
+                        .collect();
+                    free_segments(lo, hi, blocks)
+                })
+                .collect();
+
+            // Assignment: the most preferred edge with a segment that has
+            // room; within the edge, the segment nearest the group's spot.
+            let mut chips: Vec<usize> = Vec::new();
+            for (rank, &k) in order.iter().enumerate() {
+                if rank >= order.len() - forced {
+                    chips.push(k);
+                    continue;
+                }
+                let (prefs, _) = pref_and_decisiveness(seeds[k].screen);
+                let mut placed = false;
+                for e in prefs {
+                    let ext = if e < 2 { seeds[k].h } else { EDIT_BOX_W };
+                    let pref_c = if e < 2 {
+                        seeds[k].screen.y
+                    } else {
+                        seeds[k].screen.x
+                    };
+                    let mut best: Option<(f32, usize)> = None;
+                    for (si, seg) in edges[e].iter().enumerate() {
+                        let need = if seg.items.is_empty() {
+                            ext
+                        } else {
+                            ext + EDIT_GAP
+                        };
+                        if seg.used + need <= seg.hi - seg.lo {
+                            let d = (pref_c - pref_c.clamp(seg.lo, seg.hi)).abs();
+                            if best.is_none_or(|(bd, _)| d < bd) {
+                                best = Some((d, si));
+                            }
+                        }
+                    }
+                    if let Some((_, si)) = best {
+                        let seg = &mut edges[e][si];
+                        seg.used += if seg.items.is_empty() {
+                            ext
+                        } else {
+                            ext + EDIT_GAP
+                        };
+                        seg.items.push(k);
+                        placed = true;
+                        break;
+                    }
+                }
+                if !placed {
+                    chips.push(k);
+                }
+            }
+
+            // Chip shelves: the band's free x-runs around any pinned box
+            // touching it (a pinned box blocks the whole band's height — a
+            // box is taller than a chip row anyway). A band the pinned boxes
+            // cover wall-to-wall falls back to the full width.
+            let band_strip = egui::Rect::from_min_max(
+                egui::pos2(rect.left(), rect.bottom() - band),
+                egui::pos2(rect.right(), rect.bottom()),
+            );
+            let chip_blocks: Vec<(f32, f32)> = pinned
+                .iter()
+                .filter(|p| rects_strictly_overlap(**p, band_strip))
+                .map(|p| (p.min.x - EDIT_GAP, p.max.x + EDIT_GAP))
+                .collect();
+            let mut chip_segs = free_segments(
+                rect.left() + EDIT_COL_PAD,
+                rect.right() - EDIT_COL_PAD,
+                chip_blocks,
+            );
+            let seg_fit =
+                |s: &RunSegment| ((s.hi - s.lo + EDIT_GAP) / (CHIP_W + EDIT_GAP)).floor() as usize;
+            let mut per_row: usize = chip_segs.iter().map(seg_fit).sum();
+            if per_row == 0 {
+                chip_segs = free_segments(
+                    rect.left() + EDIT_COL_PAD,
+                    rect.right() - EDIT_COL_PAD,
+                    Vec::new(),
+                );
+                per_row = per_chip_row_full;
+            }
+            let rows_needed = if chips.is_empty() {
+                0
             } else {
-                egui::pos2(x, y + EDIT_SLOT_H * 0.5)
+                chips.len().div_ceil(per_row)
             };
-            windows.push(EditWindow {
-                group_index: seeds[k].group_index,
-                pos: egui::pos2(x, y),
-                inner_anchor,
-                centroid: seeds[k].anchor,
-                storey_idx: seeds[k].storey_idx,
-                color: seeds[k].color,
-            });
-        }
-    }
+            if rows_needed > chip_rows {
+                chip_rows = rows_needed;
+                continue;
+            }
 
-    // TOP / BOTTOM rows: window x tracks the group's screen x, confined to the
-    // width not reserved by the left/right columns.
-    let row_lo = rect.left() + left_w;
-    let row_hi = (rect.right() - right_w - EDIT_BOX_W).max(row_lo);
-    for (row, top_side) in [(&mut top, true), (&mut bottom, false)] {
-        row.sort_by(|&a, &b| {
-            seeds[a]
-                .screen
-                .x
-                .partial_cmp(&seeds[b].screen.x)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        let mut xs: Vec<f32> = row
-            .iter()
-            .map(|&k| seeds[k].screen.x - EDIT_BOX_W * 0.5)
-            .collect();
-        declutter_axis(&mut xs, row_pitch, row_lo, row_hi);
-        let y = if top_side {
-            rect.top() + EDIT_TOP_SAFE // clear the phase signpost / banner
-        } else {
-            rect.bottom() - EDIT_TOP_PAD - EDIT_SLOT_H
-        };
-        for (slot, &k) in row.iter().enumerate() {
-            let x = xs[slot];
-            let inner_anchor = if top_side {
-                egui::pos2(x + EDIT_BOX_W * 0.5, y + EDIT_SLOT_H)
+            // ── The attempt is feasible: place everything. ──
+            let mut windows = Vec::with_capacity(seeds.len());
+
+            // LEFT / RIGHT columns: window y tracks the group's screen y,
+            // de-cluttered within its free segment. Columns never collide
+            // with the rows: those are confined to the width between the
+            // column strips.
+            for (e, left_side) in [(0usize, true), (1, false)] {
+                let x = if left_side {
+                    rect.left() + EDIT_COL_PAD
+                } else {
+                    rect.right() - EDIT_COL_PAD - EDIT_BOX_W
+                };
+                for seg in &mut edges[e] {
+                    seg.items.sort_by(|&a, &b| {
+                        seeds[a]
+                            .screen
+                            .y
+                            .partial_cmp(&seeds[b].screen.y)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    let exts: Vec<f32> = seg.items.iter().map(|&k| seeds[k].h).collect();
+                    let mut ys: Vec<f32> = seg
+                        .items
+                        .iter()
+                        .map(|&k| seeds[k].screen.y - seeds[k].h * 0.5)
+                        .collect();
+                    declutter_extents(&mut ys, &exts, EDIT_GAP, seg.lo, seg.hi);
+                    for (slot, &k) in seg.items.iter().enumerate() {
+                        windows.push(mk_window(
+                            k,
+                            egui::pos2(x, ys[slot]),
+                            egui::vec2(EDIT_BOX_W, seeds[k].h),
+                            false,
+                        ));
+                    }
+                }
+            }
+
+            // TOP / BOTTOM rows: window x tracks the group's screen x within
+            // its free segment; the bottom row bottom-aligns just above the
+            // chip band so uneven heights grow AWAY from the canvas edge.
+            for (e, top_side) in [(2usize, true), (3, false)] {
+                for seg in &mut edges[e] {
+                    seg.items.sort_by(|&a, &b| {
+                        seeds[a]
+                            .screen
+                            .x
+                            .partial_cmp(&seeds[b].screen.x)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    let exts: Vec<f32> = vec![EDIT_BOX_W; seg.items.len()];
+                    let mut xs: Vec<f32> = seg
+                        .items
+                        .iter()
+                        .map(|&k| seeds[k].screen.x - EDIT_BOX_W * 0.5)
+                        .collect();
+                    declutter_extents(&mut xs, &exts, EDIT_GAP, seg.lo, seg.hi);
+                    for (slot, &k) in seg.items.iter().enumerate() {
+                        let y = if top_side {
+                            row_top_y
+                        } else {
+                            row_bot_base - seeds[k].h
+                        };
+                        windows.push(mk_window(
+                            k,
+                            egui::pos2(xs[slot], y),
+                            egui::vec2(EDIT_BOX_W, seeds[k].h),
+                            false,
+                        ));
+                    }
+                }
+            }
+
+            // CHIP BAND: the overflow groups as compact title-bar chips,
+            // shelf-packed in group order across the free segments —
+            // deterministic, gap-separated, never intersecting each other,
+            // any full box, or (band width permitting) any pinned box.
+            chips.sort_by_key(|&k| seeds[k].group_index);
+            let chips_top = rect.bottom() - band + EDIT_GAP * 0.5;
+            let mut it = chips.iter();
+            'shelves: for row_i in 0..chip_rows {
+                let y = chips_top + row_i as f32 * (CHIP_H + EDIT_GAP);
+                for seg in &chip_segs {
+                    for c in 0..seg_fit(seg) {
+                        let Some(&k) = it.next() else { break 'shelves };
+                        windows.push(mk_window(
+                            k,
+                            egui::pos2(seg.lo + c as f32 * (CHIP_W + EDIT_GAP), y),
+                            egui::vec2(CHIP_W, CHIP_H),
+                            true,
+                        ));
+                    }
+                }
+            }
+
+            // Reserve a margin only on edges that actually hold a window.
+            let has = |e: usize| edges[e].iter().any(|s| !s.items.is_empty());
+            let edge_max_h = |e: usize| {
+                edges[e]
+                    .iter()
+                    .flat_map(|s| s.items.iter())
+                    .map(|&k| seeds[k].h)
+                    .fold(EDIT_SLOT_H, f32::max)
+            };
+            let left_w = if has(0) { col_w } else { EDIT_COL_PAD };
+            let right_w = if has(1) { col_w } else { EDIT_COL_PAD };
+            // A top row sits BELOW the signpost, so the plan must clear the
+            // signpost band PLUS the row height; the bottom has no overlay,
+            // so a normal band suffices.
+            let top_h = if has(2) {
+                EDIT_TOP_SAFE + edge_max_h(2) + EDIT_TOP_PAD
             } else {
-                egui::pos2(x + EDIT_BOX_W * 0.5, y)
+                EDIT_TOP_PAD
             };
-            windows.push(EditWindow {
-                group_index: seeds[k].group_index,
-                pos: egui::pos2(x, y),
-                inner_anchor,
-                centroid: seeds[k].anchor,
-                storey_idx: seeds[k].storey_idx,
-                color: seeds[k].color,
-            });
+            let bottom_h = if has(3) {
+                edge_max_h(3) + 2.0 * EDIT_TOP_PAD
+            } else {
+                EDIT_TOP_PAD
+            };
+            let inner = egui::Rect::from_min_max(
+                egui::pos2(rect.left() + left_w, rect.top() + top_h),
+                egui::pos2(rect.right() - right_w, rect.bottom() - bottom_h - band),
+            );
+            break (windows, inner);
         }
-    }
+    };
 
-    Some((windows, inner))
+    // Start with no forced chips; while the margins squeeze the plan below a
+    // usable minimum, demote the least-decisive groups (the tail of `order`,
+    // never the just-expanded head) to chips one by one — full boxes trade
+    // for plan space rather than ever overlapping. Only a canvas too small
+    // for even the all-chips layout gives up entirely.
+    let mut forced = 0usize;
+    loop {
+        let (windows, inner) = attempt(forced);
+        if inner.width() >= 60.0 && inner.height() >= 60.0 {
+            return Some((windows, inner));
+        }
+        if forced >= order.len() {
+            return None;
+        }
+        forced += 1;
+    }
 }
 
-/// The SINGLE-STOREY in-place "Edit attributes" layout: place the windows in
-/// the margins ([`place_windows_in_margins`]), then fit the plan into the gap
-/// left over — "place the windows first, then zoom the plan to fill what's
-/// left". `None` when there's no fittable plan or the canvas is too small,
-/// leaving the caller on the normal view.
+/// Whether two rects overlap with positive area (a shared edge/corner does
+/// not count) — the collision predicate every no-intersect rule here uses.
+fn rects_strictly_overlap(a: egui::Rect, b: egui::Rect) -> bool {
+    a.min.x < b.max.x && b.min.x < a.max.x && a.min.y < b.max.y && b.min.y < a.max.y
+}
+
+/// One free interval of a margin band's run, plus the packing bookkeeping for
+/// the items assigned into it (`used` = occupied extent including inter-item
+/// gaps).
+struct RunSegment {
+    lo: f32,
+    hi: f32,
+    used: f32,
+    items: Vec<usize>,
+}
+
+/// Subtract `blocks` (unsorted, possibly overlapping intervals) from
+/// `[lo, hi]`: the free sub-intervals in ascending order. Slivers under a
+/// pixel are dropped — nothing packs into them anyway.
+fn free_segments(lo: f32, hi: f32, mut blocks: Vec<(f32, f32)>) -> Vec<RunSegment> {
+    blocks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut segs: Vec<RunSegment> = Vec::new();
+    let mut cursor = lo;
+    let push = |a: f32, b: f32, segs: &mut Vec<RunSegment>| {
+        if b - a > 1.0 {
+            segs.push(RunSegment {
+                lo: a,
+                hi: b,
+                used: 0.0,
+                items: Vec::new(),
+            });
+        }
+    };
+    for (b0, b1) in blocks {
+        if b0 > cursor {
+            push(cursor, b0.min(hi), &mut segs);
+        }
+        cursor = cursor.max(b1);
+        if cursor >= hi {
+            break;
+        }
+    }
+    push(cursor, hi, &mut segs);
+    segs
+}
+
+/// The per-frame layout inputs that live in egui memory rather than the
+/// controller: each group's MEASURED box height from the previous frame
+/// (`EDIT_SLOT_H` until it has rendered once), any USER-DRAGGED position (a
+/// dragged box keeps its spot for the session; the auto-packing treats its
+/// rect as an OBSTACLE — no box ever overlaps another, dragged or not), and
+/// the group most recently expanded from a chip (guaranteed a full box).
+struct EditBoxUiState {
+    heights: Vec<f32>,
+    dragged: Vec<Option<egui::Pos2>>,
+    expand_first: Option<usize>,
+}
+
+/// The session-scoped store of user-dragged box positions, keyed by group
+/// index, kept in egui temp memory (cleared when the edit session closes).
+type DraggedBoxes = std::collections::HashMap<usize, egui::Pos2>;
+
+/// The `Area` id of group `i`'s attribute box — shared by the renderer and
+/// the measured-size lookup so both address the same egui memory.
+fn attr_area_id(ui: &egui::Ui, i: usize) -> egui::Id {
+    ui.id().with(("structure_attr", i))
+}
+
+/// Where [`DraggedBoxes`] lives in egui temp memory.
+fn drag_store_id(ui: &egui::Ui) -> egui::Id {
+    ui.id().with("structure_attr_dragged")
+}
+
+/// Where the expanded-chip choice (`usize` group index) lives in egui temp
+/// memory.
+fn expand_store_id(ui: &egui::Ui) -> egui::Id {
+    ui.id().with("structure_attr_expanded")
+}
+
+/// Gather [`EditBoxUiState`] for this frame from egui memory.
+fn edit_box_ui_state(
+    ui: &egui::Ui,
+    edit: &crate::controller::app_controller::StructureEdit,
+) -> EditBoxUiState {
+    let n = edit.groups.len();
+    let dragged_map: DraggedBoxes = ui
+        .ctx()
+        .data(|d| d.get_temp(drag_store_id(ui)))
+        .unwrap_or_default();
+    EditBoxUiState {
+        heights: (0..n)
+            .map(|i| {
+                ui.ctx()
+                    .memory(|m| m.area_rect(attr_area_id(ui, i)))
+                    .map(|r| r.height())
+                    .unwrap_or(EDIT_SLOT_H)
+            })
+            .collect(),
+        dragged: (0..n).map(|i| dragged_map.get(&i).copied()).collect(),
+        expand_first: ui
+            .ctx()
+            .data(|d| d.get_temp::<usize>(expand_store_id(ui)))
+            .filter(|&g| g < n),
+    }
+}
+
+/// Split a group list into auto-packed seeds and directly-placed windows for
+/// the groups the user has DRAGGED: a dragged box sits exactly where it was
+/// dropped (anywhere on the canvas), keeps its measured size, and frees its
+/// margin slot for the others — and the PLAN then re-fits to clear it
+/// ([`plan_rect_avoiding_pinned`]), so the drawing never renders under a box.
+fn dragged_window(
+    box_ui: &EditBoxUiState,
+    group_index: usize,
+    anchor: (f64, f64),
+    storey_idx: Option<usize>,
+    color: egui::Color32,
+) -> Option<EditWindow> {
+    let pos = box_ui.dragged.get(group_index).copied().flatten()?;
+    Some(EditWindow {
+        group_index,
+        pos,
+        size: egui::vec2(EDIT_BOX_W, box_ui.heights[group_index]),
+        chip: false,
+        centroid: anchor,
+        storey_idx,
+        color,
+    })
+}
+
+/// The SINGLE-STOREY in-place "Edit attributes" layout: the PRESCRIPTIVE
+/// slot arrangement ([`place_windows_prescriptive`]) — up to 3 boxes across
+/// the top, 5 down the right, 3 along the bottom, in group order — then fit
+/// the plan into the space the occupied bands and any dragged boxes leave.
+/// Groups past the 11 slots aren't displayed (`hidden_groups` drives the
+/// canvas note). `None` when there's no fittable plan or no groups, leaving
+/// the caller on the normal view.
 fn compute_structure_edit_layout(
     rect: egui::Rect,
     ber: Option<&Ber>,
@@ -345,6 +789,7 @@ fn compute_structure_edit_layout(
     storey: &ber_model::ber::structural::Storey,
     edit: &crate::controller::app_controller::StructureEdit,
     base: ViewParams,
+    box_ui: &EditBoxUiState,
 ) -> Option<StructureEditLayout> {
     let i = current_storey_idx?;
     let ber = ber?;
@@ -354,31 +799,41 @@ fn compute_structure_edit_layout(
         return None;
     }
 
-    // Each group's on-screen position under the plain full-rect fit — picks which
-    // side of the plan each window goes to and where along that edge it sits.
-    let t_full = render::fit_transform(rect, min_xy, max_xy, base);
-    let seeds: Vec<MarginSeed> = fans
+    // `fans` is in group order, so slots follow group numbering.
+    let seeds: Vec<SlotSeed> = fans
         .iter()
-        .map(|f| {
-            let anchor = render::structure_fan::group_connector_anchor(
+        .map(|f| SlotSeed {
+            group_index: f.group_index,
+            color: f.color,
+            anchor: render::structure_fan::group_connector_anchor(
                 storey,
                 &edit.groups[f.group_index],
                 f.centroid,
-            );
-            MarginSeed {
-                group_index: f.group_index,
-                color: f.color,
-                anchor,
-                storey_idx: None,
-                screen: t_full.apply(anchor.0, anchor.1),
-            }
+            ),
+            h: box_ui.heights[f.group_index],
+            pinned: box_ui.dragged.get(f.group_index).copied().flatten(),
         })
         .collect();
-    let plan_centre = t_full.apply((min_xy.0 + max_xy.0) * 0.5, (min_xy.1 + max_xy.1) * 0.5);
-    let (windows, inner) = place_windows_in_margins(rect, plan_centre, &seeds)?;
+    let (windows, inner, hidden_groups) = place_windows_prescriptive(rect, &seeds);
+    // The plan must not sit under a DRAGGED box either: shrink the band gap
+    // to its largest sub-rectangle clear of every pinned box. The user's
+    // placement always wins — the plan gets smaller, never the box moved.
+    let pinned_rects: Vec<egui::Rect> = seeds
+        .iter()
+        .filter_map(|s| {
+            s.pinned
+                .map(|p| egui::Rect::from_min_size(p, egui::vec2(EDIT_BOX_W, s.h)))
+        })
+        .collect();
+    let inner = plan_rect_avoiding_pinned(inner, &pinned_rects);
+    // Tiny-window edge case: the prescriptive bands are never shrunk or
+    // demoted — just keep the fit finite and let the plan take what's left.
+    let inner =
+        egui::Rect::from_center_size(inner.center(), inner.size().max(egui::vec2(40.0, 40.0)));
 
-    // Fit the plan into `inner`: zoom relative to the full-rect auto-fit, offset
-    // to recentre on the gap between the reserved margins.
+    // Fit the plan into `inner`: zoom relative to the full-rect auto-fit,
+    // offset to recentre on the gap left between the occupied bands and any
+    // dragged boxes.
     let base_scale = render::auto_fit_scale(rect, min_xy, max_xy);
     let inner_scale = render::auto_fit_scale(inner, min_xy, max_xy);
     let view = ViewParams {
@@ -393,6 +848,7 @@ fn compute_structure_edit_layout(
         view,
         windows,
         all_storeys_inner: None,
+        hidden_groups,
     })
 }
 
@@ -411,39 +867,172 @@ fn compute_structure_edit_layout_all_storeys(
     ber: &Ber,
     edit: &crate::controller::app_controller::StructureEdit,
     base: ViewParams,
+    box_ui: &EditBoxUiState,
 ) -> Option<StructureEditLayout> {
     let cells = render::all_storeys_2d::cell_transforms(rect, ber, base);
     if cells.is_empty() || edit.groups.is_empty() {
         return None;
     }
-    let seeds: Vec<MarginSeed> = edit
-        .groups
-        .iter()
-        .enumerate()
-        .filter_map(|(i, g)| {
-            let (s, anchor) = render::structure_fan::group_anchor_all_storeys(ber, g)?;
-            let t = cells.get(s)?;
-            Some(MarginSeed {
-                group_index: i,
-                color: render::structure_fan::group_color(i),
-                anchor,
-                storey_idx: Some(s),
-                screen: t.apply(anchor.0, anchor.1),
-            })
-        })
-        .collect();
-    if seeds.is_empty() {
+    let mut seeds: Vec<MarginSeed> = Vec::with_capacity(edit.groups.len());
+    let mut pinned: Vec<EditWindow> = Vec::new();
+    for (i, g) in edit.groups.iter().enumerate() {
+        let Some((s, anchor)) = render::structure_fan::group_anchor_all_storeys(ber, g) else {
+            continue;
+        };
+        let Some(t) = cells.get(s) else { continue };
+        let color = render::structure_fan::group_color(i);
+        if let Some(w) = dragged_window(box_ui, i, anchor, Some(s), color) {
+            pinned.push(w);
+            continue;
+        }
+        seeds.push(MarginSeed {
+            group_index: i,
+            color,
+            anchor,
+            storey_idx: Some(s),
+            screen: t.apply(anchor.0, anchor.1),
+            h: box_ui.heights[i],
+        });
+    }
+    if seeds.is_empty() && pinned.is_empty() {
         return None;
     }
     // The row spans the whole canvas, so its centre IS the canvas centre —
     // left-cell groups prefer the left margin, right-cell groups the right,
     // middle cells spill to top/bottom.
-    let (windows, inner) = place_windows_in_margins(rect, rect.center(), &seeds)?;
+    let pinned_rects: Vec<egui::Rect> = pinned
+        .iter()
+        .map(|w| egui::Rect::from_min_size(w.pos, w.size))
+        .collect();
+    let (mut windows, inner) = place_windows_in_margins(
+        rect,
+        rect.center(),
+        &seeds,
+        box_ui.expand_first,
+        &pinned_rects,
+    )?;
+    // Same as the single-storey layout: the storey row must dodge DRAGGED
+    // boxes too, not just the reserved margins.
+    let inner = plan_rect_avoiding_pinned(inner, &pinned_rects);
+    windows.append(&mut pinned);
     Some(StructureEditLayout {
         view: base,
         windows,
         all_storeys_inner: Some(inner),
+        hidden_groups: 0,
     })
+}
+
+/// Shrink the margin-layout plan gap so it clears every PINNED (user-dragged)
+/// box: the largest empty sub-rectangle of `inner` minus the pinned rects
+/// ([`largest_empty_rect`]). Auto-placed boxes and chips already live outside
+/// `inner` by construction; only dragged boxes can intrude. When a dragged
+/// box leaves no usable gap (the user covered essentially the whole plan
+/// area), the plan keeps the best rect there is — tiny beats vanished, and
+/// the user's box is never demoted to make room.
+fn plan_rect_avoiding_pinned(inner: egui::Rect, pinned: &[egui::Rect]) -> egui::Rect {
+    let best = largest_empty_rect(inner, pinned);
+    if best.width() >= 20.0 && best.height() >= 20.0 {
+        best
+    } else {
+        inner
+    }
+}
+
+/// Resolve a DROPPED box's rect against the already-pinned boxes: while it
+/// strictly overlaps one, push it out along the cheapest of the four cardinal
+/// directions (minimal displacement), preferring pushes that stay inside
+/// `bounds`. The previously-pinned box always stays put — the newly dropped
+/// one yields. A few iterations handle knock-on overlaps; a pathological pen
+/// with no clear spot returns the best-effort position rather than looping.
+fn nudge_clear_of(mut r: egui::Rect, obstacles: &[egui::Rect], bounds: egui::Rect) -> egui::Rect {
+    for _ in 0..8 {
+        let Some(o) = obstacles
+            .iter()
+            .find(|o| rects_strictly_overlap(r, **o))
+            .copied()
+        else {
+            return r;
+        };
+        let pushes = [
+            egui::vec2(o.min.x - r.max.x, 0.0), // out to the left
+            egui::vec2(o.max.x - r.min.x, 0.0), // out to the right
+            egui::vec2(0.0, o.min.y - r.max.y), // out above
+            egui::vec2(0.0, o.max.y - r.min.y), // out below
+        ];
+        let by_len = |a: &egui::Vec2, b: &egui::Vec2| {
+            a.length()
+                .partial_cmp(&b.length())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        };
+        r = match pushes
+            .iter()
+            .filter(|d| bounds.contains_rect(r.translate(**d)))
+            .min_by(|a, b| by_len(a, b))
+        {
+            Some(d) => r.translate(*d),
+            // No in-bounds cardinal push-out: take the smallest anyway and
+            // clamp back onto the canvas (may still touch the obstacle — the
+            // canvas edge wins over a perfect separation).
+            None => {
+                let d = pushes
+                    .iter()
+                    .min_by(|a, b| by_len(a, b))
+                    .copied()
+                    .unwrap_or_default();
+                let moved = r.translate(d);
+                let dx = (bounds.left() - moved.left()).max(0.0)
+                    - (moved.right() - bounds.right()).max(0.0);
+                let dy = (bounds.top() - moved.top()).max(0.0)
+                    - (moved.bottom() - bounds.bottom()).max(0.0);
+                moved.translate(egui::vec2(dx, dy))
+            }
+        };
+    }
+    r
+}
+
+/// The largest-area axis-aligned rectangle inside `container` that STRICTLY
+/// overlaps none of `obstacles` (edge touches allowed). Candidate search over
+/// the coordinate grid the obstacle edges induce — O((4 + 2n)⁴) candidates
+/// with n obstacles, and n here is the handful of dragged boxes, so brute
+/// force is fine. `container` itself when no obstacle intrudes.
+fn largest_empty_rect(container: egui::Rect, obstacles: &[egui::Rect]) -> egui::Rect {
+    let obs: Vec<egui::Rect> = obstacles
+        .iter()
+        .filter(|o| rects_strictly_overlap(**o, container))
+        .map(|o| o.intersect(container))
+        .collect();
+    if obs.is_empty() {
+        return container;
+    }
+    let mut xs = vec![container.left(), container.right()];
+    let mut ys = vec![container.top(), container.bottom()];
+    for o in &obs {
+        xs.extend([o.left(), o.right()]);
+        ys.extend([o.top(), o.bottom()]);
+    }
+    xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    ys.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    xs.dedup();
+    ys.dedup();
+    let mut best = egui::Rect::from_min_size(container.min, egui::Vec2::ZERO);
+    for (i, &x0) in xs.iter().enumerate() {
+        for &x1 in &xs[i + 1..] {
+            for (k, &y0) in ys.iter().enumerate() {
+                for &y1 in &ys[k + 1..] {
+                    if (x1 - x0) * (y1 - y0) <= best.area() {
+                        continue;
+                    }
+                    let cand = egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x1, y1));
+                    if obs.iter().all(|o| !rects_strictly_overlap(*o, cand)) {
+                        best = cand;
+                    }
+                }
+            }
+        }
+    }
+    best
 }
 
 /// The floating UI of an open in-place "Edit attributes" session: a centred
@@ -496,20 +1085,52 @@ fn structure_edit_windows_ui<F: FnMut(UiEvent)>(
                 });
         }
     } else {
+        let canvas_rect = painter.clip_rect();
         for w in &layout.windows {
             let i = w.group_index;
             let Some(group) = edit.groups.get(i) else {
                 continue;
             };
-            // Connector from the window's inner edge to the group's true
-            // centroid, ending in a dot on the recoloured surfaces.
-            if let Some(target) = target_of(w) {
-                painter.line_segment([w.inner_anchor, target], egui::Stroke::new(2.0, w.color));
-                painter.circle_filled(target, 3.5, w.color);
+            if w.chip {
+                // Collapsed CHIP: colour + name only. Tapping it expands the
+                // group to a full box next frame — the margin packing then
+                // demotes whichever box falls past capacity, rather than
+                // letting two boxes overlap.
+                let area = egui::Area::new(ui.id().with(("structure_chip", i)))
+                    .order(egui::Order::Foreground)
+                    .fixed_pos(w.pos)
+                    .show(ui.ctx(), |ui| {
+                        egui::Frame::popup(ui.style())
+                            .fill(w.color.gamma_multiply(0.35))
+                            .stroke(egui::Stroke::new(1.5, w.color))
+                            .show(ui, |ui| {
+                                // Hold the reserved chip footprint (frame
+                                // margins + stroke make up the difference).
+                                ui.set_width(w.size.x - 16.0);
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(&group.name).small().strong(),
+                                    )
+                                    .truncate()
+                                    .selectable(false),
+                                );
+                            });
+                    });
+                if area.response.clicked() {
+                    ui.ctx().data_mut(|d| d.insert_temp(expand_store_id(ui), i));
+                }
+                continue;
             }
-            let area = egui::Area::new(ui.id().with(("structure_attr", i)))
+            // Full box. MOVABLE: the assessor can drag it anywhere (over the
+            // plan too); the dropped position is remembered for the session
+            // and the auto-layout leaves it alone (`dragged_window`). The
+            // drag is consumed by the Area's own layer, so it never pans the
+            // canvas or draws a stroke.
+            let area = egui::Area::new(attr_area_id(ui, i))
                 .order(egui::Order::Foreground)
-                .fixed_pos(w.pos)
+                .movable(true)
+                .current_pos(w.pos)
+                .constrain_to(canvas_rect)
                 .show(ui.ctx(), |ui| {
                     egui::Frame::popup(ui.style())
                         .fill(w.color.gamma_multiply(0.22))
@@ -534,14 +1155,85 @@ fn structure_edit_windows_ui<F: FnMut(UiEvent)>(
                             );
                         });
                 });
-            // An over-capacity edge cascades its boxes with partial overlap
-            // (see `declutter_axis`) — a press anywhere on a box raises it, so
-            // a buried box is always reachable by tapping its visible sliver.
+            // Connector from the box's edge to the group's true anchor,
+            // ending in a dot ON the recoloured surfaces. Drawn from the
+            // box's ACTUAL rect (after `show`) so the line tracks a live
+            // drag; the painter sits under the Foreground areas, so drawing
+            // after the box still renders beneath it.
+            if let Some(target) = target_of(w) {
+                let rect = area.response.rect;
+                if !rect.contains(target) {
+                    painter.line_segment(
+                        [rect_edge_toward(rect, target), target],
+                        egui::Stroke::new(2.0, w.color),
+                    );
+                }
+                painter.circle_filled(target, 3.5, w.color);
+            }
+            // A finished drag pins the box at its new spot for the rest of
+            // the session. Only on RELEASE: the layout (slots/packing + the
+            // plan-fit that dodges pinned boxes) keys off the stored map, so
+            // committing mid-drag would re-fit the plan every frame under
+            // the finger (jitter). During the drag egui moves the Area
+            // itself, the connector tracks the live rect above, and the box
+            // may sit over the plan — the finger is on it; the plan re-fits
+            // once, at drop. Box-on-box collisions resolve HERE: a drop
+            // intersecting ANY other box's current rect takes the minimal
+            // cardinal nudge clear of it — the other box stays put (pinned
+            // boxes never move for a newcomer; prescriptive slots never
+            // reflow; the all-storeys margin packing additionally repacks
+            // around the pinned rect next frame).
+            if area.response.drag_stopped() {
+                let store = drag_store_id(ui);
+                let others: Vec<egui::Rect> = layout
+                    .windows
+                    .iter()
+                    .filter(|o| o.group_index != i)
+                    .map(|o| egui::Rect::from_min_size(o.pos, o.size))
+                    .collect();
+                let dropped = nudge_clear_of(area.response.rect, &others, canvas_rect);
+                ui.ctx().data_mut(|d| {
+                    let map: &mut DraggedBoxes = d.get_temp_mut_or_default(store);
+                    map.insert(i, dropped.min);
+                });
+            }
+            // Tap-to-raise: a press anywhere on a box brings it above its
+            // peers (a dragged box dropped over another stays reachable).
             if area.response.contains_pointer() && ui.ctx().input(|inp| inp.pointer.any_pressed()) {
                 ui.ctx().move_to_top(area.response.layer_id);
             }
         }
+        // Prescriptive single-storey layout with more groups than slots:
+        // say so, unobtrusively (the extra groups are not displayed).
+        if layout.hidden_groups > 0 {
+            painter.text(
+                egui::pos2(canvas_rect.left() + 8.0, canvas_rect.bottom() - 6.0),
+                egui::Align2::LEFT_BOTTOM,
+                format!("not all groups shown — {} more", layout.hidden_groups),
+                egui::FontId::proportional(12.0),
+                egui::Color32::from_gray(150),
+            );
+        }
     }
+}
+
+/// Where the connector line leaves a box: the point on `rect`'s boundary
+/// along the ray from its centre toward `target` (the rect's centre when the
+/// direction degenerates).
+fn rect_edge_toward(rect: egui::Rect, target: egui::Pos2) -> egui::Pos2 {
+    let c = rect.center();
+    let (dx, dy) = (target.x - c.x, target.y - c.y);
+    let mut t = f32::INFINITY;
+    if dx.abs() > 1e-3 {
+        t = t.min(rect.width() * 0.5 / dx.abs());
+    }
+    if dy.abs() > 1e-3 {
+        t = t.min(rect.height() * 0.5 / dy.abs());
+    }
+    if !t.is_finite() {
+        return c;
+    }
+    egui::pos2(c.x + dx * t, c.y + dy * t)
 }
 
 pub(super) fn render<F: FnMut(UiEvent)>(
@@ -650,13 +1342,35 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     let structure_edit_layout = view
         .structure_edit
         .filter(|e| !e.exploded && matches!(mode, SketchMode::Storey2D))
-        .and_then(|edit| match current_storey_idx {
-            Some(i) => {
-                let storey = ber.and_then(|b| b.storeys.get(i))?;
-                compute_structure_edit_layout(rect, ber, current_storey_idx, storey, edit, vp)
+        .and_then(|edit| {
+            // Frame inputs from egui memory: measured box sizes, user-dragged
+            // positions, the expanded-chip choice.
+            let box_ui = edit_box_ui_state(ui, edit);
+            match current_storey_idx {
+                Some(i) => {
+                    let storey = ber.and_then(|b| b.storeys.get(i))?;
+                    compute_structure_edit_layout(
+                        rect,
+                        ber,
+                        current_storey_idx,
+                        storey,
+                        edit,
+                        vp,
+                        &box_ui,
+                    )
+                }
+                None => compute_structure_edit_layout_all_storeys(rect, ber?, edit, vp, &box_ui),
             }
-            None => compute_structure_edit_layout_all_storeys(rect, ber?, edit, vp),
         });
+    if view.structure_edit.is_none() {
+        // No edit session: forget the session-scoped box state (dragged
+        // positions + the expanded-chip choice) so the next session starts
+        // on the clean auto-layout.
+        ui.ctx().data_mut(|d| {
+            d.remove::<DraggedBoxes>(drag_store_id(ui));
+            d.remove::<usize>(expand_store_id(ui));
+        });
+    }
     let vp = structure_edit_layout.as_ref().map(|l| l.view).unwrap_or(vp);
     // The rect the PLAN occupies this frame: the whole canvas, except while the
     // all-storeys "Edit attributes" layout reserves its margins — then the
@@ -4830,74 +5544,371 @@ fn partition_inset(
 mod tests {
     use super::*;
 
-    /// Under capacity the de-clutter keeps every item near its preferred
-    /// spot, in order, at least `spacing` apart, inside `[lo, hi]` — the
-    /// original contract, unchanged by the overflow fix.
-    #[test]
-    fn declutter_axis_under_capacity_keeps_spacing_and_bounds() {
-        let mut ys = vec![10.0_f32, 15.0, 300.0];
-        declutter_axis(&mut ys, 50.0, 0.0, 400.0);
-        assert_eq!(ys, vec![10.0, 60.0, 300.0]);
+    fn seed(i: usize, screen: egui::Pos2) -> MarginSeed {
+        MarginSeed {
+            group_index: i,
+            color: egui::Color32::RED,
+            anchor: (0.0, 0.0),
+            storey_idx: None,
+            screen,
+            h: EDIT_SLOT_H,
+        }
     }
 
-    /// OVER capacity the items cascade evenly across the whole range instead
-    /// of overlap-compressing into a stack at the `lo` end — the field bug
-    /// where a group's attribute box could end up fully hidden under the
-    /// stack. Every item keeps a `(hi - lo)/(n - 1)` sliver visible.
+    fn window_rect(w: &EditWindow) -> egui::Rect {
+        egui::Rect::from_min_size(w.pos, w.size)
+    }
+
+    fn assert_no_pairwise_intersection(windows: &[EditWindow]) {
+        for (i, a) in windows.iter().enumerate() {
+            for b in &windows[i + 1..] {
+                let (ra, rb) = (window_rect(a), window_rect(b));
+                let overlap = ra.min.x < rb.max.x
+                    && rb.min.x < ra.max.x
+                    && ra.min.y < rb.max.y
+                    && rb.min.y < ra.max.y;
+                assert!(
+                    !overlap,
+                    "boxes {} ({ra:?}) and {} ({rb:?}) intersect",
+                    a.group_index, b.group_index
+                );
+            }
+        }
+    }
+
+    /// Under capacity the de-clutter keeps every item near its preferred
+    /// spot, in order, at least `gap` past the previous item's extent,
+    /// inside `[lo, hi]` — the original contract, carried over to the
+    /// per-item-extent form.
     #[test]
-    fn declutter_axis_over_capacity_cascades_instead_of_stacking() {
-        // 8 boxes that all want the same spot on a 500 px range that fits
-        // only ~4 at the requested 167 px pitch.
-        let mut ys = vec![100.0_f32; 8];
-        declutter_axis(&mut ys, 167.0, 84.0, 584.0);
-        for w in ys.windows(2) {
-            let gap = w[1] - w[0];
+    fn declutter_extents_under_capacity_keeps_spacing_and_bounds() {
+        let mut ys = vec![10.0_f32, 15.0, 300.0];
+        declutter_extents(&mut ys, &[40.0, 40.0, 40.0], 10.0, 0.0, 400.0);
+        assert_eq!(ys, vec![10.0, 60.0, 300.0]);
+        // Items overrunning `hi` are pulled back keeping their extents clear.
+        let mut ys = vec![350.0_f32, 380.0];
+        declutter_extents(&mut ys, &[40.0, 40.0], 10.0, 0.0, 400.0);
+        assert_eq!(ys, vec![310.0, 360.0]);
+    }
+
+    /// UNDER total capacity nothing collapses to a chip, and the placed
+    /// boxes respect the no-intersect contract with real gaps.
+    #[test]
+    fn margin_placement_under_capacity_places_full_boxes_only() {
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        let seeds: Vec<MarginSeed> = (0..4)
+            .map(|i| seed(i, egui::pos2(100.0 + 200.0 * i as f32, 300.0)))
+            .collect();
+        let (windows, inner) = place_windows_in_margins(rect, rect.center(), &seeds, None, &[])
+            .expect("canvas is big enough");
+        assert_eq!(windows.len(), 4);
+        assert!(windows.iter().all(|w| !w.chip), "no chips under capacity");
+        assert!(inner.width() >= 60.0 && inner.height() >= 60.0);
+        assert_no_pairwise_intersection(&windows);
+    }
+
+    /// With far more groups than the four margins hold at full size, NO two
+    /// boxes may intersect — the overflow collapses to compact chips (also
+    /// non-intersecting, on-canvas) instead of cascading with overlap.
+    #[test]
+    fn margin_placement_over_capacity_collapses_overflow_to_chips() {
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        // All left of centre → all first-prefer the LEFT edge; the capacity
+        // spill has to distribute them and chip the rest.
+        let seeds: Vec<MarginSeed> = (0..30).map(|i| seed(i, egui::pos2(150.0, 300.0))).collect();
+        let (windows, inner) = place_windows_in_margins(rect, rect.center(), &seeds, None, &[])
+            .expect("canvas is big enough");
+        assert_eq!(windows.len(), 30, "every group gets a box or a chip");
+        assert!(inner.width() >= 60.0 && inner.height() >= 60.0);
+        let chips = windows.iter().filter(|w| w.chip).count();
+        assert!(chips > 0, "30 groups cannot all fit as full boxes");
+        assert!(chips < 30, "the margins hold at least a few full boxes");
+        for w in &windows {
+            let r = window_rect(w);
             assert!(
-                gap > 60.0,
-                "boxes must cascade with a visible sliver, got gap {gap} in {ys:?}"
+                rect.contains_rect(r),
+                "box {} off-canvas: {r:?}",
+                w.group_index
             );
         }
-        assert!(ys.iter().all(|&y| (84.0..=584.0).contains(&y)), "{ys:?}");
-        // The cascade spans the full range end to end.
-        assert!((ys[0] - 84.0).abs() < 0.5, "{ys:?}");
-        assert!((ys[7] - 584.0).abs() < 0.5, "{ys:?}");
+        assert_no_pairwise_intersection(&windows);
     }
 
-    /// With far more groups than the four edges hold, the margin placement
-    /// still gives EVERY window an on-canvas position, and no two windows
-    /// land on top of each other (the cascade keeps a tappable sliver each —
-    /// tap-to-raise does the rest).
+    /// The plan rect must intersect NO box — auto-placed boxes stay outside
+    /// the margin gap by construction, and a simulated DRAGGED box dropped
+    /// onto the plan shrinks the plan rect clear of it (largest empty
+    /// sub-rectangle; the user's box is never moved or demoted).
     #[test]
-    fn margin_placement_over_capacity_keeps_every_window_distinct() {
+    fn plan_rect_avoids_dragged_boxes() {
         let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
-        let seeds: Vec<MarginSeed> = (0..30)
-            .map(|i| MarginSeed {
-                group_index: i,
-                color: egui::Color32::RED,
-                anchor: (0.0, 0.0),
-                storey_idx: None,
-                // All left of centre → all first-prefer the LEFT edge; the
-                // capacity spill has to distribute + cascade them.
-                screen: egui::pos2(150.0, 300.0),
-            })
+        let seeds: Vec<MarginSeed> = (0..4)
+            .map(|i| seed(i, egui::pos2(100.0 + 200.0 * i as f32, 300.0)))
             .collect();
         let (windows, inner) =
-            place_windows_in_margins(rect, rect.center(), &seeds).expect("canvas is big enough");
-        assert_eq!(windows.len(), 30);
-        assert!(inner.width() >= 60.0 && inner.height() >= 60.0);
-        for w in &windows {
-            assert!(w.pos.x >= rect.left() && w.pos.x <= rect.right() - EDIT_BOX_W);
-            assert!(w.pos.y >= rect.top() && w.pos.y <= rect.bottom() - EDIT_SLOT_H);
+            place_windows_in_margins(rect, rect.center(), &seeds, None, &[]).expect("fits");
+        // A dragged box dropped INSIDE the margin gap, off-centre (as on the
+        // tablet screenshot: dragged boxes sitting on the plan).
+        let dragged_rect = egui::Rect::from_min_size(
+            inner.min + egui::vec2(10.0, 10.0),
+            egui::vec2(EDIT_BOX_W, EDIT_SLOT_H),
+        );
+        let plan = plan_rect_avoiding_pinned(inner, &[dragged_rect]);
+        assert!(
+            inner.contains_rect(plan),
+            "plan {plan:?} must stay within the margin gap {inner:?}"
+        );
+        assert!(plan.width() >= 60.0 && plan.height() >= 60.0, "{plan:?}");
+        // Strictly clear of the dragged box AND of every auto-placed box.
+        for r in windows.iter().map(window_rect).chain([dragged_rect]) {
+            assert!(
+                !rects_strictly_overlap(plan, r),
+                "plan {plan:?} intersects box {r:?}"
+            );
         }
-        for (a, i) in windows.iter().zip(0..) {
-            for b in &windows[i + 1..] {
-                let d = ((a.pos.x - b.pos.x).powi(2) + (a.pos.y - b.pos.y).powi(2)).sqrt();
-                assert!(
-                    d > 8.0,
-                    "windows {} and {} coincide (d = {d})",
-                    a.group_index,
-                    b.group_index
-                );
+        // A dragged box covering essentially the whole gap: the plan takes
+        // the best rect there is rather than vanishing (or demoting the box).
+        let wall_to_wall = egui::Rect::from_min_size(
+            inner.min + egui::vec2(5.0, 5.0),
+            inner.size() - egui::vec2(10.0, 10.0),
+        );
+        let plan = plan_rect_avoiding_pinned(inner, &[wall_to_wall]);
+        assert!(plan.width() > 0.0 && plan.height() > 0.0);
+    }
+
+    /// Rule "no box overlaps ANY other box": the auto-packing treats a
+    /// PINNED (dragged) rect as an obstacle — auto boxes that would have
+    /// landed under it repack into the free segments around it (or demote to
+    /// chips), so nothing intersects it or each other.
+    #[test]
+    fn margin_placement_repacks_around_pinned_box() {
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        // Six groups, all preferring the LEFT edge.
+        let seeds: Vec<MarginSeed> = (0..6).map(|i| seed(i, egui::pos2(150.0, 300.0))).collect();
+        // A dragged box dropped ON the left column, mid-height.
+        let pinned_rect =
+            egui::Rect::from_min_size(egui::pos2(10.0, 220.0), egui::vec2(EDIT_BOX_W, EDIT_SLOT_H));
+        let (windows, _inner) =
+            place_windows_in_margins(rect, rect.center(), &seeds, None, &[pinned_rect])
+                .expect("fits");
+        assert_eq!(windows.len(), 6, "every group still gets a box or a chip");
+        for w in &windows {
+            let r = window_rect(w);
+            assert!(
+                rect.contains_rect(r),
+                "box {} off-canvas: {r:?}",
+                w.group_index
+            );
+            assert!(
+                !rects_strictly_overlap(r, pinned_rect),
+                "auto box {} ({r:?}) sits under the pinned box {pinned_rect:?}",
+                w.group_index
+            );
+        }
+        assert_no_pairwise_intersection(&windows);
+    }
+
+    /// Pinned-vs-pinned resolves at DROP time: a box dropped onto an
+    /// already-pinned box takes the smallest of the four cardinal push-outs
+    /// (minimal displacement, on-canvas); a drop with no overlap is
+    /// untouched.
+    #[test]
+    fn dropped_box_nudges_clear_of_pinned() {
+        let bounds = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        let pinned = egui::Rect::from_min_size(
+            egui::pos2(100.0, 100.0),
+            egui::vec2(EDIT_BOX_W, EDIT_SLOT_H),
+        ); // → (100,100)-(265,255)
+        let dropped = egui::Rect::from_min_size(
+            egui::pos2(150.0, 120.0),
+            egui::vec2(EDIT_BOX_W, EDIT_SLOT_H),
+        );
+        let nudged = nudge_clear_of(dropped, &[pinned], bounds);
+        // Push-outs: left 215, right 115, up 175, down 135 → right wins.
+        assert_eq!(nudged.min, egui::pos2(265.0, 120.0), "{nudged:?}");
+        assert!(!rects_strictly_overlap(nudged, pinned));
+        assert!(bounds.contains_rect(nudged));
+        // No overlap → no movement.
+        let clear = egui::Rect::from_min_size(
+            egui::pos2(400.0, 400.0),
+            egui::vec2(EDIT_BOX_W, EDIT_SLOT_H),
+        );
+        assert_eq!(nudge_clear_of(clear, &[pinned], bounds).min, clear.min);
+        // Near the canvas edge the cheapest IN-BOUNDS push wins instead.
+        let pinned_edge = egui::Rect::from_min_size(
+            egui::pos2(800.0 - EDIT_BOX_W, 200.0),
+            egui::vec2(EDIT_BOX_W, EDIT_SLOT_H),
+        );
+        let dropped_edge = egui::Rect::from_min_size(
+            egui::pos2(800.0 - EDIT_BOX_W - 2.0, 210.0),
+            egui::vec2(EDIT_BOX_W, EDIT_SLOT_H),
+        );
+        let nudged = nudge_clear_of(dropped_edge, &[pinned_edge], bounds);
+        assert!(!rects_strictly_overlap(nudged, pinned_edge), "{nudged:?}");
+        assert!(bounds.contains_rect(nudged), "{nudged:?}");
+    }
+
+    /// `expand_first` guarantees THAT group a full box even when it would
+    /// otherwise be past capacity (a tapped chip expands; another box
+    /// collapses rather than overlaps).
+    #[test]
+    fn margin_placement_expand_first_gets_a_full_box() {
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        let seeds: Vec<MarginSeed> = (0..30).map(|i| seed(i, egui::pos2(150.0, 300.0))).collect();
+        let (without, _) =
+            place_windows_in_margins(rect, rect.center(), &seeds, None, &[]).expect("fits");
+        // Pick a group that came out as a chip, then ask for it expanded.
+        let victim = without
+            .iter()
+            .find(|w| w.chip)
+            .expect("over capacity yields chips")
+            .group_index;
+        let (with, _) =
+            place_windows_in_margins(rect, rect.center(), &seeds, Some(victim), &[]).expect("fits");
+        let w = with
+            .iter()
+            .find(|w| w.group_index == victim)
+            .expect("still placed");
+        assert!(!w.chip, "the expanded group must get a full box");
+        assert_no_pairwise_intersection(&with);
+    }
+
+    // ── The PRESCRIPTIVE single-storey slot layout ──────────────────────────
+
+    /// A roomy canvas for the prescriptive tests: tall enough that the
+    /// 5-slot right column (5 × (155 + 12) px from y = 84) fits.
+    fn tall_rect() -> egui::Rect {
+        egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, 1200.0))
+    }
+
+    fn slot_seed(i: usize) -> SlotSeed {
+        SlotSeed {
+            group_index: i,
+            color: egui::Color32::RED,
+            anchor: (0.0, 0.0),
+            h: EDIT_SLOT_H,
+            pinned: None,
+        }
+    }
+
+    /// The slot position spec, with uniform `EDIT_SLOT_H` boxes on
+    /// [`tall_rect`]: top row (slots 0-2) left→right at the signpost
+    /// clearance, right column (slots 3-7) stacked down the right edge from
+    /// the top (owning both right corners), bottom row (slots 8-10)
+    /// left→right, bottom-aligned.
+    fn expected_slot_pos(slot: usize) -> egui::Pos2 {
+        let pitch = EDIT_BOX_W + EDIT_GAP;
+        let vpitch = EDIT_SLOT_H + EDIT_GAP;
+        match slot {
+            0..=2 => egui::pos2(10.0 + slot as f32 * pitch, 84.0),
+            3..=7 => egui::pos2(
+                1000.0 - 10.0 - EDIT_BOX_W,
+                84.0 + (slot - 3) as f32 * vpitch,
+            ),
+            _ => egui::pos2(
+                10.0 + (slot - 8) as f32 * pitch,
+                1200.0 - 12.0 - EDIT_SLOT_H,
+            ),
+        }
+    }
+
+    fn assert_prescriptive_contract(windows: &[EditWindow], inner: egui::Rect, n: usize) {
+        assert_eq!(windows.len(), n.min(MAX_SLOTS));
+        for (slot, w) in windows.iter().enumerate() {
+            assert_eq!(w.group_index, slot, "slots follow group order");
+            assert!(!w.chip, "the prescriptive layout has no chips");
+            assert_eq!(
+                w.pos,
+                expected_slot_pos(slot),
+                "slot {slot} position off-spec"
+            );
+        }
+        assert_no_pairwise_intersection(windows);
+        // The plan rect avoids every box.
+        for w in windows {
+            assert!(
+                !rects_strictly_overlap(inner, window_rect(w)),
+                "plan {inner:?} intersects box {} at {:?}",
+                w.group_index,
+                window_rect(w)
+            );
+        }
+    }
+
+    /// N ≤ 3: three slots across the top row; the plan gets everything below.
+    #[test]
+    fn prescriptive_three_groups_fill_the_top_row() {
+        let seeds: Vec<SlotSeed> = (0..3).map(slot_seed).collect();
+        let (windows, inner, hidden) = place_windows_prescriptive(tall_rect(), &seeds);
+        assert_eq!(hidden, 0);
+        assert_prescriptive_contract(&windows, inner, 3);
+        // No column/bottom band → the plan reaches the right and bottom pads.
+        assert_eq!(inner.max, egui::pos2(1000.0 - 10.0, 1200.0 - 12.0));
+        assert!((inner.min.y - (84.0 + EDIT_SLOT_H + 12.0)).abs() < 0.5);
+    }
+
+    /// 4 ≤ N ≤ 8: 3 on top + the rest down the right column; the plan gets
+    /// the rect left of the column, below the top row.
+    #[test]
+    fn prescriptive_eight_groups_fill_top_and_right() {
+        let seeds: Vec<SlotSeed> = (0..8).map(slot_seed).collect();
+        let (windows, inner, hidden) = place_windows_prescriptive(tall_rect(), &seeds);
+        assert_eq!(hidden, 0);
+        assert_prescriptive_contract(&windows, inner, 8);
+        assert!((inner.max.x - (1000.0 - EDIT_BOX_W - 20.0)).abs() < 0.5);
+    }
+
+    /// 9 ≤ N ≤ 11: 3 top + 5 right (owning both right corners) + 3 bottom;
+    /// the plan gets the central remaining rect.
+    #[test]
+    fn prescriptive_eleven_groups_fill_all_three_bands() {
+        let seeds: Vec<SlotSeed> = (0..11).map(slot_seed).collect();
+        let (windows, inner, hidden) = place_windows_prescriptive(tall_rect(), &seeds);
+        assert_eq!(hidden, 0);
+        assert_prescriptive_contract(&windows, inner, 11);
+        assert!((inner.max.y - (1200.0 - EDIT_SLOT_H - 24.0)).abs() < 0.5);
+    }
+
+    /// N > 11: exactly the first 11 groups get boxes; the rest are hidden
+    /// (the count drives the "not all groups shown" canvas note).
+    #[test]
+    fn prescriptive_overflow_hides_groups_past_eleven() {
+        let seeds: Vec<SlotSeed> = (0..13).map(slot_seed).collect();
+        let (windows, inner, hidden) = place_windows_prescriptive(tall_rect(), &seeds);
+        assert_eq!(hidden, 2, "13 groups → 2 hidden behind the note");
+        assert_prescriptive_contract(&windows, inner, 13);
+        assert!(
+            windows.iter().all(|w| w.group_index < 11),
+            "only the first 11 groups are displayed"
+        );
+    }
+
+    /// A dragged box leaves its slot EMPTY: the others keep their exact slot
+    /// positions (no reflow — the column even keeps the vacated slot's
+    /// space), the pinned box sits where it was dropped, and the plan
+    /// (largest-empty-rect step) avoids it.
+    #[test]
+    fn prescriptive_pinned_box_leaves_slot_empty_without_reflow() {
+        let mut seeds: Vec<SlotSeed> = (0..8).map(slot_seed).collect();
+        let drop_pos = egui::pos2(400.0, 400.0); // over the plan area
+        seeds[4].pinned = Some(drop_pos); // column slot 1 dragged away
+        let (windows, inner, _) = place_windows_prescriptive(tall_rect(), &seeds);
+        assert_eq!(windows.len(), 8);
+        for (slot, w) in windows.iter().enumerate() {
+            let expected = if slot == 4 {
+                drop_pos
+            } else {
+                expected_slot_pos(slot) // NOT reflowed into the vacancy
+            };
+            assert_eq!(w.pos, expected, "slot {slot}");
+        }
+        // The plan then dodges the pinned rect via the existing
+        // largest-empty-rect step.
+        let pinned_rect = egui::Rect::from_min_size(drop_pos, egui::vec2(EDIT_BOX_W, EDIT_SLOT_H));
+        let plan = plan_rect_avoiding_pinned(inner, &[pinned_rect]);
+        assert!(!rects_strictly_overlap(plan, pinned_rect));
+        for w in &windows {
+            if w.group_index != 4 {
+                assert!(!rects_strictly_overlap(plan, window_rect(w)));
             }
         }
     }

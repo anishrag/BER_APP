@@ -143,11 +143,18 @@ fn group_centroid(
     (n > 0).then(|| (sum.0 / n as f64, sum.1 / n as f64))
 }
 
-/// The point a group's in-place connector LINE should target. Floors/ceilings use
-/// the group `centroid`; WALLS use the base midpoint of the wall (in the group)
-/// NEAREST that centroid — pointing at an actual selected wall reads clearer
-/// than at the average position, which can land in empty space (e.g. an
-/// L-shaped wall run). Falls back to the centroid if no wall resolves.
+/// The point a group's in-place connector LINE should target — always ON one
+/// of the group's OWN member surfaces. WALLS use the base midpoint of the wall
+/// (in the group) NEAREST the group centroid — pointing at an actual selected
+/// wall reads clearer than at the average position, which can land in empty
+/// space (e.g. an L-shaped wall run). FLOORS/CEILINGS use a representative
+/// INTERIOR point of the group's largest member region
+/// ([`manip_plan::ring_interior_point`]): the raw group centroid is a vertex
+/// average over member rings and is NOT guaranteed inside any of them — a
+/// concave post-carve remainder (the ExposedRoof band an inter-storey split
+/// leaves behind) puts it near the middle of the ORIGINAL un-split area,
+/// visibly outside the region the box labels. Falls back to `centroid` if no
+/// member resolves.
 pub(crate) fn group_connector_anchor(
     storey: &Storey,
     group: &crate::controller::app_controller::EditGroup,
@@ -155,7 +162,18 @@ pub(crate) fn group_connector_anchor(
 ) -> (f64, f64) {
     let kind = group.ty.kind();
     if kind != SurfaceKind::Walls {
-        return centroid;
+        return group
+            .ids
+            .iter()
+            .filter_map(|id| region_plan_ring(storey, kind, *id))
+            .max_by(|a, b| {
+                domain::points::ring_area(a)
+                    .partial_cmp(&domain::points::ring_area(b))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .and_then(|ring| manip_plan::ring_interior_point(&ring))
+            .map(|p| (p.x, p.y))
+            .unwrap_or(centroid);
     }
     let dist2 = |p: &(f64, f64)| (p.0 - centroid.0).powi(2) + (p.1 - centroid.1).powi(2);
     group
@@ -168,6 +186,38 @@ pub(crate) fn group_connector_anchor(
                 .unwrap_or(std::cmp::Ordering::Equal)
         })
         .unwrap_or(centroid)
+}
+
+/// A floor/ceiling region's plan exterior ring (world metres, open), for the
+/// interior-point anchor. `None` for walls (they use the base midpoint) and
+/// for ids that don't resolve.
+fn region_plan_ring(
+    storey: &Storey,
+    kind: SurfaceKind,
+    id: ber_model::ber::common::ItemId,
+) -> Option<Vec<domain::points::Point2f64>> {
+    use domain::points::Point2f64;
+    match kind {
+        SurfaceKind::Walls => None,
+        SurfaceKind::Floors => storey.floors.regions.iter().find(|r| r.id == id).map(|r| {
+            floor_ring(r)
+                .iter()
+                .map(|&(x, y)| Point2f64::new(x, y))
+                .collect()
+        }),
+        SurfaceKind::Ceilings => storey
+            .ceilings
+            .regions
+            .iter()
+            .find(|r| r.id == id)
+            .map(|r| {
+                r.polygon
+                    .exterior
+                    .iter()
+                    .map(|v| Point2f64::new(v.x, v.y))
+                    .collect()
+            }),
+    }
 }
 
 /// The connector anchor for a group on the ALL-STOREYS view, where a group's
