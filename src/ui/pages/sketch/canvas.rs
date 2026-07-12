@@ -4189,34 +4189,55 @@ fn external_photos_button<F: FnMut(UiEvent)>(
                         .default_open(false)
                         .show(ui, |ui| {
                             // Two-column grid of side entries (Front | Right,
-                            // Left | Back) so the opened panel spends WIDTH
-                            // instead of stacking four thumbnails into one tall
-                            // 230px strip — on the ~2000px-wide tablet canvas
-                            // there's plenty of room, and halving the stack
-                            // height means the whole panel normally fits the
-                            // screen with no scrolling. Column width fits the
-                            // 280px thumbnail plus the capture-button row.
-                            ui.set_max_width(680.0);
-                            // The panel sizes to its CONTENT (the ScrollArea
-                            // auto-shrinks), capped at the canvas height minus
-                            // room for the header + frame chrome + the 8px
-                            // anchor margins so it never runs off the top (the
-                            // panel is anchored bottom-right and grows UP).
-                            // The scrollbar only appears in that capped case;
-                            // constrain_to keeps the panel on-screen regardless.
+                            // Left | Back), sized to FILL the canvas
+                            // vertically when expanded: the two grid rows
+                            // split the available canvas height (minus room
+                            // for the header + frame chrome + the 8px anchor
+                            // margins ≈ 60, and the inter-row grid spacing),
+                            // and each thumbnail scales to fill its row after
+                            // the label + button stack takes its share. On
+                            // the ~2000px-wide tablet canvas that lands the
+                            // thumbnails around 600x450 (4:3 kept). The panel
+                            // is anchored bottom-right and grows UP-and-LEFT;
+                            // constrain_to keeps it on-screen regardless.
                             let max_h = (rect.height() - 60.0).max(220.0);
+                            let grid_spacing = egui::vec2(20.0, 16.0);
+                            let row_h = (max_h - grid_spacing.y) / 2.0;
+                            // ≈ status-label row + capture-button row + the
+                            // item spacing around the thumbnail between them.
+                            const ENTRY_TEXT_AND_BUTTONS_H: f32 = 62.0;
+                            // Floor keeps entries usable on a tiny canvas —
+                            // the ScrollArea then caps + scrolls instead.
+                            let thumb_h = (row_h - ENTRY_TEXT_AND_BUTTONS_H).max(150.0);
+                            let thumb_w = thumb_h * (4.0 / 3.0);
+                            // Column fits the thumbnail (floored at 300 so the
+                            // capture-button row never drives layout); the
+                            // panel widens to match so the taller thumbnails
+                            // aren't letterboxed by a narrow column.
+                            let col_w = thumb_w.max(300.0);
+                            ui.set_max_width(2.0 * col_w + grid_spacing.x + 16.0);
+                            // min_row_height pins the content height to
+                            // ≈ max_h (2 rows + spacing) whether or not
+                            // photos are stored yet, so the scrollbar only
+                            // appears in the floored small-canvas case.
                             egui::ScrollArea::vertical()
                                 .max_height(max_h)
                                 .show(ui, |ui| {
                                     egui::Grid::new(ui.id().with("external_photo_grid"))
                                         .num_columns(2)
-                                        .min_col_width(300.0)
-                                        .spacing(egui::vec2(20.0, 16.0))
+                                        .min_col_width(col_w)
+                                        .min_row_height(row_h)
+                                        .spacing(grid_spacing)
                                         .show(ui, |ui| {
                                             for (i, entry) in
                                                 view.external_photos.iter().enumerate()
                                             {
-                                                external_photo_entry(ui, entry, on_event);
+                                                external_photo_entry(
+                                                    ui,
+                                                    entry,
+                                                    egui::vec2(thumb_w, thumb_h),
+                                                    on_event,
+                                                );
                                                 // Two entries per grid row.
                                                 if i % 2 == 1 {
                                                     ui.end_row();
@@ -4231,14 +4252,16 @@ fn external_photos_button<F: FnMut(UiEvent)>(
 }
 
 /// One side's entry in the [`external_photos_button`] grid: status label,
-/// thumbnail (when a photo is stored), and the capture / annotate / rotate /
-/// remove button row.
+/// thumbnail (when a photo is stored, scaled to `thumb_size` — computed by the
+/// caller so the two grid rows fill the canvas height), and the capture /
+/// annotate / rotate / remove button row.
 fn external_photo_entry<F: FnMut(UiEvent)>(
     ui: &mut egui::Ui,
     (side, photo): &(
         ber_model::ber::common::ExternalSide,
         Option<crate::controller::app_controller::PhotoView>,
     ),
+    thumb_size: egui::Vec2,
     on_event: &mut F,
 ) {
     ui.vertical(|ui| {
@@ -4264,7 +4287,7 @@ fn external_photo_entry<F: FnMut(UiEvent)>(
             let src = p.thumbnail_path.as_deref().unwrap_or(&p.file_path);
             ui.add(
                 egui::Image::new(format!("file://{src}"))
-                    .fit_to_exact_size(egui::vec2(280.0, 210.0))
+                    .fit_to_exact_size(thumb_size)
                     .maintain_aspect_ratio(true)
                     .corner_radius(4.0),
             );
