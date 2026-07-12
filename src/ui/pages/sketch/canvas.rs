@@ -79,6 +79,12 @@ struct StructureEditLayout {
     /// ("not all groups shown — N more"). Always 0 on the all-storeys layout
     /// (its overflow degrades to chips instead).
     hidden_groups: usize,
+    /// SINGLE-STOREY only: a freshly OPTIMISED base slot order the caller
+    /// must persist into the session store ([`slot_order_store_id`]) — set
+    /// exactly when no valid stored order existed (session open / group-set
+    /// change), so the optimisation runs once, not per frame, and user swaps
+    /// permute the cached base. `None` otherwise (and always on all-storeys).
+    store_slot_order: Option<Vec<usize>>,
 }
 
 /// Slots per band of the PRESCRIPTIVE single-storey layout
@@ -91,30 +97,25 @@ const SLOTS_RIGHT: usize = 5;
 const MAX_SLOTS: usize = SLOTS_TOP + SLOTS_RIGHT + 3;
 
 /// One group's input to the prescriptive layout: identity + colour + the
-/// connector anchor (like [`MarginSeed`]), its measured box height, and any
-/// user-dragged position.
+/// connector anchor (like [`MarginSeed`]) plus its measured box height.
 struct SlotSeed {
     group_index: usize,
     color: egui::Color32,
     anchor: (f64, f64),
     h: f32,
-    pinned: Option<egui::Pos2>,
 }
 
 /// The PRESCRIPTIVE single-storey slot layout (the all-storeys tab keeps the
-/// adaptive margin packing, [`place_windows_in_margins`]). Slots are assigned
-/// in GROUP ORDER — top row left→right, then right column top→bottom, then
-/// bottom row left→right — each `EDIT_BOX_W` wide and sized to its box's
-/// measured height, packed from the band's start with the usual gap.
-/// Predictability over connector aesthetics: a group's box is always where
-/// its number says. A user-dragged box goes exactly where it was dropped and
-/// leaves its slot EMPTY — later boxes never reflow into a vacated slot
-/// (stability over density; the column even keeps the vacated slot's
-/// vertical space). Returns the windows, the inner rect the OCCUPIED bands
-/// leave for the plan (top band = tallest in-slot top-row box, right band =
-/// the column width, bottom band = tallest in-slot bottom-row box; pinned
-/// rects are subtracted by the caller), and how many groups past
-/// [`MAX_SLOTS`] are hidden.
+/// adaptive margin packing, [`place_windows_in_margins`]). `seeds` arrive in
+/// SLOT order — the session's slot order: the connector-optimised base
+/// ([`optimise_slot_order`]) permuted by the user's drag-SWAPS — and fill
+/// top row left→right, then right column top→bottom, then bottom row
+/// left→right; each box `EDIT_BOX_W` wide, sized to its measured height,
+/// packed from the band's start with the usual gap. Boxes never rest outside
+/// the slot grid, so the plan rect derives EXACTLY from the occupied bands
+/// (top = tallest top-row box, right = the column width, bottom = tallest
+/// bottom-row box). Returns the windows, that inner rect, and how many
+/// groups past [`MAX_SLOTS`] are hidden.
 fn place_windows_prescriptive(
     rect: egui::Rect,
     seeds: &[SlotSeed],
@@ -129,37 +130,24 @@ fn place_windows_prescriptive(
     let mut col_occupied = false;
     let mut col_y = top_y;
     for (slot, s) in seeds.iter().take(shown).enumerate() {
-        let slot_pos = if slot < SLOTS_TOP {
+        let pos = if slot < SLOTS_TOP {
+            top_band = top_band.max(s.h);
             egui::pos2(
                 rect.left() + EDIT_COL_PAD + slot as f32 * (EDIT_BOX_W + EDIT_GAP),
                 top_y,
             )
         } else if slot < SLOTS_TOP + SLOTS_RIGHT {
+            col_occupied = true;
             let pos = egui::pos2(col_x, col_y);
-            // The slot keeps its vertical space even when its box is dragged
-            // away — the column below it never reflows upward.
             col_y += s.h + EDIT_GAP;
             pos
         } else {
+            bottom_band = bottom_band.max(s.h);
             let b = slot - SLOTS_TOP - SLOTS_RIGHT;
             egui::pos2(
                 rect.left() + EDIT_COL_PAD + b as f32 * (EDIT_BOX_W + EDIT_GAP),
                 rect.bottom() - EDIT_TOP_PAD - s.h,
             )
-        };
-        let pos = match s.pinned {
-            Some(p) => p,
-            None => {
-                // Only a box actually SITTING in its slot reserves its band.
-                if slot < SLOTS_TOP {
-                    top_band = top_band.max(s.h);
-                } else if slot < SLOTS_TOP + SLOTS_RIGHT {
-                    col_occupied = true;
-                } else {
-                    bottom_band = bottom_band.max(s.h);
-                }
-                slot_pos
-            }
         };
         windows.push(EditWindow {
             group_index: s.group_index,
@@ -192,6 +180,143 @@ fn place_windows_prescriptive(
         egui::pos2(rect.right() - right_w, rect.bottom() - bottom_h),
     );
     (windows, inner, hidden)
+}
+
+/// The point a slot's connector LEAVES its box, estimated with the uniform
+/// `EDIT_SLOT_H` slot grid (assignment must not depend on who occupies a
+/// slot, or the optimisation wouldn't be well-defined): the box-edge
+/// midpoint facing the plan — bottom-centre for the top row, left-centre
+/// for the right column, top-centre for the bottom row.
+fn slot_anchor_estimate(rect: egui::Rect, slot: usize) -> egui::Pos2 {
+    let pitch = EDIT_BOX_W + EDIT_GAP;
+    if slot < SLOTS_TOP {
+        egui::pos2(
+            rect.left() + EDIT_COL_PAD + slot as f32 * pitch + EDIT_BOX_W * 0.5,
+            rect.top() + EDIT_TOP_SAFE + EDIT_SLOT_H,
+        )
+    } else if slot < SLOTS_TOP + SLOTS_RIGHT {
+        let k = (slot - SLOTS_TOP) as f32;
+        egui::pos2(
+            rect.right() - EDIT_COL_PAD - EDIT_BOX_W,
+            rect.top() + EDIT_TOP_SAFE + k * (EDIT_SLOT_H + EDIT_GAP) + EDIT_SLOT_H * 0.5,
+        )
+    } else {
+        let b = (slot - SLOTS_TOP - SLOTS_RIGHT) as f32;
+        egui::pos2(
+            rect.left() + EDIT_COL_PAD + b * pitch + EDIT_BOX_W * 0.5,
+            rect.bottom() - EDIT_TOP_PAD - EDIT_SLOT_H,
+        )
+    }
+}
+
+/// Whether segments `a1→a2` and `b1→b2` PROPERLY intersect (a single
+/// strictly-interior crossing; shared endpoints and collinear touches don't
+/// count) — the connector-crossing predicate of [`optimise_slot_order`].
+/// Presentation math on screen points, so it lives here rather than in
+/// `manip_plan` (whose f64 equivalent is private to its geom internals).
+fn segments_properly_cross(a1: egui::Pos2, a2: egui::Pos2, b1: egui::Pos2, b2: egui::Pos2) -> bool {
+    let ccw = |p: egui::Pos2, q: egui::Pos2, r: egui::Pos2| {
+        (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x)
+    };
+    let d1 = ccw(b1, b2, a1);
+    let d2 = ccw(b1, b2, a2);
+    let d3 = ccw(a1, a2, b1);
+    let d4 = ccw(a1, a2, b2);
+    d1 * d2 < 0.0 && d3 * d4 < 0.0
+}
+
+/// The OPTIMISED base group→slot assignment for the prescriptive layout:
+/// `order[slot] = group`, minimising the summed connector lengths (slot
+/// anchor → group anchor, `anchors[group]` on screen) plus a heavy penalty —
+/// 10 × the canvas diagonal — per pair of connectors that properly cross.
+/// Greedy start (each group, in group order, takes the nearest free slot),
+/// then 2-opt hill-climbing: apply the best improving pairwise swap until
+/// none improves. n ≤ [`MAX_SLOTS`] slots, so this is microseconds, and every
+/// step is deterministic (fixed iteration order, strict improvement) — the
+/// same input always yields the same layout. Groups past [`MAX_SLOTS`]
+/// aren't displayed and keep their identity tail. Run ONCE per session /
+/// group-set change; user swaps then permute the cached result.
+fn optimise_slot_order(rect: egui::Rect, anchors: &[egui::Pos2]) -> Vec<usize> {
+    let n = anchors.len();
+    let m = n.min(MAX_SLOTS);
+    let slots: Vec<egui::Pos2> = (0..m).map(|k| slot_anchor_estimate(rect, k)).collect();
+
+    // Greedy: each group takes the nearest still-free slot, in group order.
+    let mut order: Vec<usize> = vec![0; m];
+    let mut taken = vec![false; m];
+    for g in 0..m {
+        let k = (0..m)
+            .filter(|&k| !taken[k])
+            .min_by(|&a, &b| {
+                let (da, db) = (
+                    (slots[a] - anchors[g]).length(),
+                    (slots[b] - anchors[g]).length(),
+                );
+                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .expect("g < m free slots remain");
+        taken[k] = true;
+        order[k] = g;
+    }
+
+    let penalty = rect.size().length() * 10.0;
+    let cost = |order: &[usize]| -> f32 {
+        let segs: Vec<(egui::Pos2, egui::Pos2)> = order
+            .iter()
+            .enumerate()
+            .map(|(k, &g)| (slots[k], anchors[g]))
+            .collect();
+        let mut c: f32 = segs.iter().map(|(a, b)| (*a - *b).length()).sum();
+        for i in 0..segs.len() {
+            for j in i + 1..segs.len() {
+                if segments_properly_cross(segs[i].0, segs[i].1, segs[j].0, segs[j].1) {
+                    c += penalty;
+                }
+            }
+        }
+        c
+    };
+
+    // 2-opt: best improving swap, repeated to a fixpoint.
+    let mut current = cost(&order);
+    loop {
+        let mut best: Option<(f32, usize, usize)> = None;
+        for i in 0..m {
+            for j in i + 1..m {
+                order.swap(i, j);
+                let c = cost(&order);
+                order.swap(i, j);
+                if c + 1e-3 < current && best.is_none_or(|(bc, _, _)| c < bc) {
+                    best = Some((c, i, j));
+                }
+            }
+        }
+        match best {
+            Some((c, i, j)) => {
+                order.swap(i, j);
+                current = c;
+            }
+            None => break,
+        }
+    }
+    order.extend(m..n);
+    order
+}
+
+/// The SWAP target for a box dropped in the single-storey prescriptive
+/// layout: the other box whose rect the dropped rect overlaps MOST (greatest
+/// positive overlap area). `None` when the drop touches no other box —
+/// releasing over empty space snaps the box back to its own slot.
+fn swap_target(windows: &[EditWindow], dragged_group: usize, dropped: egui::Rect) -> Option<usize> {
+    windows
+        .iter()
+        .filter(|w| w.group_index != dragged_group)
+        .filter_map(|w| {
+            let r = egui::Rect::from_min_size(w.pos, w.size);
+            rects_strictly_overlap(dropped, r).then(|| (w.group_index, dropped.intersect(r).area()))
+        })
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(g, _)| g)
 }
 
 /// Place items (window top-left coords, given in their PREFERRED order) along
@@ -693,18 +818,25 @@ fn free_segments(lo: f32, hi: f32, mut blocks: Vec<(f32, f32)>) -> Vec<RunSegmen
 
 /// The per-frame layout inputs that live in egui memory rather than the
 /// controller: each group's MEASURED box height from the previous frame
-/// (`EDIT_SLOT_H` until it has rendered once), any USER-DRAGGED position (a
-/// dragged box keeps its spot for the session; the auto-packing treats its
-/// rect as an OBSTACLE — no box ever overlaps another, dragged or not), and
-/// the group most recently expanded from a chip (guaranteed a full box).
+/// (`EDIT_SLOT_H` until it has rendered once); the single-storey SLOT ORDER
+/// (`None` until a session's base has been optimised — the compute then runs
+/// [`optimise_slot_order`] once and hands the result back for storage; user
+/// drag-SWAPS transpose the stored order in place); the all-storeys DRAGGED
+/// pin positions (that tab keeps free pinning); and the group most recently
+/// expanded from an all-storeys chip (guaranteed a full box).
 struct EditBoxUiState {
     heights: Vec<f32>,
+    /// `order[slot] = group`; validated as a permutation of `0..n` — a
+    /// group-set change invalidates it, which re-runs the base optimisation.
+    slot_order: Option<Vec<usize>>,
     dragged: Vec<Option<egui::Pos2>>,
     expand_first: Option<usize>,
 }
 
-/// The session-scoped store of user-dragged box positions, keyed by group
-/// index, kept in egui temp memory (cleared when the edit session closes).
+/// The session-scoped store of user-dragged box positions on the ALL-STOREYS
+/// tab, keyed by group index, kept in egui temp memory (cleared when the
+/// edit session closes). The single-storey view has no pins — its drags SWAP
+/// slots in the [`slot_order_store_id`] order instead.
 type DraggedBoxes = std::collections::HashMap<usize, egui::Pos2>;
 
 /// The `Area` id of group `i`'s attribute box — shared by the renderer and
@@ -722,6 +854,13 @@ fn drag_store_id(ui: &egui::Ui) -> egui::Id {
 /// memory.
 fn expand_store_id(ui: &egui::Ui) -> egui::Id {
     ui.id().with("structure_attr_expanded")
+}
+
+/// Where the single-storey slot order (`Vec<usize>`, `order[slot] = group`)
+/// lives in egui temp memory: the optimised session base permuted by the
+/// user's drag-swaps. Cleared when the edit session closes.
+fn slot_order_store_id(ui: &egui::Ui) -> egui::Id {
+    ui.id().with("structure_slot_order")
 }
 
 /// Gather [`EditBoxUiState`] for this frame from egui memory.
@@ -743,6 +882,14 @@ fn edit_box_ui_state(
                     .unwrap_or(EDIT_SLOT_H)
             })
             .collect(),
+        slot_order: ui
+            .ctx()
+            .data(|d| d.get_temp::<Vec<usize>>(slot_order_store_id(ui)))
+            .filter(|order| {
+                let mut sorted = order.clone();
+                sorted.sort_unstable();
+                order.len() == n && sorted == (0..n).collect::<Vec<_>>()
+            }),
         dragged: (0..n).map(|i| dragged_map.get(&i).copied()).collect(),
         expand_first: ui
             .ctx()
@@ -751,11 +898,12 @@ fn edit_box_ui_state(
     }
 }
 
-/// Split a group list into auto-packed seeds and directly-placed windows for
-/// the groups the user has DRAGGED: a dragged box sits exactly where it was
-/// dropped (anywhere on the canvas), keeps its measured size, and frees its
-/// margin slot for the others — and the PLAN then re-fits to clear it
-/// ([`plan_rect_avoiding_pinned`]), so the drawing never renders under a box.
+/// ALL-STOREYS only: split a group list into auto-packed seeds and
+/// directly-placed windows for the groups the user has DRAGGED — a dragged
+/// box sits exactly where it was dropped (anywhere on the canvas), keeps its
+/// measured size, and frees its margin slot for the others; the PLAN then
+/// re-fits to clear it ([`plan_rect_avoiding_pinned`]), so the drawing never
+/// renders under a box. (Single-storey drags SWAP slots instead.)
 fn dragged_window(
     box_ui: &EditBoxUiState,
     group_index: usize,
@@ -777,11 +925,15 @@ fn dragged_window(
 
 /// The SINGLE-STOREY in-place "Edit attributes" layout: the PRESCRIPTIVE
 /// slot arrangement ([`place_windows_prescriptive`]) — up to 3 boxes across
-/// the top, 5 down the right, 3 along the bottom, in group order — then fit
-/// the plan into the space the occupied bands and any dragged boxes leave.
-/// Groups past the 11 slots aren't displayed (`hidden_groups` drives the
-/// canvas note). `None` when there's no fittable plan or no groups, leaving
-/// the caller on the normal view.
+/// the top, 5 down the right, 3 along the bottom — in the session's slot
+/// order: the connector-OPTIMISED base ([`optimise_slot_order`], computed
+/// once when no valid stored order exists and handed back via
+/// `store_slot_order`) permuted by the user's drag-swaps. The plan then fits
+/// the exact space the occupied bands leave (boxes never rest off the slot
+/// grid, so no obstacle subtraction is needed here). Groups past the 11
+/// slots aren't displayed (`hidden_groups` drives the canvas note). `None`
+/// when there's no fittable plan or no groups, leaving the caller on the
+/// normal view.
 fn compute_structure_edit_layout(
     rect: egui::Rect,
     ber: Option<&Ber>,
@@ -799,41 +951,50 @@ fn compute_structure_edit_layout(
         return None;
     }
 
-    // `fans` is in group order, so slots follow group numbering.
-    let seeds: Vec<SlotSeed> = fans
+    // Per GROUP (fans are in group order): the connector's world anchor.
+    let anchors: Vec<(f64, f64)> = fans
         .iter()
-        .map(|f| SlotSeed {
-            group_index: f.group_index,
-            color: f.color,
-            anchor: render::structure_fan::group_connector_anchor(
+        .map(|f| {
+            render::structure_fan::group_connector_anchor(
                 storey,
                 &edit.groups[f.group_index],
                 f.centroid,
-            ),
-            h: box_ui.heights[f.group_index],
-            pinned: box_ui.dragged.get(f.group_index).copied().flatten(),
+            )
+        })
+        .collect();
+
+    // The session's slot order: the stored one (base optimisation already
+    // done — user swaps live in it), or a freshly optimised base handed back
+    // to the caller for storage. The optimisation sees each anchor under the
+    // plain full-rect fit — the final view depends on the assignment itself,
+    // and the approximation only steers WHICH slot a group gets.
+    let (slot_order, store_slot_order) = match &box_ui.slot_order {
+        Some(order) => (order.clone(), None),
+        None => {
+            let t_full = render::fit_transform(rect, min_xy, max_xy, base);
+            let screen: Vec<egui::Pos2> = anchors.iter().map(|a| t_full.apply(a.0, a.1)).collect();
+            let order = optimise_slot_order(rect, &screen);
+            (order.clone(), Some(order))
+        }
+    };
+
+    let seeds: Vec<SlotSeed> = slot_order
+        .iter()
+        .map(|&g| SlotSeed {
+            group_index: g,
+            color: render::structure_fan::group_color(g),
+            anchor: anchors[g],
+            h: box_ui.heights[g],
         })
         .collect();
     let (windows, inner, hidden_groups) = place_windows_prescriptive(rect, &seeds);
-    // The plan must not sit under a DRAGGED box either: shrink the band gap
-    // to its largest sub-rectangle clear of every pinned box. The user's
-    // placement always wins — the plan gets smaller, never the box moved.
-    let pinned_rects: Vec<egui::Rect> = seeds
-        .iter()
-        .filter_map(|s| {
-            s.pinned
-                .map(|p| egui::Rect::from_min_size(p, egui::vec2(EDIT_BOX_W, s.h)))
-        })
-        .collect();
-    let inner = plan_rect_avoiding_pinned(inner, &pinned_rects);
     // Tiny-window edge case: the prescriptive bands are never shrunk or
     // demoted — just keep the fit finite and let the plan take what's left.
     let inner =
         egui::Rect::from_center_size(inner.center(), inner.size().max(egui::vec2(40.0, 40.0)));
 
     // Fit the plan into `inner`: zoom relative to the full-rect auto-fit,
-    // offset to recentre on the gap left between the occupied bands and any
-    // dragged boxes.
+    // offset to recentre on the gap the occupied bands leave.
     let base_scale = render::auto_fit_scale(rect, min_xy, max_xy);
     let inner_scale = render::auto_fit_scale(inner, min_xy, max_xy);
     let view = ViewParams {
@@ -849,6 +1010,7 @@ fn compute_structure_edit_layout(
         windows,
         all_storeys_inner: None,
         hidden_groups,
+        store_slot_order,
     })
 }
 
@@ -920,6 +1082,7 @@ fn compute_structure_edit_layout_all_storeys(
         windows,
         all_storeys_inner: Some(inner),
         hidden_groups: 0,
+        store_slot_order: None,
     })
 }
 
@@ -1170,32 +1333,68 @@ fn structure_edit_windows_ui<F: FnMut(UiEvent)>(
                 }
                 painter.circle_filled(target, 3.5, w.color);
             }
-            // A finished drag pins the box at its new spot for the rest of
-            // the session. Only on RELEASE: the layout (slots/packing + the
-            // plan-fit that dodges pinned boxes) keys off the stored map, so
-            // committing mid-drag would re-fit the plan every frame under
-            // the finger (jitter). During the drag egui moves the Area
-            // itself, the connector tracks the live rect above, and the box
-            // may sit over the plan — the finger is on it; the plan re-fits
-            // once, at drop. Box-on-box collisions resolve HERE: a drop
-            // intersecting ANY other box's current rect takes the minimal
-            // cardinal nudge clear of it — the other box stays put (pinned
-            // boxes never move for a newcomer; prescriptive slots never
-            // reflow; the all-storeys margin packing additionally repacks
-            // around the pinned rect next frame).
+            let single_storey = layout.all_storeys_inner.is_none();
+            // SINGLE-STOREY, mid-drag: ring the box the drop would SWAP with,
+            // so the target is visible before release. Painted on the canvas
+            // layer just OUTSIDE the target's frame — the ring stays visible
+            // around the Foreground box it marks.
+            if single_storey && area.response.dragged() {
+                if let Some(t) = swap_target(&layout.windows, i, area.response.rect) {
+                    if let Some(tw) = layout.windows.iter().find(|w| w.group_index == t) {
+                        painter.rect_stroke(
+                            egui::Rect::from_min_size(tw.pos, tw.size).expand(3.0),
+                            4.0,
+                            egui::Stroke::new(2.5, egui::Color32::WHITE),
+                            egui::StrokeKind::Outside,
+                        );
+                    }
+                }
+            }
+            // Drop handling, on RELEASE only (mid-drag egui moves the Area
+            // itself and the connector tracks the live rect above; committing
+            // mid-drag would re-fit the plan every frame under the finger).
+            //
+            // SINGLE-STOREY (prescriptive slots): dragging means SWAP — a
+            // drop on another box transposes the two groups' slots in the
+            // session order ([`slot_order_store_id`]); a drop on empty space
+            // stores nothing, so the box snaps back to its own slot next
+            // frame. Boxes never rest off the grid.
+            //
+            // ALL-STOREYS (margin packing): free pinning as before — the drop
+            // takes the minimal cardinal nudge clear of every other box (they
+            // stay put), the position persists, and the packing + plan-fit
+            // re-run around it next frame.
             if area.response.drag_stopped() {
-                let store = drag_store_id(ui);
-                let others: Vec<egui::Rect> = layout
-                    .windows
-                    .iter()
-                    .filter(|o| o.group_index != i)
-                    .map(|o| egui::Rect::from_min_size(o.pos, o.size))
-                    .collect();
-                let dropped = nudge_clear_of(area.response.rect, &others, canvas_rect);
-                ui.ctx().data_mut(|d| {
-                    let map: &mut DraggedBoxes = d.get_temp_mut_or_default(store);
-                    map.insert(i, dropped.min);
-                });
+                if single_storey {
+                    if let Some(target) = swap_target(&layout.windows, i, area.response.rect) {
+                        let store = slot_order_store_id(ui);
+                        let n = edit.groups.len();
+                        ui.ctx().data_mut(|d| {
+                            let order: &mut Vec<usize> =
+                                d.get_temp_mut_or_insert_with(store, || (0..n).collect());
+                            let (pa, pb) = (
+                                order.iter().position(|&g| g == i),
+                                order.iter().position(|&g| g == target),
+                            );
+                            if let (Some(pa), Some(pb)) = (pa, pb) {
+                                order.swap(pa, pb);
+                            }
+                        });
+                    }
+                } else {
+                    let store = drag_store_id(ui);
+                    let others: Vec<egui::Rect> = layout
+                        .windows
+                        .iter()
+                        .filter(|o| o.group_index != i)
+                        .map(|o| egui::Rect::from_min_size(o.pos, o.size))
+                        .collect();
+                    let dropped = nudge_clear_of(area.response.rect, &others, canvas_rect);
+                    ui.ctx().data_mut(|d| {
+                        let map: &mut DraggedBoxes = d.get_temp_mut_or_default(store);
+                        map.insert(i, dropped.min);
+                    });
+                }
             }
             // Tap-to-raise: a press anywhere on a box brings it above its
             // peers (a dragged box dropped over another stays reachable).
@@ -1362,12 +1561,23 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 None => compute_structure_edit_layout_all_storeys(rect, ber?, edit, vp, &box_ui),
             }
         });
+    // A freshly OPTIMISED single-storey slot order (session open / group-set
+    // change) is persisted NOW, before the windows render — the drag-swap
+    // handler transposes this same store.
+    if let Some(order) = structure_edit_layout
+        .as_ref()
+        .and_then(|l| l.store_slot_order.clone())
+    {
+        let store = slot_order_store_id(ui);
+        ui.ctx().data_mut(|d| d.insert_temp(store, order));
+    }
     if view.structure_edit.is_none() {
         // No edit session: forget the session-scoped box state (dragged
-        // positions + the expanded-chip choice) so the next session starts
-        // on the clean auto-layout.
+        // positions, the slot order + its swaps, the expanded-chip choice)
+        // so the next session starts on a freshly optimised layout.
         ui.ctx().data_mut(|d| {
             d.remove::<DraggedBoxes>(drag_store_id(ui));
+            d.remove::<Vec<usize>>(slot_order_store_id(ui));
             d.remove::<usize>(expand_store_id(ui));
         });
     }
@@ -5786,7 +5996,6 @@ mod tests {
             color: egui::Color32::RED,
             anchor: (0.0, 0.0),
             h: EDIT_SLOT_H,
-            pinned: None,
         }
     }
 
@@ -5882,34 +6091,97 @@ mod tests {
         );
     }
 
-    /// A dragged box leaves its slot EMPTY: the others keep their exact slot
-    /// positions (no reflow — the column even keeps the vacated slot's
-    /// space), the pinned box sits where it was dropped, and the plan
-    /// (largest-empty-rect step) avoids it.
+    /// A user SWAP is a transposition of the slot order: with groups 1 and 5
+    /// swapped, they trade exact slot positions and everyone else keeps
+    /// theirs — no reflow, no off-grid rest positions.
     #[test]
-    fn prescriptive_pinned_box_leaves_slot_empty_without_reflow() {
-        let mut seeds: Vec<SlotSeed> = (0..8).map(slot_seed).collect();
-        let drop_pos = egui::pos2(400.0, 400.0); // over the plan area
-        seeds[4].pinned = Some(drop_pos); // column slot 1 dragged away
+    fn prescriptive_swap_transposes_two_slots_only() {
+        let mut order: Vec<usize> = (0..8).collect();
+        // What the drop handler does: swap the two groups' POSITIONS in the
+        // stored order (group 1 dropped onto group 5's box).
+        let (pa, pb) = (
+            order.iter().position(|&g| g == 1).unwrap(),
+            order.iter().position(|&g| g == 5).unwrap(),
+        );
+        order.swap(pa, pb);
+        let seeds: Vec<SlotSeed> = order.iter().map(|&g| slot_seed(g)).collect();
         let (windows, inner, _) = place_windows_prescriptive(tall_rect(), &seeds);
-        assert_eq!(windows.len(), 8);
-        for (slot, w) in windows.iter().enumerate() {
-            let expected = if slot == 4 {
-                drop_pos
-            } else {
-                expected_slot_pos(slot) // NOT reflowed into the vacancy
-            };
-            assert_eq!(w.pos, expected, "slot {slot}");
+        let pos_of = |g: usize| windows.iter().find(|w| w.group_index == g).unwrap().pos;
+        assert_eq!(pos_of(5), expected_slot_pos(1), "5 took 1's slot");
+        assert_eq!(pos_of(1), expected_slot_pos(5), "1 took 5's slot");
+        for g in [0, 2, 3, 4, 6, 7] {
+            assert_eq!(pos_of(g), expected_slot_pos(g), "group {g} unmoved");
         }
-        // The plan then dodges the pinned rect via the existing
-        // largest-empty-rect step.
-        let pinned_rect = egui::Rect::from_min_size(drop_pos, egui::vec2(EDIT_BOX_W, EDIT_SLOT_H));
-        let plan = plan_rect_avoiding_pinned(inner, &[pinned_rect]);
-        assert!(!rects_strictly_overlap(plan, pinned_rect));
+        assert_no_pairwise_intersection(&windows);
         for w in &windows {
-            if w.group_index != 4 {
-                assert!(!rects_strictly_overlap(plan, window_rect(w)));
+            assert!(!rects_strictly_overlap(inner, window_rect(w)));
+        }
+    }
+
+    /// The drop hit-test: greatest positive overlap picks the swap target;
+    /// a drop over empty space is a miss (→ snap back to own slot).
+    #[test]
+    fn swap_target_picks_greatest_overlap_or_none() {
+        let seeds: Vec<SlotSeed> = (0..3).map(slot_seed).collect();
+        let (windows, ..) = place_windows_prescriptive(tall_rect(), &seeds);
+        // Dropped rect overlapping slot 1 by a sliver and slot 2 by a lot.
+        let dropped = egui::Rect::from_min_size(
+            expected_slot_pos(2) + egui::vec2(-20.0, 10.0),
+            egui::vec2(EDIT_BOX_W, EDIT_SLOT_H),
+        );
+        assert_eq!(swap_target(&windows, 0, dropped), Some(2));
+        // The dragged box's own slot never counts as a target.
+        assert_eq!(swap_target(&windows, 2, dropped), Some(1));
+        // Empty space → no swap.
+        let empty = egui::Rect::from_min_size(
+            egui::pos2(400.0, 600.0),
+            egui::vec2(EDIT_BOX_W, EDIT_SLOT_H),
+        );
+        assert_eq!(swap_target(&windows, 0, empty), None);
+    }
+
+    /// The base optimiser uncrosses connectors: anchors constructed so the
+    /// identity assignment crosses two lines come out swapped — zero proper
+    /// crossings, the expected assignment — and the result is deterministic.
+    #[test]
+    fn optimise_slot_order_uncrosses_and_is_deterministic() {
+        let rect = tall_rect();
+        // Group 0's region sits under slot 1, group 1's under slot 0 —
+        // identity order would cross; groups 2 and 3 sit under their own
+        // slots (slot 3 = the right column's top slot).
+        let anchors = vec![
+            egui::pos2(270.0, 400.0),
+            egui::pos2(92.0, 400.0),
+            egui::pos2(446.0, 400.0),
+            egui::pos2(700.0, 300.0),
+        ];
+        let order = optimise_slot_order(rect, &anchors);
+        assert_eq!(order, vec![1, 0, 2, 3], "0 and 1 trade slots");
+        // Zero proper crossings in the optimised assignment.
+        let segs: Vec<(egui::Pos2, egui::Pos2)> = order
+            .iter()
+            .enumerate()
+            .map(|(k, &g)| (slot_anchor_estimate(rect, k), anchors[g]))
+            .collect();
+        for (i, a) in segs.iter().enumerate() {
+            for b in &segs[i + 1..] {
+                assert!(
+                    !segments_properly_cross(a.0, a.1, b.0, b.1),
+                    "optimised connectors must not cross: {a:?} × {b:?}"
+                );
             }
         }
+        // Determinism: same input, same output.
+        assert_eq!(order, optimise_slot_order(rect, &anchors));
+        // Past MAX_SLOTS the identity tail is preserved.
+        let many: Vec<egui::Pos2> = (0..13)
+            .map(|i| egui::pos2(100.0 + i as f32, 500.0))
+            .collect();
+        let order = optimise_slot_order(rect, &many);
+        assert_eq!(order.len(), 13);
+        assert_eq!(&order[11..], &[11, 12]);
+        let mut sorted = order.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, (0..13).collect::<Vec<_>>(), "a permutation");
     }
 }
