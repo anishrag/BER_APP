@@ -122,8 +122,8 @@ pub use objects::{
 use openings::PendingOpening;
 pub use openings::{
     ComplexWindowPlacement, DoorSidelightsMode, DoorSidelightsPlacement, ElevationView,
-    ExistingWindowType, OpeningFieldSpec, OpeningFieldsPrompt, OpeningPromptUiData,
-    OpeningToolKind, OpeningViewKind, WindowTypeChoice,
+    ExistingWindowType, FullSpanInfo, OpeningEditPrefill, OpeningFieldSpec, OpeningFieldsPrompt,
+    OpeningPromptUiData, OpeningToolKind, OpeningViewKind, WindowTypeChoice,
 };
 pub use partition::{
     PartitionDimAxis, PartitionDimPrompt, PartitionInset, PartitionRegionView, PartitionSnapTag,
@@ -331,6 +331,10 @@ pub struct AppController {
     elevation_drag: Option<ber_model::ber::openings::OpeningRef>,
     /// The opening selected in the elevation, for Delete (transient).
     elevation_selection: Option<ber_model::ber::openings::OpeningRef>,
+    /// The WINDOW being attribute-edited from the elevation ("Edit…"): the
+    /// placement box re-opens in edit mode, prefilled with its size / type /
+    /// overshading. Transient — cleared with the rest of the elevation state.
+    elevation_edit: Option<ber_model::ber::common::ItemId>,
     /// A ROOF window selected in the PLAN view (Edit-on-surface tool), for drag /
     /// delete — roof windows live in plan, so their "surface" is the footprint.
     /// Transient.
@@ -630,6 +634,14 @@ pub struct AppController {
     /// surface, or the copied height failed the commit's guard). Shown under the
     /// pick hint; cleared on start / cancel / a successful copy.
     copy_height_error: Option<String>,
+    /// Transient notice for a SILENTLY auto-resolved junction ridge (a typed
+    /// height on a ridge claimed by ≥ 2 ceiling areas where exactly one was
+    /// slope-able — no ChooseArea prompt opened): names which side sloped so
+    /// the decision is visible/diagnosable. Set by `assign_roof_ridge_height`;
+    /// suppressed on the assessor-initiated "meet other edge" path; cleared on
+    /// the next ridge action / cancel / mode exit / storey switch / record
+    /// load. Read via `roof_ridge_notice()`. See `ceiling_ridges.rs`.
+    roof_ridge_notice: Option<String>,
 }
 
 impl AppController {
@@ -687,6 +699,7 @@ impl AppController {
             elevation_wall: None,
             elevation_drag: None,
             elevation_selection: None,
+            elevation_edit: None,
             roof_window_sel: None,
             roof_window_drag: None,
             confirm_delete: false,
@@ -758,6 +771,7 @@ impl AppController {
             ceiling_exposure_pending_cut: None,
             copy_height_pick: None,
             copy_height_error: None,
+            roof_ridge_notice: None,
         }
     }
 }

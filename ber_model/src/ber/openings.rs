@@ -232,7 +232,8 @@ impl DoorSidelightsSpec {
 }
 
 /// The length of the wall with `wall_id`, or `None` if absent/degenerate.
-fn wall_length(storey: &Storey, wall_id: ItemId) -> Option<f32> {
+/// Public so the shell can display the span a "Full width" opening will take.
+pub fn wall_length(storey: &Storey, wall_id: ItemId) -> Option<f32> {
     storey
         .walls
         .regions
@@ -240,6 +241,18 @@ fn wall_length(storey: &Storey, wall_id: ItemId) -> Option<f32> {
         .find(|r| r.id == wall_id)
         .and_then(|r| r.base_frame())
         .map(|(_, _, len, _)| len as f32)
+}
+
+/// The wall FACE height (base → roofline top) at `along_m` — what a
+/// "Full height" opening spans (sill 0 up to the wall top). `None` when the
+/// wall is absent. Degenerate walls report 0 (mirrors `max_sill_for`).
+pub fn wall_face_height(storey: &Storey, wall_id: ItemId, along_m: f32) -> Option<f32> {
+    storey
+        .walls
+        .regions
+        .iter()
+        .find(|r| r.id == wall_id)
+        .map(|r| r.max_sill_for(along_m as f64, 0.0) as f32)
 }
 
 /// The nearest OUTLINE wall to a world plan point and the along-distance of the
@@ -438,15 +451,17 @@ pub fn add_roof_window(
     Ok(id)
 }
 
-/// Add a window that fills the WHOLE wall face — a "window wall". Width = the
-/// wall length (centred, no end margins), sill 0; `height_m` is the face height
-/// (the caller computes it from the wall top). NOT redistributed: it spans the
-/// entire wall, so it's meant for an empty wall (the caller gates this) — any
-/// existing opening would be overlapped.
-pub fn add_full_wall_window(
+/// Add a window spanning the WHOLE wall length at a TYPED height — the
+/// "Full width" checkbox with the height still measured. Width = the wall
+/// length (centred, no end margins), sill at `sill_m`. NOT redistributed: it
+/// spans the entire wall, so it requires an EMPTY wall — a full-width opening
+/// plus anything else can never fit, refused as `WallTooShort` here (same rule
+/// as [`add_full_wall_door`]).
+pub fn add_full_width_window(
     storey: &mut Storey,
     wall_id: ItemId,
     height_m: f32,
+    sill_m: f32,
     window_type_id: ItemId,
 ) -> Result<ItemId, OpeningError> {
     let Some(len) = wall_length(storey, wall_id) else {
@@ -454,6 +469,15 @@ pub fn add_full_wall_window(
     };
     if height_m <= 0.0 || len <= 0.0 {
         return Err(OpeningError::ZeroSize);
+    }
+    let existing = wall_openings(storey, wall_id);
+    if !existing.is_empty() {
+        // A full-width window plus anything else can never fit the wall.
+        let others: f32 = existing.iter().map(|o| o.width_m).sum();
+        return Err(OpeningError::WallTooShort {
+            needed_m: len + others,
+            available_m: len,
+        });
     }
     let id = ItemId::default();
     storey.windows.push(Window {
@@ -465,7 +489,7 @@ pub fn add_full_wall_window(
         placement: Some(OpeningPlacement::Wall {
             wall_id,
             along_m: len / 2.0,
-            sill_m: 0.0,
+            sill_m,
         }),
         wall_anchor: None,
         assembly_id: None,
@@ -474,6 +498,117 @@ pub fn add_full_wall_window(
         overshading: Overshading::Average,
     });
     link_window(storey, wall_id, id);
+    Ok(id)
+}
+
+/// Add a window that fills the WHOLE wall face — a "window wall" (Full width +
+/// Full height). Width = the wall length, sill 0; `height_m` is the face
+/// height (the caller resolves it, e.g. via [`wall_face_height`]). Requires an
+/// EMPTY wall (checked in [`add_full_width_window`]).
+pub fn add_full_wall_window(
+    storey: &mut Storey,
+    wall_id: ItemId,
+    height_m: f32,
+    window_type_id: ItemId,
+) -> Result<ItemId, OpeningError> {
+    add_full_width_window(storey, wall_id, height_m, 0.0, window_type_id)
+}
+
+/// Add a window spanning the FULL face height at a TYPED width — the
+/// "Full height" checkbox with the width still measured. Sill 0, height = the
+/// face height at `along_m` (see [`wall_face_height`]); the width takes the
+/// NORMAL placement rules — end margins + auto-redistribution against the
+/// wall's other openings, rolled back atomically when nothing fits. Unlike the
+/// full-WIDTH ops this does NOT require an empty wall: at a typed width it
+/// coexists with other openings whenever redistribution fits it.
+pub fn add_full_height_window(
+    storey: &mut Storey,
+    wall_id: ItemId,
+    along_m: f32,
+    width_m: f32,
+    window_type_id: ItemId,
+) -> Result<ItemId, OpeningError> {
+    let Some(height_m) = wall_face_height(storey, wall_id, along_m) else {
+        return Err(OpeningError::NoHostRegion);
+    };
+    add_wall_window(
+        storey,
+        wall_id,
+        along_m,
+        width_m,
+        height_m,
+        0.0,
+        window_type_id,
+    )
+}
+
+/// Add a door spanning the FULL face height at a TYPED width — sill 0, height
+/// = the face height at `along_m`; the width under the normal margin +
+/// redistribution rules (see [`add_full_height_window`]).
+pub fn add_full_height_door(
+    storey: &mut Storey,
+    wall_id: ItemId,
+    along_m: f32,
+    width_m: f32,
+    kind: DoorKind,
+    type_name: String,
+) -> Result<ItemId, OpeningError> {
+    let Some(height_m) = wall_face_height(storey, wall_id, along_m) else {
+        return Err(OpeningError::NoHostRegion);
+    };
+    add_wall_door(
+        storey, wall_id, along_m, width_m, height_m, kind, type_name, 0.0,
+    )
+}
+
+/// Add a door that fills the WHOLE wall length — e.g. a porch door as wide as
+/// its wall. Width = the wall length (centred, no end margins); `height_m`,
+/// `kind`, `type_name` and `sill_m` mean the same as for [`add_wall_door`].
+/// NOT redistributed: it spans the entire wall, so it requires an EMPTY wall —
+/// any existing opening would be overlapped. Callers route here explicitly
+/// (the placement box's "Full width" checkbox); the end-margin path would
+/// always refuse a door as wide as its wall (width + 2 margins > wall length).
+pub fn add_full_wall_door(
+    storey: &mut Storey,
+    wall_id: ItemId,
+    height_m: f32,
+    kind: DoorKind,
+    type_name: String,
+    sill_m: f32,
+) -> Result<ItemId, OpeningError> {
+    let Some(len) = wall_length(storey, wall_id) else {
+        return Err(OpeningError::NoHostRegion);
+    };
+    if height_m <= 0.0 || len <= 0.0 {
+        return Err(OpeningError::ZeroSize);
+    }
+    let existing = wall_openings(storey, wall_id);
+    if !existing.is_empty() {
+        // A full-wall door plus anything else can never fit the wall.
+        let others: f32 = existing.iter().map(|o| o.width_m).sum();
+        return Err(OpeningError::WallTooShort {
+            needed_m: len + others,
+            available_m: len,
+        });
+    }
+    let id = ItemId::default();
+    storey.doors.push(Door {
+        id,
+        type_name,
+        vertices: vec![],
+        photos: vec![],
+        width_m: len,
+        height_m,
+        kind: Some(kind),
+        placement: Some(OpeningPlacement::Wall {
+            wall_id,
+            along_m: len / 2.0,
+            sill_m,
+        }),
+        wall_anchor: None,
+        assembly_id: None,
+    });
+    link_door(storey, wall_id, id);
     Ok(id)
 }
 
@@ -880,6 +1015,182 @@ pub fn move_opening(
     // that may nudge the dragged one too — better than refusing the move.
     redistribute_wall_openings_pinned(storey, wall_id, &[opening])
         .or_else(|_| redistribute_wall_openings(storey, wall_id))
+}
+
+/// Resize a WALL opening in place (width/height), under the same feasibility
+/// rules as placement: end margins + auto-redistribution, the resized opening
+/// PINNED at its along while the rest flow around it (if pinning is infeasible
+/// a full re-arrange may nudge it too — same fallback as [`move_opening`]).
+/// When even touching openings can't fit, the resize is refused with
+/// `WallTooShort`: the opening's size and sill are restored and the storey is
+/// left exactly as it was (redistribution applies nothing on error) — the same
+/// rollback discipline as the add ops. A full-wall opening resized SMALLER
+/// re-enters the margin regime here via the normal redistribute path. No-op
+/// `Ok` if the opening isn't on a wall (mirrors [`move_opening`]); an assembly
+/// member resizes just that member (its assembly re-packs as one unit).
+pub fn resize_opening(
+    storey: &mut Storey,
+    opening: OpeningRef,
+    new_width_m: f32,
+    new_height_m: f32,
+) -> Result<(), OpeningError> {
+    if new_width_m <= 0.0 || new_height_m <= 0.0 {
+        return Err(OpeningError::ZeroSize);
+    }
+    let Some((wall_id, along, old_sill, _)) = wall_placement_of(storey, opening) else {
+        return Ok(());
+    };
+    let size_of = |storey: &Storey| match opening {
+        OpeningRef::Window(id) => storey
+            .windows
+            .iter()
+            .find(|w| w.id == id)
+            .map(|w| (w.width_m, w.height_m)),
+        OpeningRef::Door(id) => storey
+            .doors
+            .iter()
+            .find(|d| d.id == id)
+            .map(|d| (d.width_m, d.height_m)),
+    };
+    let Some((old_w, old_h)) = size_of(storey) else {
+        return Ok(());
+    };
+    let set_size = |storey: &mut Storey, w: f32, h: f32| match opening {
+        OpeningRef::Window(id) => {
+            if let Some(win) = storey.windows.iter_mut().find(|x| x.id == id) {
+                win.width_m = w;
+                win.height_m = h;
+            }
+        }
+        OpeningRef::Door(id) => {
+            if let Some(d) = storey.doors.iter_mut().find(|x| x.id == id) {
+                d.width_m = w;
+                d.height_m = h;
+            }
+        }
+    };
+    set_size(storey, new_width_m, new_height_m);
+    // Keep a now-taller opening under the wall roofline by lowering its sill —
+    // the same clamp as `move_opening`; a multi-storey window is exempt (it
+    // spans up past the roofline by design).
+    let multi_storey = matches!(opening, OpeningRef::Window(id)
+        if storey.windows.iter().any(|w| w.id == id && w.multi_storey));
+    if !multi_storey {
+        let max_sill = storey
+            .walls
+            .regions
+            .iter()
+            .find(|r| r.id == wall_id)
+            .map(|r| r.max_sill_for(along as f64, new_height_m as f64) as f32)
+            .unwrap_or(f32::INFINITY);
+        let clamped = old_sill.clamp(0.0, max_sill.max(0.0));
+        if clamped != old_sill {
+            set_wall_opening_sill(storey, opening, clamped);
+        }
+    }
+    match redistribute_wall_openings_pinned(storey, wall_id, &[opening])
+        .or_else(|_| redistribute_wall_openings(storey, wall_id))
+    {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            set_size(storey, old_w, old_h);
+            set_wall_opening_sill(storey, opening, old_sill);
+            Err(e)
+        }
+    }
+}
+
+/// Resize a WALL opening to span the WHOLE wall length — the edit box's "Full
+/// width": width = the wall length, re-centred, height set to `new_height_m`
+/// (for Full height the caller passes the face height). Requires the opening
+/// to be ALONE on its wall — full width plus anything else can never fit — so
+/// it refuses with `WallTooShort` (storey untouched) when the wall carries any
+/// other opening. No redistribution (nothing else on the wall); the sill is
+/// clamped under the roofline like [`resize_opening`] (multi-storey windows
+/// exempt). No-op `Ok` if the opening isn't on a wall.
+pub fn resize_opening_full_width(
+    storey: &mut Storey,
+    opening: OpeningRef,
+    new_height_m: f32,
+) -> Result<(), OpeningError> {
+    if new_height_m <= 0.0 {
+        return Err(OpeningError::ZeroSize);
+    }
+    let Some((wall_id, _, old_sill, _)) = wall_placement_of(storey, opening) else {
+        return Ok(());
+    };
+    let Some(len) = wall_length(storey, wall_id) else {
+        return Err(OpeningError::NoHostRegion);
+    };
+    let others: f32 = wall_openings(storey, wall_id)
+        .iter()
+        .filter(|o| o.opening != opening)
+        .map(|o| o.width_m)
+        .sum();
+    if others > 0.0 {
+        return Err(OpeningError::WallTooShort {
+            needed_m: len + others,
+            available_m: len,
+        });
+    }
+    // Keep the (possibly taller) opening under the roofline — same clamp as
+    // `resize_opening`; multi-storey windows span past it by design.
+    let multi_storey = matches!(opening, OpeningRef::Window(id)
+        if storey.windows.iter().any(|w| w.id == id && w.multi_storey));
+    let sill = if multi_storey {
+        old_sill
+    } else {
+        let max_sill = storey
+            .walls
+            .regions
+            .iter()
+            .find(|r| r.id == wall_id)
+            .map(|r| r.max_sill_for((len / 2.0) as f64, new_height_m as f64) as f32)
+            .unwrap_or(f32::INFINITY);
+        old_sill.clamp(0.0, max_sill.max(0.0))
+    };
+    let place = |placement: &mut Option<OpeningPlacement>| {
+        if let Some(OpeningPlacement::Wall {
+            along_m, sill_m, ..
+        }) = placement
+        {
+            *along_m = len / 2.0;
+            *sill_m = sill;
+        }
+    };
+    match opening {
+        OpeningRef::Window(id) => {
+            if let Some(w) = storey.windows.iter_mut().find(|x| x.id == id) {
+                w.width_m = len;
+                w.height_m = new_height_m;
+                place(&mut w.placement);
+            }
+        }
+        OpeningRef::Door(id) => {
+            if let Some(d) = storey.doors.iter_mut().find(|x| x.id == id) {
+                d.width_m = len;
+                d.height_m = new_height_m;
+                place(&mut d.placement);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Retype an existing WINDOW in place: point it at a (possibly different)
+/// shared window type and set its per-window overshading. Geometry (size,
+/// placement, shape) is untouched — pair with [`resize_opening`] for size
+/// edits. No-op if `window_id` isn't in the storey.
+pub fn set_window_attributes(
+    storey: &mut Storey,
+    window_id: ItemId,
+    window_type_id: ItemId,
+    overshading: Overshading,
+) {
+    if let Some(w) = storey.windows.iter_mut().find(|w| w.id == window_id) {
+        w.window_type_id = window_type_id;
+        w.overshading = overshading;
+    }
 }
 
 /// Delete an opening (the whole assembly if it's a member), then redistribute
@@ -2080,6 +2391,179 @@ mod tests {
     }
 
     #[test]
+    fn full_wall_door_fills_the_wall() {
+        // The field case: a 1.66 m door on a 1.66 m porch wall — the normal
+        // path would demand 1.76 m (width + 2 end margins) and refuse. The
+        // "Full width" checkbox routes here with the TYPED height kept.
+        let (mut s, wid) = storey_with_wall(1.66);
+        let id = add_full_wall_door(&mut s, wid, 2.0, DoorKind::Solid, "Door".into(), 0.0)
+            .expect("a door as wide as its wall must place");
+        let d = s.doors.iter().find(|d| d.id == id).unwrap();
+        assert!((d.width_m - 1.66).abs() < 1e-3, "width = wall length");
+        assert!((d.height_m - 2.0).abs() < 1e-3, "height as entered");
+        match &d.placement {
+            Some(OpeningPlacement::Wall {
+                along_m, sill_m, ..
+            }) => {
+                assert!((along_m - 0.83).abs() < 1e-3, "centred on the wall");
+                assert!(sill_m.abs() < 1e-3, "sill at the floor");
+            }
+            _ => panic!("expected a wall placement"),
+        }
+    }
+
+    #[test]
+    fn full_width_window_keeps_typed_height_and_sill() {
+        // "Full width" ticked, height still typed: width = wall length with no
+        // end margins, the entered height and sill untouched.
+        let (mut s, wid) = storey_with_wall(4.0);
+        let id = add_full_width_window(&mut s, wid, 1.2, 0.9, ItemId::default()).unwrap();
+        let w = s.windows.iter().find(|w| w.id == id).unwrap();
+        assert!((w.width_m - 4.0).abs() < 1e-3, "width = wall length");
+        assert!((w.height_m - 1.2).abs() < 1e-3, "height as typed");
+        match &w.placement {
+            Some(OpeningPlacement::Wall {
+                along_m, sill_m, ..
+            }) => {
+                assert!((along_m - 2.0).abs() < 1e-3, "centred on the wall");
+                assert!((sill_m - 0.9).abs() < 1e-3, "sill as given");
+            }
+            _ => panic!("expected a wall placement"),
+        }
+    }
+
+    #[test]
+    fn full_width_window_rejected_on_occupied_wall() {
+        // The empty-wall rule applies to every full-WIDTH placement.
+        let (mut s, wid) = storey_with_wall(4.0);
+        add_wall_window(&mut s, wid, 1.0, 0.8, 1.0, 1.0, ItemId::default()).unwrap();
+        let err = add_full_width_window(&mut s, wid, 1.2, 0.9, ItemId::default()).unwrap_err();
+        assert!(matches!(err, OpeningError::WallTooShort { .. }));
+        assert_eq!(s.windows.len(), 1, "no window added");
+        assert_eq!(s.walls.regions[0].opes.windows.len(), 1, "opes untouched");
+    }
+
+    #[test]
+    fn full_height_window_takes_typed_width_and_redistributes() {
+        // "Full height" ticked, width typed: sill 0 + face height, but the
+        // width obeys the NORMAL margin/redistribution regime — it coexists
+        // with an existing window (no empty-wall rule for full-height).
+        let (mut s, wid) = storey_with_wall(4.0);
+        add_wall_window(&mut s, wid, 1.8, 1.0, 1.2, 1.0, ItemId::default()).unwrap();
+        let id = add_full_height_window(&mut s, wid, 2.2, 1.0, ItemId::default())
+            .expect("fits beside the existing window");
+        let w = s.windows.iter().find(|w| w.id == id).unwrap();
+        assert!((w.height_m - 2.4).abs() < 1e-3, "height = face height");
+        match &w.placement {
+            Some(OpeningPlacement::Wall { sill_m, .. }) => {
+                assert!(sill_m.abs() < 1e-3, "sill at the floor");
+            }
+            _ => panic!("expected a wall placement"),
+        }
+        let sp = spans(&s);
+        assert_eq!(sp.len(), 2);
+        assert!(sp[0].0 >= END_MARGIN_M - 1e-4, "left margin: {sp:?}");
+        assert!(sp[1].1 <= 4.0 - END_MARGIN_M + 1e-4, "right margin: {sp:?}");
+        assert!(sp[1].0 - sp[0].1 >= -1e-4, "no overlap: {sp:?}");
+    }
+
+    #[test]
+    fn full_height_window_too_wide_fails_atomically() {
+        let (mut s, wid) = storey_with_wall(4.0);
+        add_wall_window(&mut s, wid, 1.8, 2.0, 1.2, 1.0, ItemId::default()).unwrap();
+        let before = spans(&s);
+        // 2.0 + 2.5 wide + margins can never fit 4.0 m; a full-height window
+        // can't use the vertical-stack fallback either (it spans the face).
+        let err = add_full_height_window(&mut s, wid, 2.2, 2.5, ItemId::default()).unwrap_err();
+        assert!(matches!(err, OpeningError::WallTooShort { .. }));
+        assert_eq!(s.windows.len(), 1, "rolled back");
+        assert_eq!(spans(&s), before, "existing window untouched");
+    }
+
+    #[test]
+    fn full_height_door_spans_floor_to_wall_top() {
+        let (mut s, wid) = storey_with_wall(4.0);
+        let id = add_full_height_door(&mut s, wid, 1.5, 0.9, DoorKind::Solid, "Door".into())
+            .expect("door places");
+        let d = s.doors.iter().find(|d| d.id == id).unwrap();
+        assert!((d.width_m - 0.9).abs() < 1e-3, "width as typed");
+        assert!((d.height_m - 2.4).abs() < 1e-3, "height = face height");
+        match &d.placement {
+            Some(OpeningPlacement::Wall { sill_m, .. }) => {
+                assert!(sill_m.abs() < 1e-3, "sill at the floor");
+            }
+            _ => panic!("expected a wall placement"),
+        }
+    }
+
+    #[test]
+    fn both_full_flags_equal_the_whole_face() {
+        // Full width + Full height = the existing "window wall": the caller
+        // resolves the face height and the result covers the entire face.
+        let (mut s, wid) = storey_with_wall(5.0);
+        let h = wall_face_height(&s, wid, 2.5).expect("wall exists");
+        assert!((h - 2.4).abs() < 1e-3, "face height = wall top − base");
+        let id = add_full_wall_window(&mut s, wid, h, ItemId::default()).unwrap();
+        let w = s.windows.iter().find(|w| w.id == id).unwrap();
+        assert!((w.width_m - 5.0).abs() < 1e-3, "width = wall length");
+        assert!((w.height_m - 2.4).abs() < 1e-3, "height = face height");
+        match &w.placement {
+            Some(OpeningPlacement::Wall {
+                along_m, sill_m, ..
+            }) => {
+                assert!((along_m - 2.5).abs() < 1e-3, "centred");
+                assert!(sill_m.abs() < 1e-3, "sill at the floor");
+            }
+            _ => panic!("expected a wall placement"),
+        }
+    }
+
+    #[test]
+    fn resize_full_width_takes_the_wall_and_recentres() {
+        // The edit box's "Full width": an existing lone window grows to span
+        // the whole wall, re-centred, at the given height.
+        let (mut s, wid) = storey_with_wall(3.0);
+        let id = add_wall_window(&mut s, wid, 0.8, 1.0, 1.2, 1.0, ItemId::default()).unwrap();
+        resize_opening_full_width(&mut s, OpeningRef::Window(id), 1.5).unwrap();
+        let w = s.windows.iter().find(|w| w.id == id).unwrap();
+        assert!((w.width_m - 3.0).abs() < 1e-3, "width = wall length");
+        assert!((w.height_m - 1.5).abs() < 1e-3, "height as given");
+        match &w.placement {
+            Some(OpeningPlacement::Wall {
+                along_m, sill_m, ..
+            }) => {
+                assert!((along_m - 1.5).abs() < 1e-3, "re-centred");
+                // 2.4 face − 1.5 height leaves 0.9 headroom: the 1 m sill is
+                // clamped down to keep the window under the wall top.
+                assert!((sill_m - 0.9).abs() < 1e-3, "sill clamped under the top");
+            }
+            _ => panic!("expected a wall placement"),
+        }
+    }
+
+    #[test]
+    fn resize_full_width_refused_beside_another_opening() {
+        let (mut s, wid) = storey_with_wall(4.0);
+        let id = add_wall_window(&mut s, wid, 1.0, 0.8, 1.2, 1.0, ItemId::default()).unwrap();
+        add_wall_window(&mut s, wid, 3.0, 0.8, 1.2, 1.0, ItemId::default()).unwrap();
+        let before = spans(&s);
+        let err = resize_opening_full_width(&mut s, OpeningRef::Window(id), 1.5).unwrap_err();
+        assert!(matches!(err, OpeningError::WallTooShort { .. }));
+        assert_eq!(spans(&s), before, "nothing moved or resized");
+    }
+
+    #[test]
+    fn full_wall_door_rejected_on_occupied_wall() {
+        let (mut s, wid) = storey_with_wall(3.0);
+        add_wall_window(&mut s, wid, 1.0, 0.8, 1.0, 1.0, ItemId::default()).unwrap();
+        let err =
+            add_full_wall_door(&mut s, wid, 2.0, DoorKind::Solid, "Door".into(), 0.0).unwrap_err();
+        assert!(matches!(err, OpeningError::WallTooShort { .. }));
+        assert!(s.doors.is_empty(), "no door added");
+        assert!(s.walls.regions[0].opes.doors.is_empty(), "opes untouched");
+    }
+
+    #[test]
     fn roof_window_hit_test_and_move() {
         // A flat 6×6 ceiling: the hit-test is region-aware (it builds the
         // footprint from the host plane), so a rooflight needs a region under it.
@@ -2145,6 +2629,114 @@ mod tests {
         assert!(matches!(err, OpeningError::WallTooShort { .. }));
         assert!(s.windows.is_empty(), "rolled back — no opening added");
         assert!(s.walls.regions[0].opes.windows.is_empty(), "opes scrubbed");
+    }
+
+    #[test]
+    fn resize_opening_within_bounds_updates_size_in_place() {
+        let (mut s, wid) = storey_with_wall(4.0);
+        let id = add_wall_window(&mut s, wid, 2.0, 1.0, 1.2, 1.0, ItemId::default()).unwrap();
+        resize_opening(&mut s, OpeningRef::Window(id), 1.5, 1.4).unwrap();
+        let w = s.windows.iter().find(|w| w.id == id).unwrap();
+        assert_eq!((w.width_m, w.height_m), (1.5, 1.4));
+        match &w.placement {
+            Some(OpeningPlacement::Wall {
+                along_m, sill_m, ..
+            }) => {
+                assert!((along_m - 2.0).abs() < 1e-3, "fits in place — no nudge");
+                assert!((sill_m - 1.0).abs() < 1e-3, "sill kept ({sill_m})");
+            }
+            _ => panic!("expected a wall placement"),
+        }
+    }
+
+    #[test]
+    fn resize_that_cannot_fit_fails_atomically() {
+        let (mut s, wid) = storey_with_wall(3.0);
+        let t = ItemId::default();
+        let a = add_wall_window(&mut s, wid, 0.8, 1.0, 1.0, 1.0, t).unwrap();
+        add_wall_window(&mut s, wid, 2.2, 1.0, 1.0, 1.0, t).unwrap();
+        let before = spans(&s);
+        // Growing `a` to 2.2 m needs 2.2 + 1.0 + end margins > 3.0 even with the
+        // gap compressed to touching → refused, nothing changed.
+        let err = resize_opening(&mut s, OpeningRef::Window(a), 2.2, 1.0).unwrap_err();
+        assert!(matches!(err, OpeningError::WallTooShort { .. }));
+        let wa = s.windows.iter().find(|w| w.id == a).unwrap();
+        assert_eq!((wa.width_m, wa.height_m), (1.0, 1.0), "size restored");
+        match &wa.placement {
+            Some(OpeningPlacement::Wall { sill_m, .. }) => {
+                assert!((sill_m - 1.0).abs() < 1e-6, "sill restored");
+            }
+            _ => panic!("expected a wall placement"),
+        }
+        assert_eq!(spans(&s), before, "positions untouched");
+    }
+
+    #[test]
+    fn resize_pushes_a_neighbour_that_is_in_the_way() {
+        let (mut s, wid) = storey_with_wall(4.0);
+        let t = ItemId::default();
+        let a = add_wall_window(&mut s, wid, 1.0, 1.0, 1.0, 1.0, t).unwrap();
+        add_wall_window(&mut s, wid, 2.2, 1.0, 1.0, 1.0, t).unwrap();
+        // Growing `a` to 1.8 m still fits the wall, but only if the neighbour
+        // gives way — the resized one is pinned, the other flows.
+        resize_opening(&mut s, OpeningRef::Window(a), 1.8, 1.0).unwrap();
+        let wa = s.windows.iter().find(|w| w.id == a).unwrap();
+        assert_eq!((wa.width_m, wa.height_m), (1.8, 1.0));
+        let sp = spans(&s);
+        assert!(
+            sp[1].0 - sp[0].1 >= -1e-4,
+            "no overlap after resize: {sp:?}"
+        );
+        assert!(sp[0].0 >= END_MARGIN_M - 1e-4, "left margin: {sp:?}");
+        assert!(sp[1].1 <= 4.0 - END_MARGIN_M + 1e-4, "right margin: {sp:?}");
+    }
+
+    #[test]
+    fn full_wall_window_resized_smaller_reenters_the_margin_regime() {
+        let (mut s, wid) = storey_with_wall(4.0);
+        let id = add_full_wall_window(&mut s, wid, 2.4, ItemId::default()).unwrap();
+        resize_opening(&mut s, OpeningRef::Window(id), 2.0, 2.0).unwrap();
+        let w = s.windows.iter().find(|w| w.id == id).unwrap();
+        assert_eq!((w.width_m, w.height_m), (2.0, 2.0));
+        let sp = spans(&s);
+        assert!(
+            sp[0].0 >= END_MARGIN_M - 1e-4 && sp[0].1 <= 4.0 - END_MARGIN_M + 1e-4,
+            "margins honoured: {sp:?}"
+        );
+    }
+
+    #[test]
+    fn resize_taller_lowers_the_sill_under_the_roofline() {
+        let (mut s, wid) = storey_with_wall(4.0); // flat top at 2.4
+        let id = add_wall_window(&mut s, wid, 2.0, 1.0, 1.0, 1.0, ItemId::default()).unwrap();
+        // sill 1.0 + new height 2.0 would poke past 2.4 → sill clamps to 0.4.
+        resize_opening(&mut s, OpeningRef::Window(id), 1.0, 2.0).unwrap();
+        match &s.windows[0].placement {
+            Some(OpeningPlacement::Wall { sill_m, .. }) => {
+                assert!((sill_m - 0.4).abs() < 1e-3, "sill lowered, got {sill_m}");
+            }
+            _ => panic!("expected a wall placement"),
+        }
+    }
+
+    #[test]
+    fn set_window_attributes_round_trips() {
+        let (mut s, wid) = storey_with_wall(4.0);
+        let id = add_wall_window(&mut s, wid, 2.0, 1.0, 1.2, 1.0, ItemId::default()).unwrap();
+        let new_type = ItemId::default();
+        set_window_attributes(&mut s, id, new_type, Overshading::Heavy);
+        let w = s.windows.iter().find(|w| w.id == id).unwrap();
+        assert_eq!(w.window_type_id, new_type);
+        assert_eq!(w.overshading, Overshading::Heavy);
+        assert_eq!((w.width_m, w.height_m), (1.0, 1.2), "geometry untouched");
+        match &w.placement {
+            Some(OpeningPlacement::Wall {
+                along_m, sill_m, ..
+            }) => {
+                assert!((along_m - 2.0).abs() < 1e-6 && (sill_m - 1.0).abs() < 1e-6);
+            }
+            _ => panic!("expected a wall placement"),
+        }
     }
 
     /// When the row is horizontally FULL, a newly-placed window STACKS into the

@@ -369,6 +369,11 @@ fn makeup_label(m: &ConstructionMakeup) -> String {
         ConstructionMakeup::Default => "Default".to_string(),
         ConstructionMakeup::Tbd => "Not set".to_string(),
         ConstructionMakeup::Unknown => "Unknown".to_string(),
+        ConstructionMakeup::DefaultPlus {
+            extra_insulation_mm,
+        } => {
+            format!("Default + {extra_insulation_mm}mm insulation")
+        }
         ConstructionMakeup::Layers(layers) => format!("Custom ({} layers)", layers.len()),
     }
 }

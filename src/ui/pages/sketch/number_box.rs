@@ -180,9 +180,26 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             *view.transom_semicircular = false;
             *view.sidelight_left_present = true;
             *view.sidelight_right_present = true;
+            // …and with the Full width / Full height toggles off (each pick —
+            // or edit — starts from typed measurements).
+            *view.opening_full_width = false;
+            *view.opening_full_height = false;
             // Photos are per-window, so a fresh placement starts with none (unlike
             // the window type / overshading, which persist across placements).
             view.pending_window_photos.clear();
+            // Edit mode ("Edit window"): seed the box from the window being
+            // edited — its size into the W/H fields, its shared type selected in
+            // the picker, its overshading. Once, per prompt (seq).
+            if let Some(edit) = prompt.edit {
+                let fmt = |v: f32| {
+                    let s = format!("{v:.3}");
+                    s.trim_end_matches('0').trim_end_matches('.').to_string()
+                };
+                *view.opening_width_input = fmt(edit.width_m);
+                *view.opening_height_input = fmt(edit.height_m);
+                *view.wt_existing_id = Some(edit.window_type_id);
+                *view.overshading = edit.overshading;
+            }
         }
         // The toggles are captured into the Place event by value (the checkboxes
         // below mutate them for the NEXT frame; a Place click is always a separate
@@ -214,6 +231,25 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             let (w, h, shape) = window_shape_from_inputs(kind, &dims[..n]);
             format!("area ≈ {:.2} m²", window_shape_area(shape, w, h))
         });
+        // Full width / Full height (plain Window or Door on a wall — the prompt
+        // carries the resolved spans): ticking a box disables its field, which
+        // then displays the wall span the opening will take. The flags ride the
+        // Place / Apply events by value (settled previous-frame values, like
+        // the other toggles); the controller re-resolves the spans against the
+        // LIVE wall when it places.
+        let full_span = prompt.full_span;
+        let full_width = full_span.is_some() && *view.opening_full_width;
+        let full_height = full_span.is_some() && *view.opening_full_height;
+        let fmt_span = |v: f32| {
+            let s = format!("{v:.3}");
+            s.trim_end_matches('0').trim_end_matches('.').to_string()
+        };
+        let mut full_width_display = full_span
+            .map(|i| fmt_span(i.wall_len_m))
+            .unwrap_or_default();
+        let mut full_height_display = full_span
+            .map(|i| fmt_span(i.face_height_m))
+            .unwrap_or_default();
         // The window-type choice settled on a previous frame (the picker below
         // mutates it for the NEXT frame; a Place click reads the settled value),
         // captured by value into the action events.
@@ -224,63 +260,88 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         let photos = view.pending_window_photos.clone();
         let place_window_type = window_type.clone();
         let place_photos = photos.clone();
-        let mut actions = vec![Action::new_multi("Place", "Place this opening", move |vs| {
-            let g = |i: usize| vs.get(i).copied().flatten();
-            // Fields 0/1 are the door leaf's W/H — except in Overall mode, where
-            // the whole-doorset W/H come first and the door leaf shifts to 2/3.
-            let (width_m, height_m) = match ds_mode {
-                Some(DoorSidelightsMode::Overall) => (g(2).unwrap_or(0.0), g(3).unwrap_or(0.0)),
-                _ => (g(0).unwrap_or(0.0), g(1).unwrap_or(0.0)),
-            };
-            let door_sidelights = match ds_mode {
-                None => None,
-                // Overall: [overall W, overall H, door W, door H, sill]. The two
-                // present-checkboxes pick which side(s) the leftover width fills;
-                // neither ticked falls back to an even split.
-                Some(DoorSidelightsMode::Overall) => {
-                    let layout = match (left_present, right_present) {
-                        (true, false) => SidelightLayout::LeftOnly,
-                        (false, true) => SidelightLayout::RightOnly,
-                        _ => SidelightLayout::Both,
-                    };
-                    Some(DoorSidelightsPlacement::Overall {
-                        overall_w: g(0).unwrap_or(0.0),
-                        overall_h: g(1).unwrap_or(0.0),
-                        layout,
-                        sill: if left_has_sill { g(4) } else { None },
+        // Edit mode: the primary action APPLIES the resize/retype to the
+        // existing window instead of placing a new one. Same fields, same
+        // window-type picker + gating — only the event differs.
+        let primary_action = if prompt.edit.is_some() {
+            let apply_window_type = window_type.clone();
+            let apply_photos = photos.clone();
+            Action::new_multi(
+                "Apply",
+                "Apply the new size / type to this window",
+                move |vs| {
+                    let g = |i: usize| vs.get(i).copied().flatten();
+                    SketchEvent::ApplyOpeningEdit {
+                        width_m: g(0).unwrap_or(0.0),
+                        height_m: g(1).unwrap_or(0.0),
+                        full_width,
+                        full_height,
+                        window_type: apply_window_type.clone(),
+                        overshading,
+                        photos: apply_photos.clone(),
+                    }
+                },
+            )
+        } else {
+            Action::new_multi("Place", "Place this opening", move |vs| {
+                let g = |i: usize| vs.get(i).copied().flatten();
+                // Fields 0/1 are the door leaf's W/H — except in Overall mode, where
+                // the whole-doorset W/H come first and the door leaf shifts to 2/3.
+                let (width_m, height_m) = match ds_mode {
+                    Some(DoorSidelightsMode::Overall) => (g(2).unwrap_or(0.0), g(3).unwrap_or(0.0)),
+                    _ => (g(0).unwrap_or(0.0), g(1).unwrap_or(0.0)),
+                };
+                let door_sidelights = match ds_mode {
+                    None => None,
+                    // Overall: [overall W, overall H, door W, door H, sill]. The two
+                    // present-checkboxes pick which side(s) the leftover width fills;
+                    // neither ticked falls back to an even split.
+                    Some(DoorSidelightsMode::Overall) => {
+                        let layout = match (left_present, right_present) {
+                            (true, false) => SidelightLayout::LeftOnly,
+                            (false, true) => SidelightLayout::RightOnly,
+                            _ => SidelightLayout::Both,
+                        };
+                        Some(DoorSidelightsPlacement::Overall {
+                            overall_w: g(0).unwrap_or(0.0),
+                            overall_h: g(1).unwrap_or(0.0),
+                            layout,
+                            sill: if left_has_sill { g(4) } else { None },
+                            transom_semicircular: semicircular,
+                        })
+                    }
+                    // Detailed: [door W, door H, left W, left sill, right W, right
+                    // sill, transom H]. A sidelight sill only counts when ticked.
+                    Some(DoorSidelightsMode::Detailed) => Some(DoorSidelightsPlacement::Detailed {
+                        left: g(2),
+                        left_sill: if left_has_sill { g(3) } else { None },
+                        right: g(4),
+                        right_sill: if right_has_sill { g(5) } else { None },
+                        transom: g(6),
                         transom_semicircular: semicircular,
-                    })
+                    }),
+                };
+                // A complex window carries its shape kind + the ordered dim inputs;
+                // the controller derives the bounding box + shape from them.
+                let complex_window = cx_kind.map(|kind| {
+                    let n = kind.field_labels().len();
+                    let dims = (0..n).map(|i| g(i).unwrap_or(0.0)).collect();
+                    ComplexWindowPlacement { kind, dims }
+                });
+                SketchEvent::PlaceOpening {
+                    width_m,
+                    height_m,
+                    full_width,
+                    full_height,
+                    door_sidelights,
+                    complex_window,
+                    window_type: place_window_type.clone(),
+                    overshading,
+                    photos: place_photos.clone(),
                 }
-                // Detailed: [door W, door H, left W, left sill, right W, right
-                // sill, transom H]. A sidelight sill only counts when ticked.
-                Some(DoorSidelightsMode::Detailed) => Some(DoorSidelightsPlacement::Detailed {
-                    left: g(2),
-                    left_sill: if left_has_sill { g(3) } else { None },
-                    right: g(4),
-                    right_sill: if right_has_sill { g(5) } else { None },
-                    transom: g(6),
-                    transom_semicircular: semicircular,
-                }),
-            };
-            // A complex window carries its shape kind + the ordered dim inputs;
-            // the controller derives the bounding box + shape from them.
-            let complex_window = cx_kind.map(|kind| {
-                let n = kind.field_labels().len();
-                let dims = (0..n).map(|i| g(i).unwrap_or(0.0)).collect();
-                ComplexWindowPlacement { kind, dims }
-            });
-            SketchEvent::PlaceOpening {
-                width_m,
-                height_m,
-                door_sidelights,
-                complex_window,
-                window_type: place_window_type.clone(),
-                overshading,
-                photos: place_photos.clone(),
-            }
-        })
-        .primary()
-        .gated()];
+            })
+        };
+        let mut actions = vec![primary_action.primary().gated()];
         if prompt.offer_full_surface {
             let fill_window_type = window_type.clone();
             let fill_photos = photos.clone();
@@ -310,22 +371,42 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         // fields). Width + Height are always present; the door+sidelights extras
         // (left W, left sill, right W, right sill, transom H) only when listed.
         let f = &prompt.fields;
+        // Width/Height: when a Full toggle is on, the field is disabled and
+        // shows the resolved span (a per-frame display string — the typed
+        // buffer is kept, so unticking restores it). The toggle itself is the
+        // inline checkbox beside the field, offered only with a `full_span`.
         let mut box_fields = vec![
             BoxField {
                 label: &f[0].label,
                 hint: f[0].hint,
-                buf: &mut *view.opening_width_input,
+                buf: if full_width {
+                    &mut full_width_display
+                } else {
+                    &mut *view.opening_width_input
+                },
                 required: f[0].required,
-                enabled: true,
+                enabled: !full_width,
                 measurable: true,
+                check: full_span.is_some().then(|| BoxCheck {
+                    label: "Full width",
+                    value: &mut *view.opening_full_width,
+                }),
             },
             BoxField {
                 label: &f[1].label,
                 hint: f[1].hint,
-                buf: &mut *view.opening_height_input,
+                buf: if full_height {
+                    &mut full_height_display
+                } else {
+                    &mut *view.opening_height_input
+                },
                 required: f[1].required,
-                enabled: true,
+                enabled: !full_height,
                 measurable: true,
+                check: full_span.is_some().then(|| BoxCheck {
+                    label: "Full height",
+                    value: &mut *view.opening_full_height,
+                }),
             },
         ];
         // The door+sidelights extra fields, bound by mode. Fields 0/1 (above) are
@@ -340,6 +421,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     required: true,
                     enabled: true,
                     measurable: true,
+                    check: None,
                 });
                 box_fields.push(BoxField {
                     label: &f[3].label,
@@ -348,6 +430,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     required: true,
                     enabled: true,
                     measurable: true,
+                    check: None,
                 });
                 // One sill for the whole assembly — active only when ticked.
                 // Reuses the left-sill buffer + the (repurposed) "has a sill" flag.
@@ -358,6 +441,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     required: false,
                     enabled: left_has_sill,
                     measurable: true,
+                    check: None,
                 });
             }
             Some(DoorSidelightsMode::Detailed) => {
@@ -369,6 +453,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     required: false,
                     enabled: true,
                     measurable: true,
+                    check: None,
                 });
                 // Left sill — only active when its box is ticked.
                 box_fields.push(BoxField {
@@ -378,6 +463,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     required: false,
                     enabled: left_has_sill,
                     measurable: true,
+                    check: None,
                 });
                 box_fields.push(BoxField {
                     label: &f[4].label,
@@ -386,6 +472,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     required: false,
                     enabled: true,
                     measurable: true,
+                    check: None,
                 });
                 // Right sill — only active when its box is ticked.
                 box_fields.push(BoxField {
@@ -395,6 +482,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     required: false,
                     enabled: right_has_sill,
                     measurable: true,
+                    check: None,
                 });
                 box_fields.push(BoxField {
                     label: &f[6].label,
@@ -403,6 +491,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     required: false,
                     enabled: true,
                     measurable: true,
+                    check: None,
                 });
             }
             // Not door+sidelights. A complex window binds its 3rd/4th dims to the
@@ -417,6 +506,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                         required: f[2].required,
                         enabled: true,
                         measurable: true,
+                        check: None,
                     });
                 }
                 if f.len() > 3 {
@@ -427,6 +517,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                         required: f[3].required,
                         enabled: true,
                         measurable: true,
+                        check: None,
                     });
                 }
             }
@@ -442,6 +533,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 required: false,
                 enabled: true,
                 measurable: false,
+                check: None,
             });
             box_fields.push(BoxField {
                 label: "gap",
@@ -450,6 +542,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 required: false,
                 enabled: true,
                 measurable: false,
+                check: None,
             });
         }
         let mut checks = Vec::new();
@@ -536,6 +629,13 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             .complex_window
             .is_some()
             .then_some(&mut view.cat_state.complex_window_kind);
+        // Edit mode pre-fills the W/H with the window's current size — arm the
+        // pristine guard (keyed per prompt seq) so the first key REPLACES the
+        // prefill. Placements stay user-entered (no suggestion, never pristine).
+        let edit_token = prompt
+            .edit
+            .is_some()
+            .then(|| format!("edit-window-{}", prompt.seq));
         show_box_multi(
             ctx,
             rect,
@@ -552,9 +652,9 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             view.laser,
             &mut picker,
             extra_valid,
-            // The opening box's fields are user-entered W/H, never a pre-filled
-            // suggestion.
-            None,
+            // Placement fields are user-entered W/H (no suggestion); the edit
+            // box pre-fills them, so it passes its pristine token.
+            edit_token.as_deref(),
             on_event,
         );
         return;
@@ -1213,6 +1313,10 @@ struct BoxField<'a> {
     /// the laser auto-advance, and always shows the keypad (never the laser
     /// panel) when focused — so there's only ever one keypad, the box's own.
     measurable: bool,
+    /// An inline checkbox drawn RIGHT OF the field (the openings "Full width" /
+    /// "Full height" toggles). `None` for every other field. The caller reacts
+    /// to the toggle on the next frame (disable the field, swap its display).
+    check: Option<BoxCheck<'a>>,
 }
 
 /// A boolean toggle shown under the fields (e.g. the door+sidelights
@@ -1432,6 +1536,7 @@ fn show_box<F: FnMut(UiEvent)>(
         required: true,
         enabled: true,
         measurable: true,
+        check: None,
     }];
     show_box_multi(
         ctx,
@@ -1621,6 +1726,10 @@ fn show_box_multi<F: FnMut(UiEvent)>(
                     }
                     if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                         enter = true;
+                    }
+                    // The field's inline toggle (e.g. "Full width"), beside it.
+                    if let Some(c) = f.check.as_mut() {
+                        ui.checkbox(c.value, c.label);
                     }
                     responses.push(resp);
                 });

@@ -1348,6 +1348,10 @@ fn roof_toolbar<F: FnMut(UiEvent)>(ui: &mut egui::Ui, view: &mut SketchView<'_>,
         if let Some(err) = view.roof_error {
             ui.colored_label(egui::Color32::from_rgb(200, 60, 60), err);
         }
+        // Informational, not an error: the app picked the slope side itself.
+        if let Some(notice) = view.roof_ridge_notice {
+            ui.colored_label(egui::Color32::from_rgb(90, 140, 220), notice);
+        }
     });
 }
 

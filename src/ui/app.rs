@@ -202,6 +202,11 @@ pub struct SketchState {
     /// door+sidelights fields). The box clears the active one on Apply.
     pub opening_width_input: String,
     pub opening_height_input: String,
+    /// The placement/edit box's "Full width" / "Full height" checkboxes: the
+    /// opening spans the whole wall length / face height, the matching field
+    /// disabled showing the resolved span. Reset when a new placement starts.
+    pub opening_full_width: bool,
+    pub opening_full_height: bool,
     /// Door+sidelights composer inputs (sidelight widths + per-side sills +
     /// transom height + the semicircular-transom toggle). A sidelight's sill
     /// field is only active when its `*_has_sill` box is ticked. (Detailed mode.)
@@ -250,8 +255,8 @@ pub struct SketchState {
     /// window is placed.
     pub pending_window_photos: Vec<(std::path::PathBuf, crate::ui::widgets::PhotoQuality)>,
     /// Phase-3 (Objects) entry-panel state: the chosen category (to show its
-    /// subtypes), the count / note / "Other"-name buffers, and the photos picked
-    /// for the object being added. Cleared after each Add.
+    /// subtypes) and the count / note / "Other"-name buffers. Cleared after
+    /// each Add and reset on a category switch.
     pub object_selected_category: Option<ber_model::ber::objects::ObjectCategory>,
     /// The concrete kind chosen (a subtype picked, or a singleton category).
     /// `None` while a category is selected but its subtype hasn't been picked yet.
@@ -259,7 +264,12 @@ pub struct SketchState {
     pub object_count_input: String,
     pub object_note_input: String,
     pub object_other_name: String,
-    pub object_pending_photos: Vec<(std::path::PathBuf, crate::ui::widgets::PhotoQuality)>,
+    /// Photos captured for the object being added, buffered PER KIND: OK for a
+    /// kind commits (and clears) only that kind's buffer; switching kind parks
+    /// the previous kind's photos — never dropped, never leaked into another
+    /// kind's commit. Parked photos survive room close / phase exit here until
+    /// their kind is OK'd.
+    pub object_pending_photos: crate::ui::pages::sketch::PendingObjectPhotos,
     /// The object kind we've already AUTO-opened the camera for this selection
     /// (a mandatory-photo kind opens the camera once). Latches the auto-open to
     /// one shot per selected kind so a cancel doesn't re-launch it; reset when
@@ -390,10 +400,23 @@ impl BerApp {
         let mut do_save = false;
         let mut do_cancel = false;
 
+        // While the native keyboard is up (the note field below raises it),
+        // shrink the constrain rect by the keyboard inset so the centred
+        // window gets pushed above it — and settles back when it hides. Same
+        // pattern as the sketch number box; never below 40% of the screen so
+        // an oversized keyboard can't squash the constraint into nothing.
+        // On desktop the inset is 0, so this is the full screen as before.
+        let constrain = {
+            let full = ctx.content_rect();
+            let inset = crate::ui::widgets::ime_inset_bottom_points(ctx);
+            let bottom = (full.bottom() - inset).max(full.top() + full.height() * 0.4);
+            egui::Rect::from_min_max(full.min, egui::pos2(full.max.x, bottom))
+        };
         egui::Window::new("Report a bug")
             .id(egui::Id::new("bug_report_modal"))
             .order(egui::Order::Foreground)
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .constrain_to(constrain)
             .collapsible(false)
             .resizable(false)
             .show(ctx, |ui| {
@@ -1093,6 +1116,11 @@ impl eframe::App for BerApp {
                                 .borrow()
                                 .copy_height_error()
                                 .map(str::to_owned);
+                            let roof_ridge_notice = self
+                                .app_controller
+                                .borrow()
+                                .roof_ridge_notice()
+                                .map(str::to_owned);
                             let new_storey_error = self.sketch_state.new_storey_error.clone();
                             let floor_thickness_error =
                                 self.sketch_state.floor_thickness_error.clone();
@@ -1520,6 +1548,7 @@ impl eframe::App for BerApp {
                                     .sketch_state
                                     .ceiling_ridge_length_input,
                                 roof_error: roof_error.as_deref(),
+                                roof_ridge_notice: roof_ridge_notice.as_deref(),
                                 ceiling_height_error: ceiling_height_error.as_deref(),
                                 default_ceiling_height,
                                 ceiling_heights_set,
@@ -1554,6 +1583,8 @@ impl eframe::App for BerApp {
                                 opening_dim_error: opening_dim_error.as_deref(),
                                 opening_width_input: &mut self.sketch_state.opening_width_input,
                                 opening_height_input: &mut self.sketch_state.opening_height_input,
+                                opening_full_width: &mut self.sketch_state.opening_full_width,
+                                opening_full_height: &mut self.sketch_state.opening_full_height,
                                 sidelight_left_input: &mut self.sketch_state.sidelight_left_input,
                                 sidelight_left_sill_input: &mut self
                                     .sketch_state
@@ -2253,6 +2284,8 @@ impl eframe::App for BerApp {
                                     SketchEvent::PlaceOpening {
                                         width_m,
                                         height_m,
+                                        full_width,
+                                        full_height,
                                         door_sidelights,
                                         complex_window,
                                         window_type,
@@ -2262,6 +2295,8 @@ impl eframe::App for BerApp {
                                         let _ = controller.borrow_mut().place_opening(
                                             width_m,
                                             height_m,
+                                            full_width,
+                                            full_height,
                                             door_sidelights,
                                             complex_window,
                                             window_type,
@@ -2295,6 +2330,31 @@ impl eframe::App for BerApp {
                                     }
                                     SketchEvent::ElevationPointerUp => {
                                         controller.borrow_mut().elevation_pointer_up();
+                                    }
+                                    SketchEvent::EditSelectedOpening => {
+                                        controller.borrow_mut().start_edit_selected_window();
+                                    }
+                                    // Sets its own inline error (read back via
+                                    // `opening_dim_error()`) — Result dropped like
+                                    // the placement events above.
+                                    SketchEvent::ApplyOpeningEdit {
+                                        width_m,
+                                        height_m,
+                                        full_width,
+                                        full_height,
+                                        window_type,
+                                        overshading,
+                                        photos,
+                                    } => {
+                                        let _ = controller.borrow_mut().apply_opening_edit(
+                                            width_m,
+                                            height_m,
+                                            full_width,
+                                            full_height,
+                                            window_type,
+                                            overshading,
+                                            photos,
+                                        );
                                     }
                                     SketchEvent::OpeningsPointerDrag { world_x, world_y } => {
                                         controller

@@ -64,6 +64,11 @@ pub struct ObjectReviewView {
     pub absent_prompt: Option<ber_model::ber::objects::ObjectCategory>,
     /// How many empty categories still await confirmation (incl. the current one).
     pub absent_remaining: usize,
+    /// Categories the assessor flagged as PRESENT this review ("No — there is
+    /// one") that still have zero recorded objects. While non-empty, the
+    /// "All reviewed & OK" confirm is blocked — the flagged item must be added
+    /// first (see [`AppController::unresolved_present_categories`]).
+    pub unresolved_present: Vec<ber_model::ber::objects::ObjectCategory>,
 }
 
 impl AppController {
@@ -463,8 +468,25 @@ impl AppController {
 
     /// Skip an empty category's absence prompt for THIS review ("No X?" → No,
     /// there is one — I'll add it). Session-only; re-offered on the next review.
+    /// Until an object of the category IS added, the flag blocks the review's
+    /// confirm (see [`unresolved_present_categories`](Self::unresolved_present_categories)).
     pub fn skip_object_absent(&mut self, cat: ber_model::ber::objects::ObjectCategory) {
         self.object_review_skipped.insert(cat);
+    }
+
+    /// Categories the assessor asserted are PRESENT during this review ("No —
+    /// there is one") that still have zero recorded objects house-wide. The
+    /// assertion is a promise to add the item: while any remain, the review
+    /// cannot be confirmed (and the Final phase stays gated).
+    pub fn unresolved_present_categories(&self) -> Vec<ObjectCategory> {
+        let Some(record) = self.current_record.as_ref() else {
+            return Vec::new();
+        };
+        let present = recorded_categories(&record.data);
+        ObjectCategory::ALL
+            .into_iter()
+            .filter(|c| self.object_review_skipped.contains(c) && !present.contains(c))
+            .collect()
     }
 
     /// Whether the Objects review has been confirmed ("all reviewed & OK").
@@ -475,8 +497,14 @@ impl AppController {
     }
 
     /// Confirm the Objects review (counts + absences all checked): record it on
-    /// the dwelling and close the review.
+    /// the dwelling and close the review. Refused while a category the assessor
+    /// flagged as present ("No — there is one") still has no recorded object —
+    /// the promised item must be added first (the UI disables the button too;
+    /// this is the authoritative guard).
     pub fn confirm_objects_review(&mut self) {
+        if !self.unresolved_present_categories().is_empty() {
+            return;
+        }
         if let Some(record) = self.current_record.as_mut() {
             record.data.objects_reviewed = true;
         }
@@ -510,13 +538,7 @@ impl AppController {
             .collect();
         // Absence prompts: standard categories (not "Other") with NO items, that
         // haven't been confirmed-absent on the record nor skipped this session.
-        let present: std::collections::HashSet<ObjectCategory> = data
-            .storeys
-            .iter()
-            .flat_map(|s| s.object_rooms.iter())
-            .flat_map(|r| r.objects.iter())
-            .map(|o| o.kind.category())
-            .collect();
+        let present = recorded_categories(data);
         let remaining: Vec<ObjectCategory> = ObjectCategory::ALL
             .into_iter()
             .filter(|c| {
@@ -532,8 +554,19 @@ impl AppController {
             hotspots,
             absent_prompt: remaining.first().copied(),
             absent_remaining: remaining.len(),
+            unresolved_present: self.unresolved_present_categories(),
         })
     }
+}
+
+/// The categories with at least one recorded object, house-wide.
+fn recorded_categories(data: &Ber) -> std::collections::HashSet<ObjectCategory> {
+    data.storeys
+        .iter()
+        .flat_map(|s| s.object_rooms.iter())
+        .flat_map(|r| r.objects.iter())
+        .map(|o| o.kind.category())
+        .collect()
 }
 
 /// House-wide object totals as (label, count), in first-seen order.

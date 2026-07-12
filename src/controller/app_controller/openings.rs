@@ -6,8 +6,8 @@
 use super::*;
 use ber_model::ber::common::{ItemId, Photo};
 use ber_model::ber::fenestration::{
-    window_shape_from_inputs, ComplexWindowKind, DoorKind, Frame, Glazing, Overshading, WallAnchor,
-    WindowShape,
+    window_shape_from_inputs, ComplexWindowKind, DoorKind, Frame, Glazing, OpeningPlacement,
+    Overshading, WallAnchor, WindowShape,
 };
 use ber_model::ber::openings::{
     self, DoorSidelightsSpec, OpeningError, OpeningRef, SidelightLayout,
@@ -139,9 +139,42 @@ pub struct OpeningFieldsPrompt {
     /// type) — for tools that place a window: Window / Multi-storey / Roof window
     /// and the glazed parts of Door + sidelights. A plain solid Door has none.
     pub offer_window_type: bool,
+    /// `Some` when the box should offer the "Full width" / "Full height"
+    /// checkboxes (a plain Window or Door hosted on a wall, placing or
+    /// editing): the resolved spans the ticked, disabled fields display —
+    /// the wall length and the wall face height (floor → roofline) at the
+    /// pick. `None` for the other tools (roof/multi-storey/assembly/complex).
+    pub full_span: Option<FullSpanInfo>,
     /// Bumped on every fresh host pick — the UI resets the box's field focus when
     /// it changes, so a new placement starts on the first field.
     pub seq: u64,
+    /// `Some` when this box EDITS an existing window (the elevation's "Edit…"):
+    /// carries the prefill the UI seeds its buffers from, and the primary action
+    /// becomes Apply (emitting the edit event) instead of Place. `None` for a
+    /// fresh placement.
+    pub edit: Option<OpeningEditPrefill>,
+}
+
+/// The resolved spans behind the "Full width" / "Full height" checkboxes (see
+/// [`OpeningFieldsPrompt::full_span`]): what the disabled width/height fields
+/// display while ticked, straight from the picked wall.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FullSpanInfo {
+    /// The host wall's length (m) — a Full-width opening spans all of it.
+    pub wall_len_m: f32,
+    /// The wall face height (m, floor → roofline) at the pick — a Full-height
+    /// opening spans it from sill 0.
+    pub face_height_m: f32,
+}
+
+/// Prefill for the elevation "Edit window" box: the selected window's current
+/// size, shared type, and overshading (see [`OpeningFieldsPrompt::edit`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OpeningEditPrefill {
+    pub width_m: f32,
+    pub height_m: f32,
+    pub window_type_id: ItemId,
+    pub overshading: Overshading,
 }
 
 /// What kind of opening a view rectangle is (for colour/label in plan + elevation).
@@ -259,6 +292,7 @@ impl AppController {
         self.elevation_wall = None;
         self.elevation_drag = None;
         self.elevation_selection = None;
+        self.elevation_edit = None;
         self.roof_window_sel = None;
         self.roof_window_drag = None;
         self.confirm_delete = false;
@@ -292,6 +326,7 @@ impl AppController {
         self.elevation_wall = None;
         self.elevation_drag = None;
         self.elevation_selection = None;
+        self.elevation_edit = None;
         self.roof_window_sel = None;
         self.roof_window_drag = None;
         self.confirm_delete = false;
@@ -320,6 +355,7 @@ impl AppController {
             self.elevation_wall = None;
             self.elevation_drag = None;
             self.elevation_selection = None;
+            self.elevation_edit = None;
             self.roof_window_sel = None;
             self.roof_window_drag = None;
         }
@@ -563,14 +599,12 @@ impl AppController {
             return Ok(());
         };
         let undo_snap = self.current_history_snapshot();
-        // Face height = top_z − base at the tap. `max_sill_for(along, 0)` is
-        // exactly that (public), avoiding the crate-private `top_z_at_along`.
+        // Face height = top_z − base at the tap.
         let height_m = self
             .current_record
             .as_ref()
             .and_then(|r| r.data.storeys.get(idx))
-            .and_then(|s| s.walls.regions.iter().find(|r| r.id == wall_id))
-            .map(|wall| wall.max_sill_for(along_m as f64, 0.0) as f32)
+            .and_then(|s| openings::wall_face_height(s, wall_id, along_m))
             .unwrap_or(0.0);
         let Some(record) = self.current_record.as_mut() else {
             return Ok(());
@@ -598,6 +632,11 @@ impl AppController {
         ds_mode: DoorSidelightsMode,
         cx_kind: ComplexWindowKind,
     ) -> Option<OpeningFieldsPrompt> {
+        // An in-flight window EDIT reuses the same box (exclusive with a
+        // placement: starting either clears the other).
+        if let Some(edit) = self.window_edit_prompt() {
+            return Some(edit);
+        }
         let p = self.pending_opening.as_ref()?;
         let req = |label: &str, hint| OpeningFieldSpec {
             label: label.to_string(),
@@ -653,6 +692,16 @@ impl AppController {
         let offer_full_surface = p.tool == OpeningToolKind::Window
             && matches!(p.target, PendingOpeningTarget::Wall { .. })
             && self.pending_wall_empty();
+        // Full-width / Full-height checkboxes: plain Window or Door on a wall.
+        let full_span = match (p.tool, p.target) {
+            (
+                OpeningToolKind::Window | OpeningToolKind::Door,
+                PendingOpeningTarget::Wall {
+                    wall_id, along_m, ..
+                },
+            ) => self.full_span_of(wall_id, along_m),
+            _ => None,
+        };
         let offer_window_type = matches!(
             p.tool,
             OpeningToolKind::Window
@@ -668,7 +717,69 @@ impl AppController {
             door_sidelights: is_ds.then_some(ds_mode),
             complex_window: is_cx.then_some(cx_kind),
             offer_window_type,
+            full_span,
             seq: self.placement_seq,
+            edit: None,
+        })
+    }
+
+    /// The [`FullSpanInfo`] for a host wall pick — the wall's length and its
+    /// face height at `along_m`, resolved from the current storey. `None` when
+    /// the wall is missing (stale id).
+    fn full_span_of(&self, wall_id: ItemId, along_m: f32) -> Option<FullSpanInfo> {
+        let idx = self.current_storey_idx?;
+        let s = self.current_record.as_ref()?.data.storeys.get(idx)?;
+        Some(FullSpanInfo {
+            wall_len_m: openings::wall_length(s, wall_id)?,
+            face_height_m: openings::wall_face_height(s, wall_id, along_m)?,
+        })
+    }
+
+    /// The "Edit window" variant of the placement box — active while the
+    /// elevation's "Edit…" is in flight. Same Width/Height fields + window-type
+    /// picker as placement, prefilled from the window being edited; the primary
+    /// action becomes Apply. `None` when no edit is in flight (or the window
+    /// vanished under it).
+    fn window_edit_prompt(&self) -> Option<OpeningFieldsPrompt> {
+        let wid = self.elevation_edit?;
+        let idx = self.current_storey_idx?;
+        let w = self
+            .current_record
+            .as_ref()?
+            .data
+            .storeys
+            .get(idx)?
+            .windows
+            .iter()
+            .find(|w| w.id == wid)?;
+        let req = |label: &str, hint| OpeningFieldSpec {
+            label: label.to_string(),
+            hint,
+            required: true,
+        };
+        // The checkboxes work in edit mode too: resolved from the window's own
+        // host wall, at its current along.
+        let full_span = match &w.placement {
+            Some(OpeningPlacement::Wall {
+                wall_id, along_m, ..
+            }) => self.full_span_of(*wall_id, *along_m),
+            _ => None,
+        };
+        Some(OpeningFieldsPrompt {
+            title: "Edit window".to_string(),
+            fields: vec![req("width (m)", "e.g. 1.2"), req("height (m)", "e.g. 1.4")],
+            offer_full_surface: false,
+            door_sidelights: None,
+            complex_window: None,
+            offer_window_type: true,
+            full_span,
+            seq: self.placement_seq,
+            edit: Some(OpeningEditPrefill {
+                width_m: w.width_m,
+                height_m: w.height_m,
+                window_type_id: w.window_type_id,
+                overshading: w.overshading,
+            }),
         })
     }
 
@@ -690,9 +801,10 @@ impl AppController {
             .unwrap_or(false)
     }
 
-    /// Abandon the in-flight placement.
+    /// Abandon the in-flight placement (or an in-flight window edit).
     pub fn cancel_opening_placement(&mut self) {
         self.pending_opening = None;
+        self.elevation_edit = None;
         self.opening_dim_error = None;
     }
 
@@ -704,11 +816,18 @@ impl AppController {
     /// extra measurements (sidelights + transom), and `complex_window` the chosen
     /// shape + dims — each `None` outside its own tool. On a model error the box
     /// stays open with the error shown.
+    ///
+    /// `full_width` / `full_height` are the box's checkboxes (plain Window and
+    /// Door only — the other tools never set them): Full width spans the whole
+    /// wall with NO end margins (`width_m` ignored; empty wall required), Full
+    /// height spans floor → roofline with sill 0 (`height_m` ignored).
     #[allow(clippy::too_many_arguments)]
     pub fn place_opening(
         &mut self,
         width_m: f32,
         height_m: f32,
+        full_width: bool,
+        full_height: bool,
         door_sidelights: Option<DoorSidelightsPlacement>,
         complex_window: Option<ComplexWindowPlacement>,
         window_type: WindowTypeChoice,
@@ -756,16 +875,38 @@ impl AppController {
                 PendingOpeningTarget::Wall {
                     wall_id, along_m, ..
                 },
-            ) => openings::add_wall_window(
-                storey,
-                wall_id,
-                along_m,
-                width_m,
-                height_m,
-                DEFAULT_SILL_M,
-                type_id,
-            )
-            .map(|_| ()),
+            ) => match (full_width, full_height) {
+                (false, false) => openings::add_wall_window(
+                    storey,
+                    wall_id,
+                    along_m,
+                    width_m,
+                    height_m,
+                    DEFAULT_SILL_M,
+                    type_id,
+                )
+                .map(|_| ()),
+                // Full width, typed height: the whole wall span at the default
+                // sill (dragged later, like a normal placement).
+                (true, false) => openings::add_full_width_window(
+                    storey,
+                    wall_id,
+                    height_m,
+                    DEFAULT_SILL_M,
+                    type_id,
+                )
+                .map(|_| ()),
+                // Full height, typed width: sill 0 → roofline, normal margins.
+                (false, true) => {
+                    openings::add_full_height_window(storey, wall_id, along_m, width_m, type_id)
+                        .map(|_| ())
+                }
+                // Both: the whole face — same result as "Fill whole surface".
+                (true, true) => {
+                    let h = openings::wall_face_height(storey, wall_id, along_m).unwrap_or(0.0);
+                    openings::add_full_wall_window(storey, wall_id, h, type_id).map(|_| ())
+                }
+            },
             (
                 OpeningToolKind::MultiStoreyWindow,
                 PendingOpeningTarget::Wall {
@@ -813,17 +954,53 @@ impl AppController {
                 PendingOpeningTarget::Wall {
                     wall_id, along_m, ..
                 },
-            ) => openings::add_wall_door(
-                storey,
-                wall_id,
-                along_m,
-                width_m,
-                height_m,
-                DoorKind::Solid,
-                "Door".to_string(),
-                openings::DEFAULT_DOOR_SILL_M,
-            )
-            .map(|_| ()),
+            ) => match (full_width, full_height) {
+                (false, false) => openings::add_wall_door(
+                    storey,
+                    wall_id,
+                    along_m,
+                    width_m,
+                    height_m,
+                    DoorKind::Solid,
+                    "Door".to_string(),
+                    openings::DEFAULT_DOOR_SILL_M,
+                )
+                .map(|_| ()),
+                // Full width, typed height — e.g. a porch door as wide as its
+                // (empty) wall: the end-margin path would always refuse it.
+                (true, false) => openings::add_full_wall_door(
+                    storey,
+                    wall_id,
+                    height_m,
+                    DoorKind::Solid,
+                    "Door".to_string(),
+                    openings::DEFAULT_DOOR_SILL_M,
+                )
+                .map(|_| ()),
+                // Full height, typed width: sill 0 → roofline, normal margins.
+                (false, true) => openings::add_full_height_door(
+                    storey,
+                    wall_id,
+                    along_m,
+                    width_m,
+                    DoorKind::Solid,
+                    "Door".to_string(),
+                )
+                .map(|_| ()),
+                // Both: a door filling the entire wall face.
+                (true, true) => {
+                    let h = openings::wall_face_height(storey, wall_id, along_m).unwrap_or(0.0);
+                    openings::add_full_wall_door(
+                        storey,
+                        wall_id,
+                        h,
+                        DoorKind::Solid,
+                        "Door".to_string(),
+                        0.0,
+                    )
+                    .map(|_| ())
+                }
+            },
             (
                 OpeningToolKind::DoorSidelights,
                 PendingOpeningTarget::Wall {
@@ -952,8 +1129,7 @@ impl AppController {
             .current_record
             .as_ref()
             .and_then(|r| r.data.storeys.get(idx))
-            .and_then(|s| s.walls.regions.iter().find(|r| r.id == wall_id))
-            .map(|wall| wall.max_sill_for(along_m as f64, 0.0) as f32)
+            .and_then(|s| openings::wall_face_height(s, wall_id, along_m))
             .unwrap_or(0.0);
         let Some(record) = self.current_record.as_mut() else {
             return Ok(());
@@ -1217,6 +1393,7 @@ impl AppController {
         self.elevation_wall = None;
         self.elevation_drag = None;
         self.elevation_selection = None;
+        self.elevation_edit = None;
         self.roof_window_sel = None;
         self.roof_window_drag = None;
         self.confirm_delete = false;
@@ -1274,6 +1451,9 @@ impl AppController {
         } else {
             self.elevation_selection = None;
         }
+        // Any fresh press invalidates an open "Edit window" box — its prefill
+        // belongs to the previous selection.
+        self.elevation_edit = None;
     }
 
     /// Drag the grabbed opening so its centre follows the cursor (horizontal →
@@ -1304,6 +1484,129 @@ impl AppController {
 
     pub fn elevation_pointer_up(&mut self) {
         self.elevation_drag = None;
+    }
+
+    /// "Edit…" on the elevation's selected WINDOW: open the placement box in
+    /// edit mode, prefilled from the window (size + type + overshading).
+    /// Standalone wall windows only — doors keep their placement flow, and an
+    /// assembly member (sidelight/transom) is sized by its assembly. No-op when
+    /// the selection isn't such a window.
+    pub fn start_edit_selected_window(&mut self) {
+        let Some(OpeningRef::Window(wid)) = self.elevation_selection else {
+            return;
+        };
+        let Some(idx) = self.current_storey_idx else {
+            return;
+        };
+        let editable = self
+            .current_record
+            .as_ref()
+            .and_then(|r| r.data.storeys.get(idx))
+            .and_then(|s| s.windows.iter().find(|w| w.id == wid))
+            .is_some_and(|w| w.assembly_id.is_none());
+        if !editable {
+            return;
+        }
+        self.pending_opening = None;
+        self.opening_dim_error = None;
+        self.elevation_edit = Some(wid);
+        // Fresh box: reset field focus + seed the prefill (the UI keys off seq).
+        self.placement_seq = self.placement_seq.wrapping_add(1);
+    }
+
+    /// Apply the elevation "Edit window" box: RESIZE the window under the same
+    /// feasibility rules as placement (margins + redistribution; on
+    /// `WallTooShort` the box stays open with the inline error and the model is
+    /// untouched), then RETYPE it (window type resolved with the same dedup as
+    /// placement, plus per-window overshading; photos join the type's group).
+    /// Snapshots for undo like the other opening mutations.
+    ///
+    /// `full_width` / `full_height` are the box's checkboxes (same meaning as
+    /// in [`Self::place_opening`]): Full width resizes to the whole wall span
+    /// (refused with the inline WallTooShort error when the wall carries any
+    /// other opening); Full height resizes to the face height — the roofline
+    /// clamp inside `resize_opening` then drops the sill to 0.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_opening_edit(
+        &mut self,
+        width_m: f32,
+        height_m: f32,
+        full_width: bool,
+        full_height: bool,
+        window_type: WindowTypeChoice,
+        overshading: Overshading,
+        photos: Vec<(std::path::PathBuf, PhotoQuality)>,
+    ) -> Result<(), String> {
+        let Some(wid) = self.elevation_edit else {
+            return Ok(());
+        };
+        let Some(idx) = self.current_storey_idx else {
+            return Ok(());
+        };
+        let undo_snap = self.current_history_snapshot();
+        // Store picked photos up front (needs `&self`, before the record borrow).
+        let stored_photos: Vec<Photo> = photos
+            .iter()
+            .filter_map(|(p, quality)| self.ingest_photo(p, *quality))
+            .collect();
+        let Some(record) = self.current_record.as_mut() else {
+            return Ok(());
+        };
+        let Some(storey) = record.data.storeys.get_mut(idx) else {
+            return Ok(());
+        };
+        // The checkbox spans resolve against the window's host wall; a window
+        // that isn't wall-placed ignores the flags (can't happen from the
+        // elevation box, which only edits wall windows).
+        let host = storey
+            .windows
+            .iter()
+            .find(|w| w.id == wid)
+            .and_then(|w| match &w.placement {
+                Some(OpeningPlacement::Wall {
+                    wall_id, along_m, ..
+                }) => Some((*wall_id, *along_m)),
+                _ => None,
+            });
+        let height_m = match host {
+            Some((wall_id, along_m)) if full_height => {
+                openings::wall_face_height(storey, wall_id, along_m).unwrap_or(height_m)
+            }
+            _ => height_m,
+        };
+        // Resize first — it can fail (wall too short); the attributes apply only
+        // on success, so a refused edit leaves the window fully untouched.
+        let resized = if full_width && host.is_some() {
+            openings::resize_opening_full_width(storey, OpeningRef::Window(wid), height_m)
+        } else {
+            openings::resize_opening(storey, OpeningRef::Window(wid), width_m, height_m)
+        };
+        if let Err(e) = resized {
+            discard_stored_photos(&stored_photos); // edit failed — no leak on retry
+            let msg = opening_error_msg(e);
+            self.opening_dim_error = Some(msg.clone());
+            return Err(msg);
+        }
+        // Retype: resolve the type AFTER the resize so a refused edit mints none.
+        let type_id = resolve_window_type(&mut record.data, window_type);
+        openings::set_window_attributes(&mut record.data.storeys[idx], wid, type_id, overshading);
+        // Photos belong to the GROUP (window type), shared by all its windows.
+        if !stored_photos.is_empty() {
+            if let Some(t) = record
+                .data
+                .window_types
+                .iter_mut()
+                .find(|t| t.id == type_id)
+            {
+                t.photos.extend(stored_photos.iter().cloned());
+            }
+        }
+        self.elevation_edit = None;
+        self.opening_dim_error = None;
+        self.reseed_opening_anchors(idx);
+        let _ = self.mark_dirty();
+        self.push_history_snapshot(undo_snap);
+        Ok(())
     }
 
     /// Drag a grabbed ROOF window in the plan view to a new point (Edit-on-surface
@@ -1383,6 +1686,7 @@ impl AppController {
             }
         }
         self.elevation_selection = None;
+        self.elevation_edit = None;
         self.roof_window_sel = None;
         let _ = self.mark_dirty();
         self.push_history_snapshot(undo_snap);

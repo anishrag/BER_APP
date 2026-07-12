@@ -41,8 +41,12 @@ struct EditWindow {
     pos: egui::Pos2,
     /// Where the connector leaves the window — its inner-edge midpoint (screen px).
     inner_anchor: egui::Pos2,
-    /// The group's true plan centroid (world) — the connector's target.
+    /// The group's connector target (world, in its storey's own frame).
     centroid: (f64, f64),
+    /// Which storey CELL `centroid` lives in — `Some` on the all-storeys
+    /// layout (the target maps through that cell's transform); `None` on the
+    /// single-storey layout (the active storey's own transform applies).
+    storey_idx: Option<usize>,
     color: egui::Color32,
 }
 
@@ -52,15 +56,38 @@ struct EditWindow {
 struct StructureEditLayout {
     view: ViewParams,
     windows: Vec<EditWindow>,
+    /// ALL-STOREYS only: the inner rect the storey ROW is fitted into (the gap
+    /// between the reserved margins). The row's per-cell fit is rect-driven
+    /// (`all_storeys_2d::cell_transforms`), so the canvas renders + inverts
+    /// the row against THIS rect — the rect-shrink is the all-storeys
+    /// equivalent of the single-storey layout's zoomed-out `view`. `None` on
+    /// the single-storey layout.
+    all_storeys_inner: Option<egui::Rect>,
 }
 
 /// Place items (window top-left coords, given in their PREFERRED order) along one
 /// axis with no overlap: a forward pass pushes each to at least `spacing` past
 /// the previous (and ≥ `lo`), a backward pass pulls any that overran `hi` back
 /// (keeping `spacing`). The result keeps each near its preferred spot while
-/// staying inside `[lo, hi]`; if there are too many to fit they compress evenly.
+/// staying inside `[lo, hi]`. OVER CAPACITY (more items than fit at `spacing`)
+/// the pitch shrinks to the even cascade that exactly spans `[lo, hi]`, so
+/// every item keeps a deterministic `(hi - lo)/(n - 1)` sliver visible —
+/// never the old full stack at the `lo` end, which could hide an item
+/// entirely (the boxes rendered over a cascade raise on tap, so a buried one
+/// is always reachable via its sliver).
 fn declutter_axis(prefs: &mut [f32], spacing: f32, lo: f32, hi: f32) {
     let n = prefs.len();
+    if n == 0 {
+        return;
+    }
+    let hi = hi.max(lo);
+    // No-op under capacity: the cascade pitch is only smaller than `spacing`
+    // when (n - 1) · spacing exceeds the range.
+    let spacing = if n > 1 {
+        spacing.min((hi - lo) / (n - 1) as f32)
+    } else {
+        spacing
+    };
     for i in 0..n {
         let floor = if i == 0 { lo } else { prefs[i - 1] + spacing };
         if prefs[i] < floor {
@@ -77,62 +104,49 @@ fn declutter_axis(prefs: &mut [f32], spacing: f32, lo: f32, hi: f32) {
             prefs[i] = ceil;
         }
     }
-    // The backward pass can push the leftmost items below `lo` when there are
-    // more than fit; clamp so nothing ever lands off-screen (they overlap-compress
-    // at the `lo` end instead of running off the canvas).
+    // Safety clamp — a no-op in the over-capacity case (the shrunken pitch
+    // fits the range exactly), kept so nothing can ever land off-screen.
     for p in prefs.iter_mut() {
         *p = p.clamp(lo, hi);
     }
 }
 
-/// Lay the in-place attribute windows into the canvas MARGINS, then fit the plan
-/// into the gap left over — "place the windows first, then zoom the plan to fill
-/// what's left". Each group's window goes to whichever canvas EDGE its group is
-/// nearest (top / bottom / left / right) and is positioned along that edge close
-/// to the group's own spot (de-cluttered so windows on the same edge don't
-/// overlap). Spreading across all four margins — rather than forcing every window
-/// into one pair of gutters — keeps each connector short and roughly radial and
-/// keeps the plan large in the centre. Corners are kept clear by confining the
-/// side columns to the un-reserved height and the top/bottom rows to the
-/// un-reserved width. `None` when there's no fittable plan or the canvas is too
-/// small, leaving the caller on the normal view.
-fn compute_structure_edit_layout(
-    rect: egui::Rect,
-    ber: Option<&Ber>,
-    current_storey_idx: Option<usize>,
-    storey: &ber_model::ber::structural::Storey,
-    edit: &crate::controller::app_controller::StructureEdit,
-    base: ViewParams,
-) -> Option<StructureEditLayout> {
-    let i = current_storey_idx?;
-    let ber = ber?;
-    let (min_xy, max_xy) = render::fit_bbox_for_storey(ber, i)?;
-    let fans = render::structure_fan::group_fan_layout(storey, edit);
-    if fans.is_empty() {
-        return None;
-    }
+/// One group's seed for the margin placement: identity + colour, the world
+/// connector TARGET (walls → nearest selected wall, else the centroid — see
+/// `group_connector_anchor`), and where that target sits on screen under the
+/// plain FULL-canvas fit. Placement — edge assignment AND ordering — is
+/// driven by `screen` (where the line points), so the boxes sit near their
+/// targets and the connectors don't cross.
+struct MarginSeed {
+    group_index: usize,
+    color: egui::Color32,
+    /// World-space connector target, in `storey_idx`'s frame.
+    anchor: (f64, f64),
+    /// See [`EditWindow::storey_idx`].
+    storey_idx: Option<usize>,
+    /// The anchor under the full-rect fit (pre-reservation).
+    screen: egui::Pos2,
+}
 
+/// The margin-placement CORE shared by the single-storey and all-storeys
+/// layouts: lay the in-place attribute windows into the canvas MARGINS,
+/// leaving the gap in the middle for the plan. Each group's window goes to
+/// whichever canvas EDGE its group is nearest (top / bottom / left / right)
+/// and is positioned along that edge close to the group's own spot
+/// (de-cluttered so windows on the same edge don't overlap). Spreading across
+/// all four margins — rather than forcing every window into one pair of
+/// gutters — keeps each connector short and roughly radial and keeps the plan
+/// large in the centre. Corners are kept clear by confining the side columns
+/// to the un-reserved height and the top/bottom rows to the un-reserved
+/// width. Returns the placed windows plus the inner rect left for the plan;
+/// `None` when the canvas is too small.
+fn place_windows_in_margins(
+    rect: egui::Rect,
+    plan_centre: egui::Pos2,
+    seeds: &[MarginSeed],
+) -> Option<(Vec<EditWindow>, egui::Rect)> {
     let col_w = EDIT_BOX_W + 2.0 * EDIT_COL_PAD;
     let band_h = EDIT_SLOT_H + 2.0 * EDIT_TOP_PAD;
-
-    // Each group's on-screen position under the plain full-rect fit — picks which
-    // side of the plan each window goes to and where along that edge it sits.
-    let t_full = render::fit_transform(rect, min_xy, max_xy, base);
-    // The connector TARGET per group (walls → nearest selected wall, else the
-    // centroid). Placement — edge assignment AND ordering — is driven by the
-    // anchor (where the line points), not the bare centroid, so the boxes sit
-    // near their targets and the connectors don't cross.
-    let anchors: Vec<(f64, f64)> = fans
-        .iter()
-        .map(|f| {
-            render::structure_fan::group_connector_anchor(
-                storey,
-                &edit.groups[f.group_index],
-                f.centroid,
-            )
-        })
-        .collect();
-    let screen: Vec<egui::Pos2> = anchors.iter().map(|a| t_full.apply(a.0, a.1)).collect();
 
     // Assign each group to a side by WHERE IT SITS RELATIVE TO THE PLAN'S OWN
     // CENTRE (its quadrant), not the nearest canvas edge — otherwise a
@@ -145,7 +159,7 @@ fn compute_structure_edit_layout(
     // preferred edge that still has room — decisive groups (clearly on one side)
     // claim their edge first, and ones near a corner spill to a perpendicular
     // edge that's free. Edge codes: 0 = left, 1 = right, 2 = top, 3 = bottom.
-    let plan_centre = t_full.apply((min_xy.0 + max_xy.0) * 0.5, (min_xy.1 + max_xy.1) * 0.5);
+    //
     // Rough per-edge capacities from the full canvas (the exact reserved margins
     // depend on the assignment we're computing, so estimate from the whole rect).
     let col_pitch = EDIT_SLOT_H + EDIT_GAP;
@@ -173,10 +187,10 @@ fn compute_structure_edit_layout(
     };
 
     // Decisive groups first, so corner-ish ones are the ones that spill over.
-    let mut order: Vec<usize> = (0..fans.len()).collect();
+    let mut order: Vec<usize> = (0..seeds.len()).collect();
     order.sort_by(|&a, &b| {
-        let da = pref_and_decisiveness(screen[a]).1;
-        let db = pref_and_decisiveness(screen[b]).1;
+        let da = pref_and_decisiveness(seeds[a].screen).1;
+        let db = pref_and_decisiveness(seeds[b].screen).1;
         db.partial_cmp(&da).unwrap_or(std::cmp::Ordering::Equal)
     });
 
@@ -188,9 +202,10 @@ fn compute_structure_edit_layout(
     ) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let mut counts = [0usize; 4];
     for k in order {
-        let (prefs, _) = pref_and_decisiveness(screen[k]);
+        let (prefs, _) = pref_and_decisiveness(seeds[k].screen);
         // First preferred edge with spare room; if all are full, fall back to the
-        // first choice (an unavoidable overlap, but only once every edge is full).
+        // first choice (an unavoidable overlap, but only once every edge is full —
+        // the de-clutter cascade keeps a visible sliver of every box even then).
         let edge = prefs
             .into_iter()
             .find(|&e| counts[e] < cap[e])
@@ -231,19 +246,7 @@ fn compute_structure_edit_layout(
         return None;
     }
 
-    // Fit the plan into `inner`: zoom relative to the full-rect auto-fit, offset
-    // to recentre on the gap between the reserved margins.
-    let base_scale = render::auto_fit_scale(rect, min_xy, max_xy);
-    let inner_scale = render::auto_fit_scale(inner, min_xy, max_xy);
-    let view = ViewParams {
-        zoom: (inner_scale / base_scale) as f32,
-        offset_x: inner.center().x - rect.center().x,
-        offset_y: inner.center().y - rect.center().y,
-        yaw_deg: base.yaw_deg,
-        pitch_deg: base.pitch_deg,
-    };
-
-    let mut windows = Vec::with_capacity(fans.len());
+    let mut windows = Vec::with_capacity(seeds.len());
 
     // LEFT / RIGHT columns: window y tracks the group's screen y. Columns flank
     // the plan for the full height (below the signpost), and never collide with
@@ -253,14 +256,15 @@ fn compute_structure_edit_layout(
     let col_hi = (rect.bottom() - EDIT_TOP_PAD - EDIT_SLOT_H).max(col_lo);
     for (col, left_side) in [(&mut left, true), (&mut right, false)] {
         col.sort_by(|&a, &b| {
-            screen[a]
+            seeds[a]
+                .screen
                 .y
-                .partial_cmp(&screen[b].y)
+                .partial_cmp(&seeds[b].screen.y)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         let mut ys: Vec<f32> = col
             .iter()
-            .map(|&k| screen[k].y - EDIT_SLOT_H * 0.5)
+            .map(|&k| seeds[k].screen.y - EDIT_SLOT_H * 0.5)
             .collect();
         declutter_axis(&mut ys, col_pitch, col_lo, col_hi);
         let x = if left_side {
@@ -276,11 +280,12 @@ fn compute_structure_edit_layout(
                 egui::pos2(x, y + EDIT_SLOT_H * 0.5)
             };
             windows.push(EditWindow {
-                group_index: fans[k].group_index,
+                group_index: seeds[k].group_index,
                 pos: egui::pos2(x, y),
                 inner_anchor,
-                centroid: anchors[k],
-                color: fans[k].color,
+                centroid: seeds[k].anchor,
+                storey_idx: seeds[k].storey_idx,
+                color: seeds[k].color,
             });
         }
     }
@@ -291,14 +296,15 @@ fn compute_structure_edit_layout(
     let row_hi = (rect.right() - right_w - EDIT_BOX_W).max(row_lo);
     for (row, top_side) in [(&mut top, true), (&mut bottom, false)] {
         row.sort_by(|&a, &b| {
-            screen[a]
+            seeds[a]
+                .screen
                 .x
-                .partial_cmp(&screen[b].x)
+                .partial_cmp(&seeds[b].screen.x)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         let mut xs: Vec<f32> = row
             .iter()
-            .map(|&k| screen[k].x - EDIT_BOX_W * 0.5)
+            .map(|&k| seeds[k].screen.x - EDIT_BOX_W * 0.5)
             .collect();
         declutter_axis(&mut xs, row_pitch, row_lo, row_hi);
         let y = if top_side {
@@ -314,16 +320,228 @@ fn compute_structure_edit_layout(
                 egui::pos2(x + EDIT_BOX_W * 0.5, y)
             };
             windows.push(EditWindow {
-                group_index: fans[k].group_index,
+                group_index: seeds[k].group_index,
                 pos: egui::pos2(x, y),
                 inner_anchor,
-                centroid: anchors[k],
-                color: fans[k].color,
+                centroid: seeds[k].anchor,
+                storey_idx: seeds[k].storey_idx,
+                color: seeds[k].color,
             });
         }
     }
 
-    Some(StructureEditLayout { view, windows })
+    Some((windows, inner))
+}
+
+/// The SINGLE-STOREY in-place "Edit attributes" layout: place the windows in
+/// the margins ([`place_windows_in_margins`]), then fit the plan into the gap
+/// left over — "place the windows first, then zoom the plan to fill what's
+/// left". `None` when there's no fittable plan or the canvas is too small,
+/// leaving the caller on the normal view.
+fn compute_structure_edit_layout(
+    rect: egui::Rect,
+    ber: Option<&Ber>,
+    current_storey_idx: Option<usize>,
+    storey: &ber_model::ber::structural::Storey,
+    edit: &crate::controller::app_controller::StructureEdit,
+    base: ViewParams,
+) -> Option<StructureEditLayout> {
+    let i = current_storey_idx?;
+    let ber = ber?;
+    let (min_xy, max_xy) = render::fit_bbox_for_storey(ber, i)?;
+    let fans = render::structure_fan::group_fan_layout(storey, edit);
+    if fans.is_empty() {
+        return None;
+    }
+
+    // Each group's on-screen position under the plain full-rect fit — picks which
+    // side of the plan each window goes to and where along that edge it sits.
+    let t_full = render::fit_transform(rect, min_xy, max_xy, base);
+    let seeds: Vec<MarginSeed> = fans
+        .iter()
+        .map(|f| {
+            let anchor = render::structure_fan::group_connector_anchor(
+                storey,
+                &edit.groups[f.group_index],
+                f.centroid,
+            );
+            MarginSeed {
+                group_index: f.group_index,
+                color: f.color,
+                anchor,
+                storey_idx: None,
+                screen: t_full.apply(anchor.0, anchor.1),
+            }
+        })
+        .collect();
+    let plan_centre = t_full.apply((min_xy.0 + max_xy.0) * 0.5, (min_xy.1 + max_xy.1) * 0.5);
+    let (windows, inner) = place_windows_in_margins(rect, plan_centre, &seeds)?;
+
+    // Fit the plan into `inner`: zoom relative to the full-rect auto-fit, offset
+    // to recentre on the gap between the reserved margins.
+    let base_scale = render::auto_fit_scale(rect, min_xy, max_xy);
+    let inner_scale = render::auto_fit_scale(inner, min_xy, max_xy);
+    let view = ViewParams {
+        zoom: (inner_scale / base_scale) as f32,
+        offset_x: inner.center().x - rect.center().x,
+        offset_y: inner.center().y - rect.center().y,
+        yaw_deg: base.yaw_deg,
+        pitch_deg: base.pitch_deg,
+    };
+
+    Some(StructureEditLayout {
+        view,
+        windows,
+        all_storeys_inner: None,
+    })
+}
+
+/// The ALL-STOREYS in-place "Edit attributes" layout — the same margin
+/// placement as the single-storey view, over the storey ROW. Each group is
+/// seeded from the storey CELL holding its largest surface cluster
+/// ([`structure_fan::group_anchor_all_storeys`] — a group can span storeys;
+/// its recolour still shows in every cell, the connector points at the main
+/// cluster). The plan can't be "zoomed into the gap" via `ViewParams` here —
+/// the row's per-cell fit is rect-driven — so the layout instead carries the
+/// inner RECT (`all_storeys_inner`) and the canvas renders + inverts the row
+/// against it. `None` when there are no cells/groups or the canvas is too
+/// small, leaving the caller on the normal view.
+fn compute_structure_edit_layout_all_storeys(
+    rect: egui::Rect,
+    ber: &Ber,
+    edit: &crate::controller::app_controller::StructureEdit,
+    base: ViewParams,
+) -> Option<StructureEditLayout> {
+    let cells = render::all_storeys_2d::cell_transforms(rect, ber, base);
+    if cells.is_empty() || edit.groups.is_empty() {
+        return None;
+    }
+    let seeds: Vec<MarginSeed> = edit
+        .groups
+        .iter()
+        .enumerate()
+        .filter_map(|(i, g)| {
+            let (s, anchor) = render::structure_fan::group_anchor_all_storeys(ber, g)?;
+            let t = cells.get(s)?;
+            Some(MarginSeed {
+                group_index: i,
+                color: render::structure_fan::group_color(i),
+                anchor,
+                storey_idx: Some(s),
+                screen: t.apply(anchor.0, anchor.1),
+            })
+        })
+        .collect();
+    if seeds.is_empty() {
+        return None;
+    }
+    // The row spans the whole canvas, so its centre IS the canvas centre —
+    // left-cell groups prefer the left margin, right-cell groups the right,
+    // middle cells spill to top/bottom.
+    let (windows, inner) = place_windows_in_margins(rect, rect.center(), &seeds)?;
+    Some(StructureEditLayout {
+        view: base,
+        windows,
+        all_storeys_inner: Some(inner),
+    })
+}
+
+/// The floating UI of an open in-place "Edit attributes" session: a centred
+/// takeover while the build-up layer editor or the photos view is up,
+/// otherwise the per-group attribute windows — each joined to its recoloured
+/// group by a connector line to `target_of(window)` (`None` skips the line,
+/// e.g. a cell that no longer resolves). Shared by the single-storey and
+/// all-storeys canvases so the boxes look and edit identically on both.
+fn structure_edit_windows_ui<F: FnMut(UiEvent)>(
+    ui: &mut egui::Ui,
+    painter: &egui::Painter,
+    view: &SketchView<'_>,
+    edit: &crate::controller::app_controller::StructureEdit,
+    layout: &StructureEditLayout,
+    editable: bool,
+    target_of: impl Fn(&EditWindow) -> Option<egui::Pos2>,
+    on_event: &mut F,
+) {
+    if let Some(spec) = edit.specifying {
+        // "Specify…" is open: a centred build-up LAYER editor takes over
+        // (the small per-group windows are hidden while it's up).
+        if let Some(group) = edit.groups.get(spec) {
+            egui::Area::new(ui.id().with("specify_layers"))
+                .order(egui::Order::Foreground)
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .show(ui.ctx(), |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.set_max_width(300.0);
+                        super::structure::layer_editor_ui(
+                            ui,
+                            spec,
+                            group,
+                            view.layer_library,
+                            on_event,
+                        );
+                    });
+                });
+        }
+    } else if let Some(pg) = edit.viewing_photos {
+        // Camera button is open: a centred PHOTOS view (thumbnails + add).
+        if let Some(group) = edit.groups.get(pg) {
+            egui::Area::new(ui.id().with("view_photos"))
+                .order(egui::Order::Foreground)
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .show(ui.ctx(), |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.set_max_width(440.0);
+                        super::structure::photos_view_ui(ui, pg, group, on_event);
+                    });
+                });
+        }
+    } else {
+        for w in &layout.windows {
+            let i = w.group_index;
+            let Some(group) = edit.groups.get(i) else {
+                continue;
+            };
+            // Connector from the window's inner edge to the group's true
+            // centroid, ending in a dot on the recoloured surfaces.
+            if let Some(target) = target_of(w) {
+                painter.line_segment([w.inner_anchor, target], egui::Stroke::new(2.0, w.color));
+                painter.circle_filled(target, 3.5, w.color);
+            }
+            let area = egui::Area::new(ui.id().with(("structure_attr", i)))
+                .order(egui::Order::Foreground)
+                .fixed_pos(w.pos)
+                .show(ui.ctx(), |ui| {
+                    egui::Frame::popup(ui.style())
+                        .fill(w.color.gamma_multiply(0.22))
+                        .stroke(egui::Stroke::new(2.0, w.color))
+                        .show(ui, |ui| {
+                            ui.set_max_width(EDIT_BOX_W - 16.0);
+                            // The two-level heading (kind + editable name)
+                            // is rendered by `group_editor_ui` itself now.
+                            super::structure::group_editor_ui(
+                                ui,
+                                group.ty.kind(),
+                                i,
+                                group,
+                                view.phase_choices,
+                                &view.structure_existing_groups,
+                                editable,
+                                edit.name_error
+                                    .as_ref()
+                                    .filter(|(gi, _)| *gi == i)
+                                    .map(|(_, m)| m.as_str()),
+                                on_event,
+                            );
+                        });
+                });
+            // An over-capacity edge cascades its boxes with partial overlap
+            // (see `declutter_axis`) — a press anywhere on a box raises it, so
+            // a buried box is always reachable by tapping its visible sliver.
+            if area.response.contains_pointer() && ui.ctx().input(|inp| inp.pointer.any_pressed()) {
+                ui.ctx().move_to_top(area.response.layer_id);
+            }
+        }
+    }
 }
 
 pub(super) fn render<F: FnMut(UiEvent)>(
@@ -424,17 +642,30 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     // Structure "Edit attributes" (in-place view): lay the per-group windows out
     // in the margins (each on the side nearest its group), then fit the plan into
     // the gap they leave.
-    // The fitted view REPLACES the normal pan/zoom for the whole render so the
-    // plan, its overlays, and the windows all share one transform. `None` (no
+    // Single storey: the fitted view REPLACES the normal pan/zoom for the whole
+    // render so the plan, its overlays, and the windows all share one transform.
+    // All storeys: the view stays put and the storey ROW shrinks into the inner
+    // rect instead (`all_storeys_inner` → `plan_area` below). `None` (no
     // session, the exploded view, 3D, or a canvas too small) leaves `vp` as-is.
     let structure_edit_layout = view
         .structure_edit
         .filter(|e| !e.exploded && matches!(mode, SketchMode::Storey2D))
-        .and_then(|edit| {
-            let storey = ber.and_then(|b| current_storey_idx.and_then(|i| b.storeys.get(i)))?;
-            compute_structure_edit_layout(rect, ber, current_storey_idx, storey, edit, vp)
+        .and_then(|edit| match current_storey_idx {
+            Some(i) => {
+                let storey = ber.and_then(|b| b.storeys.get(i))?;
+                compute_structure_edit_layout(rect, ber, current_storey_idx, storey, edit, vp)
+            }
+            None => compute_structure_edit_layout_all_storeys(rect, ber?, edit, vp),
         });
     let vp = structure_edit_layout.as_ref().map(|l| l.view).unwrap_or(vp);
+    // The rect the PLAN occupies this frame: the whole canvas, except while the
+    // all-storeys "Edit attributes" layout reserves its margins — then the
+    // storey row (render AND every per-cell transform, including input
+    // inversion) lives in the inner rect so plan and windows never overlap.
+    let plan_area = structure_edit_layout
+        .as_ref()
+        .and_then(|l| l.all_storeys_inner)
+        .unwrap_or(rect);
 
     // Push the diagonal (metres) of the currently-VISIBLE world rectangle to the
     // controller each frame, so its snap tolerances scale with zoom. Computed by
@@ -629,7 +860,10 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         };
         render::render_ber(
             &painter,
-            rect,
+            // `plan_area` ≠ `rect` only under the all-storeys "Edit
+            // attributes" layout — the storey row then fits the gap between
+            // the reserved window margins.
+            plan_area,
             ber,
             current_storey_idx,
             mode,
@@ -863,7 +1097,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             && view.current_phase == AssessmentPhase::Structure
         {
             if let Some(b) = ber {
-                let cells = render::all_storeys_2d::cell_transforms(rect, b, vp);
+                let cells = render::all_storeys_2d::cell_transforms(plan_area, b, vp);
                 let gold = egui::Color32::from_rgb(235, 195, 80);
                 for (i, ring) in view.pending_structure_carves_by_storey {
                     let (Some(t), true) = (cells.get(*i), ring.len() >= 3) else {
@@ -1350,82 +1584,54 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             {
                 render::structure_fan::render_groups_inplace(&painter, &t, storey, edit);
                 let editable = !reviewing && !dim_prompting;
-                if let Some(spec) = edit.specifying {
-                    // "Specify…" is open: a centred build-up LAYER editor takes over
-                    // (the small per-group windows are hidden while it's up).
-                    if let Some(group) = edit.groups.get(spec) {
-                        egui::Area::new(ui.id().with("specify_layers"))
-                            .order(egui::Order::Foreground)
-                            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-                            .show(ui.ctx(), |ui| {
-                                egui::Frame::popup(ui.style()).show(ui, |ui| {
-                                    ui.set_max_width(300.0);
-                                    super::structure::layer_editor_ui(
-                                        ui,
-                                        spec,
-                                        group,
-                                        view.layer_library,
-                                        on_event,
-                                    );
-                                });
-                            });
-                    }
-                } else if let Some(pg) = edit.viewing_photos {
-                    // Camera button is open: a centred PHOTOS view (thumbnails + add).
-                    if let Some(group) = edit.groups.get(pg) {
-                        egui::Area::new(ui.id().with("view_photos"))
-                            .order(egui::Order::Foreground)
-                            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-                            .show(ui.ctx(), |ui| {
-                                egui::Frame::popup(ui.style()).show(ui, |ui| {
-                                    ui.set_max_width(440.0);
-                                    super::structure::photos_view_ui(ui, pg, group, on_event);
-                                });
-                            });
-                    }
-                } else {
-                    for w in &layout.windows {
-                        let i = w.group_index;
-                        let Some(group) = edit.groups.get(i) else {
-                            continue;
-                        };
-                        // Connector from the window's inner edge to the group's true
-                        // centroid, ending in a dot on the recoloured surfaces.
-                        let target = t.apply(w.centroid.0, w.centroid.1);
-                        painter.line_segment(
-                            [w.inner_anchor, target],
-                            egui::Stroke::new(2.0, w.color),
-                        );
-                        painter.circle_filled(target, 3.5, w.color);
-                        egui::Area::new(ui.id().with(("structure_attr", i)))
-                            .order(egui::Order::Foreground)
-                            .fixed_pos(w.pos)
-                            .show(ui.ctx(), |ui| {
-                                egui::Frame::popup(ui.style())
-                                    .fill(w.color.gamma_multiply(0.22))
-                                    .stroke(egui::Stroke::new(2.0, w.color))
-                                    .show(ui, |ui| {
-                                        ui.set_max_width(EDIT_BOX_W - 16.0);
-                                        // The two-level heading (kind + editable name)
-                                        // is rendered by `group_editor_ui` itself now.
-                                        super::structure::group_editor_ui(
-                                            ui,
-                                            group.ty.kind(),
-                                            i,
-                                            group,
-                                            view.phase_choices,
-                                            &view.structure_existing_groups,
-                                            editable,
-                                            edit.name_error
-                                                .as_ref()
-                                                .filter(|(gi, _)| *gi == i)
-                                                .map(|(_, m)| m.as_str()),
-                                            on_event,
-                                        );
-                                    });
-                            });
+                structure_edit_windows_ui(
+                    ui,
+                    &painter,
+                    view,
+                    edit,
+                    layout,
+                    editable,
+                    |w| Some(t.apply(w.centroid.0, w.centroid.1)),
+                    on_event,
+                );
+            }
+        }
+
+        // Structure "Edit attributes" on the ALL-STOREYS tab: the same in-place
+        // session over the storey row. Each group's surfaces are recoloured in
+        // EVERY cell that holds one (a group can span storeys); the connector
+        // points into the cell holding the group's largest cluster; the same
+        // floating attribute boxes sit in the margins reserved around
+        // `plan_area` — the all-storeys view now looks like the single-storey
+        // one instead of degrading to a side-panel strip.
+        if let (Some(layout), Some(edit), Some(b), None) = (
+            structure_edit_layout.as_ref(),
+            view.structure_edit,
+            ber,
+            current_storey_idx,
+        ) {
+            if layout.all_storeys_inner.is_some() {
+                let cells = render::all_storeys_2d::cell_transforms(plan_area, b, vp);
+                for (s, storey) in b.storeys.iter().enumerate() {
+                    if let Some(t) = cells.get(s) {
+                        render::structure_fan::render_groups_inplace(&painter, t, storey, edit);
                     }
                 }
+                let editable = !reviewing && !dim_prompting;
+                structure_edit_windows_ui(
+                    ui,
+                    &painter,
+                    view,
+                    edit,
+                    layout,
+                    editable,
+                    |w| {
+                        w.storey_idx
+                            .and_then(|s| cells.get(s))
+                            .map(|t| t.apply(w.centroid.0, w.centroid.1))
+                    },
+                    on_event,
+                );
             }
         }
 
@@ -1920,8 +2126,11 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             // cross-storey selection just like the lasso.
             if response.clicked_by(egui::PointerButton::Primary) {
                 if let (Some(pos), Some(b)) = (response.interact_pointer_pos(), ber) {
-                    if let Some(i) = render::all_storeys_2d::cell_index_at(rect, b, pos) {
-                        if let Some(t) = render::all_storeys_2d::cell_transforms(rect, b, vp).get(i)
+                    // `plan_area`: with the "Edit attributes" margins reserved,
+                    // the cells the row was DRAWN into are the ones to invert.
+                    if let Some(i) = render::all_storeys_2d::cell_index_at(plan_area, b, pos) {
+                        if let Some(t) =
+                            render::all_storeys_2d::cell_transforms(plan_area, b, vp).get(i)
                         {
                             let (wx, wy) = t.inverse(pos.x, pos.y);
                             on_event(UiEvent::Sketch(
@@ -2036,7 +2245,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         }
         if response.drag_stopped_by(egui::PointerButton::Primary) {
             let cells = ber
-                .map(|b| render::all_storeys_2d::cell_transforms(rect, b, vp))
+                .map(|b| render::all_storeys_2d::cell_transforms(plan_area, b, vp))
                 .unwrap_or_default();
             if let (Some(stroke), false) = (view.current.as_ref(), cells.is_empty()) {
                 let topleft = rect.left_top();
@@ -2918,7 +3127,9 @@ fn external_photos_button<F: FnMut(UiEvent)>(
                             // (minus room for the header + frame chrome) so the
                             // opened panel is as LARGE as fits without being cut
                             // off, and scroll only when it can't all show.
-                            let max_h = (rect.height() - 140.0).max(220.0);
+                            // 60 ≈ header + frame chrome + the 8px anchor margins;
+                            // constrain_to keeps the panel on-screen regardless.
+                            let max_h = (rect.height() - 60.0).max(220.0);
                             egui::ScrollArea::vertical()
                                 .max_height(max_h)
                                 .show(ui, |ui| {
@@ -3271,10 +3482,35 @@ fn elevation_overlay<F: FnMut(UiEvent)>(
     painter.text(
         rect.left_top() + egui::vec2(8.0, 8.0),
         egui::Align2::LEFT_TOP,
-        "Elevation — drag openings to reposition (sizes locked). Done in the toolbar.",
+        "Elevation — drag openings to reposition · tap a window, then Edit to change its size/type. Done in the toolbar.",
         egui::FontId::proportional(13.0),
         egui::Color32::from_gray(160),
     );
+    // "Edit window…" for the selected STANDALONE window (doors + assembly
+    // members keep their placement flow) — opens the attribute box prefilled.
+    let window_selected = elev.openings.iter().any(|o| {
+        o.selected
+            && matches!(
+                o.kind,
+                crate::controller::app_controller::OpeningViewKind::Window
+            )
+    });
+    if window_selected {
+        egui::Area::new(egui::Id::new("ber_elevation_edit_window"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(rect.left_top() + egui::vec2(8.0, 30.0))
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    if ui
+                        .button("Edit window…")
+                        .hint("Change this window's size, glazing type, or overshading")
+                        .clicked()
+                    {
+                        on_event(UiEvent::Sketch(SketchEvent::EditSelectedOpening));
+                    }
+                });
+            });
+    }
     // Primary input → wall-local (along, height-above-base).
     let to_local = |pos: egui::Pos2| {
         let (wx, wy) = t.inverse(pos.x, pos.y);
@@ -3755,8 +3991,14 @@ fn object_review_overlay<F: FnMut(UiEvent)>(
                         .size(15.0),
                 );
                 ui.separator();
+                // Confirm is blocked while a category flagged "there is one"
+                // still has no recorded object (the controller refuses too).
+                let confirmable = orv.unresolved_present.is_empty();
                 if ui
-                    .button(egui::RichText::new("✓ All reviewed & OK").strong())
+                    .add_enabled(
+                        confirmable,
+                        egui::Button::new(egui::RichText::new("✓ All reviewed & OK").strong()),
+                    )
                     .clicked()
                 {
                     on_event(UiEvent::Sketch(SketchEvent::ConfirmObjectReview));
@@ -3872,6 +4114,21 @@ fn object_review_overlay<F: FnMut(UiEvent)>(
             ui.label(
                 egui::RichText::new("All empty categories confirmed ✓")
                     .color(egui::Color32::from_gray(150)),
+            );
+        }
+        // Flagged-present categories with no object yet: confirm stays
+        // disabled until each promised item is actually added.
+        if !orv.unresolved_present.is_empty() {
+            let names = orv
+                .unresolved_present
+                .iter()
+                .map(|c| c.label().to_lowercase())
+                .collect::<Vec<_>>()
+                .join(", ");
+            ui.label(
+                egui::RichText::new(format!("Add the {names} you flagged before finishing"))
+                    .strong()
+                    .color(egui::Color32::from_rgb(220, 160, 80)),
             );
         }
     });
@@ -4567,4 +4824,81 @@ fn partition_inset(
         [eye, tip],
         egui::Stroke::new(2.0, egui::Color32::from_rgb(120, 200, 255)),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Under capacity the de-clutter keeps every item near its preferred
+    /// spot, in order, at least `spacing` apart, inside `[lo, hi]` — the
+    /// original contract, unchanged by the overflow fix.
+    #[test]
+    fn declutter_axis_under_capacity_keeps_spacing_and_bounds() {
+        let mut ys = vec![10.0_f32, 15.0, 300.0];
+        declutter_axis(&mut ys, 50.0, 0.0, 400.0);
+        assert_eq!(ys, vec![10.0, 60.0, 300.0]);
+    }
+
+    /// OVER capacity the items cascade evenly across the whole range instead
+    /// of overlap-compressing into a stack at the `lo` end — the field bug
+    /// where a group's attribute box could end up fully hidden under the
+    /// stack. Every item keeps a `(hi - lo)/(n - 1)` sliver visible.
+    #[test]
+    fn declutter_axis_over_capacity_cascades_instead_of_stacking() {
+        // 8 boxes that all want the same spot on a 500 px range that fits
+        // only ~4 at the requested 167 px pitch.
+        let mut ys = vec![100.0_f32; 8];
+        declutter_axis(&mut ys, 167.0, 84.0, 584.0);
+        for w in ys.windows(2) {
+            let gap = w[1] - w[0];
+            assert!(
+                gap > 60.0,
+                "boxes must cascade with a visible sliver, got gap {gap} in {ys:?}"
+            );
+        }
+        assert!(ys.iter().all(|&y| (84.0..=584.0).contains(&y)), "{ys:?}");
+        // The cascade spans the full range end to end.
+        assert!((ys[0] - 84.0).abs() < 0.5, "{ys:?}");
+        assert!((ys[7] - 584.0).abs() < 0.5, "{ys:?}");
+    }
+
+    /// With far more groups than the four edges hold, the margin placement
+    /// still gives EVERY window an on-canvas position, and no two windows
+    /// land on top of each other (the cascade keeps a tappable sliver each —
+    /// tap-to-raise does the rest).
+    #[test]
+    fn margin_placement_over_capacity_keeps_every_window_distinct() {
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        let seeds: Vec<MarginSeed> = (0..30)
+            .map(|i| MarginSeed {
+                group_index: i,
+                color: egui::Color32::RED,
+                anchor: (0.0, 0.0),
+                storey_idx: None,
+                // All left of centre → all first-prefer the LEFT edge; the
+                // capacity spill has to distribute + cascade them.
+                screen: egui::pos2(150.0, 300.0),
+            })
+            .collect();
+        let (windows, inner) =
+            place_windows_in_margins(rect, rect.center(), &seeds).expect("canvas is big enough");
+        assert_eq!(windows.len(), 30);
+        assert!(inner.width() >= 60.0 && inner.height() >= 60.0);
+        for w in &windows {
+            assert!(w.pos.x >= rect.left() && w.pos.x <= rect.right() - EDIT_BOX_W);
+            assert!(w.pos.y >= rect.top() && w.pos.y <= rect.bottom() - EDIT_SLOT_H);
+        }
+        for (a, i) in windows.iter().zip(0..) {
+            for b in &windows[i + 1..] {
+                let d = ((a.pos.x - b.pos.x).powi(2) + (a.pos.y - b.pos.y).powi(2)).sqrt();
+                assert!(
+                    d > 8.0,
+                    "windows {} and {} coincide (d = {d})",
+                    a.group_index,
+                    b.group_index
+                );
+            }
+        }
+    }
 }

@@ -55,5 +55,34 @@ pub fn workspace_chrome<F, B>(
         });
     }
 
-    egui::CentralPanel::default().show(ctx, |ui| body(ui));
+    egui::CentralPanel::default().show(ctx, |ui| match section {
+        // The sketch canvas fills the panel and owns its pointer input — no
+        // scroll wrapper (drag-to-scroll would fight stroke capture, and its
+        // floating windows already dodge the keyboard via their constrain
+        // rects).
+        Section::Sketch => body(ui),
+        // Form sections scroll. While the native keyboard is up, shrink the
+        // scroll viewport by its inset so `native_ime::attach`'s
+        // scroll_to_rect (a no-op outside a ScrollArea) can bring a covered
+        // field above the keyboard; when the keyboard hides the inset returns
+        // to 0 and the viewport regains full height. Never below 40% of the
+        // panel so an oversized keyboard can't squash the form into nothing.
+        // On desktop the inset is always 0: full-height area, no scrollbar
+        // when the content fits.
+        Section::KeyDetails | Section::MoreDetails => {
+            let inset = crate::ui::widgets::ime_inset_bottom_points(ctx);
+            let avail = ui.available_height();
+            let max_h = (avail - inset).max(avail * 0.4);
+            egui::ScrollArea::vertical()
+                // Distinct scroll state per section, so a scrolled-down Key
+                // Details doesn't leave More Details half-scrolled.
+                .id_salt(match section {
+                    Section::KeyDetails => "workspace_scroll_key_details",
+                    _ => "workspace_scroll_more_details",
+                })
+                .auto_shrink([false, false])
+                .max_height(max_h)
+                .show(ui, |ui| body(ui));
+        }
+    });
 }

@@ -12,6 +12,7 @@
 //! `canvas.rs` share [`fan_transform`] + [`group_fan_layout`] so both agree on
 //! where every fanned surface lands.
 
+use ber_model::ber::ber_struct::Ber;
 use ber_model::ber::structural::Storey;
 use eframe::egui;
 
@@ -167,6 +168,40 @@ pub(crate) fn group_connector_anchor(
                 .unwrap_or(std::cmp::Ordering::Equal)
         })
         .unwrap_or(centroid)
+}
+
+/// The connector anchor for a group on the ALL-STOREYS view, where a group's
+/// surfaces can be spread over several storey cells: the storey holding the
+/// LARGEST CLUSTER of the group's surfaces (ties → the lower storey), plus the
+/// anchor point within that storey — the same wall-nearest rule as the
+/// single-storey connector ([`group_connector_anchor`]), evaluated over that
+/// storey's cluster centroid. One anchor per group keeps the picture sane: the
+/// box points at where most of the group lives; the recolour in every other
+/// cell still shows the rest. `None` when no surface resolves on any storey.
+pub(crate) fn group_anchor_all_storeys(
+    ber: &Ber,
+    group: &crate::controller::app_controller::EditGroup,
+) -> Option<(usize, (f64, f64))> {
+    let kind = group.ty.kind();
+    let mut best: Option<(usize, u32, (f64, f64))> = None;
+    for (s, storey) in ber.storeys.iter().enumerate() {
+        let mut sum = (0.0, 0.0);
+        let mut n = 0u32;
+        for id in &group.ids {
+            if let Some(c) = region_centroid(storey, kind, *id) {
+                sum.0 += c.0;
+                sum.1 += c.1;
+                n += 1;
+            }
+        }
+        // Strict `>` keeps the FIRST (lowest) storey on a tie.
+        if n > 0 && best.is_none_or(|(_, bn, _)| n > bn) {
+            best = Some((s, n, (sum.0 / n as f64, sum.1 / n as f64)));
+        }
+    }
+    let (s, _, centroid) = best?;
+    let anchor = group_connector_anchor(&ber.storeys[s], group, centroid);
+    Some((s, anchor))
 }
 
 /// A single region's plan centroid for `kind` (wall → base midpoint; floor /

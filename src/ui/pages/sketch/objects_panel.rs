@@ -92,8 +92,15 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                             } else {
                                 *view.object_selected_category = Some(cat);
                                 *view.object_selected_kind = cat.singleton();
-                                view.object_other_name.clear();
                             }
+                            // A switch starts a fresh entry: reset the count /
+                            // note / name buffers (cheap text — OK to drop).
+                            // Pending PHOTOS are NOT dropped: they're buffered
+                            // per kind, so the previous kind's photos stay
+                            // parked and reappear if it's re-selected.
+                            view.object_count_input.clear();
+                            view.object_note_input.clear();
+                            view.object_other_name.clear();
                             // Re-arm the auto-camera for the new selection.
                             *view.object_auto_photo_for = None;
                         }
@@ -171,7 +178,9 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     // one of that kind is recorded house-wide.
                     let already_recorded = view.object_recorded_kinds.contains(&kind);
                     let photo_required = kind.photo_required(already_recorded);
-                    let have_photo = !view.object_pending_photos.is_empty();
+                    // Only the SELECTED kind's pending photos count — another
+                    // kind's parked photos must not satisfy this kind's gates.
+                    let have_photo = !view.object_pending_photos.for_kind(&kind).is_empty();
 
                     ui.horizontal(|ui| {
                         ui.label("count");
@@ -190,7 +199,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                         *view.object_auto_photo_for = Some(kind.clone());
                     }
                     ui.horizontal_wrapped(|ui| {
-                        for (p, _quality) in view.object_pending_photos.iter() {
+                        for (p, _quality) in view.object_pending_photos.for_kind(&kind).iter() {
                             let src = p.to_string_lossy();
                             ui.add(
                                 egui::Image::new(format!("file://{src}"))
@@ -207,7 +216,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                             PhotoQuality::High,
                             auto_open,
                         ) {
-                            view.object_pending_photos.push(captured);
+                            view.object_pending_photos.push(&kind, captured);
                         }
                     });
                     if photo_required && !have_photo {
@@ -230,11 +239,14 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                             let n = view.object_note_input.trim();
                             (!n.is_empty()).then(|| n.to_string())
                         };
+                        // Commit ONLY this kind's pending photos (consumes its
+                        // buffer); other kinds' parked photos are untouched.
+                        let photos = view.object_pending_photos.take(&kind);
                         on_event(UiEvent::Sketch(SketchEvent::AddObject {
                             kind,
                             count,
                             note,
-                            photos: view.object_pending_photos.clone(),
+                            photos,
                         }));
                         *view.object_selected_category = None;
                         *view.object_selected_kind = None;
@@ -242,7 +254,6 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                         view.object_count_input.clear();
                         view.object_note_input.clear();
                         view.object_other_name.clear();
-                        view.object_pending_photos.clear();
                     }
                 }
             });

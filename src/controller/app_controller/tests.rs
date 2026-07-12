@@ -8188,6 +8188,63 @@ fn ceiling_ridge_along_an_outline_wall_raises_it_as_a_mono_pitch() {
             apex.point
         );
     }
+    // A single-claimant resolve is trivial — no real choice was made, so the
+    // silent-auto-resolve notice must NOT nag.
+    assert!(
+        c.roof_ridge_notice().is_none(),
+        "single claimant — no notice"
+    );
+}
+
+/// A typed ridge height on an internal JOINT that resolves WITHOUT the
+/// ChooseArea prompt (only one neighbour is slope-able — here the ridge sits
+/// at the raised side's own height) surfaces the silent decision:
+/// `roof_ridge_notice` names which side sloped and which kept its ceiling,
+/// and the next ridge stroke retires it. The assessor-initiated "meet other
+/// edge" button takes the SAME path but stays quiet — the assessor asked for
+/// exactly that outcome.
+#[test]
+fn silent_junction_ridge_auto_resolve_sets_the_notice() {
+    let mut c = ceiling_ready_controller();
+    // Step the ceiling at x = 4: the right side raises to 2.7, left keeps 2.4.
+    ceiling_step_to_amount_at_x4(&mut c);
+    c.assign_ceiling_step_delta(0.3).expect("delta applies");
+    // Wall-to-wall ridge stroke near the joint: both extent ends snap to the
+    // y = 0 / y = 10 walls and the cross snaps onto the joint x = 4 (drawn on
+    // the RIGHT side — which must NOT sway the junction resolve).
+    c.set_roof_point_mode(true);
+    c.apply_roof_ridge_stroke_event(&[(4.52, 0.1), (4.48, 9.9)]);
+    assert!(
+        c.ceiling_ridge_height_pending(),
+        "all position DOFs snapped → straight to the height stage"
+    );
+    let ((ax, _), (bx, _)) = c.pending_roof_ridge_line().unwrap();
+    assert!(
+        (ax - 4.0).abs() < 1e-6 && (bx - 4.0).abs() < 1e-6,
+        "cross snapped onto the joint x = 4"
+    );
+    assert!(
+        c.roof_ridge_notice().is_none(),
+        "no notice before the decision"
+    );
+    // Height = the raised side's 2.7: only the LEFT area can slope → the
+    // model resolves silently; the decision must surface.
+    c.assign_roof_ridge_height(2.7)
+        .expect("the junction ridge assigns");
+    assert!(
+        !c.ceiling_ridge_pending(),
+        "resolved without the ChooseArea prompt"
+    );
+    assert_eq!(
+        c.roof_ridge_notice(),
+        Some("Sloped: Left of the ridge — Right of the ridge keeps its ceiling"),
+    );
+    // The next ridge stroke starts a new decision — the notice retires.
+    c.apply_roof_ridge_stroke_event(&[(2.0, 3.0), (2.0, 6.0)]);
+    assert!(
+        c.roof_ridge_notice().is_none(),
+        "the next stroke clears the notice"
+    );
 }
 
 /// THE CENTRE BUTTON (S5): both ridge location prompts offer it
@@ -11275,6 +11332,8 @@ fn multi_field_window_places_with_default_sill() {
     c.place_opening(
         1.0,
         1.2,
+        false,
+        false,
         None,
         None,
         WindowTypeChoice::default(),
@@ -11313,6 +11372,105 @@ fn multi_field_window_places_with_default_sill() {
         .is_empty());
 }
 
+/// The placement box's "Full width" / "Full height" checkboxes: the prompt
+/// carries the resolved wall spans (shown in the disabled fields), and the
+/// ticked flags route to the explicit full-span ops — a door with both ticked
+/// fills the whole wall face, no end margins, sill 0.
+#[test]
+fn full_span_checkboxes_place_a_full_wall_door() {
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    c.select_opening_tool(OpeningToolKind::Door);
+    c.openings_pointer_down(5.0, -0.2, 0.5);
+    let p = c
+        .opening_fields_prompt(
+            DoorSidelightsMode::default(),
+            ber_model::ber::fenestration::ComplexWindowKind::default(),
+        )
+        .expect("placement staged");
+    let span = p
+        .full_span
+        .expect("a wall-hosted door offers the checkboxes");
+    assert!(
+        (span.wall_len_m - 10.0).abs() < 1e-2,
+        "resolved wall length for display, got {}",
+        span.wall_len_m
+    );
+    assert!(span.face_height_m > 0.0, "resolved face height for display");
+    // Both ticked: the W/H fields are disabled — their values are ignored.
+    c.place_opening(
+        0.0,
+        0.0,
+        true,
+        true,
+        None,
+        None,
+        WindowTypeChoice::default(),
+        ber_model::ber::fenestration::Overshading::Average,
+        Vec::new(),
+    )
+    .expect("full-wall door places");
+    c.materialize();
+    let ber = &c.current_record.as_ref().unwrap().data;
+    assert_eq!(ber.storeys[0].doors.len(), 1, "door placed");
+    let d = &ber.storeys[0].doors[0];
+    assert!(
+        (d.width_m - span.wall_len_m).abs() < 1e-2,
+        "spans the whole wall: {} vs {}",
+        d.width_m,
+        span.wall_len_m
+    );
+    assert!(
+        (d.height_m - span.face_height_m).abs() < 1e-2,
+        "spans the whole face: {} vs {}",
+        d.height_m,
+        span.face_height_m
+    );
+    match &d.placement {
+        Some(ber_model::ber::fenestration::OpeningPlacement::Wall { sill_m, .. }) => {
+            assert!(sill_m.abs() < 1e-4, "sill at the floor");
+        }
+        other => panic!("expected a wall placement, got {other:?}"),
+    }
+}
+
+/// With the checkboxes UNticked, a door exactly as wide as its wall is refused
+/// (width + end margins > wall) — the old implicit ±1 cm full-wall auto-detect
+/// is gone; the explicit "Full width" tick is the only route.
+#[test]
+fn exact_wall_width_door_without_the_tick_is_refused() {
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    c.select_opening_tool(OpeningToolKind::Door);
+    c.openings_pointer_down(5.0, -0.2, 0.5);
+    let wall_len = c
+        .opening_fields_prompt(
+            DoorSidelightsMode::default(),
+            ber_model::ber::fenestration::ComplexWindowKind::default(),
+        )
+        .and_then(|p| p.full_span)
+        .expect("wall-hosted door prompt")
+        .wall_len_m;
+    let r = c.place_opening(
+        wall_len,
+        2.0,
+        false,
+        false,
+        None,
+        None,
+        WindowTypeChoice::default(),
+        ber_model::ber::fenestration::Overshading::Average,
+        Vec::new(),
+    );
+    assert!(r.is_err(), "no auto-detect: the margin path refuses");
+    assert!(
+        c.opening_dim_error().is_some(),
+        "inline error kept in the box"
+    );
+    let ber = &c.current_record.as_ref().unwrap().data;
+    assert!(ber.storeys[0].doors.is_empty(), "nothing placed");
+}
+
 /// The window-type picker shares a single shared `WindowType` across windows of
 /// the same (glazing, frame, year, certified) — and only mints a new type when
 /// they differ. Mirrors the "assign to existing / only add if different" rule.
@@ -11330,6 +11488,8 @@ fn window_type_picker_reuses_existing_and_adds_only_when_different() {
         c.place_opening(
             1.0,
             1.2,
+            false,
+            false,
             None,
             None,
             choice,
@@ -11464,6 +11624,8 @@ fn overshading_is_applied_per_window_at_placement() {
         c.place_opening(
             1.0,
             1.2,
+            false,
+            false,
             None,
             None,
             WindowTypeChoice::default(),
@@ -11509,6 +11671,8 @@ fn window_photo_is_attached_at_placement() {
     c.place_opening(
         1.0,
         1.2,
+        false,
+        false,
         None,
         None,
         WindowTypeChoice::New {
@@ -11564,6 +11728,8 @@ fn failed_placement_discards_copied_photos() {
     let r = c.place_opening(
         999.0,
         1.2,
+        false,
+        false,
         None,
         None,
         WindowTypeChoice::New {
@@ -11694,6 +11860,8 @@ fn place_door_sidelights_overall_mode() {
     c.place_opening(
         0.9,
         2.05,
+        false,
+        false,
         Some(DoorSidelightsPlacement::Overall {
             overall_w: 2.1,
             overall_h: 2.4,
@@ -11723,7 +11891,7 @@ fn place_door_sidelights_overall_mode() {
         .find(|w| (w.width_m - 1.2).abs() < 1e-3)
         .expect("left sidelight");
     match &side.placement {
-        Some(OpeningPlacement::Wall { sill_m, .. }) => {
+        Some(ber_model::ber::fenestration::OpeningPlacement::Wall { sill_m, .. }) => {
             assert!(
                 (sill_m - 0.15).abs() < 1e-3,
                 "single sill applied, got {sill_m}"
@@ -11761,6 +11929,8 @@ fn place_complex_window_shapes() {
     c.place_opening(
         0.0,
         0.0,
+        false,
+        false,
         None,
         Some(ComplexWindowPlacement {
             kind: ComplexWindowKind::Circular,
@@ -11776,6 +11946,8 @@ fn place_complex_window_shapes() {
     c.place_opening(
         0.0,
         0.0,
+        false,
+        false,
         None,
         Some(ComplexWindowPlacement {
             kind: ComplexWindowKind::RoundedTop,
@@ -15709,6 +15881,98 @@ fn object_review_absence_confirmation() {
         .data
         .objects_no_items_confirmed
         .contains(&first));
+}
+
+/// "No — there is one" is a PROMISE: a category flagged present during the
+/// review blocks "All reviewed & OK" until an object of that category is
+/// actually recorded — asserting a solar panel exists must not let the review
+/// (and the Final phase behind it) complete without one.
+#[test]
+fn object_review_flagged_present_blocks_confirm_until_added() {
+    use ber_model::ber::objects::{BoilerFuel, ObjectCategory, ObjectKind, SolarPanelKind};
+
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    c.objects_pointer_down(2.0, 2.0, 0.5);
+    c.add_object(ObjectKind::Boiler(BoilerFuel::Gas), 1, None, Vec::new());
+    c.close_object_room();
+
+    c.set_object_review_mode(true);
+    // "No — there is one" on the empty solar-panel category.
+    c.skip_object_absent(ObjectCategory::SolarPanel);
+    assert_eq!(
+        c.unresolved_present_categories(),
+        vec![ObjectCategory::SolarPanel],
+        "the flagged empty category is unresolved"
+    );
+    assert_eq!(
+        c.object_review_view().unwrap().unresolved_present,
+        vec![ObjectCategory::SolarPanel],
+        "…and surfaced on the review view (disables the confirm button)"
+    );
+
+    // Confirm is refused: not reviewed, review stays open.
+    c.confirm_objects_review();
+    assert!(
+        !c.objects_reviewed(),
+        "confirm refused while the flagged category has no object"
+    );
+    assert!(c.object_review_mode(), "review stays open");
+
+    // Add the promised solar panel → the flag is resolved and confirm lands.
+    c.objects_pointer_down(3.5, 3.5, 0.5);
+    c.add_object(
+        ObjectKind::SolarPanel(SolarPanelKind::Photovoltaic),
+        1,
+        None,
+        Vec::new(),
+    );
+    c.close_object_room();
+    assert!(
+        c.unresolved_present_categories().is_empty(),
+        "adding the object resolves the flag"
+    );
+    c.confirm_objects_review();
+    assert!(
+        c.objects_reviewed(),
+        "confirm succeeds once the object exists"
+    );
+    assert!(!c.object_review_mode(), "review closed");
+}
+
+/// The controller attaches EXACTLY the photos passed in the AddObject event —
+/// nothing pending elsewhere leaks in. (The per-kind parking of pending photos
+/// lives in UI state: see `ui::pages::sketch::pending_photos` and its tests —
+/// a photo captured for kind A then left un-OK'd must not ride along on kind
+/// B's commit, which is what this contract guarantees at the model boundary.)
+#[test]
+fn add_object_attaches_only_the_event_photos() {
+    use ber_model::ber::objects::{FanType, ObjectKind};
+
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    c.objects_pointer_down(2.0, 2.0, 0.5);
+
+    // A fan committed WITH a photo, then a thermostat committed WITHOUT one
+    // (the field bug had the fan's un-OK'd photo migrating onto it).
+    c.add_object(
+        ObjectKind::Fan(FanType::Extract),
+        1,
+        None,
+        vec![(
+            std::path::PathBuf::from("/nonexistent/fan.jpg"),
+            PhotoQuality::High,
+        )],
+    );
+    c.add_object(ObjectKind::Thermostat, 1, None, Vec::new());
+
+    let rows = c.active_object_room_view().expect("room open").objects;
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].photo_count, 1, "the fan keeps its own photo");
+    assert_eq!(
+        rows[1].photo_count, 0,
+        "the thermostat gets none — only the event's photos attach"
+    );
 }
 
 /// Stepping the side cursor wraps through the four sides.

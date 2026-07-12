@@ -282,9 +282,11 @@ impl AppController {
         self.pending_ceiling_step = None;
         self.ceiling_step_mode = false;
         // And a half-finished roof point / ridge (same coordinate space
-        // argument).
+        // argument) — plus the last ridge's auto-resolve notice (it names the
+        // OUTGOING storey's areas).
         self.pending_roof_point = None;
         self.pending_roof_ridge = None;
+        self.roof_ridge_notice = None;
         self.pending_roof_rect = None;
         self.dormer_mode = false;
         self.pending_rect_is_dormer = false;
@@ -425,6 +427,7 @@ impl AppController {
         self.ceiling_step_mode = false;
         self.pending_roof_point = None;
         self.pending_roof_ridge = None;
+        self.roof_ridge_notice = None;
         self.pending_roof_rect = None;
         self.dormer_mode = false;
         self.pending_rect_is_dormer = false;

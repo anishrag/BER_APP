@@ -236,6 +236,15 @@ pub fn render_ber(
             }
         }
         (SketchMode::Storey2D, None) => {
+            // Mirror the single-storey in-place arm: while an in-place "Edit
+            // attributes" session is open the gold selection shade is
+            // suppressed — the canvas paints the per-group colour overlay on
+            // top instead (`structure_fan::render_groups_inplace` per cell).
+            let no_selection = std::collections::HashSet::new();
+            let selected = match structure_edit {
+                Some(e) if !e.exploded => &no_selection,
+                _ => selected,
+            };
             all_storeys_2d::render(painter, rect, ber, display_mode, view, selected);
         }
         (SketchMode::Storey3D, None) => {

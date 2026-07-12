@@ -33,7 +33,8 @@ pub use ceiling_point::{
     centred_rect_lo, centred_ridge_cross, centred_ridge_start, resolve_ridge_slope_side,
     ridge_meet_edge_height, ridge_region_ring, validate_dormer, validate_roof_apex,
     validate_roof_rect_length, validate_roof_rect_placement, validate_roof_rect_ridge,
-    validate_roof_ridge, validate_roof_ridge_extent, validate_roof_ridge_length, RidgeSlopeSide,
+    validate_roof_ridge, validate_roof_ridge_extent, validate_roof_ridge_length, RidgeAutoChoice,
+    RidgeSlopeSide,
 };
 pub use ceiling_step::{
     canonicalize_ceiling_steps, ceiling_line_coords, region_line_coords, CeilingStepRegion,

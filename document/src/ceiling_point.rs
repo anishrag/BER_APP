@@ -45,6 +45,7 @@
 //! ber_model::ber::structural::CeilingRegions::apex_groups
 
 use crate::StoreyDoc;
+use ber_model::ber::common::ItemId;
 use ber_model::ber::structural::{
     rect_hip_switches, ridge_hub_switches, CeilingApex, CeilingApexGroup, CeilingRegion, Storey,
     APEX_BOUNDARY_EPS_M,
@@ -1230,14 +1231,37 @@ impl StoreyDoc {
 /// matches on this to either stamp the apexes directly or open its area-choice
 /// prompt. (See [`resolve_ridge_slope_side`].)
 pub enum RidgeSlopeSide {
-    /// One area to slope: the interior point to stamp as BOTH apexes' side hint
-    /// (`None` for a single-claimant outline ridge with no usable drawn side —
-    /// the apexes are stored without a hint, as a plain mono-pitch).
+    /// One area to slope with no real alternative (a SINGLE-claimant ridge):
+    /// the interior point to stamp as BOTH apexes' side hint (`None` for an
+    /// outline ridge with no usable drawn side — the apexes are stored without
+    /// a hint, as a plain mono-pitch).
     Resolved(Option<(f32, f32)>),
+    /// A JUNCTION ridge (≥ 2 claiming areas) resolved WITHOUT asking — exactly
+    /// one neighbour was slope-able. The payload names both sides so the shell
+    /// can SURFACE the silent decision (a notice + a log line) instead of
+    /// letting it pass invisibly.
+    AutoResolved(RidgeAutoChoice),
     /// The ridge sits on an INTERNAL boundary shared by ≥ 2 areas and the drawn
     /// side doesn't fall clearly inside one — the shell must ASK which slopes.
     /// Each option is `(side label, that area's interior hint point)`.
     Ambiguous(Vec<(String, (f32, f32))>),
+}
+
+/// The context of a silently auto-resolved junction ridge (see
+/// [`RidgeSlopeSide::AutoResolved`]): who slopes and who was passed over, with
+/// the side labels the ChooseArea prompt would have shown plus the region ids
+/// and flat heights for the shell's log line.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RidgeAutoChoice {
+    /// The sloped area's interior point — the hint to stamp on both apexes.
+    pub hint: (f32, f32),
+    /// The sloped area's side label (e.g. "Left of the ridge") — the same
+    /// vocabulary as the ChooseArea options.
+    pub sloped_label: String,
+    /// The sloped region's id and flat height (`None` = already non-flat).
+    pub sloped_region: (ItemId, Option<f64>),
+    /// The passed-over claimants: `(side label, region id, flat height)`.
+    pub passed_over: Vec<(String, ItemId, Option<f64>)>,
 }
 
 /// A point ~30 cm inside `region` from the ridge midpoint `mid` (toward the
@@ -1294,7 +1318,9 @@ fn area_side_label(axis: ParameterAxis, coord_m: f32, inside: (f32, f32)) -> Str
 ///   no-op for it (ridging to its own base collapses back to flat). So:
 ///   - exactly ONE such slope-able neighbour → resolve to it deterministically
 ///     (a mono-pitch drawn on the joint of an already-raised area slopes the
-///     LOWER neighbour, regardless of which side the line was drawn on);
+///     LOWER neighbour, regardless of which side the line was drawn on) —
+///     returned as [`RidgeSlopeSide::AutoResolved`], naming both sides so the
+///     shell can surface the silent decision;
 ///   - ≥ 2 slope-able neighbours → [`RidgeSlopeSide::Ambiguous`], ALWAYS asking
 ///     which side rises to the ridge. The drawn side is NOT used to auto-resolve
 ///     here: "the side the line was drawn over" does not reliably match the
@@ -1349,10 +1375,27 @@ pub fn resolve_ridge_slope_side(
         // claimants (a degenerate all-no-op ridge keeps the prior behaviour).
         let candidates: &[usize] = if sloped.is_empty() { &claims } else { &sloped };
         if candidates.len() == 1 {
-            return RidgeSlopeSide::Resolved(Some(area_inside_point(
-                &storey.ceilings.regions[candidates[0]],
-                mid,
-            )));
+            // A real choice existed (≥ 2 claimants) but the slope-able filter
+            // left one — resolve silently, carrying enough context for the
+            // shell to NAME the decision (labels + ids + heights).
+            let ri = candidates[0];
+            let chosen = &storey.ceilings.regions[ri];
+            let inside = area_inside_point(chosen, mid);
+            return RidgeSlopeSide::AutoResolved(RidgeAutoChoice {
+                hint: inside,
+                sloped_label: area_side_label(axis, coord_m, inside),
+                sloped_region: (chosen.id, chosen.flat_z()),
+                passed_over: claims
+                    .iter()
+                    .copied()
+                    .filter(|&other| other != ri)
+                    .map(|other| {
+                        let r = &storey.ceilings.regions[other];
+                        let label = area_side_label(axis, coord_m, area_inside_point(r, mid));
+                        (label, r.id, r.flat_z())
+                    })
+                    .collect(),
+            });
         }
         // Two or more slope-able neighbours: a genuine two-way choice. Never
         // guess from the drawn side (it doesn't reliably match "which side rises
@@ -1542,15 +1585,63 @@ mod tests {
         // Draw on the RAISED side (drawn_cross just above the joint) at the raised
         // height (3.4): it must STILL resolve into the lower area.
         match resolve_ridge_slope_side(&storey, a, b, Some(2.1), ParameterAxis::Y, 2.0, 3.4) {
-            RidgeSlopeSide::Resolved(Some((_, hy))) => assert!(
-                (hy as f64) < 2.0,
-                "hint sits inside the lower area (y < 2), got y = {hy}"
+            RidgeSlopeSide::AutoResolved(auto) => assert!(
+                (auto.hint.1 as f64) < 2.0,
+                "hint sits inside the lower area (y < 2), got y = {}",
+                auto.hint.1
             ),
-            RidgeSlopeSide::Resolved(None) => panic!("expected a lower-area hint, got no hint"),
+            RidgeSlopeSide::Resolved(_) => {
+                panic!("a junction resolve must be AutoResolved (it had a real choice)")
+            }
             RidgeSlopeSide::Ambiguous(_) => {
                 panic!("expected a deterministic resolve to the lower area, got Ambiguous")
             }
         }
+    }
+
+    /// The silent junction resolve carries the context the shell needs to
+    /// surface it: both sides' labels (the ChooseArea vocabulary), the region
+    /// ids, and the flat heights.
+    #[test]
+    fn auto_resolved_junction_ridge_names_both_sides() {
+        let cid = Default::default();
+        let sq = |x0: f64, y0: f64, x1: f64, y1: f64| {
+            vec![
+                Point2f64::new(x0, y0),
+                Point2f64::new(x1, y0),
+                Point2f64::new(x1, y1),
+                Point2f64::new(x0, y1),
+            ]
+        };
+        // Lower area y 0..2 at 2.4; raised area y 2..5 at 3.4; joint y = 2.
+        let mut ceilings =
+            CeilingRegions::default_for_footprint(vec![sq(0.0, 0.0, 6.0, 2.0)], 2.4, cid);
+        ceilings.regions.extend(
+            CeilingRegions::default_for_footprint(vec![sq(0.0, 2.0, 6.0, 5.0)], 3.4, cid).regions,
+        );
+        let lower_id = ceilings.regions[0].id;
+        let raised_id = ceilings.regions[1].id;
+        let storey = Storey {
+            ceilings,
+            ceiling_height_m: Some(2.4),
+            ..Storey::default()
+        };
+
+        let a = Point2f64::new(0.0, 2.0);
+        let b = Point2f64::new(6.0, 2.0);
+        // Ridge at the RAISED height: only the lower area is slope-able.
+        let RidgeSlopeSide::AutoResolved(auto) =
+            resolve_ridge_slope_side(&storey, a, b, None, ParameterAxis::Y, 2.0, 3.4)
+        else {
+            panic!("expected AutoResolved for the one-slope-able junction");
+        };
+        // Plan y grows downward: the lower area (y < 2) is "Above the ridge".
+        assert_eq!(auto.sloped_label, "Above the ridge");
+        assert_eq!(auto.sloped_region, (lower_id, Some(2.4)));
+        assert_eq!(
+            auto.passed_over,
+            vec![("Below the ridge".to_string(), raised_id, Some(3.4))]
+        );
     }
 
     /// A ridge on the joint between TWO areas the ridge can actually slope (both
@@ -1591,8 +1682,8 @@ mod tests {
             RidgeSlopeSide::Ambiguous(opts) => {
                 assert_eq!(opts.len(), 2, "both sides offered, got {}", opts.len())
             }
-            RidgeSlopeSide::Resolved(_) => {
-                panic!("expected Ambiguous (always ask), got a silent Resolved")
+            RidgeSlopeSide::Resolved(_) | RidgeSlopeSide::AutoResolved(_) => {
+                panic!("expected Ambiguous (always ask), got a silent resolve")
             }
         }
     }

@@ -19,9 +19,12 @@ mod final_panel;
 mod number_box;
 mod objects_panel;
 pub mod overlays;
+mod pending_photos;
 mod prompt_dock;
 mod structure;
 pub mod touch;
+
+pub use pending_photos::PendingObjectPhotos;
 
 use egui::epaint::PathStroke;
 use egui::Pos2;
@@ -478,6 +481,11 @@ pub enum SketchEvent {
     PlaceOpening {
         width_m: f32,
         height_m: f32,
+        /// The box's "Full width" / "Full height" checkboxes (plain Window and
+        /// Door only): span the whole wall (no end margins) / the whole face
+        /// height (sill 0). The matching `width_m`/`height_m` is ignored.
+        full_width: bool,
+        full_height: bool,
         door_sidelights: Option<DoorSidelightsPlacement>,
         /// The chosen complex-window shape + its dims (`None` for every other
         /// tool). When `Some`, the controller derives width/height/shape from it.
@@ -524,6 +532,26 @@ pub enum SketchEvent {
         height_m: f32,
     },
     ElevationPointerUp,
+    /// "Edit…" on the elevation's selected window: open the placement box in
+    /// edit mode, prefilled with its size / window type / overshading.
+    EditSelectedOpening,
+    /// Apply the elevation window edit: resize + retype from the box's values.
+    ApplyOpeningEdit {
+        width_m: f32,
+        height_m: f32,
+        /// The "Full width" / "Full height" checkboxes (see
+        /// [`Self::PlaceOpening`]) — resize to the whole wall span / face height.
+        full_width: bool,
+        full_height: bool,
+        /// Which shared window type the window joins after the edit (see
+        /// [`Self::PlaceOpening`]).
+        window_type: WindowTypeChoice,
+        /// Per-window overshading (see [`Self::PlaceOpening`]).
+        overshading: Overshading,
+        /// Photos picked in the box, attached to the (possibly new) window
+        /// type's group (see [`Self::PlaceOpening`]).
+        photos: Vec<(std::path::PathBuf, crate::ui::widgets::PhotoQuality)>,
+    },
     /// Delete the opening selected in the elevation.
     DeleteSelectedOpening,
     /// Open / close the Stage-1 (Mapping) REVIEW takeover view.
@@ -1137,6 +1165,11 @@ pub struct SketchView<'a> {
     /// height), shown inline in the shared roof toolbar — one field because
     /// the three stages are mutually exclusive within it.
     pub roof_error: Option<&'a str>,
+    /// Transient notice when a typed ridge height auto-resolved which side
+    /// slopes (junction with one slope-able neighbour) — surfaced so the
+    /// silent decision is visible; cleared by the controller on the next
+    /// ridge action.
+    pub roof_ridge_notice: Option<&'a str>,
     /// Default ceiling heights: the last error from the Heights field's Set
     /// (shown inline next to it), the current scope's value when it has one
     /// (the field's "2.40 m" display), and whether the scope's heights are
@@ -1213,6 +1246,12 @@ pub struct SketchView<'a> {
     /// matching `opening_fields_prompt` entry (Width, Height, then the lights).
     pub opening_width_input: &'a mut String,
     pub opening_height_input: &'a mut String,
+    /// The "Full width" / "Full height" checkboxes beside the W/H fields —
+    /// shown only when the prompt carries `full_span` (plain Window/Door on a
+    /// wall). While ticked the matching field is disabled and displays the
+    /// resolved wall span instead of the buffer. Reset on each fresh pick.
+    pub opening_full_width: &'a mut bool,
+    pub opening_full_height: &'a mut bool,
     /// Door+sidelights composer inputs. DETAILED mode: optional left/right
     /// sidelight width + per-side sill + transom height. A sidelight's sill field
     /// is active only when its `*_has_sill` toggle is on.
@@ -1329,14 +1368,15 @@ pub struct SketchView<'a> {
     /// or `None` when none is open.
     pub active_object_room: Option<ActiveObjectRoomView>,
     /// Object-entry UI state (the open room's panel): the category chosen (to
-    /// show its subtypes), the count / note / "Other" buffers, and the photos
-    /// picked for the object being added. See [`crate::ui::app::SketchState`].
+    /// show its subtypes), the count / note / "Other" buffers, and the pending
+    /// photos — buffered PER KIND so a category switch parks (never leaks or
+    /// loses) them. See [`crate::ui::app::SketchState`].
     pub object_selected_category: &'a mut Option<ber_model::ber::objects::ObjectCategory>,
     pub object_selected_kind: &'a mut Option<ObjectKind>,
     pub object_count_input: &'a mut String,
     pub object_note_input: &'a mut String,
     pub object_other_name: &'a mut String,
-    pub object_pending_photos: &'a mut Vec<(std::path::PathBuf, crate::ui::widgets::PhotoQuality)>,
+    pub object_pending_photos: &'a mut PendingObjectPhotos,
     /// Object kinds already recorded house-wide — the panel combines this with
     /// each kind's `photo_policy` to decide whether the next instance needs a
     /// photo (drives the auto-camera + OK gate). From `recorded_object_kinds`.

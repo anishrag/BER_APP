@@ -362,11 +362,10 @@ pub fn ribbon<F: FnMut(UiEvent)>(
             &flags.phase_choices,
             &flags.structure_existing_groups,
             // The Structure tools also work from the All-storeys tab (the
-            // cross-storey lasso flow), so the panel stays ENABLED there —
-            // `read_only` only tells it to host the group editor itself
-            // (there are no per-group canvas windows on that tab).
+            // cross-storey lasso flow), so the panel stays ENABLED there. An
+            // open edit session hosts its per-group windows on the canvas on
+            // BOTH tabs now — the panel needs no all-storeys special case.
             true,
-            flags.read_only,
             on_event,
         );
         ui.separator();
@@ -411,11 +410,10 @@ pub fn side_panel<F: FnMut(UiEvent)>(
             &flags.phase_choices,
             &flags.structure_existing_groups,
             // The Structure tools also work from the All-storeys tab (the
-            // cross-storey lasso flow), so the panel stays ENABLED there —
-            // `read_only` only tells it to host the group editor itself
-            // (there are no per-group canvas windows on that tab).
+            // cross-storey lasso flow), so the panel stays ENABLED there. An
+            // open edit session hosts its per-group windows on the canvas on
+            // BOTH tabs now — the panel needs no all-storeys special case.
             true,
-            flags.read_only,
             on_event,
         );
         ui.separator();

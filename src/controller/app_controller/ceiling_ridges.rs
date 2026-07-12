@@ -179,6 +179,8 @@ impl AppController {
         if pts.len() < 2 {
             return;
         }
+        // A new ridge begins — the previous ridge's auto-resolve notice is done.
+        self.roof_ridge_notice = None;
         // Flush the live buffer to its slot: the fit + snap read
         // `document.outline`, which is only synced on shape switches.
         self.sync_active();
@@ -918,6 +920,8 @@ impl AppController {
             return Ok(()); // nothing awaiting a height — no-op
         };
         let (axis, coord_m, lo, len_m) = (*axis, *coord_m, *lo, *len_m);
+        // A fresh decision — drop any notice left by an earlier ridge.
+        self.roof_ridge_notice = None;
         // When the cross coordinate SNAPPED onto a wall, the ridge may sit on an
         // internal junction shared by two areas — the DRAWN (pre-snap) cross
         // coordinate tells the model which area the assessor drew over.
@@ -955,6 +959,22 @@ impl AppController {
                 return Ok(());
             }
             document::RidgeSlopeSide::Resolved(hint) => hint,
+            document::RidgeSlopeSide::AutoResolved(auto) => {
+                // A junction ridge resolved WITHOUT the ChooseArea prompt
+                // (only one neighbour was slope-able) — surface the silent
+                // decision: a short notice for the assessor, region ids +
+                // heights in the log for a bug-report reconstruction.
+                log::info!(
+                    "ridge auto-resolve at z {:.3} m: sloped region {:?} (flat z {:?}); \
+                     passed over: {:?}",
+                    z_m,
+                    auto.sloped_region.0,
+                    auto.sloped_region.1,
+                    auto.passed_over
+                );
+                self.roof_ridge_notice = Some(ridge_auto_notice(&auto));
+                Some(auto.hint)
+            }
         };
         let record = self.current_record.as_mut().expect("checked above");
         for p in [a, b] {
@@ -1010,12 +1030,28 @@ impl AppController {
         let Some(z) = self.ceiling_ridge_meet_edge_height() else {
             return Ok(());
         };
-        self.assign_roof_ridge_height(z)
+        let result = self.assign_roof_ridge_height(z);
+        // Assessor-INITIATED: they explicitly asked to rise to the raised
+        // edge, so the auto-resolve is the expected outcome — no notice (the
+        // log line above still records the decision).
+        self.roof_ridge_notice = None;
+        result
     }
 
     /// Discard the in-flight ceiling ridge at any stage.
     pub fn cancel_pending_roof_ridge(&mut self) {
         self.pending_roof_ridge = None;
+        self.roof_ridge_notice = None;
+    }
+
+    /// The transient notice for the last SILENTLY auto-resolved junction
+    /// ridge — a typed height on a ridge claimed by ≥ 2 ceiling areas where
+    /// exactly one was slope-able, so no ChooseArea prompt opened. Names
+    /// which side sloped ("Sloped: … — … keeps its ceiling"); `None` when
+    /// the last ridge resolved trivially (single claimant), via the prompt,
+    /// or via the assessor-initiated "meet other edge" button.
+    pub fn roof_ridge_notice(&self) -> Option<&str> {
+        self.roof_ridge_notice.as_deref()
     }
 
     /// Pick which area a boundary ridge SLOPES (the ChooseArea stage): store the
@@ -1168,4 +1204,22 @@ impl AppController {
             })
             .collect()
     }
+}
+
+/// The one-line user-facing notice for a silently auto-resolved junction ridge
+/// — the same side vocabulary as the ChooseArea buttons, e.g.
+/// "Sloped: Left of the ridge — Right of the ridge keeps its ceiling".
+fn ridge_auto_notice(auto: &document::RidgeAutoChoice) -> String {
+    let others = auto
+        .passed_over
+        .iter()
+        .map(|(label, _, _)| label.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let keeps = if auto.passed_over.len() == 1 {
+        "keeps its ceiling"
+    } else {
+        "keep their ceilings"
+    };
+    format!("Sloped: {} — {} {}", auto.sloped_label, others, keeps)
 }

@@ -94,6 +94,7 @@ impl AppController {
         self.ceiling_point_mode = on;
         self.pending_roof_point = None;
         self.pending_roof_ridge = None;
+        self.roof_ridge_notice = None;
         self.pending_roof_rect = None;
         self.dormer_mode = false;
         self.pending_rect_is_dormer = false;
