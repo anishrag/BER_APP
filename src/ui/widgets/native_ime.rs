@@ -183,6 +183,8 @@ pub fn attach(
         if !suppress || s.shown || response.clicked() {
             app.show_soft_input(false);
             s.shown = true;
+        } else {
+            scrub_ime_output(ui.ctx());
         }
     } else if focused && is_owner {
         // The system back gesture can hide the keyboard without the app ever
@@ -192,6 +194,11 @@ pub fn attach(
         if response.clicked() {
             app.show_soft_input(false);
             s.shown = true;
+        }
+        if !s.shown {
+            // Still adopted-without-keyboard: keep the implicit show path off
+            // (the focused `TextEdit` re-sets the IME output every frame).
+            scrub_ime_output(ui.ctx());
         }
         if response.changed() || *buf != s.last_text {
             // The field's buffer moved on the app side this frame — an egui
@@ -291,6 +298,22 @@ pub fn end_frame(ctx: &egui::Context) {
     if s.shown {
         ctx.request_repaint_after(std::time::Duration::from_millis(50));
     }
+}
+
+/// Kill the SECOND, implicit keyboard-show path for this frame. This module's
+/// explicit `show_soft_input` is not the only one: a focused `TextEdit` sets
+/// `PlatformOutput::ime` every frame (egui `builder.rs`, guarded by
+/// `has_focus`), egui-winit turns the None→Some flip into
+/// `Window::set_ime_allowed(true)`, and winit's Android backend implements
+/// that as `show_soft_input(true)`. Clearing the output here suppresses that
+/// path with no flicker: [`attach`] runs directly after the owning `TextEdit`
+/// (the only focused widget, hence the only `ime` writer), and egui-winit
+/// reads the output only after the frame ends. Called every frame the owner
+/// holds the session WITHOUT the keyboard (a suppressed laser-advance
+/// adoption); once a tap sets `shown`, the output flows again and egui-winit's
+/// show fires alongside ours — same as an ordinary tap-focus today.
+fn scrub_ime_output(ctx: &egui::Context) {
+    ctx.output_mut(|o| o.ime = None);
 }
 
 /// Seed/replace the IME's text buffer and selection. Spans are Java string
