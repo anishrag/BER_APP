@@ -144,6 +144,138 @@ fn prompted_wall_is_never_a_known_length_copy_source() {
     assert!(!c.walls_with_known_length().is_empty());
 }
 
+/// The field report behind the generous label set (dump 07-13T1633): while a
+/// PHASE CARVE was being dimensioned, only "some" walls were labelled — the
+/// live buffer held the carve's little ring, so `walls_with_known_length`'s
+/// indices landed on the wrong polygon, and the settled outline (including
+/// "the full length on the right side") was offered nowhere. Now: during a
+/// carve's dimension loop, EVERY outline wall is a labelled copy source, the
+/// carve's own walls too (minus the prompted wall + its length-equivalents),
+/// and the region-label indices point at the OUTLINE again.
+#[test]
+fn carve_dimensioning_offers_every_outline_wall_as_copy_source() {
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    c.create_ber(
+        "T".into(),
+        chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+    );
+    // 2x2 dimensioned storey outline.
+    let square = vec![
+        Point2f32::new(0.0, 0.0),
+        Point2f32::new(2.0, 0.0),
+        Point2f32::new(2.0, 2.0),
+        Point2f32::new(0.0, 2.0),
+        Point2f32::new(0.05, 0.05),
+    ];
+    c.document.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.1, true).unwrap();
+    c.document.dimensioning.scale_set = true;
+    c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
+    c.sync_active();
+    // No labels outside a prompt — the generous set is prompt-scoped.
+    assert!(c.copyable_wall_labels().is_empty(), "no prompt, no labels");
+
+    let mut phases = ConstructionPhases::default();
+    phases.set_year(ConstructionPhase::Extension1, 2008);
+    c.set_construction_phases(phases);
+    // Interior ~0.9m phase carve → its dimension loop opens.
+    c.set_phase_mode(true);
+    c.apply_phase_region_stroke_event(&[
+        (0.5, 0.5),
+        (1.4, 0.5),
+        (1.4, 1.4),
+        (0.5, 1.4),
+        (0.55, 0.55),
+    ]);
+    assert!(c.dimensioning_active(), "carve prompts to be dimensioned");
+
+    let labels = c.copyable_wall_labels();
+    // All FOUR outline walls are copy sources — including the right side's
+    // full length, the one the assessor couldn't select.
+    let outline_walls = labels
+        .iter()
+        .filter(|(_, _, len)| (len - 2.0).abs() < 1e-2)
+        .count();
+    assert_eq!(
+        outline_walls, 4,
+        "every settled outline wall carries a label: {labels:?}"
+    );
+    assert!(
+        labels.iter().any(|(a, b, len)| (a.0 - 2.0).abs() < 1e-3
+            && (b.0 - 2.0).abs() < 1e-3
+            && (len - 2.0).abs() < 1e-2),
+        "the right side (x = 2) is offered at its full length: {labels:?}"
+    );
+    // The carve contributes its walls too (generous: current drawn lengths,
+    // not just confirmed ones) — minus the prompted wall and its
+    // length-equivalent, so exactly the OTHER pair (~0.9 m) remains.
+    let carve_walls = labels
+        .iter()
+        .filter(|(_, _, len)| (len - 0.9).abs() < 0.15)
+        .count();
+    assert_eq!(
+        carve_walls, 2,
+        "the carve's non-prompted pair is copyable: {labels:?}"
+    );
+    // …and the prompted wall itself is never a source (no self-insert).
+    let prompt = c.current_dimension_prompt().expect("prompt open");
+    let (pa, pb) = c
+        .document
+        .floor_plan
+        .wall_endpoints(prompt.wall_start_vertex)
+        .expect("prompted wall resolves");
+    let close = |s: (f64, f64), p: Point2f32| {
+        (s.0 - p.x as f64).abs() < 1e-3 && (s.1 - p.y as f64).abs() < 1e-3
+    };
+    assert!(
+        labels.iter().all(
+            |(a, b, _)| !((close(*a, pa) && close(*b, pb)) || (close(*a, pb) && close(*b, pa)))
+        ),
+        "the prompted wall must not be a copy source: {labels:?}"
+    );
+    // The confirmed-label indices point at the OUTLINE regions again — while
+    // the carve is active they used to index its little ring instead (the
+    // "random labels" bug).
+    let known = c.walls_with_known_length();
+    assert_eq!(known.len(), 4, "all outline edges known: {known:?}");
+    assert!(known.iter().all(|(r, _)| *r == 0));
+}
+
+/// Generosity on the OUTLINE's own loop: before the scale is set nothing is
+/// labelled (pixel numbers are meaningless); from the first applied
+/// dimension on, every wall carries its current metric length except the
+/// prompted wall and its length-equivalents.
+#[test]
+fn outline_mid_loop_labels_every_wall_once_scale_is_set() {
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    let square = vec![
+        Point2f32::new(0.0, 0.0),
+        Point2f32::new(10.0, 0.0),
+        Point2f32::new(10.0, 10.0),
+        Point2f32::new(0.0, 10.0),
+        Point2f32::new(0.2, 0.2),
+    ];
+    c.document.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.5, true).unwrap();
+    c.compute_next_dimension_prompt();
+    assert!(c.dimensioning_active());
+    assert!(
+        c.copyable_wall_labels().is_empty(),
+        "pixel-space plan: no copy labels before the scale is set"
+    );
+
+    c.apply_dimension(4.0).expect("first dimension sets scale");
+    assert!(c.dimensioning_active(), "the other axis is still asked");
+    let labels = c.copyable_wall_labels();
+    assert_eq!(
+        labels.len(),
+        2,
+        "four walls minus the prompted one and its equivalent: {labels:?}"
+    );
+    assert!(
+        labels.iter().all(|(_, _, len)| (len - 4.0).abs() < 1e-2),
+        "labels show the current metric lengths: {labels:?}"
+    );
+}
+
 /// Zeroing a regular (orthogonal) wall is rejected — only a trim cut wall
 /// can be collapsed. Guards against silently deleting a drawn wall.
 #[test]
@@ -16486,8 +16618,10 @@ fn objects_3d_placement_stores_surface_point_and_pitch() {
     // The full-house 3D is reached from the All tab: no current storey.
     c.set_current_storey(None).expect("All tab");
 
-    // A pick on storey 0's roof plane at (2, 3), 2.3 m up, pitched 35°.
-    c.objects_pointer_down_3d(0, 2.0, 3.0, 2.3, Some(35.0), 0.5);
+    // A pick on a SLOPED CEILING of storey 0 at (2, 3), 2.3 m up, pitched 35°
+    // (an interior surface — `on_roof: false`; roof picks are covered by
+    // `roof_pins_hidden_from_storey_views`).
+    c.objects_pointer_down_3d(0, 2.0, 3.0, 2.3, Some(35.0), false, 0.5);
     let room = c
         .active_object_room()
         .expect("a room opened on the surface");
@@ -16528,13 +16662,13 @@ fn objects_3d_placement_stores_surface_point_and_pitch() {
 
     // A near 3D tap (same surface point) reopens the same pin — no duplicate.
     c.close_object_room();
-    c.objects_pointer_down_3d(0, 2.1, 3.0, 2.35, None, 0.5);
+    c.objects_pointer_down_3d(0, 2.1, 3.0, 2.35, None, false, 0.5);
     assert_eq!(c.active_object_room(), Some(room), "near tap reopens it");
     assert_eq!(c.object_rooms_view().len(), 1, "no new pin");
 
     // A 3D tap while the box is OPEN dismisses it — no stray pin. The room
     // stays (it has an object).
-    c.objects_pointer_down_3d(0, 8.0, 8.0, 1.2, None, 0.5);
+    c.objects_pointer_down_3d(0, 8.0, 8.0, 1.2, None, false, 0.5);
     assert!(
         c.active_object_room().is_none(),
         "outside tap dismissed the box"
@@ -16543,7 +16677,7 @@ fn objects_3d_placement_stores_surface_point_and_pitch() {
 
     // Box closed: a far 3D tap drops a fresh pin (no pitch on a wall pick);
     // undo removes it.
-    c.objects_pointer_down_3d(0, 8.0, 8.0, 1.2, None, 0.5);
+    c.objects_pointer_down_3d(0, 8.0, 8.0, 1.2, None, false, 0.5);
     assert_eq!(c.object_rooms_view().len(), 2);
     assert_eq!(
         c.active_object_room_view().unwrap().surface_pitch_deg,
@@ -16552,6 +16686,165 @@ fn objects_3d_placement_stores_surface_point_and_pitch() {
     );
     c.undo().expect("undo");
     assert_eq!(c.object_rooms_view().len(), 1, "undo removed the 3D pin");
+}
+
+/// Field report: solar panels placed on the ROOF must not appear in the
+/// storey's object views — they belong to the roof, not a storey plan. The
+/// pin stays reachable where the roof is drawn (full-house world points, 3D
+/// near-tap), and an invisible roof pin doesn't swallow a 2D plan tap.
+#[test]
+fn roof_pins_hidden_from_storey_views() {
+    use ber_model::ber::objects::{ObjectKind, ObjectRoom, SolarPanelKind};
+
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+
+    // Solar panels placed on a roof plane from the full-house 3D view.
+    c.set_current_storey(None).expect("All tab");
+    c.objects_pointer_down_3d(0, 2.0, 3.0, 4.0, Some(35.0), true, 0.5);
+    let roof_room = c.active_object_room().expect("roof pin opened");
+    c.add_object(
+        ObjectKind::SolarPanel(SolarPanelKind::Photovoltaic),
+        10,
+        None,
+        Vec::new(),
+    );
+    c.close_object_room();
+
+    // Hidden from the storey's pin views (2D plan + single-storey 3D)…
+    c.set_current_storey(Some(0)).expect("storey 0");
+    assert!(
+        c.object_rooms_view().is_empty(),
+        "a roof pin is not a storey object"
+    );
+    // …and a 2D tap at its plan position doesn't reopen the invisible pin
+    // (it starts a fresh room instead).
+    c.objects_pointer_down(2.0, 3.0, 0.5);
+    assert_ne!(
+        c.active_object_room(),
+        Some(roof_room),
+        "the hidden roof pin must not swallow a plan tap"
+    );
+    c.close_object_room(); // prunes the empty fresh pin
+
+    // Still present where the roof is: the full-house world points, at its
+    // surface height, and a 3D near-tap reopens it.
+    let world = c.object_pin_world_points();
+    assert_eq!(world.len(), 1, "the roof pin keeps its world hotspot");
+    assert!((world[0].2 - 4.0).abs() < 1e-6);
+    c.set_current_storey(None).expect("All tab");
+    c.objects_pointer_down_3d(0, 2.0, 3.0, 4.0, None, false, 0.5);
+    assert_eq!(
+        c.active_object_room(),
+        Some(roof_room),
+        "3D near-tap reopens the roof pin"
+    );
+    c.close_object_room();
+
+    // Legacy pins (recorded before `on_roof` existed): a pitched pin ABOVE
+    // the storey's flat ceiling can only be on the roof envelope; at or below
+    // it (a sloped interior ceiling) it stays a storey pin.
+    let legacy = ObjectRoom::new_on_surface(
+        domain::points::Point2f32::new(1.0, 1.0),
+        4.0,
+        Some(35.0),
+        false,
+    );
+    assert!(legacy.is_roof_mounted(Some(2.4)));
+    let interior = ObjectRoom::new_on_surface(
+        domain::points::Point2f32::new(1.0, 1.0),
+        2.0,
+        Some(35.0),
+        false,
+    );
+    assert!(!interior.is_roof_mounted(Some(2.4)));
+}
+
+/// Field feature: the ATTIC bucket — objects recorded in the attic space via
+/// the "Attic" button (no plan pin), and the review's "anything in the
+/// attic?" question with the same promise-gate as the category absences.
+#[test]
+fn attic_bucket_and_review_question() {
+    use ber_model::ber::objects::ObjectKind;
+
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+
+    // A normal room first, so the review has content.
+    c.objects_pointer_down(2.0, 2.0, 0.5);
+    c.add_object(ObjectKind::Thermostat, 1, None, Vec::new());
+    c.close_object_room();
+
+    // Open the attic: created on demand, flagged for the UI, no plan pin and
+    // no world hotspot (it isn't a storey location).
+    c.open_attic_room();
+    let av = c.active_object_room_view().expect("attic open");
+    assert!(av.is_attic, "panel view knows it's the attic");
+    assert_eq!(av.name, "Attic");
+    assert_eq!(
+        c.object_rooms_view().len(),
+        1,
+        "the attic adds no plan pin (only the room pin shows)"
+    );
+    assert_eq!(c.object_pin_world_points().len(), 1);
+
+    // Dismissed EMPTY, the bucket is pruned (like an untouched pin).
+    c.close_object_room();
+
+    // Review: the attic question is pending; "Yes — there is" blocks confirm
+    // until an attic object is actually recorded.
+    c.set_object_review_mode(true);
+    assert!(c.object_review_view().unwrap().attic_prompt);
+    c.skip_attic_absent();
+    let rv = c.object_review_view().unwrap();
+    assert!(!rv.attic_prompt, "answered for this session");
+    assert!(rv.attic_unresolved, "…but the promise is unresolved");
+    c.confirm_objects_review();
+    assert!(
+        !c.objects_reviewed(),
+        "confirm refused while the flagged attic has no object"
+    );
+    assert!(c.object_review_mode(), "review stays open");
+
+    // Record the promised attic object (e.g. a heat-recovery unit).
+    c.open_attic_room();
+    c.add_object(
+        ObjectKind::Other("Heat recovery unit".into()),
+        1,
+        None,
+        Vec::new(),
+    );
+    c.close_object_room();
+    assert!(!c.attic_unresolved(), "attic object resolves the promise");
+    let rv = c.object_review_view().unwrap();
+    assert!(
+        rv.totals
+            .iter()
+            .any(|t| t.label.contains("Heat recovery unit")),
+        "attic objects count in the house totals"
+    );
+    c.confirm_objects_review();
+    assert!(
+        c.objects_reviewed(),
+        "confirm succeeds once the object exists"
+    );
+
+    // The "No — empty" path persists on the record: a fresh review (which
+    // clears session skips) no longer asks.
+    let mut c2 = dimensioned_square_controller();
+    c2.materialize();
+    c2.objects_pointer_down(2.0, 2.0, 0.5);
+    c2.add_object(ObjectKind::Thermostat, 1, None, Vec::new());
+    c2.close_object_room();
+    c2.set_object_review_mode(true);
+    c2.confirm_attic_absent();
+    assert!(!c2.object_review_view().unwrap().attic_prompt);
+    c2.set_object_review_mode(false);
+    c2.set_object_review_mode(true);
+    assert!(
+        !c2.object_review_view().unwrap().attic_prompt,
+        "confirmed-empty attic is never re-asked"
+    );
 }
 
 /// Object photo requirement: always-required kinds need a photo every time,
@@ -20415,5 +20708,165 @@ fn partitioned_wall_exposed_piece_merges_into_same_phase_group() {
     assert!(
         c.structure_selected_ids().is_empty(),
         "the whole merged group is attributed — nothing remains"
+    );
+}
+
+// ─── Field report cd36f510: ridge between two raised areas ──────────────────
+
+/// The cd36f510 dump reconstructed through the real load path: the dump's
+/// outline, default height 2.409, and the two DURABLE ceiling steps (the two
+/// raised strips: y ∈ [0.093, 1.462] at 2.95 and y ∈ [−1.385, 0.093] at
+/// 2.572, both x ∈ [1.366, 7.367]) restored exactly as a reload does.
+fn cd36f510_controller() -> AppController {
+    let p = |x: f32, y: f32| Point2f32::new(x, y);
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    let _ = c.create_ber(
+        "T".into(),
+        chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+    );
+    c.document.floor_plan = FloorPlan::from_points_to_orthogonal(
+        &[
+            p(1.366, -1.385),
+            p(1.366, 9.401),
+            p(5.701, 9.401),
+            p(5.701, 10.496),
+            p(7.367, 10.496),
+            p(7.367, 9.234),
+            p(9.875, 9.234),
+            p(9.875, -1.385),
+            p(1.4, -1.38),
+        ],
+        0.1,
+        true,
+    )
+    .unwrap();
+    c.document.dimensioning.scale_set = true;
+    c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
+    c.commit_to_ber().unwrap();
+    c.set_default_ceiling_height(2.409).expect("height applies");
+    let d = |x0: f64, y0: f64, x1: f64, y1: f64| {
+        vec![
+            domain::points::Point2f64::new(x0, y0),
+            domain::points::Point2f64::new(x1, y0),
+            domain::points::Point2f64::new(x1, y1),
+            domain::points::Point2f64::new(x0, y1),
+        ]
+    };
+    {
+        let storey = &mut c.current_record.as_mut().unwrap().data.storeys[0];
+        storey.ceiling_steps = vec![
+            (d(1.3659, 0.0929, 7.3669, 1.4619), 0.541),
+            (d(1.3659, -1.3851, 7.3669, 0.0929), 0.163),
+        ];
+    }
+    c.load_ceiling_step_regions_for(0);
+    c.recompose_ceilings(0);
+    c.materialize();
+    c.set_roof_point_mode(true);
+    assert!(c.ceiling_point_mode(), "roof point mode enters");
+    c
+}
+/// THE cd36f510 REGRESSION, end to end through the real controller path: a
+/// ridge stroke drawn ACROSS the two raised strips (one end in each — "a
+/// ridge between the two areas that I raised") fits, takes the cross
+/// position, accepts the height, and solves ONE two-plane gable over the
+/// fused pair. Before the flat-chain acceptance + solve fuse this was
+/// rejected at the position stage ("that length would push the ridge out of
+/// its ceiling area — 1.48 m wall to wall") because each strip alone was
+/// asked to contain the whole ridge.
+#[test]
+fn cd36f510_ridge_across_the_two_raised_strips_solves_one_gable() {
+    let mut c = cd36f510_controller();
+    // Vertical stroke from inside the lower strip to the upper strip's far
+    // boundary; the extent ends snap to y = -1.3851 (outline) and y = 1.4619
+    // (the strip/default area boundary), the cross (x) stays as drawn.
+    c.apply_roof_ridge_stroke_event(&[(4.37, -1.2), (4.36, 0.1), (4.37, 1.4)]);
+    assert!(
+        c.ceiling_ridge_position_pending(),
+        "both ends snapped, the cross position is the one open question"
+    );
+    c.skip_position_dimension()
+        .expect("the drawn cross position is accepted — the finalize check passes via the chain");
+    assert!(c.ceiling_ridge_height_pending(), "height stage opens");
+    c.assign_roof_ridge_height(3.4)
+        .expect("the height applies across the chain");
+    assert!(
+        c.ceiling_ridge_area_options().is_empty(),
+        "no ChooseArea — the ridge is not a junction mono-pitch"
+    );
+
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert_eq!(storey.ceiling_apexes.len(), 2, "both ridge ends committed");
+    for a in &storey.ceiling_apexes {
+        assert!((a.z_m - 3.4).abs() < 1e-6);
+    }
+    let mut ys: Vec<f64> = storey.ceiling_apexes.iter().map(|a| a.point.y).collect();
+    ys.sort_by(f64::total_cmp);
+    assert!(
+        (ys[0] - -1.3851).abs() < 1e-3 && (ys[1] - 1.4619).abs() < 1e-3,
+        "ends on the outline wall and the strip boundary: {ys:?}"
+    );
+    // ONE two-apex group — a single ridge, not two independent fans.
+    let groups = storey.ceiling_apex_groups();
+    assert_eq!(groups.len(), 1, "one roof group");
+    assert_eq!(groups[0].apex_idxs.len(), 2, "carrying both apexes");
+    // The solve: two sloped planes over the fused strips (ridge 3.4, eaves
+    // at the anchor corner's 2.572 — the 2.95 corners embed), the
+    // default-height neighbours untouched, and NEITHER strip left flat.
+    let sloped: Vec<_> = storey
+        .ceilings
+        .regions
+        .iter()
+        .filter(|r| r.flat_z().is_none())
+        .collect();
+    assert_eq!(sloped.len(), 2, "two gable side planes");
+    for face in &sloped {
+        for v in &face.polygon.exterior {
+            assert!(
+                (v.z - 3.4).abs() < 1e-6 || (v.z - 2.572).abs() < 1e-4,
+                "plane vertices at the ridge or the eave, got z {}",
+                v.z
+            );
+        }
+    }
+    assert!(
+        !storey.ceilings.regions.iter().any(|r| r
+            .flat_z()
+            .is_some_and(|z| (z - 2.95).abs() < 1e-4 || (z - 2.572).abs() < 1e-4)),
+        "the raised strips are consumed by the gable"
+    );
+    assert!(
+        storey
+            .ceilings
+            .regions
+            .iter()
+            .any(|r| r.flat_z().is_some_and(|z| (z - 2.409).abs() < 1e-4)),
+        "the default-height remainder survives flat"
+    );
+}
+
+/// The all-snapped stroke path used to DROP a rejected ridge silently (a
+/// `log::error` the assessor never sees — cd36f510's "it's not letting me
+/// do it"). Now the rejection surfaces as the ridge notice.
+#[test]
+fn rejected_all_snapped_ridge_stroke_surfaces_a_notice() {
+    let mut c = cd36f510_controller();
+    // Solve the cross gable first so the strips are sloped (occupied).
+    c.apply_roof_ridge_stroke_event(&[(4.37, -1.2), (4.36, 0.1), (4.37, 1.4)]);
+    c.skip_position_dimension().unwrap();
+    c.assign_roof_ridge_height(3.4).unwrap();
+    assert!(c.roof_ridge_notice().is_none(), "no notice after success");
+    // A horizontal stroke hugging the bottom outline wall: the cross snaps
+    // to y = -1.3851 and both ends snap (x = 1.3659 / 7.3669) — all-snapped,
+    // so the finalize rejection (the area is sloped now) has no open stage.
+    c.apply_roof_ridge_stroke_event(&[(1.45, -1.30), (4.4, -1.31), (7.3, -1.30)]);
+    assert!(
+        c.pending_roof_ridge.is_none(),
+        "the rejected stroke opens no stage"
+    );
+    let notice = c.roof_ridge_notice().expect("the rejection is surfaced");
+    assert!(
+        !notice.is_empty(),
+        "the notice carries the rejection message"
     );
 }

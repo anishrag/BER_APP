@@ -709,6 +709,16 @@ impl CeilingRegions {
         // roof it now belongs to).
         let (regions, per_region) =
             absorb_level_neighbours(self.regions, per_region, &junction_pairs);
+        // FUSE the flat chain a CROSS-STEP ridge spans (field bug cd36f510):
+        // a ridge drawn ACROSS two raised strips separated by a ceiling step
+        // puts one apex in EACH strip — two independent fans, not the gable
+        // the assessor drew. When two single-apex flat regions are joined by
+        // a segment that stays over flat, otherwise-unclaimed regions, the
+        // whole chain fuses into ONE region (per-vertex base z — the strips
+        // KEEP their own eave heights) claiming BOTH apexes, and the normal
+        // ridge/gable machinery shapes the union. Runs AFTER the same-height
+        // absorption so indices are final and dividers are already gone.
+        let (regions, per_region) = fuse_ridge_spanned_regions(regions, per_region, apexes);
         let mut next: Vec<CeilingRegion> = Vec::new();
         for (ri, region) in regions.into_iter().enumerate() {
             if region.polygon.exterior.len() < 3 {
@@ -1322,6 +1332,91 @@ impl CeilingRegions {
             .collect()
     }
 
+    /// The PLAN UNION of the `members` regions as ONE simple ring (closing
+    /// vertex dropped), or `None` when the union comes out as anything else
+    /// (holes, disjoint pieces — the members don't form one connected patch).
+    /// Sub-mm² slivers are dropped before the shape test ([`SLIVER_AREA_M2`]).
+    /// The geometric half of the ridge-chain checks: assign-time validation
+    /// (`document`) runs its foldover guard over this ring, and the solve's
+    /// [`fuse_ridge_spanned_regions`] fuses over the same union — the two
+    /// must agree on whether the chain is one patch.
+    pub fn plan_union_ring(&self, members: &[usize]) -> Option<Vec<Point2f64>> {
+        use geo::bool_ops::BooleanOps;
+        use geo::Area;
+        let mut acc = MultiPolygon::<f64>(Vec::new());
+        for &m in members {
+            acc = acc.union(&MultiPolygon(vec![self.regions[m].polygon.clone().into()]));
+        }
+        let pieces: Vec<Polygon<f64>> = acc
+            .0
+            .iter()
+            .flat_map(split_to_simple)
+            .filter(|p| p.unsigned_area() >= SLIVER_AREA_M2)
+            .collect();
+        let [one] = pieces.as_slice() else {
+            return None;
+        };
+        let mut ring: Vec<Point2f64> = one
+            .exterior()
+            .coords()
+            .map(|c| Point2f64::new(c.x, c.y))
+            .collect();
+        if ring.len() > 1 && ring.first() == ring.last() {
+            ring.pop();
+        }
+        (ring.len() >= 3).then_some(ring)
+    }
+
+    /// Group the GIVEN region indices into plan-ADJACENCY components (adjacency
+    /// = a shared plan boundary piece longer than a millimetre —
+    /// [`shared_plan_pieces`], the absorption pass's predicate). Components come
+    /// out ordered by smallest member, members ascending. The Length stage's
+    /// optimistic ridge bound spans a component (a ridge may now run across a
+    /// CHAIN of flat areas — the assign-time chain checks), so the bound is per
+    /// connected group, not per region.
+    pub fn plan_adjacent_components(&self, idxs: &[usize]) -> Vec<Vec<usize>> {
+        const MIN_SHARED_M: f64 = 1e-3;
+        let rings: Vec<Vec<Point2f64>> = idxs
+            .iter()
+            .map(|&i| {
+                self.regions[i]
+                    .polygon
+                    .exterior
+                    .iter()
+                    .map(|v| Point2f64::new(v.x, v.y))
+                    .collect()
+            })
+            .collect();
+        let adjacent = |a: usize, b: usize| {
+            shared_plan_pieces(&rings[a], &rings[b])
+                .iter()
+                .any(|(p, q)| ((p.x - q.x).powi(2) + (p.y - q.y).powi(2)).sqrt() > MIN_SHARED_M)
+        };
+        let mut comp_of: Vec<Option<usize>> = vec![None; idxs.len()];
+        let mut comps: Vec<Vec<usize>> = Vec::new();
+        for seed in 0..idxs.len() {
+            if comp_of[seed].is_some() {
+                continue;
+            }
+            let id = comps.len();
+            let mut members = vec![seed];
+            comp_of[seed] = Some(id);
+            let mut stack = vec![seed];
+            while let Some(k) = stack.pop() {
+                for j in 0..idxs.len() {
+                    if comp_of[j].is_none() && adjacent(k, j) {
+                        comp_of[j] = Some(id);
+                        members.push(j);
+                        stack.push(j);
+                    }
+                }
+            }
+            members.sort_unstable();
+            comps.push(members.into_iter().map(|k| idxs[k]).collect());
+        }
+        comps
+    }
+
     /// Interior CEILING-RISER faces: for every plan edge piece shared by two
     /// regions ([`shared_plan_pieces`] — metric collinearity over boolean-op
     /// output, never exact vertex equality) whose (linear) z profiles differ
@@ -1555,6 +1650,182 @@ fn absorb_level_neighbours(
             c.sort_unstable();
             c
         });
+    }
+    (out_regions, out_claims)
+}
+
+/// How many interior samples the ridge-chain segment walk takes — one every
+/// few centimetres on a room-scale ridge, dense enough that no real ceiling
+/// region between the endpoints is stepped over.
+const CHAIN_SAMPLES: usize = 64;
+
+/// The CROSS-STEP RIDGE fuse of
+/// [`with_apexes_shaped`](CeilingRegions::with_apexes_shaped), run AFTER
+/// [`absorb_level_neighbours`]: when two apexes land in two DIFFERENT flat
+/// single-apex regions and the straight segment between them stays over
+/// FLAT, un-apexed regions the whole way (sampled every ~len/[`CHAIN_SAMPLES`];
+/// boundary-band claims count — [`CeilingRegions::claim_regions`]), the
+/// chain's members fuse into ONE region claiming BOTH apexes, so the
+/// downstream two-apex branch shapes the RIDGE the assessor drew instead of
+/// two independent fans. Mirrors the assign-time chain acceptance in
+/// `document::validate_roof_ridge*` — keep the two in step.
+///
+/// The fused ring keeps PER-VERTEX base z: each union-ring vertex takes the
+/// flat height of the member region claiming it (the LOWEST when a vertex
+/// sits on the internal step line and is claimed by several — the eave-safe
+/// choice; those step vertices are collinear on the union ring, so they are
+/// never gable anchors and mostly embed on the side planes anyway). The
+/// union must come out as ONE simple ring; anything else warns and leaves
+/// the chain unfused (the apexes then fan their own regions — the legacy
+/// posture). The fused region sits at its lowest member's position with that
+/// member's fabric link (warned when members disagree — the absorption
+/// pass's convention).
+fn fuse_ridge_spanned_regions(
+    regions: Vec<CeilingRegion>,
+    claims: Vec<Vec<usize>>,
+    apexes: &[CeilingApex],
+) -> (Vec<CeilingRegion>, Vec<Vec<usize>>) {
+    let n = regions.len();
+    if n < 2 {
+        return (regions, claims);
+    }
+    // Regions holding exactly ONE apex, keyed by that apex index.
+    let single: Vec<(usize, usize)> = claims
+        .iter()
+        .enumerate()
+        .filter_map(|(r, c)| match c.as_slice() {
+            [a] => Some((*a, r)),
+            _ => None,
+        })
+        .collect();
+    if single.len() < 2 {
+        return (regions, claims);
+    }
+    let tmp = CeilingRegions { regions };
+    let flat: Vec<Option<f64>> = tmp.regions.iter().map(|r| r.flat_z()).collect();
+    let mut consumed: Vec<bool> = vec![false; n];
+    // (sorted members, apex pair) per accepted chain.
+    let mut fused: Vec<(Vec<usize>, [usize; 2])> = Vec::new();
+    for (k, &(ai, ra)) in single.iter().enumerate() {
+        for &(bi, rb) in &single[k + 1..] {
+            if ra == rb || consumed[ra] || consumed[rb] || flat[ra].is_none() || flat[rb].is_none()
+            {
+                continue;
+            }
+            let (pa, pb) = (apexes[ai].point, apexes[bi].point);
+            let mut members: Vec<usize> = Vec::new();
+            let mut covered = true;
+            for s in 0..CHAIN_SAMPLES {
+                let t = (s as f64 + 0.5) / CHAIN_SAMPLES as f64;
+                let p = Point2f64::new(pa.x + (pb.x - pa.x) * t, pa.y + (pb.y - pa.y) * t);
+                let cl = tmp.claim_regions(p);
+                if cl.is_empty() {
+                    covered = false;
+                    break;
+                }
+                for c in cl {
+                    if !members.contains(&c) {
+                        members.push(c);
+                    }
+                }
+            }
+            members.sort_unstable();
+            // The chain must really CROSS regions, stay flat and un-apexed
+            // (its two end regions carry exactly the pair), and be untouched
+            // by an earlier fuse.
+            if !covered
+                || members.len() < 2
+                || !members.contains(&ra)
+                || !members.contains(&rb)
+                || members.iter().any(|&m| {
+                    consumed[m]
+                        || flat[m].is_none()
+                        || (m != ra && m != rb && !claims[m].is_empty())
+                })
+            {
+                continue;
+            }
+            if tmp.plan_union_ring(&members).is_none() {
+                log::warn!(
+                    "cross-step ridge chain of {} ceiling regions does not union into one \
+                     ring — left unfused",
+                    members.len()
+                );
+                continue;
+            }
+            for &m in &members {
+                consumed[m] = true;
+            }
+            fused.push((members, [ai.min(bi), ai.max(bi)]));
+        }
+    }
+    if fused.is_empty() {
+        return (tmp.regions, claims);
+    }
+    let regions = tmp.regions;
+    let mut out_regions: Vec<CeilingRegion> = Vec::new();
+    let mut out_claims: Vec<Vec<usize>> = Vec::new();
+    let mut emitted: Vec<bool> = vec![false; fused.len()];
+    for ri in 0..n {
+        let Some(fi) = fused.iter().position(|(m, _)| m.contains(&ri)) else {
+            out_regions.push(regions[ri].clone());
+            out_claims.push(claims[ri].clone());
+            continue;
+        };
+        if emitted[fi] {
+            continue; // the chain was emitted at its first member
+        }
+        emitted[fi] = true;
+        let (members, pair) = &fused[fi];
+        let tmp = CeilingRegions {
+            regions: regions.clone(),
+        };
+        let Some(union_ring) = tmp.plan_union_ring(members) else {
+            unreachable!("chain acceptance checked the union above");
+        };
+        // Per-vertex base z: the flat height of the member claiming the
+        // vertex (lowest wins on the internal step line).
+        let vertex_z = |p: Point2f64| -> f64 {
+            members
+                .iter()
+                .filter(|&&m| tmp.regions[m].plan_contains_within(p, APEX_BOUNDARY_EPS_M))
+                .filter_map(|&m| flat[m])
+                .fold(f64::INFINITY, f64::min)
+        };
+        if members
+            .iter()
+            .any(|&m| regions[m].construction_id != regions[members[0]].construction_id)
+        {
+            log::warn!(
+                "cross-step ridge fuse merges ceiling regions with different constructions — \
+                 the roof takes the first member's"
+            );
+        }
+        let seed = &regions[members[0]];
+        out_regions.push(CeilingRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(
+                union_ring
+                    .into_iter()
+                    .map(|p| {
+                        let z = vertex_z(p);
+                        Point3f64::new(
+                            p.x,
+                            p.y,
+                            if z.is_finite() {
+                                z
+                            } else {
+                                flat[members[0]].unwrap_or(0.0)
+                            },
+                        )
+                    })
+                    .collect(),
+            ),
+            opes: Opes::default(),
+            construction_id: seed.construction_id,
+            exposure: seed.exposure,
+        });
+        out_claims.push(pair.to_vec());
     }
     (out_regions, out_claims)
 }

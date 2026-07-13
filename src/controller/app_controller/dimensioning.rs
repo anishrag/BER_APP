@@ -22,16 +22,37 @@ impl AppController {
         self.document.dimensioning.scale_set
     }
 
-    /// Every wall whose length is currently *known* — meaning all parameters
-    /// in its length expression are in `known_params`. This is the superset
-    /// of `dimensioned_walls`: it also catches walls whose length is implied
-    /// by equality (e.g. the opposite side of a rectangle, after one side
-    /// was dimensioned) or by sums/differences of already-set parameters.
-    /// The UI uses this to label every wall whose length can be displayed.
+    /// Every OUTLINE wall whose length is currently *known* — meaning all
+    /// parameters in its length expression are in the outline's
+    /// `known_params`. This is the superset of `dimensioned_walls`: it also
+    /// catches walls whose length is implied by equality (e.g. the opposite
+    /// side of a rectangle, after one side was dimensioned) or by
+    /// sums/differences of already-set parameters. The UI applies these
+    /// `(ring, edge)` indices to the RESOLVED outline regions
+    /// (`storey.floors.regions`) to label them — so they are computed on the
+    /// OUTLINE plan explicitly: while a carve/living-area is active the live
+    /// buffer holds ITS little ring, whose indices would land on the wrong
+    /// polygon (the "random labels while dimensioning a carve" bug). When
+    /// the outline is active the live buffer is the up-to-date truth (the
+    /// slot is stale until the next shape switch stows it back).
     pub fn walls_with_known_length(&self) -> Vec<(usize, usize)> {
-        self.document
-            .floor_plan
-            .walls_with_known_length(&self.document.dimensioning.known_params)
+        let (plan, dim) = if self.document.active == ActiveShape::Outline {
+            (&self.document.floor_plan, &self.document.dimensioning)
+        } else {
+            (
+                &self.document.outline.floor_plan,
+                &self.document.outline.dimensioning,
+            )
+        };
+        plan.walls_with_known_length(&dim.known_params)
+    }
+
+    /// Tap-to-copy label set for the open dimension prompt — every wall with
+    /// a determinable current length, minus the prompted wall and its
+    /// length-equivalents; see `StoreyDoc::copyable_wall_labels` in
+    /// `document`. Empty when no prompt is open.
+    pub fn copyable_wall_labels(&self) -> Vec<((f64, f64), (f64, f64), f32)> {
+        self.document.copyable_wall_labels()
     }
 
     /// Resolved view of the current prompt for the UI: world-coord endpoints

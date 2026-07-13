@@ -393,6 +393,11 @@ pub struct AppController {
     /// the session. Cleared each time the review opens. (A "Yes" persists on the
     /// record instead — `Ber.objects_no_items_confirmed`.)
     object_review_skipped: std::collections::HashSet<ber_model::ber::objects::ObjectCategory>,
+    /// The attic counterpart of `object_review_skipped`: "Anything in the
+    /// attic?" answered "Yes — there is" this session (they'll go add it).
+    /// Cleared each time the review opens; a "No, empty" persists on the
+    /// record instead (`Ber.attic_no_items_confirmed`).
+    object_review_attic_skipped: bool,
     /// Phase-4 north-align: the satellite IMAGE's transient pan offset (canvas
     /// px) and zoom over the fixed plan. The image's ROTATION is the persisted
     /// `orientation_deg` (the plan's north). Pan/zoom are session-only.
@@ -740,6 +745,7 @@ impl AppController {
             object_review_mode: false,
             object_review_selected: 0,
             object_review_skipped: std::collections::HashSet::new(),
+            object_review_attic_skipped: false,
             north_img_offset: (0.0, 0.0),
             north_img_zoom: 1.0,
             show_ber_complete: false,

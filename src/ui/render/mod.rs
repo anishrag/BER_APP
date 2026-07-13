@@ -400,6 +400,43 @@ pub fn render_equivalent_wall(
     );
 }
 
+/// Tap-to-copy wall-length labels while a dimension prompt is open: one
+/// `"{len:.2} m"` label at each wall's midpoint, from the generous label set
+/// (`AppController::copyable_wall_labels` — the settled outline plus the
+/// active in-flight shape, minus the prompted wall). Same look as the
+/// confirmed dimension labels, and drawn for EVERY entry — no declutter,
+/// each label doubles as a tap-to-copy input key.
+pub fn render_copy_wall_labels(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    ber: Option<&Ber>,
+    current_storey_idx: Option<usize>,
+    sketch_mode: SketchMode,
+    view: ViewParams,
+    labels: &[((f64, f64), (f64, f64), f32)],
+) {
+    if labels.is_empty() {
+        return;
+    }
+    let Some((_storey, t)) = storey_transform(rect, ber, current_storey_idx, sketch_mode, view)
+    else {
+        return;
+    };
+    for (a, b, len) in labels {
+        if *len < 1e-3 {
+            continue;
+        }
+        let mid = t.apply((a.0 + b.0) * 0.5, (a.1 + b.1) * 0.5);
+        painter.text(
+            mid,
+            egui::Align2::CENTER_CENTER,
+            format!("{len:.2} m"),
+            egui::FontId::monospace(11.0),
+            style::DIMENSION_TEXT,
+        );
+    }
+}
+
 /// Highlight one wall in a caller-chosen colour — the same thick on-wall line
 /// as [`render_equivalent_wall`], for prompts that need to distinguish two
 /// walls (e.g. the position prompt's area wall vs its outline reference wall).

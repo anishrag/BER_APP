@@ -343,6 +343,45 @@ impl BerApp {
         self.current_page = page;
     }
 
+    /// Dismiss the OPEN object room (a tap outside its box, or its Done):
+    /// commit like OK first, then close. The field rule — an EMPTY in-flight
+    /// entry dismisses silently, but anything already entered (count, note,
+    /// photo, an "Other" name) must not be lost — plus a flush of any photo
+    /// buffers still parked for this room (each becomes its own object), so a
+    /// captured photo can neither strand nor leak into another room. The
+    /// decision logic is `sketch::take_dismiss_commits` (unit-tested there);
+    /// runs post-render because the render view borrows the entry buffers.
+    fn flush_and_close_object_room(&mut self) {
+        let Some(room_id) = self.app_controller.borrow().active_object_room() else {
+            return;
+        };
+        let st = &mut self.sketch_state;
+        let commits = {
+            let ctrl = self.app_controller.borrow();
+            crate::ui::pages::sketch::take_dismiss_commits(
+                room_id,
+                st.object_selected_kind.as_ref(),
+                &st.object_count_input,
+                &st.object_note_input,
+                |k| ctrl.object_photo_required(k),
+                &mut st.object_pending_photos,
+            )
+        };
+        // Reset the entry UI — the room is closing, so the selection doesn't
+        // carry over to the next room (mirrors the OK button's reset).
+        st.object_selected_category = None;
+        st.object_selected_kind = None;
+        st.object_auto_photo_for = None;
+        st.object_count_input.clear();
+        st.object_note_input.clear();
+        st.object_other_name.clear();
+        let mut ctrl = self.app_controller.borrow_mut();
+        for c in commits {
+            ctrl.add_object(c.kind, c.count, c.note, c.photos);
+        }
+        ctrl.close_object_room();
+    }
+
     /// Draw the always-available bug-report overlay: a floating 🐞 button and,
     /// when opened, a modal to record a spoken description + save a full state
     /// dump. Handled entirely here (direct controller calls) — the page render
@@ -814,6 +853,7 @@ impl eframe::App for BerApp {
                                 dim_error,
                                 position_prompt,
                                 dimensioned_walls,
+                                copy_wall_labels,
                                 arc_preview,
                                 curve_bulge,
                                 living_area_mode,
@@ -917,6 +957,7 @@ impl eframe::App for BerApp {
                                     self.sketch_state.dimension_error.clone(),
                                     controller_ref.position_prompt_for_ui(),
                                     controller_ref.walls_with_known_length(),
+                                    controller_ref.copyable_wall_labels(),
                                     controller_ref.pending_arc_preview(),
                                     controller_ref.pending_arc_bulge(),
                                     controller_ref.living_area_mode(),
@@ -1488,6 +1529,7 @@ impl eframe::App for BerApp {
                                 dim_scale_set,
                                 dim_error: dim_error.as_deref(),
                                 dimensioned_walls: &dimensioned_walls,
+                                copy_wall_labels: &copy_wall_labels,
                                 position_prompt,
                                 position_input: &mut self.sketch_state.position_input,
                                 position_error: position_error.as_deref(),
@@ -1751,6 +1793,20 @@ impl eframe::App for BerApp {
                             // render — same pattern as `annotate_request`.
                             let dim_copy_request: std::cell::Cell<Option<f32>> =
                                 std::cell::Cell::new(None);
+                            // Dismissing the OPEN object room (a tap outside
+                            // its box / its Done) must first COMMIT a
+                            // non-empty in-flight entry like OK would — but
+                            // the entry buffers are mutably borrowed by the
+                            // render view, so the dismissal is parked here and
+                            // honoured right after render (same pattern as
+                            // `annotate_request`).
+                            let object_dismiss_request: std::cell::Cell<bool> =
+                                std::cell::Cell::new(false);
+                            // Opening the ATTIC bucket goes through the same
+                            // deferred flush (a previous room's in-flight
+                            // entry must commit before the attic opens).
+                            let attic_open_request: std::cell::Cell<bool> =
+                                std::cell::Cell::new(false);
                             SketchPage::render(ui, view, touch_nav, |event| match event {
                                 UiEvent::Sketch(sketch_event) => match sketch_event {
                                     // Logged, not expected: after a two-finger
@@ -2514,14 +2570,24 @@ impl eframe::App for BerApp {
                                     SketchEvent::ConfirmStructureReview => {
                                         controller.borrow_mut().confirm_structure_review()
                                     }
+                                    // The three tap handlers below: a tap
+                                    // while a room box is OPEN dismisses it —
+                                    // that path goes through the DEFERRED
+                                    // dismiss (`object_dismiss_request`) so a
+                                    // non-empty entry commits first; with no
+                                    // room open they open/create as usual.
                                     SketchEvent::ObjectsPointerDown {
                                         world_x,
                                         world_y,
                                         tol,
                                     } => {
-                                        controller
-                                            .borrow_mut()
-                                            .objects_pointer_down(world_x, world_y, tol);
+                                        if controller.borrow().active_object_room().is_some() {
+                                            object_dismiss_request.set(true);
+                                        } else {
+                                            controller
+                                                .borrow_mut()
+                                                .objects_pointer_down(world_x, world_y, tol);
+                                        }
                                     }
                                     SketchEvent::ObjectsPointerDownAllStoreys {
                                         storey_idx,
@@ -2529,9 +2595,13 @@ impl eframe::App for BerApp {
                                         world_y,
                                         tol,
                                     } => {
-                                        controller.borrow_mut().objects_pointer_down_on(
-                                            storey_idx, world_x, world_y, tol,
-                                        );
+                                        if controller.borrow().active_object_room().is_some() {
+                                            object_dismiss_request.set(true);
+                                        } else {
+                                            controller.borrow_mut().objects_pointer_down_on(
+                                                storey_idx, world_x, world_y, tol,
+                                            );
+                                        }
                                     }
                                     SketchEvent::ObjectsPointerDown3D {
                                         storey_idx,
@@ -2539,14 +2609,20 @@ impl eframe::App for BerApp {
                                         world_y,
                                         z_m,
                                         pitch_deg,
+                                        on_roof,
                                         tol,
                                     } => {
-                                        controller.borrow_mut().objects_pointer_down_3d(
-                                            storey_idx, world_x, world_y, z_m, pitch_deg, tol,
-                                        );
+                                        if controller.borrow().active_object_room().is_some() {
+                                            object_dismiss_request.set(true);
+                                        } else {
+                                            controller.borrow_mut().objects_pointer_down_3d(
+                                                storey_idx, world_x, world_y, z_m, pitch_deg,
+                                                on_roof, tol,
+                                            );
+                                        }
                                     }
                                     SketchEvent::CloseObjectRoom => {
-                                        controller.borrow_mut().close_object_room();
+                                        object_dismiss_request.set(true);
                                     }
                                     SketchEvent::RenameObjectRoom(name) => {
                                         controller.borrow_mut().rename_object_room(name);
@@ -2584,6 +2660,15 @@ impl eframe::App for BerApp {
                                     }
                                     SketchEvent::ConfirmObjectReview => {
                                         controller.borrow_mut().confirm_objects_review();
+                                    }
+                                    SketchEvent::OpenAtticRoom => {
+                                        attic_open_request.set(true);
+                                    }
+                                    SketchEvent::ConfirmAtticAbsent => {
+                                        controller.borrow_mut().confirm_attic_absent();
+                                    }
+                                    SketchEvent::SkipAtticAbsent => {
+                                        controller.borrow_mut().skip_attic_absent();
                                     }
                                     SketchEvent::SetFinalFloor(floor) => {
                                         controller.borrow_mut().set_final_floor(floor);
@@ -3162,6 +3247,18 @@ impl eframe::App for BerApp {
                                 UiEvent::ExitBer => exit_clicked.set(true),
                                 _ => {}
                             });
+                            // Deferred object-room dismissal (see
+                            // `object_dismiss_request` above): commit any
+                            // non-empty in-flight entry + parked photos like
+                            // OK, then close the room. Opening the attic
+                            // flushes the previous room the same way first.
+                            let open_attic = attic_open_request.take();
+                            if object_dismiss_request.take() || open_attic {
+                                self.flush_and_close_object_room();
+                            }
+                            if open_attic {
+                                self.app_controller.borrow_mut().open_attic_room();
+                            }
                             // Deferred annotator open (see `annotate_request`
                             // above): decode the side's stored full-res photo
                             // into a fresh session. A missing/undecodable file

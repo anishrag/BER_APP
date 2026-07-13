@@ -24,7 +24,7 @@ mod prompt_dock;
 mod structure;
 pub mod touch;
 
-pub use pending_photos::PendingObjectPhotos;
+pub use pending_photos::{take_dismiss_commits, PendingObjectPhotos};
 
 use egui::epaint::PathStroke;
 use egui::Pos2;
@@ -640,19 +640,25 @@ pub enum SketchEvent {
     /// ([`crate::ui::render::pick_3d`]). Drops / opens a room pin ON that
     /// surface: `z_m` is the hit's height above storey `storey_idx`'s floor
     /// datum; `pitch_deg` is the surface's pitch when it's sloped (a roof
-    /// plane / sloped ceiling), shown in the add-object dialog.
+    /// plane / sloped ceiling), shown in the add-object dialog; `on_roof` is
+    /// true when the pick landed on a dwelling ROOF plane (roof pins are kept
+    /// off the per-storey views — e.g. solar panels).
     ObjectsPointerDown3D {
         storey_idx: usize,
         world_x: f64,
         world_y: f64,
         z_m: f64,
         pitch_deg: Option<f32>,
+        on_roof: bool,
         tol: f64,
     },
     /// Close the open object room (the panel's "Done").
     CloseObjectRoom,
     /// Rename the open object room.
     RenameObjectRoom(String),
+    /// Open the house-level ATTIC object bucket (the "Attic" button), creating
+    /// it on first use. The usual entry panel then adds objects to it.
+    OpenAtticRoom,
     /// Add an object to the open room: its kind, count, optional note, and
     /// photos (each with its capture tier — see [`Self::PlaceOpening`]).
     AddObject {
@@ -677,6 +683,11 @@ pub enum SketchEvent {
     ConfirmObjectAbsent(ObjectCategory),
     /// Review absence prompt: skip this category for now (there is one to add).
     SkipObjectAbsent(ObjectCategory),
+    /// Review attic prompt: confirm the attic really holds nothing.
+    ConfirmAtticAbsent,
+    /// Review attic prompt: there IS something in the attic (they'll add it —
+    /// blocks the review's confirm until they do).
+    SkipAtticAbsent,
     /// Confirm the Objects review ("all reviewed & OK") — records it and closes.
     ConfirmObjectReview,
     /// Phase-4 form: set the floor / wall-finish / heating values.
@@ -1057,6 +1068,14 @@ pub struct SketchView<'a> {
     pub dim_scale_set: bool,
     pub dim_error: Option<&'a str>,
     pub dimensioned_walls: &'a [(usize, usize)],
+    /// Tap-to-copy label set while a dimension prompt is open: every wall
+    /// with a determinable current length, as `(start, end, length)` in
+    /// world coords — the settled outline's walls plus the active in-flight
+    /// shape's, minus the prompted wall and its length-equivalents. The
+    /// canvas draws these as labels during the prompt and offers exactly
+    /// this set (plus living-area labels) as tap-to-copy sources. Empty when
+    /// no prompt is open.
+    pub copy_wall_labels: &'a [((f64, f64), (f64, f64), f32)],
     /// Position prompt for a carved phase/step area: how far the area (or its
     /// cut wall) sits from a storey-outline wall. Shown once the area's
     /// wall-length loop is done; both walls are highlighted on the canvas.

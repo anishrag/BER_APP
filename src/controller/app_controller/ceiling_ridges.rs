@@ -276,7 +276,10 @@ impl AppController {
         if start_snap.is_some() && end_snap.is_some() {
             // Both ends snapped: the Length question is skipped — advance
             // straight to the position questions. A finalize rejection here
-            // has no open stage to land on: it rejects the STROKE (logged).
+            // has no open stage to land on: it rejects the STROKE — logged,
+            // and SURFACED as the ridge notice so the dropped stroke isn't
+            // silent (field report cd36f510: repeated strokes vanishing with
+            // nothing on screen saying why).
             if let Err(e) = self.advance_roof_ridge(
                 axis,
                 coord_m,
@@ -289,6 +292,7 @@ impl AppController {
             ) {
                 log::error!("ceiling ridge: {}", e);
                 self.pending_roof_ridge = None;
+                self.roof_ridge_notice = Some(e);
             }
             return;
         }

@@ -1,5 +1,7 @@
 //! Dimensioning operations on the active shape — pure model mutation.
 //! The shell (`AppController`) wraps these with undo + persistence.
+use std::collections::HashSet;
+
 use crate::{ActiveShape, DimensionPrompt, PendingArc, StoreyDoc};
 use manip_plan::{find_flipped_edge, ParameterAxis};
 
@@ -275,5 +277,89 @@ impl StoreyDoc {
             && deps
                 .iter()
                 .all(|p| self.dimensioning.known_params.contains(p))
+    }
+
+    /// Every wall the assessor can COPY a length from while a dimension
+    /// prompt is open — `(start, end, current length)` in plan coords, the
+    /// tap-to-copy label set. Deliberately GENEROUS (the assessor chains
+    /// expressions from walls measured once, so a missing label is a missing
+    /// input key): once a plan is in metres, EVERY wall carries its current
+    /// drawn length — the settled outline's walls, and the active in-flight
+    /// shape's too — not just user-confirmed ones. Excluded: the prompted
+    /// wall and its length-equivalents (their length IS the unknown being
+    /// asked; the prompt box already shows their current value), and every
+    /// wall of a plan still in pixel space (`!scale_set` — pixel numbers are
+    /// meaningless). Completed living areas are labelled by the living-area
+    /// path (`known_length_wall_segments`), not repeated here. Empty when no
+    /// prompt is open.
+    pub fn copyable_wall_labels(&self) -> Vec<((f64, f64), (f64, f64), f32)> {
+        let Some(prompt) = self.dimensioning.current_prompt.as_ref() else {
+            return Vec::new();
+        };
+        // The prompted wall + its length-equivalents, as (ring, edge) in the
+        // ACTIVE plan (the prompt always lives on the live buffer).
+        let excluded: HashSet<(usize, usize)> = self
+            .floor_plan
+            .find_vertex(prompt.wall_start_vertex)
+            .map(|(ring, edge)| {
+                let mut set: HashSet<_> = self
+                    .floor_plan
+                    .equivalent_length_walls(ring, edge)
+                    .into_iter()
+                    .collect();
+                set.insert((ring, edge));
+                set
+            })
+            .unwrap_or_default();
+
+        let mut out: Vec<((f64, f64), (f64, f64), f32)> = Vec::new();
+        let mut push_plan = |plan: &manip_plan::FloorPlan, exclude_prompt: bool| {
+            for (ri, ring) in plan.polygons().iter().enumerate() {
+                let n = ring.len();
+                if n < 3 {
+                    continue;
+                }
+                for e in 0..n {
+                    if exclude_prompt && excluded.contains(&(ri, e)) {
+                        continue;
+                    }
+                    let (a, b) = (ring[e], ring[(e + 1) % n]);
+                    let len = ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt();
+                    if len < 1e-3 {
+                        continue;
+                    }
+                    out.push(((a.x as f64, a.y as f64), (b.x as f64, b.y as f64), len));
+                }
+            }
+        };
+
+        match self.active {
+            ActiveShape::Outline => {
+                // The outline IS the live buffer: all its walls minus the
+                // prompt's own.
+                if self.dimensioning.scale_set {
+                    push_plan(&self.floor_plan, true);
+                }
+            }
+            ActiveShape::PhaseArea | ActiveShape::StepArea => {
+                // The settled outline (every wall — the slot is current, the
+                // live buffer holds the carve)…
+                if self.outline.dimensioning.scale_set {
+                    push_plan(&self.outline.floor_plan, false);
+                }
+                // …plus the in-flight carve's walls minus the prompt's.
+                if self.dimensioning.scale_set {
+                    push_plan(&self.floor_plan, true);
+                }
+            }
+            ActiveShape::LivingArea(_) => {
+                // The active living area's known walls are already labelled
+                // by the living-area path — add only the settled outline.
+                if self.outline.dimensioning.scale_set {
+                    push_plan(&self.outline.floor_plan, false);
+                }
+            }
+        }
+        out
     }
 }

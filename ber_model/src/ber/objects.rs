@@ -412,6 +412,14 @@ pub struct ObjectRoom {
     /// Shown read-only in the add-object dialog (e.g. solar panels on a roof).
     #[serde(default)]
     pub surface_pitch_deg: Option<f32>,
+    /// Whether the pin was placed on a dwelling ROOF plane (the weather
+    /// envelope — e.g. solar panels), as opposed to any interior surface. Roof
+    /// pins belong to the roof, not a storey plan: the per-storey views hide
+    /// them (they stay visible in the full-house 3D view). `#[serde(default)]`
+    /// so pins recorded before this flag load as interior; see
+    /// [`is_roof_mounted`](Self::is_roof_mounted) for the legacy fallback.
+    #[serde(default)]
+    pub on_roof: bool,
 }
 
 impl ObjectRoom {
@@ -423,20 +431,50 @@ impl ObjectRoom {
             objects: Vec::new(),
             z_m: None,
             surface_pitch_deg: None,
+            on_roof: false,
         }
     }
 
     /// A pin placed on a surface in the 3D view: `z_m` above its storey's floor
-    /// datum, carrying the surface's pitch when the surface is sloped.
+    /// datum, carrying the surface's pitch when the surface is sloped, and
+    /// `on_roof` when the surface is a dwelling roof plane.
     pub fn new_on_surface(
         plan_position: Point2f32,
         z_m: f64,
         surface_pitch_deg: Option<f32>,
+        on_roof: bool,
     ) -> Self {
         Self {
             z_m: Some(z_m),
             surface_pitch_deg,
+            on_roof,
             ..Self::new(plan_position)
+        }
+    }
+
+    /// The house-level ATTIC bucket (objects in the attic space — e.g. a
+    /// heat-recovery unit). Not a plan pin: it lives on
+    /// [`Ber::attic_room`](crate::ber::ber_struct::Ber::attic_room), has no
+    /// meaningful plan position, and never renders on a storey plan.
+    pub fn new_attic() -> Self {
+        Self {
+            name: "Attic".to_string(),
+            ..Self::new(Point2f32::new(0.0, 0.0))
+        }
+    }
+
+    /// Whether this pin sits on the dwelling ROOF (drives the per-storey view
+    /// filter). The explicit [`on_roof`](Self::on_roof) flag decides for pins
+    /// placed since it exists; for LEGACY pins (flag absent → `false`) a
+    /// pitched pin ABOVE the storey's flat ceiling height can only be on the
+    /// roof envelope — interior sloped-ceiling pins sit at or below it.
+    pub fn is_roof_mounted(&self, storey_ceiling_h_m: Option<f64>) -> bool {
+        if self.on_roof {
+            return true;
+        }
+        match (self.surface_pitch_deg, self.z_m, storey_ceiling_h_m) {
+            (Some(_), Some(z), Some(h)) => z > h + 0.05,
+            _ => false,
         }
     }
 

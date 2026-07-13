@@ -3770,6 +3770,119 @@ mod tests {
         );
     }
 
+    /// THE CROSS-STEP RIDGE FUSE (field report cd36f510, dump geometry): two
+    /// raised strips at DIFFERENT heights (2.95 / 2.572, split by a ceiling
+    /// step at y = 0.0929) plus three default-height regions; a vertical
+    /// ridge spans BOTH strips, one apex in each. Without the fuse each strip
+    /// would fan its own apex; with it the strips fuse into one region and
+    /// the gable machinery solves TWO planes over the union — ridge at 3.4,
+    /// eaves at the anchor corner's height (2.572; the 2.95 corners embed on
+    /// the side planes). The default-height regions are untouched.
+    #[test]
+    fn ridge_across_two_raised_strips_fuses_them_into_one_gable() {
+        let cid = ItemId::default();
+        let mut c = CeilingRegions::default_for_footprint(
+            vec![square(1.3659, 0.0929, 7.3669, 1.4619)],
+            2.95,
+            cid,
+        );
+        for (ring, z) in [
+            (square(1.3659, -1.3851, 7.3669, 0.0929), 2.572),
+            (square(7.3669, 1.4619, 9.875, 9.234), 2.409),
+            (square(1.3659, 1.4619, 7.3669, 9.401), 2.409),
+            (square(7.3669, -1.3851, 9.875, 1.4619), 2.409),
+        ] {
+            c.regions
+                .extend(CeilingRegions::default_for_footprint(vec![ring], z, cid).regions);
+        }
+        let apexes = [
+            CeilingApex {
+                point: Point2f64::new(4.37, -1.3851),
+                z_m: 3.4,
+            },
+            CeilingApex {
+                point: Point2f64::new(4.37, 1.4619),
+                z_m: 3.4,
+            },
+        ];
+        let shaped = c.with_apexes(&apexes);
+        let sloped: Vec<&CeilingRegion> = shaped
+            .regions
+            .iter()
+            .filter(|r| r.flat_z().is_none())
+            .collect();
+        assert_eq!(sloped.len(), 2, "two gable side planes over the fused pair");
+        for face in &sloped {
+            let zs: Vec<f64> = face.polygon.exterior.iter().map(|v| v.z).collect();
+            assert!(
+                zs.iter().any(|z| (z - 3.4).abs() < 1e-9),
+                "each plane reaches the ridge: {zs:?}"
+            );
+            assert!(
+                zs.iter()
+                    .all(|z| (z - 3.4).abs() < 1e-9 || (z - 2.572).abs() < 1e-9),
+                "eaves at the anchor height — the 2.95 corners embed: {zs:?}"
+            );
+        }
+        // The three default-height regions pass through untouched.
+        let flat_default = shaped
+            .regions
+            .iter()
+            .filter(|r| r.flat_z().is_some_and(|z| (z - 2.409).abs() < 1e-9))
+            .count();
+        assert_eq!(flat_default, 3, "neighbours at the default height survive");
+        // Neither strip survives at its own flat height — both were fused.
+        assert!(
+            !shaped.regions.iter().any(|r| r
+                .flat_z()
+                .is_some_and(|z| (z - 2.95).abs() < 1e-9 || (z - 2.572).abs() < 1e-9)),
+            "the raised strips are consumed by the gable"
+        );
+        // One two-apex group — THE grouping authority sees a single ridge.
+        let groups = shaped.apex_groups(&apexes);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].apex_idxs.len(), 2);
+    }
+
+    /// The fuse leaves a ridge WITHIN one strip alone, and never crosses a
+    /// SLOPED region: the same layout with the ridge wall-to-wall inside the
+    /// lower strip keeps the other strip's flat height.
+    #[test]
+    fn ridge_within_one_strip_does_not_fuse_its_neighbour() {
+        let cid = ItemId::default();
+        let mut c = CeilingRegions::default_for_footprint(
+            vec![square(1.3659, 0.0929, 7.3669, 1.4619)],
+            2.95,
+            cid,
+        );
+        c.regions.extend(
+            CeilingRegions::default_for_footprint(
+                vec![square(1.3659, -1.3851, 7.3669, 0.0929)],
+                2.572,
+                cid,
+            )
+            .regions,
+        );
+        let apexes = [
+            CeilingApex {
+                point: Point2f64::new(1.3659, -0.65),
+                z_m: 3.4,
+            },
+            CeilingApex {
+                point: Point2f64::new(7.3669, -0.65),
+                z_m: 3.4,
+            },
+        ];
+        let shaped = c.with_apexes(&apexes);
+        assert!(
+            shaped
+                .regions
+                .iter()
+                .any(|r| r.flat_z().is_some_and(|z| (z - 2.95).abs() < 1e-9)),
+            "the untouched strip keeps its flat height"
+        );
+    }
+
     /// THE GABLE WALL-PROFILE TEST: the wall UNDER a boundary ridge end gets
     /// the triangular gable top straight out of `WallRegions::regenerate` —
     /// `profile_breakpoints` picks up the slope edges along the wall,

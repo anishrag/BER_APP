@@ -1585,14 +1585,19 @@ pub(super) fn render<F: FnMut(UiEvent)>(
 
     // Wall-length labels gated on the Dimensions-category toggle: passing
     // empty label lists leaves the geometry untouched and just drops the
-    // text.
-    let dimensioned_walls: &[(usize, usize)] = if view.cat_state.show_wall_lengths {
+    // text. While a DIMENSION PROMPT is open the rules flip: the generous
+    // tap-to-copy set (`view.copy_wall_labels`) replaces the confirmed-only
+    // region labels (drawn below beside the dim-prompt highlight), and the
+    // living-area labels show regardless of the toggle — during the prompt
+    // every label is a copy source, so hiding one would hide an input key.
+    let dimensioned_walls: &[(usize, usize)] = if view.cat_state.show_wall_lengths && !dim_prompting
+    {
         view.dimensioned_walls
     } else {
         &[]
     };
     let living_area_wall_labels: &[Vec<((f64, f64), (f64, f64), f32)>] =
-        if view.cat_state.show_wall_lengths {
+        if view.cat_state.show_wall_lengths || dim_prompting {
             view.living_area_wall_labels
         } else {
             &[]
@@ -2860,6 +2865,22 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     // leftover single-storey outline prompt doesn't leak on top.
     if !overlay_mode || carve_dimensioning {
         if let Some(p) = &view.dim_prompt {
+            // Tap-to-copy labels first (under the highlights): every wall
+            // with a determinable current length carries its label while
+            // the prompt is open — each one is a copy source, and the set
+            // matches the tap hit-test below exactly. Not drawn under an
+            // overlay takeover (the tap input is suppressed there too).
+            if !overlay_mode {
+                render::render_copy_wall_labels(
+                    &painter,
+                    rect,
+                    ber,
+                    current_storey_idx,
+                    mode,
+                    vp,
+                    view.copy_wall_labels,
+                );
+            }
             for wall in &p.walls {
                 render::render_equivalent_wall(
                     &painter,
@@ -3644,12 +3665,13 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     // wall that carries a length label inserts that displayed length into the
     // dimension expression (as the term at the caret; after a `+` it starts
     // the next term — the assessor chains `3.2 + 1.45` from walls measured
-    // once, without retyping). The wall being dimensioned (and its
-    // length-equivalents) can never self-insert: their length is the unknown
-    // being asked for, so they carry no label and aren't candidates — a tap
-    // on them simply does nothing. Suppressed under an overlay takeover
-    // (floor/ceiling carve dimensioning): the overlay draws different
-    // geometry with its own transform.
+    // once, without retyping). Candidates are exactly the labels on screen:
+    // the generous `copy_wall_labels` set (settled outline + active in-flight
+    // shape, minus the prompted wall and its length-equivalents — so a tap on
+    // the wall being dimensioned simply does nothing) plus the living-area
+    // labels. Suppressed under an overlay takeover (floor/ceiling carve
+    // dimensioning): the overlay draws different geometry with its own
+    // transform.
     if dim_prompting
         && matches!(mode, SketchMode::Storey2D)
         && !touch_nav_active
@@ -3663,9 +3685,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             let (wx, wy) = t.inverse(pos.x, pos.y);
             let tol_world = (14.0 / t.scale()) as f64;
             if let Some(len) = nearest_labelled_wall_length(
-                ber,
-                current_storey_idx,
-                dimensioned_walls,
+                view.copy_wall_labels,
                 living_area_wall_labels,
                 wx,
                 wy,
@@ -3849,6 +3869,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     world_y: hit.world_point.1,
                     z_m: hit.storey_local_z,
                     pitch_deg: hit.pitch_deg.map(|p| p as f32),
+                    on_roof: matches!(hit.surface, render::pick_3d::PickedSurface::Roof { .. }),
                     tol,
                 }));
             }
@@ -3899,6 +3920,20 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             if let (Some(sp), Some(room)) = (active_sp, view.active_object_room.as_ref()) {
                 object_pin_dropdown(ui, sp, room, on_event);
             }
+        }
+    }
+
+    // The open ATTIC bucket has no plan pin to anchor to: hang its box (the
+    // objects list + Done) top-right, just under the "Attic" button that
+    // opened it. Any view mode — the attic isn't tied to a storey.
+    if matches!(view.current_phase, AssessmentPhase::Objects) {
+        if let Some(room) = view.active_object_room.as_ref().filter(|r| r.is_attic) {
+            object_pin_dropdown(
+                ui,
+                rect.right_top() + egui::vec2(-260.0, 96.0),
+                room,
+                on_event,
+            );
         }
     }
 
@@ -4585,17 +4620,15 @@ fn canvas_transform(
 
 /// The length (metres) of the labelled wall nearest to world point
 /// `(wx, wy)`, within `tol` — or `None` when the tap lands on no label-
-/// carrying wall. Candidates are exactly the walls whose length label is
-/// on screen: the storey outline's known-length walls (`dimensioned_walls`,
-/// already gated on the Dimensions-category toggle) measured off the SAME
-/// resolved region ring the label is computed from, plus the living areas'
-/// known walls (endpoints + length precomputed by the controller). Used by
-/// the dimension-prompt tap-to-copy input; the caller applies the label's
-/// 2 dp rounding on insert, so what the assessor sees is what he gets.
+/// carrying wall. Candidates are exactly the labels on screen during the
+/// dimension prompt: the generous `copy_wall_labels` set (settled outline +
+/// active in-flight shape, prompted wall already excluded upstream) plus
+/// the living areas' known walls — both as (start, end, length) in world
+/// coords. Used by the dimension-prompt tap-to-copy input; the caller
+/// applies the label's 2 dp rounding on insert, so what the assessor sees
+/// is what he gets.
 fn nearest_labelled_wall_length(
-    ber: Option<&Ber>,
-    current_storey_idx: Option<usize>,
-    dimensioned_walls: &[(usize, usize)],
+    copy_wall_labels: &[((f64, f64), (f64, f64), f32)],
     living_area_wall_labels: &[Vec<((f64, f64), (f64, f64), f32)>],
     wx: f64,
     wy: f64,
@@ -4607,38 +4640,13 @@ fn nearest_labelled_wall_length(
             best = Some((d, len));
         }
     };
-    if let Some(storey) = ber
-        .zip(current_storey_idx)
-        .and_then(|(b, i)| b.storeys.get(i))
-    {
-        for &(r, e) in dimensioned_walls {
-            let Some(region) = storey.floors.regions.get(r) else {
-                continue;
-            };
-            // `exterior()` repeats the first vertex at the end to close the
-            // ring, so edge `e` runs coords[e] → coords[e + 1] — the same
-            // indexing (and hence the same length) as `draw_dimensions`.
-            let coords: Vec<_> = region.polygon.exterior().coords().cloned().collect();
-            if coords.len() < 2 || e + 1 >= coords.len() {
-                continue;
-            }
-            let (a, b) = (coords[e], coords[e + 1]);
-            let len = ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt();
-            if len < 1e-3 {
-                continue;
-            }
-            let d = domain::points::point_to_segment_distance(wx, wy, a.x, a.y, b.x, b.y);
-            consider(d, len as f32);
+    let flat = living_area_wall_labels.iter().flatten();
+    for &(a, b, len) in copy_wall_labels.iter().chain(flat) {
+        if len < 1e-3 {
+            continue;
         }
-    }
-    for area in living_area_wall_labels {
-        for &(a, b, len) in area {
-            if len < 1e-3 {
-                continue;
-            }
-            let d = domain::points::point_to_segment_distance(wx, wy, a.0, a.1, b.0, b.1);
-            consider(d, len);
-        }
+        let d = domain::points::point_to_segment_distance(wx, wy, a.0, a.1, b.0, b.1);
+        consider(d, len);
     }
     best.map(|(_, len)| len)
 }
@@ -5365,8 +5373,9 @@ fn object_review_overlay<F: FnMut(UiEvent)>(
                 );
                 ui.separator();
                 // Confirm is blocked while a category flagged "there is one"
-                // still has no recorded object (the controller refuses too).
-                let confirmable = orv.unresolved_present.is_empty();
+                // — or the attic flagged as holding something — still has no
+                // recorded object (the controller refuses too).
+                let confirmable = orv.unresolved_present.is_empty() && !orv.attic_unresolved;
                 if ui
                     .add_enabled(
                         confirmable,
@@ -5461,7 +5470,8 @@ fn object_review_overlay<F: FnMut(UiEvent)>(
                 }
             });
 
-        // Absence confirmation, one empty category at a time ("No cylinder?").
+        // Absence confirmation, one empty category at a time ("No cylinder?"),
+        // then the attic question once the categories are done.
         if let Some(cat) = orv.absent_prompt {
             ui.separator();
             ui.label(
@@ -5482,6 +5492,21 @@ fn object_review_overlay<F: FnMut(UiEvent)>(
                     .size(11.0)
                     .color(egui::Color32::from_gray(150)),
             );
+        } else if orv.attic_prompt {
+            ui.separator();
+            ui.label(
+                egui::RichText::new("Anything in the attic?")
+                    .strong()
+                    .size(15.0),
+            );
+            ui.horizontal(|ui| {
+                if ui.button("No — empty").clicked() {
+                    on_event(UiEvent::Sketch(SketchEvent::ConfirmAtticAbsent));
+                }
+                if ui.button("Yes — there is").clicked() {
+                    on_event(UiEvent::Sketch(SketchEvent::SkipAtticAbsent));
+                }
+            });
         } else {
             ui.separator();
             ui.label(
@@ -5489,15 +5514,18 @@ fn object_review_overlay<F: FnMut(UiEvent)>(
                     .color(egui::Color32::from_gray(150)),
             );
         }
-        // Flagged-present categories with no object yet: confirm stays
-        // disabled until each promised item is actually added.
-        if !orv.unresolved_present.is_empty() {
-            let names = orv
+        // Flagged-present categories (or the attic) with no object yet:
+        // confirm stays disabled until each promised item is actually added.
+        if !orv.unresolved_present.is_empty() || orv.attic_unresolved {
+            let mut names = orv
                 .unresolved_present
                 .iter()
                 .map(|c| c.label().to_lowercase())
-                .collect::<Vec<_>>()
-                .join(", ");
+                .collect::<Vec<_>>();
+            if orv.attic_unresolved {
+                names.push("attic item".to_string());
+            }
+            let names = names.join(", ");
             ui.label(
                 egui::RichText::new(format!("Add the {names} you flagged before finishing"))
                     .strong()

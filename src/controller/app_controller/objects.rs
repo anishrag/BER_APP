@@ -44,6 +44,9 @@ pub struct ActiveObjectRoomView {
     /// or a sloped ceiling). Shown read-only in the add-object dialog so the
     /// assessor sees the roof angle while recording e.g. a solar panel.
     pub surface_pitch_deg: Option<f32>,
+    /// Whether this is the house-level ATTIC bucket (no plan pin — the UI
+    /// anchors its box to the Attic button instead of a pin).
+    pub is_attic: bool,
 }
 
 /// One row in the Objects review: an object kind's house-wide total.
@@ -69,6 +72,14 @@ pub struct ObjectReviewView {
     /// "All reviewed & OK" confirm is blocked — the flagged item must be added
     /// first (see [`AppController::unresolved_present_categories`]).
     pub unresolved_present: Vec<ber_model::ber::objects::ObjectCategory>,
+    /// Whether the "Anything in the attic?" question is still pending (attic
+    /// bucket empty, not confirmed-empty, not flagged this session). Rendered
+    /// after the per-category absence prompts.
+    pub attic_prompt: bool,
+    /// The assessor flagged the attic as holding something ("Yes — there is")
+    /// but hasn't recorded an attic object yet — blocks the confirm alongside
+    /// [`unresolved_present`](Self::unresolved_present).
+    pub attic_unresolved: bool,
 }
 
 impl AppController {
@@ -99,12 +110,16 @@ impl AppController {
             self.close_object_room();
             return;
         }
-        // Open the nearest existing pin within tolerance.
+        // Open the nearest existing pin within tolerance. ROOF pins are hidden
+        // from the 2D plan (they belong to the roof, not a storey — see
+        // `object_rooms_view`), so an invisible pin must not swallow the tap;
+        // reopen those from a 3D view instead.
         if let Some(record) = self.current_record.as_ref() {
             if let Some(storey) = record.data.storeys.get(idx) {
                 let near = storey
                     .object_rooms
                     .iter()
+                    .filter(|r| !r.is_roof_mounted(storey.ceiling_height_m))
                     .map(|r| {
                         let dx = r.plan_position.x as f64 - wx;
                         let dy = r.plan_position.y as f64 - wy;
@@ -137,8 +152,12 @@ impl AppController {
     /// Tap a SURFACE in the 3D view (the render layer's pick already resolved
     /// the screen point to `storey_idx` + the storey-local point): open the
     /// nearest existing pin on that storey within `tol` (metres, 3D distance),
-    /// else drop a new room ON the surface — carrying its height and, for a
-    /// sloped surface (roof plane / sloped ceiling), its pitch for the dialog.
+    /// else drop a new room ON the surface — carrying its height, for a
+    /// sloped surface (roof plane / sloped ceiling) its pitch for the dialog,
+    /// and `on_roof` when the pick landed on a dwelling ROOF plane (roof pins
+    /// are hidden from the per-storey views — solar panels aren't storey
+    /// objects).
+    #[allow(clippy::too_many_arguments)]
     pub fn objects_pointer_down_3d(
         &mut self,
         storey_idx: usize,
@@ -146,6 +165,7 @@ impl AppController {
         wy: f64,
         z_m: f64,
         pitch_deg: Option<f32>,
+        on_roof: bool,
         tol: f64,
     ) {
         // A tap while a room box is OPEN dismisses it (see the 2D handler) —
@@ -183,7 +203,12 @@ impl AppController {
         let Some(storey) = record.data.storeys.get_mut(storey_idx) else {
             return;
         };
-        let room = ObjectRoom::new_on_surface(Point2f32::new(wx as f32, wy as f32), z_m, pitch_deg);
+        let room = ObjectRoom::new_on_surface(
+            Point2f32::new(wx as f32, wy as f32),
+            z_m,
+            pitch_deg,
+            on_roof,
+        );
         let id = room.id;
         storey.object_rooms.push(room);
         self.active_object_room = Some(id);
@@ -201,9 +226,11 @@ impl AppController {
     }
 
     /// Remove object room `room_id` iff it holds no objects. Searches every
-    /// storey (a 3D-placed pin can live off the current storey). Persists the
-    /// removal; deliberately NOT snapshotted — placing then dismissing a bare
-    /// pin isn't a meaningful edit to undo.
+    /// storey (a 3D-placed pin can live off the current storey) and the attic
+    /// bucket (an attic dismissed empty disappears — the review then still
+    /// asks "anything in the attic?"). Persists the removal; deliberately NOT
+    /// snapshotted — placing then dismissing a bare pin isn't a meaningful
+    /// edit to undo.
     fn prune_object_room_if_empty(&mut self, room_id: ItemId) {
         let Some(record) = self.current_record.as_mut() else {
             return;
@@ -216,8 +243,38 @@ impl AppController {
                 .retain(|r| r.id != room_id || !r.objects.is_empty());
             removed |= storey.object_rooms.len() != before;
         }
+        if record
+            .data
+            .attic_room
+            .as_ref()
+            .is_some_and(|r| r.id == room_id && r.objects.is_empty())
+        {
+            record.data.attic_room = None;
+            removed = true;
+        }
         if removed {
             let _ = self.mark_dirty();
+        }
+    }
+
+    /// Open the house-level ATTIC bucket (the Objects-stage "Attic" button),
+    /// creating it on first use. The attic isn't a storey: its objects live on
+    /// `Ber::attic_room` and it has no plan pin. The usual entry panel then
+    /// adds objects to it like any room.
+    pub fn open_attic_room(&mut self) {
+        let snap = self.current_history_snapshot();
+        let Some(record) = self.current_record.as_mut() else {
+            return;
+        };
+        let created = record.data.attic_room.is_none();
+        let room = record
+            .data
+            .attic_room
+            .get_or_insert_with(ObjectRoom::new_attic);
+        self.active_object_room = Some(room.id);
+        if created {
+            let _ = self.mark_dirty();
+            self.push_history_snapshot(snap);
         }
     }
 
@@ -290,6 +347,15 @@ impl AppController {
             storey.object_rooms.retain(|r| r.id != room_id);
             removed |= storey.object_rooms.len() != before;
         }
+        if record
+            .data
+            .attic_room
+            .as_ref()
+            .is_some_and(|r| r.id == room_id)
+        {
+            record.data.attic_room = None;
+            removed = true;
+        }
         if removed {
             if self.active_object_room == Some(room_id) {
                 self.active_object_room = None;
@@ -299,7 +365,10 @@ impl AppController {
         }
     }
 
-    /// Room pins on the CURRENT storey, for the plan overlay.
+    /// Room pins on the CURRENT storey, for the plan overlay and the
+    /// single-storey 3D hotspots. ROOF pins are excluded — a solar panel on
+    /// the roof isn't a storey object; it shows in the full-house 3D view
+    /// (and its world point) instead, where the roof itself is drawn.
     pub fn object_rooms_view(&self) -> Vec<ObjectPinView> {
         let Some(idx) = self.current_storey_idx else {
             return Vec::new();
@@ -314,6 +383,7 @@ impl AppController {
         storey
             .object_rooms
             .iter()
+            .filter(|r| !r.is_roof_mounted(storey.ceiling_height_m))
             .map(|r| ObjectPinView {
                 id: r.id,
                 x: r.plan_position.x as f64,
@@ -351,17 +421,11 @@ impl AppController {
 
     /// The open room's panel view, or `None` when none is open. Searches every
     /// storey — a pin placed from the full-house 3D view can live on a storey
-    /// other than the current one.
+    /// other than the current one — plus the attic bucket.
     pub fn active_object_room_view(&self) -> Option<ActiveObjectRoomView> {
         let room_id = self.active_object_room?;
-        let room = self
-            .current_record
-            .as_ref()?
-            .data
-            .storeys
-            .iter()
-            .flat_map(|s| s.object_rooms.iter())
-            .find(|r| r.id == room_id)?;
+        let data = &self.current_record.as_ref()?.data;
+        let room = data.object_rooms_iter().find(|r| r.id == room_id)?;
         Some(ActiveObjectRoomView {
             id: room.id,
             name: room.name.clone(),
@@ -377,6 +441,7 @@ impl AppController {
                 .collect(),
             categories_present: room.categories_present(),
             surface_pitch_deg: room.surface_pitch_deg,
+            is_attic: data.attic_room.as_ref().is_some_and(|a| a.id == room.id),
         })
     }
 
@@ -388,12 +453,7 @@ impl AppController {
     pub fn recorded_object_kinds(&self) -> Vec<ObjectKind> {
         let mut kinds: Vec<ObjectKind> = Vec::new();
         if let Some(record) = self.current_record.as_ref() {
-            for room in record
-                .data
-                .storeys
-                .iter()
-                .flat_map(|s| s.object_rooms.iter())
-            {
+            for room in record.data.object_rooms_iter() {
                 for o in &room.objects {
                     if !kinds.contains(&o.kind) {
                         kinds.push(o.kind.clone());
@@ -413,24 +473,24 @@ impl AppController {
     }
 
     /// Mutable borrow of a room by id, searching every storey (a pin placed
-    /// from the full-house 3D view can live off the current storey).
+    /// from the full-house 3D view can live off the current storey) plus the
+    /// attic bucket.
     fn object_room_mut(&mut self, room_id: ItemId) -> Option<&mut ObjectRoom> {
         self.current_record
             .as_mut()?
             .data
-            .storeys
-            .iter_mut()
-            .flat_map(|s| s.object_rooms.iter_mut())
+            .object_rooms_iter_mut()
             .find(|r| r.id == room_id)
     }
 
     // ── Review ────────────────────────────────────────────────────────────────
 
-    /// Whether any object pin exists house-wide (gates the review entry).
+    /// Whether any object room exists house-wide — a storey pin or the attic
+    /// bucket (gates the review entry).
     pub fn has_object_rooms(&self) -> bool {
         self.current_record
             .as_ref()
-            .is_some_and(|r| r.data.storeys.iter().any(|s| !s.object_rooms.is_empty()))
+            .is_some_and(|r| r.data.object_rooms_iter().next().is_some())
     }
 
     /// Whether the Objects review takeover is open.
@@ -446,6 +506,7 @@ impl AppController {
         if on {
             self.object_review_selected = 0;
             self.object_review_skipped.clear();
+            self.object_review_attic_skipped = false;
             self.reset_view();
         }
     }
@@ -474,6 +535,37 @@ impl AppController {
         self.object_review_skipped.insert(cat);
     }
 
+    /// Confirm the attic holds NOTHING ("Anything in the attic?" → No, empty).
+    /// Recorded durably, like a category's `confirm_object_absent`.
+    pub fn confirm_attic_absent(&mut self) {
+        if let Some(record) = self.current_record.as_mut() {
+            if !record.data.attic_no_items_confirmed {
+                record.data.attic_no_items_confirmed = true;
+                let _ = self.mark_dirty();
+            }
+        }
+    }
+
+    /// "Anything in the attic?" → Yes, there is — I'll add it. Session-only,
+    /// like [`skip_object_absent`](Self::skip_object_absent); blocks the
+    /// review's confirm until an attic object is actually recorded (see
+    /// [`attic_unresolved`](Self::attic_unresolved)).
+    pub fn skip_attic_absent(&mut self) {
+        self.object_review_attic_skipped = true;
+    }
+
+    /// Whether the assessor asserted the attic holds something ("Anything in
+    /// the attic?" → Yes) but hasn't recorded an attic object yet — the attic
+    /// counterpart of [`unresolved_present_categories`](Self::unresolved_present_categories);
+    /// blocks the review's confirm while true.
+    pub fn attic_unresolved(&self) -> bool {
+        self.object_review_attic_skipped
+            && self
+                .current_record
+                .as_ref()
+                .is_none_or(|r| attic_is_empty(&r.data))
+    }
+
     /// Categories the assessor asserted are PRESENT during this review ("No —
     /// there is one") that still have zero recorded objects house-wide. The
     /// assertion is a promise to add the item: while any remain, the review
@@ -498,11 +590,12 @@ impl AppController {
 
     /// Confirm the Objects review (counts + absences all checked): record it on
     /// the dwelling and close the review. Refused while a category the assessor
-    /// flagged as present ("No — there is one") still has no recorded object —
-    /// the promised item must be added first (the UI disables the button too;
+    /// flagged as present ("No — there is one") still has no recorded object,
+    /// or the attic was flagged as holding something still unrecorded — the
+    /// promised item must be added first (the UI disables the button too;
     /// this is the authoritative guard).
     pub fn confirm_objects_review(&mut self) {
-        if !self.unresolved_present_categories().is_empty() {
+        if !self.unresolved_present_categories().is_empty() || self.attic_unresolved() {
             return;
         }
         if let Some(record) = self.current_record.as_mut() {
@@ -548,6 +641,12 @@ impl AppController {
                     && !self.object_review_skipped.contains(c)
             })
             .collect();
+        // The attic question ("anything in the attic?") follows the same
+        // pattern, pending while the attic bucket is empty and neither
+        // confirmed-empty nor flagged this session.
+        let attic_prompt = attic_is_empty(data)
+            && !data.attic_no_items_confirmed
+            && !self.object_review_attic_skipped;
         Some(ObjectReviewView {
             totals,
             selected,
@@ -555,33 +654,40 @@ impl AppController {
             absent_prompt: remaining.first().copied(),
             absent_remaining: remaining.len(),
             unresolved_present: self.unresolved_present_categories(),
+            attic_prompt,
+            attic_unresolved: self.attic_unresolved(),
         })
     }
 }
 
-/// The categories with at least one recorded object, house-wide.
+/// Whether the attic bucket holds no objects (no bucket, or an empty one).
+fn attic_is_empty(data: &Ber) -> bool {
+    data.attic_room
+        .as_ref()
+        .is_none_or(|r| r.objects.is_empty())
+}
+
+/// The categories with at least one recorded object, house-wide (attic
+/// included).
 fn recorded_categories(data: &Ber) -> std::collections::HashSet<ObjectCategory> {
-    data.storeys
-        .iter()
-        .flat_map(|s| s.object_rooms.iter())
+    data.object_rooms_iter()
         .flat_map(|r| r.objects.iter())
         .map(|o| o.kind.category())
         .collect()
 }
 
-/// House-wide object totals as (label, count), in first-seen order.
+/// House-wide object totals as (label, count), in first-seen order (attic
+/// included).
 fn object_label_totals(data: &Ber) -> Vec<(String, u32)> {
     let mut order: Vec<String> = Vec::new();
     let mut counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
-    for s in &data.storeys {
-        for room in &s.object_rooms {
-            for o in &room.objects {
-                let label = o.kind.label();
-                if !counts.contains_key(&label) {
-                    order.push(label.clone());
-                }
-                *counts.entry(label).or_default() += o.count;
+    for room in data.object_rooms_iter() {
+        for o in &room.objects {
+            let label = o.kind.label();
+            if !counts.contains_key(&label) {
+                order.push(label.clone());
             }
+            *counts.entry(label).or_default() += o.count;
         }
     }
     order.into_iter().map(|l| (l.clone(), counts[&l])).collect()

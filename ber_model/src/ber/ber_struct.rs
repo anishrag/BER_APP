@@ -115,6 +115,20 @@ pub struct Ber {
     /// so older records load with nothing confirmed.
     #[serde(default)]
     pub objects_no_items_confirmed: Vec<crate::ber::objects::ObjectCategory>,
+    /// The house-level ATTIC object bucket (Phase 3): objects recorded in the
+    /// attic space (e.g. a heat-recovery unit). The attic isn't a storey, so
+    /// the bucket lives here, not on a `Storey::object_rooms` — it has no plan
+    /// pin and never renders on a storey plan. Created on demand by the
+    /// Objects-stage "Attic" button; dropped again if dismissed empty.
+    /// `#[serde(default)]` so older records load without one.
+    #[serde(default)]
+    pub attic_room: Option<crate::ber::objects::ObjectRoom>,
+    /// Phase-3 review: the assessor confirmed there is NOTHING in the attic
+    /// ("Anything in the attic?" → Yes, none) — the attic counterpart of
+    /// [`objects_no_items_confirmed`](Self::objects_no_items_confirmed).
+    /// `#[serde(default)]` so older records load unconfirmed.
+    #[serde(default)]
+    pub attic_no_items_confirmed: bool,
     /// Whether the assessor has confirmed the Phase-3 (Objects) review — walked
     /// the counts + confirmed the empty categories and pressed "all reviewed".
     /// Recorded on confirm. `#[serde(default)]` so older records load as un-reviewed.
@@ -201,7 +215,35 @@ impl Ber {
                 }
             }
         }
+        if let Some(room) = &mut self.attic_room {
+            for o in &mut room.objects {
+                for p in &mut o.photos {
+                    visit(p);
+                }
+            }
+        }
         found
+    }
+
+    /// EVERY object room in the dwelling: each storey's plan/surface pins plus
+    /// the house-level attic bucket. The house-wide object queries (recorded
+    /// kinds, review totals, category presence) walk this so the attic counts
+    /// like any room.
+    pub fn object_rooms_iter(&self) -> impl Iterator<Item = &crate::ber::objects::ObjectRoom> {
+        self.storeys
+            .iter()
+            .flat_map(|s| s.object_rooms.iter())
+            .chain(self.attic_room.iter())
+    }
+
+    /// Mutable [`object_rooms_iter`](Self::object_rooms_iter).
+    pub fn object_rooms_iter_mut(
+        &mut self,
+    ) -> impl Iterator<Item = &mut crate::ber::objects::ObjectRoom> {
+        self.storeys
+            .iter_mut()
+            .flat_map(|s| s.object_rooms.iter_mut())
+            .chain(self.attic_room.iter_mut())
     }
 
     /// Whether `side`'s external photo is DEFERRED to the end of the

@@ -13,7 +13,7 @@ use egui::{Align2, Id, RichText};
 use super::{SketchEvent, SketchView};
 use crate::controller::app_controller::AssessmentPhase;
 use crate::ui::pages::events::UiEvent;
-use crate::ui::widgets::{metre_input, photo_button_pair, text_input, PhotoQuality};
+use crate::ui::widgets::{metre_input, photo_button_pair, text_input, HintExt, PhotoQuality};
 use ber_model::ber::objects::{ObjectCategory, ObjectKind};
 
 /// A simple glyph per category for the big buttons. Emoji placeholders until a
@@ -48,6 +48,29 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     if view.object_review_view.is_some() {
         return;
     }
+    // The ATTIC bucket button, top-right: the attic isn't a storey, so it has
+    // no plan pin to tap — this opens (creating on first use) the house-level
+    // attic room; the usual panel below then adds objects to it (e.g. a
+    // heat-recovery unit).
+    egui::Area::new(Id::new("ber_objects_attic_button"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(rect.right_top() + egui::vec2(-12.0, 52.0))
+        .pivot(Align2::RIGHT_TOP)
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                let open_on_attic = view.active_object_room.as_ref().is_some_and(|r| r.is_attic);
+                let btn =
+                    egui::Button::new(RichText::new("🪜 Attic").size(13.0)).selected(open_on_attic);
+                if ui
+                    .add(btn)
+                    .hint("Record objects in the attic space")
+                    .clicked()
+                    && !open_on_attic
+                {
+                    on_event(UiEvent::Sketch(SketchEvent::OpenAtticRoom));
+                }
+            });
+        });
     // No room open: a small hint to tap the plan.
     let Some(room) = view.active_object_room.as_ref() else {
         egui::Area::new(Id::new("ber_objects_hint"))
@@ -64,6 +87,9 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         return;
     };
     let present = room.categories_present.clone();
+    // The pending-photo buffers are scoped to THIS room (photos parked here
+    // never resurface in another room's commit).
+    let room_id = room.id;
 
     // ── Big category bar across the top, below the phase signpost ──
     egui::Area::new(Id::new("ber_objects_category_bar"))
@@ -150,6 +176,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     });
                 }
                 if cat == ObjectCategory::Other {
+                    let prev_name = view.object_other_name.clone();
                     ui.horizontal(|ui| {
                         ui.label("name");
                         // Use the app's `text_input` (not raw `text_edit_singleline`)
@@ -159,6 +186,17 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                         // never appear.
                         text_input(ui, view.object_other_name, 140.0, "name");
                     });
+                    // The photo buffer is keyed by the FULL `Other(name)`:
+                    // follow a live edit of the name so a photo taken
+                    // mid-typing stays with THIS entry (while a different
+                    // parked name — e.g. "bath" vs "shower" — keeps its own).
+                    if *view.object_other_name != prev_name {
+                        view.object_pending_photos.rename_other(
+                            room_id,
+                            &prev_name,
+                            view.object_other_name,
+                        );
+                    }
                     *view.object_selected_kind =
                         Some(ObjectKind::Other(view.object_other_name.clone()));
                 }
@@ -178,9 +216,13 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     // one of that kind is recorded house-wide.
                     let already_recorded = view.object_recorded_kinds.contains(&kind);
                     let photo_required = kind.photo_required(already_recorded);
-                    // Only the SELECTED kind's pending photos count — another
-                    // kind's parked photos must not satisfy this kind's gates.
-                    let have_photo = !view.object_pending_photos.for_kind(&kind).is_empty();
+                    // Only the SELECTED kind's pending photos IN THIS ROOM
+                    // count — another kind's (or room's) parked photos must
+                    // not satisfy this kind's gates.
+                    let have_photo = !view
+                        .object_pending_photos
+                        .for_kind(room_id, &kind)
+                        .is_empty();
 
                     ui.horizontal(|ui| {
                         ui.label("count");
@@ -199,7 +241,9 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                         *view.object_auto_photo_for = Some(kind.clone());
                     }
                     ui.horizontal_wrapped(|ui| {
-                        for (p, _quality) in view.object_pending_photos.for_kind(&kind).iter() {
+                        for (p, _quality) in
+                            view.object_pending_photos.for_kind(room_id, &kind).iter()
+                        {
                             let src = p.to_string_lossy();
                             ui.add(
                                 egui::Image::new(format!("file://{src}"))
@@ -216,7 +260,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                             PhotoQuality::High,
                             auto_open,
                         ) {
-                            view.object_pending_photos.push(&kind, captured);
+                            view.object_pending_photos.push(room_id, &kind, captured);
                         }
                     });
                     if photo_required && !have_photo {
@@ -239,9 +283,10 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                             let n = view.object_note_input.trim();
                             (!n.is_empty()).then(|| n.to_string())
                         };
-                        // Commit ONLY this kind's pending photos (consumes its
-                        // buffer); other kinds' parked photos are untouched.
-                        let photos = view.object_pending_photos.take(&kind);
+                        // Commit ONLY this room+kind's pending photos (consumes
+                        // the buffer); other kinds' / rooms' parked photos are
+                        // untouched.
+                        let photos = view.object_pending_photos.take(room_id, &kind);
                         on_event(UiEvent::Sketch(SketchEvent::AddObject {
                             kind,
                             count,
