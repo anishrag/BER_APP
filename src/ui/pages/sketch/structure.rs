@@ -60,6 +60,7 @@ const WALL_TYPES: &[WallConstructionType] = &[
     WallConstructionType::ConcreteHollowBlocks,
     WallConstructionType::TimberConstruction,
     WallConstructionType::ICF,
+    WallConstructionType::AeratedBlock,
 ];
 
 /// Floor construction TYPE options (the group editor).
@@ -1155,6 +1156,20 @@ fn progress_for(kind: SurfaceKind, progress: StructureProgress) -> (usize, usize
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The group editor's wall TYPE dropdown offers every real wall type —
+    /// including the 2026-07 aerated-block addition — and only user-pickable
+    /// entries (no `Uninitialised`/`Floor` placeholders), each with a real
+    /// label.
+    #[test]
+    fn wall_types_offer_aerated_block_and_only_pickable_types() {
+        assert!(WALL_TYPES.contains(&WallConstructionType::AeratedBlock));
+        for ty in WALL_TYPES {
+            assert!(ty.is_set(), "{ty:?} must be a real choice");
+            assert_ne!(*ty, WallConstructionType::Floor);
+            assert!(!ty.label().is_empty());
+        }
+    }
 
     /// The existing-group pickers (the fresh box's "Existing group…" dropdown
     /// and the in-editor "Add to existing group…" combo share this) label

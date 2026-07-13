@@ -189,6 +189,9 @@ pub enum WallConstructionType {
     ConcreteHollowBlocks,
     TimberConstruction,
     ICF,
+    /// Aerated (aircrete) concrete block — additive 2026-07; serde is
+    /// name-based, so older records (which never stored it) are unaffected.
+    AeratedBlock,
     Floor,
     #[default]
     Uninitialised,
@@ -204,6 +207,7 @@ impl WallConstructionType {
             WallConstructionType::ConcreteHollowBlocks => "Hollow block",
             WallConstructionType::TimberConstruction => "Timber",
             WallConstructionType::ICF => "ICF",
+            WallConstructionType::AeratedBlock => "Aerated block",
             WallConstructionType::Floor => "Floor",
             WallConstructionType::Uninitialised => "Unset",
         }
@@ -1177,6 +1181,58 @@ impl Ber {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every `WallConstructionType` (incl. the additive `AeratedBlock`)
+    /// round-trips through serde, and — additive evolution — JSON produced by
+    /// the OLD enum shape (which had no `AeratedBlock` variant) still
+    /// deserializes to the same values. Labels stay real for every pickable
+    /// type.
+    #[test]
+    fn wall_construction_type_serde_roundtrip_and_old_shape() {
+        for ty in [
+            WallConstructionType::CavityWall,
+            WallConstructionType::FilledCavityWall,
+            WallConstructionType::ConcreteHollowBlocks,
+            WallConstructionType::TimberConstruction,
+            WallConstructionType::ICF,
+            WallConstructionType::AeratedBlock,
+            WallConstructionType::Floor,
+            WallConstructionType::Uninitialised,
+        ] {
+            let back: WallConstructionType =
+                serde_json::from_str(&serde_json::to_string(&ty).unwrap()).unwrap();
+            assert_eq!(back, ty, "round-trip of {ty:?}");
+        }
+        // Unit variants serialize as plain name strings.
+        assert_eq!(
+            serde_json::to_string(&WallConstructionType::AeratedBlock).unwrap(),
+            r#""AeratedBlock""#
+        );
+        // JSON literals exactly as the OLD shape serialized them keep loading.
+        for (old_json, expect) in [
+            (r#""CavityWall""#, WallConstructionType::CavityWall),
+            (
+                r#""FilledCavityWall""#,
+                WallConstructionType::FilledCavityWall,
+            ),
+            (
+                r#""ConcreteHollowBlocks""#,
+                WallConstructionType::ConcreteHollowBlocks,
+            ),
+            (
+                r#""TimberConstruction""#,
+                WallConstructionType::TimberConstruction,
+            ),
+            (r#""ICF""#, WallConstructionType::ICF),
+            (r#""Floor""#, WallConstructionType::Floor),
+            (r#""Uninitialised""#, WallConstructionType::Uninitialised),
+        ] {
+            let got: WallConstructionType = serde_json::from_str(old_json).unwrap();
+            assert_eq!(got, expect, "old-shape {old_json} loads unchanged");
+        }
+        assert_eq!(WallConstructionType::AeratedBlock.label(), "Aerated block");
+        assert!(WallConstructionType::AeratedBlock.is_set());
+    }
 
     /// Ceiling completeness demands the INSULATION spec exactly when the
     /// make-up is the plain `Default` (the combined "Default" dropdown's open

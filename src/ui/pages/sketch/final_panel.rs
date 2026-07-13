@@ -285,6 +285,18 @@ fn floor_combo<F: FnMut(UiEvent)>(ui: &mut egui::Ui, current: FloorKind, on_even
         });
 }
 
+/// The finish list a wall field offers: separating and external walls (the
+/// heat-loss faces) additionally offer the insulated-plasterboard dry-lining;
+/// internal walls keep the base list.
+fn finish_options(field: WallFinishField) -> &'static [WallFinish] {
+    match field {
+        WallFinishField::Internal => &WallFinish::OPTIONS,
+        WallFinishField::Separating | WallFinishField::External => {
+            &WallFinish::OPTIONS_WITH_INSULATED
+        }
+    }
+}
+
 fn wall_combo<F: FnMut(UiEvent)>(
     ui: &mut egui::Ui,
     salt: &str,
@@ -292,10 +304,11 @@ fn wall_combo<F: FnMut(UiEvent)>(
     current: WallFinish,
     on_event: &mut F,
 ) {
+    let options = finish_options(field);
     egui::ComboBox::from_id_salt(("ber_final_wall", salt))
         .selected_text(current.label())
         .show_ui(ui, |ui| {
-            for o in WallFinish::OPTIONS {
+            for &o in options {
                 if ui.selectable_label(current == o, o.label()).clicked() {
                     on_event(UiEvent::Sketch(SketchEvent::SetFinalWallFinish(field, o)));
                 }
@@ -313,4 +326,32 @@ fn heating_combo<F: FnMut(UiEvent)>(ui: &mut egui::Ui, current: HeatingKind, on_
                 }
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The Final-form wall pickers: separating and external walls offer
+    /// "Insulated plasterboard"; internal walls keep the base finishes.
+    #[test]
+    fn separating_and_external_offer_insulated_plasterboard() {
+        for field in [WallFinishField::Separating, WallFinishField::External] {
+            assert!(
+                finish_options(field).contains(&WallFinish::InsulatedPlasterboard),
+                "{field:?} must offer the dry-lining finish"
+            );
+        }
+        assert!(
+            !finish_options(WallFinishField::Internal).contains(&WallFinish::InsulatedPlasterboard)
+        );
+        // No picker ever offers the `Unset` placeholder.
+        for field in [
+            WallFinishField::Internal,
+            WallFinishField::Separating,
+            WallFinishField::External,
+        ] {
+            assert!(!finish_options(field).contains(&WallFinish::Unset));
+        }
+    }
 }

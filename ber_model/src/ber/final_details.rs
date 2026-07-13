@@ -32,8 +32,11 @@ impl FloorKind {
     }
 }
 
-/// Interior finish of a wall — the same options apply to internal, separating and
-/// external walls in the Phase-4 form.
+/// Interior finish of a wall in the Phase-4 form. Internal walls offer the
+/// base finishes ([`WallFinish::OPTIONS`]); separating and external walls —
+/// the heat-loss-relevant faces — additionally offer an insulated
+/// plasterboard (thermal-laminate dry-lining) finish
+/// ([`WallFinish::OPTIONS_WITH_INSULATED`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum WallFinish {
     #[default]
@@ -41,13 +44,27 @@ pub enum WallFinish {
     PlasterboardOnTimber,
     HardPlaster,
     PlasterboardOnDotAndDab,
+    /// Insulated plasterboard (thermal-laminate dry-lining) — additive
+    /// 2026-07; offered for separating and external walls only. Serde is
+    /// name-based, so older records (which never stored it) are unaffected.
+    InsulatedPlasterboard,
 }
 
 impl WallFinish {
+    /// The finishes every wall field offers (internal walls stop here).
     pub const OPTIONS: [WallFinish; 3] = [
         WallFinish::PlasterboardOnTimber,
         WallFinish::HardPlaster,
         WallFinish::PlasterboardOnDotAndDab,
+    ];
+    /// The finishes offered for SEPARATING and EXTERNAL walls: the base
+    /// [`Self::OPTIONS`] plus insulated plasterboard (a dry-lining that only
+    /// makes sense on a heat-loss face, so internal walls don't offer it).
+    pub const OPTIONS_WITH_INSULATED: [WallFinish; 4] = [
+        WallFinish::PlasterboardOnTimber,
+        WallFinish::HardPlaster,
+        WallFinish::PlasterboardOnDotAndDab,
+        WallFinish::InsulatedPlasterboard,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -55,6 +72,7 @@ impl WallFinish {
             WallFinish::PlasterboardOnTimber => "Plasterboard on timber",
             WallFinish::HardPlaster => "Hard plaster",
             WallFinish::PlasterboardOnDotAndDab => "Plasterboard on dot & dab",
+            WallFinish::InsulatedPlasterboard => "Insulated plasterboard",
         }
     }
 }
@@ -172,5 +190,91 @@ impl ShelteringBySide {
                 _ => 0.0,
             })
             .sum()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every `WallFinish` (incl. the additive `InsulatedPlasterboard`)
+    /// round-trips through serde, and — additive evolution — JSON produced
+    /// by the OLD enum shape (which had no `InsulatedPlasterboard` variant)
+    /// still deserializes to the same values.
+    #[test]
+    fn wall_finish_serde_roundtrip_and_old_shape() {
+        for f in [
+            WallFinish::Unset,
+            WallFinish::PlasterboardOnTimber,
+            WallFinish::HardPlaster,
+            WallFinish::PlasterboardOnDotAndDab,
+            WallFinish::InsulatedPlasterboard,
+        ] {
+            let back: WallFinish =
+                serde_json::from_str(&serde_json::to_string(&f).unwrap()).unwrap();
+            assert_eq!(back, f, "round-trip of {f:?}");
+        }
+        // Unit variants serialize as plain name strings.
+        assert_eq!(
+            serde_json::to_string(&WallFinish::InsulatedPlasterboard).unwrap(),
+            r#""InsulatedPlasterboard""#
+        );
+        // JSON literals exactly as the OLD shape serialized them keep loading.
+        for (old_json, expect) in [
+            (r#""Unset""#, WallFinish::Unset),
+            (
+                r#""PlasterboardOnTimber""#,
+                WallFinish::PlasterboardOnTimber,
+            ),
+            (r#""HardPlaster""#, WallFinish::HardPlaster),
+            (
+                r#""PlasterboardOnDotAndDab""#,
+                WallFinish::PlasterboardOnDotAndDab,
+            ),
+        ] {
+            let got: WallFinish = serde_json::from_str(old_json).unwrap();
+            assert_eq!(got, expect, "old-shape {old_json} loads unchanged");
+        }
+    }
+
+    /// A `FinalDetails` blob exactly as an OLD record stored it (before the
+    /// `InsulatedPlasterboard` variant existed) still loads unchanged.
+    #[test]
+    fn final_details_old_record_loads() {
+        let old = r#"{"floor":"Solid","internal_wall":"HardPlaster","separating_wall":"PlasterboardOnTimber","external_wall":"PlasterboardOnDotAndDab","heating":"Radiators"}"#;
+        let d: FinalDetails = serde_json::from_str(old).unwrap();
+        assert_eq!(d.floor, FloorKind::Solid);
+        assert_eq!(d.internal_wall, WallFinish::HardPlaster);
+        assert_eq!(d.separating_wall, WallFinish::PlasterboardOnTimber);
+        assert_eq!(d.external_wall, WallFinish::PlasterboardOnDotAndDab);
+        assert_eq!(d.heating, HeatingKind::Radiators);
+    }
+
+    /// The offered lists: internal walls keep the base finishes; separating /
+    /// external walls get exactly the base list plus insulated plasterboard.
+    /// No list offers `Unset`, and every offered finish has a real label.
+    #[test]
+    fn wall_finish_option_lists() {
+        assert_eq!(
+            WallFinish::OPTIONS_WITH_INSULATED[..WallFinish::OPTIONS.len()],
+            WallFinish::OPTIONS,
+            "the insulated list extends the base list in order"
+        );
+        assert_eq!(
+            WallFinish::OPTIONS_WITH_INSULATED.last(),
+            Some(&WallFinish::InsulatedPlasterboard)
+        );
+        assert!(
+            !WallFinish::OPTIONS.contains(&WallFinish::InsulatedPlasterboard),
+            "internal walls don't offer the dry-lining finish"
+        );
+        for o in WallFinish::OPTIONS_WITH_INSULATED {
+            assert_ne!(o, WallFinish::Unset);
+            assert_ne!(o.label(), "—", "{o:?} needs a real label");
+        }
+        assert_eq!(
+            WallFinish::InsulatedPlasterboard.label(),
+            "Insulated plasterboard"
+        );
     }
 }
