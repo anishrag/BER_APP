@@ -30,12 +30,12 @@ mod wall_partition;
 mod windows;
 
 pub use ceiling_point::{
-    ceiling_fan_marker_at, ceiling_fan_markers, centred_rect_lo, centred_ridge_cross,
-    centred_ridge_start, resolve_ridge_slope_side, ridge_meet_edge_height, ridge_region_ring,
-    snap_ridge_extent_to_gables, validate_dormer, validate_roof_apex, validate_roof_rect_length,
-    validate_roof_rect_placement, validate_roof_rect_ridge, validate_roof_ridge,
-    validate_roof_ridge_extent, validate_roof_ridge_length, CeilingFanMarker, RidgeAutoChoice,
-    RidgeSlopeSide,
+    ceiling_fan_marker_at, ceiling_fan_markers, ceiling_fan_tap_action, centred_rect_lo,
+    centred_ridge_cross, centred_ridge_start, resolve_ridge_slope_side, ridge_meet_edge_height,
+    ridge_region_ring, snap_ridge_extent_to_gables, validate_dormer, validate_roof_apex,
+    validate_roof_rect_length, validate_roof_rect_placement, validate_roof_rect_ridge,
+    validate_roof_ridge, validate_roof_ridge_extent, validate_roof_ridge_length, CeilingFanMarker,
+    CeilingFanTapAction, RidgeAutoChoice, RidgeSlopeSide,
 };
 pub use ceiling_step::{
     canonicalize_ceiling_steps, ceiling_line_coords, region_line_coords, CeilingStepRegion,

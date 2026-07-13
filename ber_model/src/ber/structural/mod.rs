@@ -2430,24 +2430,104 @@ mod tests {
         assert!((total - 24.0).abs() < 1e-6);
     }
 
-    /// `Storey::ceiling_unfanned` is serde-ADDITIVE: an old record without
-    /// the field loads with an empty set (today's fan-everything behaviour),
-    /// and a populated set round-trips.
+    /// `Storey::ceiling_unfanned` and `Storey::ceiling_plane_anchors` are
+    /// serde-ADDITIVE: an old record without either field loads with empty
+    /// sets (fan-everything, auto-nearest anchors), and populated sets
+    /// round-trip.
     #[test]
     fn storey_ceiling_unfanned_serde_roundtrip_and_default() {
         let mut storey = Storey::default();
         storey.ceiling_unfanned = vec![(6.0, 2.0), (-2.0, 2.0)];
+        storey.ceiling_plane_anchors = vec![(5.52, 8.31)];
         let json = serde_json::to_value(&storey).unwrap();
         let back: Storey = serde_json::from_value(json.clone()).unwrap();
         assert_eq!(back.ceiling_unfanned, vec![(6.0, 2.0), (-2.0, 2.0)]);
-        // An "old" record: the same JSON with the field removed.
+        assert_eq!(back.ceiling_plane_anchors, vec![(5.52, 8.31)]);
+        // An "old" record: the same JSON with the fields removed.
         let mut old = json;
         old.as_object_mut().unwrap().remove("ceiling_unfanned");
+        old.as_object_mut().unwrap().remove("ceiling_plane_anchors");
         let legacy: Storey = serde_json::from_value(old).unwrap();
         assert!(
             legacy.ceiling_unfanned.is_empty(),
             "records saved before the field default to fan-everything"
         );
+        assert!(
+            legacy.ceiling_plane_anchors.is_empty(),
+            "records saved before the field default to auto-nearest anchors"
+        );
+    }
+
+    /// A gable-solve regression for the OVERRIDE path at the model level:
+    /// with the bay corner stored as the plane anchor, the ee77622f south
+    /// plane pitches to the BAY wall (main-wall corners embed ABOVE base)
+    /// and stays one plane; hips ignore the set entirely.
+    #[test]
+    fn plane_anchor_override_repitches_the_gable_and_hips_ignore_it() {
+        let cid = ItemId::default();
+        let apexes = bay_gable_apexes();
+        let overrides = vec![Point2f64::new(5.52, 8.31)];
+        let out = CeilingRegions::default_for_footprint(vec![bay_gable_ring()], 2.0, cid)
+            .with_apexes_shaped(&apexes, &[], &[], &overrides);
+        assert_eq!(out.regions.len(), 2, "still two planes under the override");
+        let south = out
+            .regions
+            .iter()
+            .find(|r| {
+                r.polygon
+                    .exterior
+                    .iter()
+                    .any(|v| (v.x - 5.52).abs() <= 1e-9 && (v.y - 8.31).abs() <= 1e-9)
+            })
+            .expect("south plane");
+        let z_main = 3.0 - 2.65 / 3.65; // ≈ 2.274, ABOVE the 2.0 base
+        for v in &south.polygon.exterior {
+            let expect = if (v.y - 4.66).abs() <= 1e-9 {
+                3.0
+            } else if (v.y - 8.31).abs() <= 1e-9 {
+                2.0 // the overridden anchor wall — the new eave
+            } else {
+                z_main
+            };
+            assert!(
+                (v.z - expect).abs() <= 1e-9,
+                "override south plane vertex {v:?} expected z {expect}"
+            );
+        }
+        // The base recovery still works with the override supplied.
+        let groups = out.apex_groups_shaped(&apexes, &[], &overrides);
+        assert_eq!(groups.len(), 1);
+        assert!(
+            (groups[0].base_z - 2.0).abs() <= 1e-9,
+            "the north anchors still vote the base: got {}",
+            groups[0].base_z
+        );
+        // A HIP (interior endpoints) ignores the anchor set entirely.
+        let hip_apexes = vec![
+            CeilingApex {
+                point: Point2f64::new(3.0, 4.66),
+                z_m: 3.0,
+            },
+            CeilingApex {
+                point: Point2f64::new(5.0, 4.66),
+                z_m: 3.0,
+            },
+        ];
+        let plain = CeilingRegions::default_for_footprint(vec![bay_gable_ring()], 2.0, cid)
+            .with_apexes(&hip_apexes);
+        let with_set = CeilingRegions::default_for_footprint(vec![bay_gable_ring()], 2.0, cid)
+            .with_apexes_shaped(&hip_apexes, &[], &[], &overrides);
+        assert_eq!(plain.regions.len(), with_set.regions.len());
+        for before in &plain.regions {
+            assert!(
+                with_set
+                    .regions
+                    .iter()
+                    .any(|after| cyclically_equal(&after.polygon, &before.polygon)),
+                "hip face changed by the anchor set: {:?}",
+                before.polygon
+            );
+        }
     }
 
     /// RE-APPLY-TO-SELF IDENTITY for a TRANSITION triangle `(w, A, B)`, for

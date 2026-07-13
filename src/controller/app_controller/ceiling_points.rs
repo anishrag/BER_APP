@@ -441,14 +441,14 @@ impl AppController {
         Some((point.x as f64, point.y as f64))
     }
 
-    /// The tap-to-unfan fan-vertex markers for the canvas, `(position,
-    /// fanned)` in world coords — non-empty only in the ceiling-shape editing
-    /// context (roof-point mode) and only when actionable (a fan/ridge group
-    /// with MORE THAN 4 fanned vertices, or any vertex already unfanned —
-    /// [`document::ceiling_fan_markers`] owns the rule). The UI renders a
-    /// small tappable marker per entry and routes a hit to
+    /// The fan-vertex markers for the canvas, `(position, fanned, anchor)`
+    /// in world coords — non-empty only in the ceiling-shape editing context
+    /// (roof-point mode) and only when actionable
+    /// ([`document::ceiling_fan_markers`] owns the rules). `anchor` marks a
+    /// gable side's CURRENT pitch anchor (rendered distinctly). The UI
+    /// renders a tappable marker per entry and routes a hit to
     /// [`toggle_ceiling_fan_vertex`](Self::toggle_ceiling_fan_vertex).
-    pub fn ceiling_fan_marker_views(&self) -> Vec<((f64, f64), bool)> {
+    pub fn ceiling_fan_marker_views(&self) -> Vec<((f64, f64), bool, bool)> {
         if !self.ceiling_point_mode {
             return Vec::new(); // markers only during the editing context
         }
@@ -459,22 +459,26 @@ impl AppController {
             .map(|storey| {
                 document::ceiling_fan_markers(storey)
                     .into_iter()
-                    .map(|m| ((m.pos.x, m.pos.y), m.fanned))
+                    .map(|m| ((m.pos.x, m.pos.y), m.fanned, m.anchor))
                     .collect()
             })
             .unwrap_or_default()
     }
 
-    /// Toggle the fan-vertex marker at `(world_x, world_y)` in/out of the
-    /// storey's UNFANNED set: a fanned vertex unfans (its fan plane folds
-    /// into the neighbours' chord plane — `ceiling_geom::lift_unfanned` owns
-    /// the semantics), an unfanned one re-fans. The tap must land on a
-    /// CURRENT marker ([`document::ceiling_fan_marker_at`] — the UI passes
-    /// the marker's own position, so the tolerance is only float slack);
-    /// anything else is a logged no-op. Then the standard ceiling-edit tail:
-    /// mark dirty, recompose the ceilings from the durable inputs, re-derive,
-    /// canonicalize the session step list. Outside undo —
-    /// phases/steps/ceiling-points parity.
+    /// A fan-marker TAP at `(world_x, world_y)` — the thin router over
+    /// [`document::ceiling_fan_tap_action`], which resolves what the tap
+    /// means against the current solve:
+    ///
+    /// - hip/fan marker → toggle the vertex in the stored UNFANNED set
+    ///   (unfan folds its fan plane into the neighbours'; re-fan restores);
+    /// - gable embedded vertex → make it that side's PITCH ANCHOR (store the
+    ///   override, dropping the side's previous one);
+    /// - gable current anchor → clear the side's override (auto-nearest).
+    ///
+    /// A tap on no marker / an ineligible vertex is a logged no-op. Then the
+    /// standard ceiling-edit tail: mark dirty, recompose the ceilings from
+    /// the durable inputs, re-derive, canonicalize the session step list.
+    /// Outside undo — phases/steps/ceiling-points parity.
     pub fn toggle_ceiling_fan_vertex(&mut self, world_x: f64, world_y: f64) {
         if !self.ceiling_point_mode {
             return;
@@ -490,24 +494,30 @@ impl AppController {
         // The UI hit-tests in screen space and sends the marker's own world
         // position — 1 mm of slack absorbs the f64→f32→f64 event plumbing.
         let p = Point2f64::new(world_x, world_y);
-        let Some(target) = document::ceiling_fan_marker_at(storey, p, 1e-3) else {
-            log::debug!(
-                "fan-vertex toggle at ({world_x:.3}, {world_y:.3}) hit no marker — ignored"
-            );
+        let Some(action) = document::ceiling_fan_tap_action(storey, p, 1e-3) else {
+            log::debug!("fan-marker tap at ({world_x:.3}, {world_y:.3}) resolves to no action");
             return;
         };
         let Some(record) = self.current_record.as_mut() else {
             return;
         };
-        match record.data.toggle_ceiling_unfanned(idx, target) {
-            Some(unfanned) => log::debug!(
-                "fan vertex ({:.3}, {:.3}) is now {}",
-                target.x,
-                target.y,
-                if unfanned { "UNFANNED" } else { "fanned" }
-            ),
-            None => return,
+        let applied = match &action {
+            document::CeilingFanTapAction::ToggleUnfanned(v) => {
+                record.data.toggle_ceiling_unfanned(idx, *v).is_some()
+            }
+            document::CeilingFanTapAction::SetPlaneAnchor { anchor, drop } => record
+                .data
+                .update_ceiling_plane_anchors(idx, drop, Some(*anchor))
+                .is_some(),
+            document::CeilingFanTapAction::ClearPlaneAnchor { drop } => record
+                .data
+                .update_ceiling_plane_anchors(idx, drop, None)
+                .is_some(),
+        };
+        if !applied {
+            return;
         }
+        log::debug!("fan-marker tap applied: {action:?}");
         let _ = self.mark_dirty();
         self.recompose_ceilings(idx);
         self.materialize();

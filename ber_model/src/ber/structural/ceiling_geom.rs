@@ -270,26 +270,36 @@ pub(crate) const GABLE_DIST_EPS_M: f64 = 1e-4;
 ///   part of a vertical gable END (edges collinear with their hub — e.g. an
 ///   extra vertex on the gable wall) never anchor a slope and their z never
 ///   surfaces (their faces are all slivers).
-/// - `fanned`: the AUTO baseline XOR the stored manual toggles. The baseline
-///   fans exactly the eligible vertices at their side's MINIMUM ridge
-///   distance (within [`GABLE_DIST_EPS_M`]) — the eave the slope plane is
-///   pitched to; every other vertex is auto-unfanned and EMBEDS on the side
-///   plane ([`ridge_triangles`]). A stored entry ([`UNFAN_MATCH_EPS_M`]
-///   match) FLIPS its vertex: unfan an anchor (pitch to the next wall) or
-///   re-fan an embedded corner (pin it back to its own z). Old records with
-///   a stored set keep their unfan meaning wherever the baseline is empty
-///   (every non-gable roof).
+/// - `anchors`: ONE anchor per side — the eave vertex the side's slope
+///   plane is pitched to. By default the NEAREST eligible vertex to the
+///   ridge line (deterministic tie-break: smaller distance, then lex-smaller
+///   `(x, y)` — solve and markers must agree on which tied corner anchors).
+///   A point of `anchor_overrides` (the storey's durable
+///   `ceiling_plane_anchors`, matched within [`UNFAN_MATCH_EPS_M`]) that
+///   lands on an ELIGIBLE vertex of a side OVERRIDES that side's anchor —
+///   the user's "this corner sets the pitch"; several matches on one side
+///   take the nearest of them (warned); a stale override matching nothing
+///   is ignored (auto-nearest stands).
+/// - `fanned`: exactly the anchors — every other vertex EMBEDS on its side
+///   plane ([`ridge_triangles`]). Note the stored UNFANNED set does NOT
+///   apply on gable sides (the old tap-to-pin made kinks; anchor selection
+///   replaced it) — it still drives hip/fan groups unchanged.
 pub(crate) struct GablePlanClass {
     pub side: Vec<f64>,
     pub eligible: Vec<bool>,
     pub fanned: Vec<bool>,
+    /// The ring index of each side's current anchor, `[negative, positive]`
+    /// by side sign; `None` for an empty (or anchor-less) side.
+    pub anchors: [Option<usize>; 2],
+    /// Whether each side's anchor came from a matched override (vs auto).
+    pub overridden: [bool; 2],
 }
 
 pub(crate) fn gable_plan_classify(
     ring: &[Point2f64],
     a: Point2f64,
     b: Point2f64,
-    stored_unfanned: &[Point2f64],
+    anchor_overrides: &[Point2f64],
 ) -> Option<GablePlanClass> {
     let n = ring.len();
     if n < 3 {
@@ -332,62 +342,115 @@ pub(crate) fn gable_plan_classify(
     let eligible: Vec<bool> = (0..n)
         .map(|i| !edge_gable[(i + n - 1) % n] || !edge_gable[i])
         .collect();
-    // Per-side minimum ridge distance among eligible vertices off the line.
-    let mut min_side = [f64::INFINITY, f64::INFINITY]; // [negative side, positive side]
-    for i in 0..n {
-        if eligible[i] && side[i].abs() > GABLE_DIST_EPS_M {
-            let s = usize::from(side[i] > 0.0);
-            min_side[s] = min_side[s].min(side[i].abs());
+    // Anchor election per side: an eligible matched OVERRIDE wins (nearest
+    // of several, warned); else the nearest eligible vertex. Deterministic
+    // tie-break by (distance, x, y).
+    let matches_override = |i: usize| {
+        anchor_overrides.iter().any(|o| {
+            (ring[i].x - o.x).abs() <= UNFAN_MATCH_EPS_M
+                && (ring[i].y - o.y).abs() <= UNFAN_MATCH_EPS_M
+        })
+    };
+    let key = |i: usize| (side[i].abs(), ring[i].x, ring[i].y);
+    let cmp = |i: &usize, j: &usize| {
+        let (da, xa, ya) = key(*i);
+        let (db, xb, yb) = key(*j);
+        da.total_cmp(&db)
+            .then(xa.total_cmp(&xb))
+            .then(ya.total_cmp(&yb))
+    };
+    let mut anchors: [Option<usize>; 2] = [None, None];
+    let mut overridden = [false, false];
+    for s in [false, true] {
+        let on_side =
+            |i: usize| (side[i] > 0.0) == s && side[i].abs() > GABLE_DIST_EPS_M && eligible[i];
+        let hits: Vec<usize> = (0..n)
+            .filter(|&i| on_side(i) && matches_override(i))
+            .collect();
+        if hits.len() > 1 {
+            log::warn!(
+                "gable: {} plane-anchor overrides match one ridge side — using the nearest",
+                hits.len()
+            );
         }
+        let (choice, is_override) = match hits.iter().copied().min_by(cmp) {
+            Some(i) => (Some(i), true),
+            None => ((0..n).filter(|&i| on_side(i)).min_by(cmp), false),
+        };
+        anchors[usize::from(s)] = choice;
+        overridden[usize::from(s)] = is_override && choice.is_some();
     }
     let fanned: Vec<bool> = (0..n)
-        .map(|i| {
-            let baseline = eligible[i]
-                && side[i].abs() > GABLE_DIST_EPS_M
-                && side[i].abs() <= min_side[usize::from(side[i] > 0.0)] + GABLE_DIST_EPS_M;
-            let stored = stored_unfanned.iter().any(|u| {
-                (ring[i].x - u.x).abs() <= UNFAN_MATCH_EPS_M
-                    && (ring[i].y - u.y).abs() <= UNFAN_MATCH_EPS_M
-            });
-            baseline ^ stored
-        })
+        .map(|i| anchors.iter().any(|a| *a == Some(i)))
         .collect();
     Some(GablePlanClass {
         side,
         eligible,
         fanned,
+        anchors,
+        overridden,
     })
 }
 
-/// The EFFECTIVE fanned flag per ring vertex of a TRUE-GABLE ridge (both
-/// endpoints on the ring boundary), or `None` for any other ridge — the
-/// public face of [`gable_plan_classify`] for the document layer's
-/// tap-to-unfan markers, so the markers show exactly what the solve does.
-pub fn gable_effective_fanned(
+/// The public per-vertex ROLES of a TRUE-GABLE ring (both ridge endpoints on
+/// the ring boundary), or `None` for any other ridge — the document layer's
+/// marker/tap-routing view, index-parallel to `ring`, built from the SAME
+/// classification the solve uses ([`gable_plan_classify`]) so the markers
+/// show exactly what the solve does.
+pub struct GableRingRoles {
+    /// This vertex is a side's CURRENT pitch anchor (auto or override).
+    pub anchor: Vec<bool>,
+    /// This vertex may anchor a slope (owns a non-gable eave edge).
+    pub eligible: Vec<bool>,
+    /// The vertex's embedded z DIFFERS from its own base — the roof
+    /// genuinely deviates over it (its ridge distance differs from its
+    /// side's anchor distance). Anchors never deviate.
+    pub deviates: Vec<bool>,
+    /// Any side's anchor currently comes from a stored override.
+    pub overridden: bool,
+}
+
+pub fn gable_ring_roles(
     ring: &[Point2f64],
     a: Point2f64,
     b: Point2f64,
-    stored_unfanned: &[Point2f64],
-) -> Option<Vec<bool>> {
-    gable_plan_classify(ring, a, b, stored_unfanned).map(|c| c.fanned)
+    anchor_overrides: &[Point2f64],
+) -> Option<GableRingRoles> {
+    let cls = gable_plan_classify(ring, a, b, anchor_overrides)?;
+    let n = ring.len();
+    let deviates = (0..n)
+        .map(|i| {
+            if cls.fanned[i] {
+                return false;
+            }
+            let s = usize::from(cls.side[i] > 0.0);
+            match cls.anchors[s] {
+                Some(ai) => (cls.side[i].abs() - cls.side[ai].abs()).abs() > GABLE_DIST_EPS_M,
+                None => false,
+            }
+        })
+        .collect();
+    Some(GableRingRoles {
+        anchor: cls.fanned.clone(),
+        eligible: cls.eligible.clone(),
+        deviates,
+        overridden: cls.overridden.iter().any(|o| *o),
+    })
 }
 
 /// The TRUE-GABLE embed (both ridge endpoints on the region boundary): each
 /// side of the ridge is ONE PLANE through the ridge line and that side's
-/// ANCHOR — the nearest effective-fanned eligible vertex
-/// ([`gable_plan_classify`]) at its own z, i.e. the slope meets base height
-/// at the eave wall closest to the ridge and CONTINUES over anything
-/// further out (the assessor's "one of them extends a bit more over the
-/// bay"). When the assessor unfanned every eave vertex on a side, the
-/// nearest eligible vertex still anchors (warned — a slope must be pitched
-/// to something). Every vertex that is NOT effective-fanned embeds at the
-/// side plane's z over its plan position; fanned vertices keep their own z
-/// (a re-fanned bay corner pins the surface locally — the escape in the fan
-/// direction). The hub triangulation then runs unchanged; on a plain side
-/// every triangle (and every midline split point, interpolated along
-/// on-plane edges) lies on the side plane, so the coplanar merge folds the
-/// whole side into ONE face — the classic two-plane gable, bays and notches
-/// embedded.
+/// ANCHOR ([`gable_plan_classify`] — the nearest eligible eave vertex, or
+/// the user's stored override) at its own z: the slope meets base height at
+/// the anchor wall and CONTINUES over everything else (the assessor's "one
+/// of them extends a bit more over the bay"). Every non-anchor vertex
+/// embeds at the side plane's z over its plan position — INCLUDING corners
+/// closer to the ridge than an overridden anchor, which then embed ABOVE
+/// base (the roof-void wall above them fills to the roof). The hub
+/// triangulation then runs unchanged; every triangle (and every midline
+/// split point, interpolated along on-plane edges) lies on its side plane,
+/// so the coplanar merge folds each side into ONE face — the classic
+/// two-plane gable, bays and notches embedded.
 fn embed_gable_sides(
     mut ext: Vec<Point3f64>,
     cls: &GablePlanClass,
@@ -405,34 +468,23 @@ fn embed_gable_sides(
     };
     for s in [false, true] {
         let on_side = |i: usize| (cls.side[i] > 0.0) == s && cls.side[i].abs() > GABLE_DIST_EPS_M;
-        // The side's anchor: nearest fanned eligible vertex; nearest eligible
-        // (warned) when every one was unfanned; none → nothing to pitch, the
-        // side keeps its z (its faces are gable slivers anyway).
-        let candidates = |need_fanned: bool| {
-            (0..n)
-                .filter(|&i| on_side(i) && cls.eligible[i] && (!need_fanned || cls.fanned[i]))
-                .min_by(|&i, &j| cls.side[i].abs().total_cmp(&cls.side[j].abs()))
-        };
-        let anchor = candidates(true).or_else(|| {
-            let fallback = candidates(false);
-            if fallback.is_some() {
-                log::warn!(
-                    "gable: every eave vertex on one side is unfanned — \
-                     pitching to the nearest corner anyway"
-                );
-            }
-            fallback
-        });
-        let Some(ai) = anchor else {
-            continue;
+        let Some(ai) = cls.anchors[usize::from(s)] else {
+            continue; // an empty / anchor-less side — nothing to pitch
         };
         let (p0, p1, p2) = (a3, b3, ext[ai]);
         for i in 0..n {
-            if !on_side(i) || cls.fanned[i] || i == ai || is_hub(&ext[i]) {
+            if !on_side(i) || i == ai || is_hub(&ext[i]) {
                 continue;
             }
             if let Some(z) = plane_z_at(p0, p1, p2, ext[i].x, ext[i].y) {
-                ext[i].z = z;
+                // A vertex ALREADY on the plane keeps its exact z: a co-nearest
+                // eave corner (same distance as the anchor) or a re-applied,
+                // previously-embedded corner must round-trip bit-identically —
+                // the re-apply/reload fixpoint; plane evaluation would smear
+                // ~1e-16 over it.
+                if (z - ext[i].z).abs() > 1e-9 {
+                    ext[i].z = z;
+                }
             }
         }
     }
@@ -636,6 +688,7 @@ pub(crate) fn ridge_triangles(
     a: &CeilingApex,
     b: &CeilingApex,
     unfanned: &[Point2f64],
+    plane_anchors: &[Point2f64],
 ) -> Vec<CeilingRegion> {
     let cid = region.construction_id;
     let exposure = region.exposure;
@@ -645,14 +698,16 @@ pub(crate) fn ridge_triangles(
     // already-embedded edges, staying on their planes):
     // - TRUE GABLE (both endpoints on the region boundary,
     //   [`gable_plan_classify`]): each side embeds onto its single slope
-    //   plane ([`embed_gable_sides`]) — two planes with zero taps, bays and
-    //   notches carried along; the stored unfanned set toggles against the
-    //   auto baseline.
+    //   plane ([`embed_gable_sides`]), pitched to the auto-nearest eave
+    //   corner or the user's stored plane-anchor override — two planes with
+    //   zero taps, bays and notches carried along. The stored UNFANNED set
+    //   does not apply here (anchor selection replaced tap-to-pin).
     // - otherwise (hip / interior endpoints): only stored-unfanned vertices
     //   embed, on the effective solve's containing sub-face
-    //   ([`lift_unfanned_hip_ridge`]).
+    //   ([`lift_unfanned_hip_ridge`]); the anchor set is a gable-only
+    //   concern and is ignored.
     let plan_ring: Vec<Point2f64> = ext.iter().map(|v| Point2f64::new(v.x, v.y)).collect();
-    let ext = match gable_plan_classify(&plan_ring, a.point, b.point, unfanned) {
+    let ext = match gable_plan_classify(&plan_ring, a.point, b.point, plane_anchors) {
         Some(cls) => embed_gable_sides(ext, &cls, a, b),
         None => lift_unfanned_hip_ridge(ext, unfanned, a, b),
     };

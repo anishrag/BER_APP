@@ -568,6 +568,39 @@ impl Ber {
         }
     }
 
+    /// Update storey `storey_idx`'s gable plane-anchor OVERRIDE set
+    /// (`Storey::ceiling_plane_anchors`): drop every stored point matching
+    /// one of `remove` (within `UNFAN_MATCH_EPS_M`), then push `add`
+    /// (quantized like an apex) if given — the one-call form of "this corner
+    /// now sets the pitch" (the removed points are the side's previous
+    /// override) and "back to auto" (`add = None`). Validation (the point
+    /// being a real eligible eave vertex) happens upstream in the document
+    /// layer. `None` when the storey doesn't exist; `Some(changed)`
+    /// otherwise.
+    pub fn update_ceiling_plane_anchors(
+        &mut self,
+        storey_idx: usize,
+        remove: &[Point2f64],
+        add: Option<Point2f64>,
+    ) -> Option<bool> {
+        use super::structural::UNFAN_MATCH_EPS_M;
+        let storey = self.storeys.get_mut(storey_idx)?;
+        let before = storey.ceiling_plane_anchors.len();
+        storey.ceiling_plane_anchors.retain(|&(x, y)| {
+            !remove.iter().any(|r| {
+                ((x as f64) - r.x).abs() <= UNFAN_MATCH_EPS_M
+                    && ((y as f64) - r.y).abs() <= UNFAN_MATCH_EPS_M
+            })
+        });
+        let mut changed = storey.ceiling_plane_anchors.len() != before;
+        if let Some(p) = add {
+            let q = CeilingApex::quantize_point(p);
+            storey.ceiling_plane_anchors.push((q.x as f32, q.y as f32));
+            changed = true;
+        }
+        Some(changed)
+    }
+
     /// Append a flat-topped DORMER to storey `storey_idx`'s durable dormer
     /// list (replayed at resolve by [`CeilingRegions::with_flat_patches`]).
     /// Each footprint vertex is QUANTIZED to the f32 grid, exactly as
@@ -627,6 +660,41 @@ mod tests {
         assert!(ber.storeys[0].ceiling_unfanned.is_empty());
         assert_eq!(
             ber.toggle_ceiling_unfanned(7, p),
+            None,
+            "missing storey is a no-op"
+        );
+    }
+
+    /// The plane-anchor setter swaps overrides in one call: remove the
+    /// side's previous point(s) within the epsilon, push the new quantized
+    /// one; `add = None` clears back to auto.
+    #[test]
+    fn update_ceiling_plane_anchors_swaps_and_clears() {
+        let mut ber = Ber::default();
+        ber.storeys.push(Storey::default());
+        let a = Point2f64::new(5.52, 8.31);
+        let b = Point2f64::new(1.52, 7.31);
+        assert_eq!(
+            ber.update_ceiling_plane_anchors(0, &[], Some(a)),
+            Some(true)
+        );
+        assert_eq!(ber.storeys[0].ceiling_plane_anchors.len(), 1);
+        // Swap: drop `a` (matched within the epsilon), store `b`.
+        let a_near = Point2f64::new(5.52 + 5e-5, 8.31);
+        assert_eq!(
+            ber.update_ceiling_plane_anchors(0, &[a_near], Some(b)),
+            Some(true)
+        );
+        let stored = &ber.storeys[0].ceiling_plane_anchors;
+        assert_eq!(stored.len(), 1, "previous override dropped: {stored:?}");
+        assert!(
+            (stored[0].0 as f64 - b.x).abs() <= 1e-4 && (stored[0].1 as f64 - b.y).abs() <= 1e-4
+        );
+        // Clear back to auto.
+        assert_eq!(ber.update_ceiling_plane_anchors(0, &[b], None), Some(true));
+        assert!(ber.storeys[0].ceiling_plane_anchors.is_empty());
+        assert_eq!(
+            ber.update_ceiling_plane_anchors(9, &[], Some(a)),
             None,
             "missing storey is a no-op"
         );

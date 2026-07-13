@@ -346,31 +346,34 @@ impl RoofArea {
             return None;
         }
         let (a, b) = (&self.apexes[0], &self.apexes[1]);
+        // Auto-nearest anchors ONLY (`&[]`): the storey's
+        // `ceiling_plane_anchors` overrides are a CEILING-solve concern —
+        // a roof area's pitch comes from its own drawn pitch/ridge, so do
+        // not wire the ceiling override set through here.
         let (gi, cls) = merged.iter().enumerate().find_map(|(i, ring)| {
             gable_plan_classify(ring, a.point, b.point, &[]).map(|c| (i, c))
         })?;
         let ring = &merged[gi];
         let a3 = Point3f64::new(a.point.x, a.point.y, a.z_m);
         let b3 = Point3f64::new(b.point.x, b.point.y, b.z_m);
-        // The two side planes of the UN-OFFSET gable, keyed by side sign.
+        // The two side planes of the UN-OFFSET gable, keyed by side sign —
+        // through the ridge and the classification's per-side anchor. A side
+        // that has vertices but elected no anchor bails to the legacy path.
         let mut planes: [Option<(Point3f64, Point3f64, Point3f64)>; 2] = [None, None];
         for s in [false, true] {
-            let on_side: Vec<usize> = (0..ring.len())
-                .filter(|&i| (cls.side[i] > 0.0) == s && cls.side[i].abs() > GABLE_DIST_EPS_M)
-                .collect();
-            if on_side.is_empty() {
-                continue; // a mono-pitch's empty side — no plane needed there
+            let side_nonempty = (0..ring.len())
+                .any(|i| (cls.side[i] > 0.0) == s && cls.side[i].abs() > GABLE_DIST_EPS_M);
+            match (cls.anchors[usize::from(s)], side_nonempty) {
+                (Some(anchor), _) => {
+                    planes[usize::from(s)] = Some((
+                        a3,
+                        b3,
+                        Point3f64::new(ring[anchor].x, ring[anchor].y, self.eave_z),
+                    ));
+                }
+                (None, false) => {} // a mono-pitch's empty side — no plane needed
+                (None, true) => return None, // vertices but no eligible anchor
             }
-            let anchor = on_side
-                .iter()
-                .copied()
-                .filter(|&i| cls.eligible[i] && cls.fanned[i])
-                .min_by(|&i, &j| cls.side[i].abs().total_cmp(&cls.side[j].abs()))?;
-            planes[usize::from(s)] = Some((
-                a3,
-                b3,
-                Point3f64::new(ring[anchor].x, ring[anchor].y, self.eave_z),
-            ));
         }
         if planes.iter().all(|p| p.is_none()) {
             return None; // nothing to pitch — degenerate

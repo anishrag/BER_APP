@@ -73,6 +73,16 @@ pub struct Storey {
     /// records load (empty = the fan-to-every-vertex behaviour of before).
     #[serde(default)]
     pub ceiling_unfanned: Vec<(f32, f32)>,
+    /// User-selected GABLE pitch-anchor OVERRIDES (plan points, f32 grid —
+    /// the `CeilingApex::quantize_point` convention): a point matching an
+    /// ELIGIBLE eave vertex of a true-gable ridge side makes THAT vertex the
+    /// side's plane anchor instead of the auto-nearest corner
+    /// (`gable_plan_classify`); stale points are ignored. Durable INPUT like
+    /// `ceiling_unfanned`, re-applied on every recompose; a CEILING-solve
+    /// concern only — roof areas keep auto-nearest. `#[serde(default)]` so
+    /// older records load (empty = auto-nearest everywhere).
+    #[serde(default)]
+    pub ceiling_plane_anchors: Vec<(f32, f32)>,
     /// Flat-topped DORMER patches carved into this storey's sloped attic
     /// ceiling: each raises its `footprint` to a single flat `top_z_m` while the
     /// surrounding roof KEEPS its slope (the dormer does NOT reslope its
@@ -209,15 +219,8 @@ impl Storey {
     }
 
     /// Drop all DERIVED geometry — floors, walls, living areas, ceilings, and the
-    /// fan apexes over them — back to empty. The persist path calls this when
-    /// the outline isn't finalised yet: that geometry is still pixel/incomplete
-    /// (ceilings derived over a pixel footprint are pixel units too, so the apexes
-    /// that fan them go with it), and the DB only ever holds finalised geometry.
-    /// The durable INPUTS (`ceiling_height_m`, `ceiling_apex_hints`,
-    /// `floor_thickness_m`, `ceiling_steps`) are left untouched.
     /// The storey's UNFANNED ceiling vertices as plan points — the form
-    /// `CeilingRegions::with_apexes_hinted_unfanned` / `apex_groups_unfanned`
-    /// consume.
+    /// the `CeilingRegions` shaping/grouping calls consume.
     pub fn ceiling_unfanned_points(&self) -> Vec<Point2f64> {
         self.ceiling_unfanned
             .iter()
@@ -225,15 +228,35 @@ impl Storey {
             .collect()
     }
 
-    /// The storey's ceiling apex groups WITH its own unfanned set supplied —
-    /// the call every consumer with a `Storey` in hand should make (the raw
-    /// `CeilingRegions::apex_groups` would warn-exclude lifted faces from the
-    /// merged rings on a storey that has unfanned vertices).
-    pub fn ceiling_apex_groups(&self) -> Vec<CeilingApexGroup> {
-        self.ceilings
-            .apex_groups_unfanned(&self.ceiling_apexes, &self.ceiling_unfanned_points())
+    /// The storey's gable plane-anchor OVERRIDES as plan points — the form
+    /// the `CeilingRegions` shaping/grouping calls consume.
+    pub fn ceiling_plane_anchor_points(&self) -> Vec<Point2f64> {
+        self.ceiling_plane_anchors
+            .iter()
+            .map(|&(x, y)| Point2f64::new(x as f64, y as f64))
+            .collect()
     }
 
+    /// The storey's ceiling apex groups WITH its own unfanned + plane-anchor
+    /// sets supplied — the call every consumer with a `Storey` in hand
+    /// should make (the raw `CeilingRegions::apex_groups` would
+    /// warn-exclude lifted/embedded faces from the merged rings on a storey
+    /// carrying either set).
+    pub fn ceiling_apex_groups(&self) -> Vec<CeilingApexGroup> {
+        self.ceilings.apex_groups_shaped(
+            &self.ceiling_apexes,
+            &self.ceiling_unfanned_points(),
+            &self.ceiling_plane_anchor_points(),
+        )
+    }
+
+    /// Drop all DERIVED geometry — floors, walls, living areas, ceilings, and the
+    /// fan apexes over them — back to empty. The persist path calls this when
+    /// the outline isn't finalised yet: that geometry is still pixel/incomplete
+    /// (ceilings derived over a pixel footprint are pixel units too, so the apexes
+    /// that fan them go with it), and the DB only ever holds finalised geometry.
+    /// The durable INPUTS (`ceiling_height_m`, `ceiling_apex_hints`,
+    /// `floor_thickness_m`, `ceiling_steps`) are left untouched.
     pub fn clear_derived_geometry(&mut self) {
         self.floors = FloorRegions::default();
         self.walls = WallRegions::default();

@@ -47,7 +47,7 @@
 use crate::StoreyDoc;
 use ber_model::ber::common::ItemId;
 use ber_model::ber::structural::{
-    gable_effective_fanned, rect_hip_switches, ridge_hub_switches, strip_collinear, CeilingApex,
+    gable_ring_roles, rect_hip_switches, ridge_hub_switches, strip_collinear, CeilingApex,
     CeilingApexGroup, CeilingRegion, Storey, APEX_BOUNDARY_EPS_M, UNFAN_MATCH_EPS_M,
 };
 use domain::points::{ring_area, to_f32, Point2f32, Point2f64};
@@ -914,45 +914,73 @@ pub fn snap_ridge_extent_to_gables(
 }
 
 /// One tappable fan-vertex marker of the ceiling-shape editing context: a
-/// ceiling-area corner the current fan/ridge solve treats (or, unfanned,
-/// WOULD treat) as a fan target. See [`ceiling_fan_markers`].
+/// ceiling-area corner of a shaped roof. See [`ceiling_fan_markers`] for
+/// which corners appear and what tapping each does.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CeilingFanMarker {
     /// The vertex's plan position (world metres) — also the identity the
-    /// unfan toggle stores (f32-quantized by `Ber::toggle_ceiling_unfanned`).
+    /// toggle mutations store (f32-quantized by the `Ber` setters).
     pub pos: Point2f64,
-    /// `true` while the vertex anchors its own fan plane; `false` when it is
-    /// in the storey's unfanned set (tapping re-fans it).
+    /// `true` while the vertex keeps its own z (a hip/fan target, or a gable
+    /// anchor); `false` when it is embedded / unfanned.
     pub fanned: bool,
+    /// `true` when the vertex is a GABLE side's CURRENT pitch anchor ("this
+    /// corner sets the pitch" — render distinctly; tapping it clears the
+    /// side's override, back to auto-nearest). Implies `fanned`. Always
+    /// `false` on hip/fan groups.
+    pub anchor: bool,
 }
 
-/// The tap-to-unfan MARKERS for the storey's resolved roofs — the generic
-/// escape hatch on top of the automatic gable rule: every non-apex,
-/// non-collinear vertex of each fan/ridge group's merged ring, flagged with
-/// the EFFECTIVE fanned state the solve uses:
+/// What a tap on a fan marker should DO — resolved by
+/// [`ceiling_fan_tap_action`] against the storey's current solve, so the
+/// shell stays a thin router:
+#[derive(Debug, Clone, PartialEq)]
+pub enum CeilingFanTapAction {
+    /// Hip/fan group: toggle the vertex in the stored unfanned set
+    /// (`Ber::toggle_ceiling_unfanned`) — the pre-gable behaviour, kept
+    /// byte-identical.
+    ToggleUnfanned(Point2f64),
+    /// Gable side: make the vertex the side's pitch anchor — store it in
+    /// `ceiling_plane_anchors`, dropping the side's previous override(s) in
+    /// `drop` (`Ber::update_ceiling_plane_anchors(drop, Some(anchor))`).
+    SetPlaneAnchor {
+        anchor: Point2f64,
+        drop: Vec<Point2f64>,
+    },
+    /// Gable side: the tapped vertex IS the current anchor and holds an
+    /// override — drop it (back to auto-nearest;
+    /// `Ber::update_ceiling_plane_anchors(drop, None)`).
+    ClearPlaneAnchor { drop: Vec<Point2f64> },
+}
+
+/// The fan-vertex MARKERS for the storey's resolved roofs: every non-apex,
+/// non-collinear vertex of each fan/ridge group's merged ring, in the role
+/// the solve gives it:
 ///
 /// - a TRUE-GABLE ridge (both endpoints on the merged ring's boundary):
-///   [`gable_effective_fanned`] — the auto baseline (each side's nearest
-///   eave corners fanned, everything else embedded on the side plane) XOR
-///   the stored `ceiling_unfanned` toggles;
-/// - any other fan/ridge: fanned unless in the stored set (embedding
-///   semantics in `ceiling_geom::lift_unfanned_fan` /
-///   `lift_unfanned_hip_ridge`).
+///   [`gable_ring_roles`] — each side's pitch ANCHOR (auto-nearest or the
+///   stored `ceiling_plane_anchors` override) is `anchor` (+`fanned`);
+///   every other vertex is embedded on the side plane (`fanned = false`).
+///   Tap semantics are anchor selection ([`ceiling_fan_tap_action`]) — the
+///   stored unfanned set does not apply here;
+/// - any other fan/ridge: `fanned` unless in the stored unfanned set
+///   (embedding semantics in `ceiling_geom::lift_unfanned_fan` /
+///   `lift_unfanned_hip_ridge`); never `anchor`.
 ///
-/// A group contributes markers only when they are actionable: MORE THAN 4
-/// vertices currently fanned (a 4-corner roof is already the minimal shape —
-/// no clutter on a plain gable/hip), OR any vertex unfanned/embedded (its
-/// marker must stay tappable to RE-fan, even at 4 or fewer — a gable over a
-/// bay shows its embedded bay corners struck). Only 1-apex (fan) and 2-apex
-/// (ridge) groups participate — the 4-corner pavilion loft has no
-/// per-vertex fan. Collinear ring vertices are stripped
-/// ([`strip_collinear`]): they contribute no fan plane, so unfanning them
-/// would change nothing. Empty when the storey has no shaped ceiling.
+/// A group contributes markers only when they are actionable: for a gable,
+/// some vertex genuinely DEVIATES (its embedded z differs from its base —
+/// a plain rectangle gable shows nothing) or an override is stored (it must
+/// stay clearable); for hips/fans, MORE THAN 4 vertices fanned or any
+/// vertex unfanned (the pre-gable rule, unchanged). Only 1-apex (fan) and
+/// 2-apex (ridge) groups participate — the pavilion loft has no per-vertex
+/// fan. Collinear ring vertices are stripped ([`strip_collinear`]): they
+/// contribute no fan plane. Empty when the storey has no shaped ceiling.
 pub fn ceiling_fan_markers(storey: &Storey) -> Vec<CeilingFanMarker> {
     if storey.ceiling_apexes.is_empty() {
         return Vec::new();
     }
     let unfanned = storey.ceiling_unfanned_points();
+    let anchors = storey.ceiling_plane_anchor_points();
     let near = |a: &Point2f64, bx: f64, by: f64| {
         (a.x - bx).abs() <= UNFAN_MATCH_EPS_M && (a.y - by).abs() <= UNFAN_MATCH_EPS_M
     };
@@ -968,11 +996,15 @@ pub fn ceiling_fan_markers(storey: &Storey) -> Vec<CeilingFanMarker> {
             )
         });
         let mut markers = Vec::new();
+        let mut show = false;
         for ring in &g.merged_rings {
             let ring = strip_collinear(ring);
-            // The gable classification when this ring IS a true gable —
+            // The gable roles when this ring IS a true gable —
             // index-parallel to `ring`.
-            let gable = ridge.and_then(|(pa, pb)| gable_effective_fanned(&ring, pa, pb, &unfanned));
+            let roles = ridge.and_then(|(pa, pb)| gable_ring_roles(&ring, pa, pb, &anchors));
+            if let Some(r) = &roles {
+                show |= r.overridden || r.deviates.iter().any(|d| *d);
+            }
             for (i, v) in ring.iter().enumerate() {
                 if g.apex_idxs
                     .iter()
@@ -980,15 +1012,23 @@ pub fn ceiling_fan_markers(storey: &Storey) -> Vec<CeilingFanMarker> {
                 {
                     continue; // a gable-end hub on the boundary — not a fan target
                 }
-                let fanned = match &gable {
-                    Some(flags) => flags[i],
-                    None => !unfanned.iter().any(|u| near(u, v.x, v.y)),
+                let (fanned, anchor) = match &roles {
+                    Some(r) => (r.anchor[i], r.anchor[i]),
+                    None => (!unfanned.iter().any(|u| near(u, v.x, v.y)), false),
                 };
-                markers.push(CeilingFanMarker { pos: *v, fanned });
+                markers.push(CeilingFanMarker {
+                    pos: *v,
+                    fanned,
+                    anchor,
+                });
             }
         }
-        let fanned_count = markers.iter().filter(|m| m.fanned).count();
-        if fanned_count > 4 || markers.iter().any(|m| !m.fanned) {
+        // Hip/fan visibility: the pre-gable rule.
+        if ridge.is_none() || markers.iter().all(|m| !m.anchor) {
+            let fanned_count = markers.iter().filter(|m| m.fanned).count();
+            show |= fanned_count > 4 || markers.iter().any(|m| !m.fanned);
+        }
+        if show {
             out.extend(markers);
         }
     }
@@ -996,8 +1036,8 @@ pub fn ceiling_fan_markers(storey: &Storey) -> Vec<CeilingFanMarker> {
 }
 
 /// The marker within `tol_m` (plan metres) of `p` nearest to it — the
-/// document-side guard behind the shell's unfan toggle: only a CURRENT
-/// marker's canonical position may be toggled (a stray tap toggles nothing).
+/// document-side guard behind the shell's fan-marker tap: only a CURRENT
+/// marker's canonical position may be acted on (a stray tap does nothing).
 pub fn ceiling_fan_marker_at(storey: &Storey, p: Point2f64, tol_m: f64) -> Option<Point2f64> {
     ceiling_fan_markers(storey)
         .into_iter()
@@ -1008,6 +1048,108 @@ pub fn ceiling_fan_marker_at(storey: &Storey, p: Point2f64, tol_m: f64) -> Optio
         .filter(|(_, d2)| *d2 <= tol_m * tol_m)
         .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
         .map(|(m, _)| m.pos)
+}
+
+/// Resolve a fan-marker tap at `p` (within `tol_m`) into the model mutation
+/// it means — the document-side brain behind the shell's marker tap:
+///
+/// - on a HIP/FAN group's marker: [`CeilingFanTapAction::ToggleUnfanned`]
+///   (the pre-gable behaviour, byte-identical);
+/// - on a GABLE side's EMBEDDED vertex (eligible — it owns an eave edge):
+///   [`CeilingFanTapAction::SetPlaneAnchor`] — that corner now sets the
+///   side's pitch; the side's previous override(s) ride in `drop` so one
+///   `Ber::update_ceiling_plane_anchors` call swaps them;
+/// - on a GABLE side's CURRENT anchor: [`CeilingFanTapAction::ClearPlaneAnchor`]
+///   when an override is stored for that side (back to auto-nearest);
+///   `None` when the anchor is already the auto choice (nothing to clear);
+/// - on an INELIGIBLE gable vertex (a gable-wall extra — it can't anchor a
+///   pitch), or a tap that hits no marker: `None` (logged by the caller).
+pub fn ceiling_fan_tap_action(
+    storey: &Storey,
+    p: Point2f64,
+    tol_m: f64,
+) -> Option<CeilingFanTapAction> {
+    let anchor_overrides = storey.ceiling_plane_anchor_points();
+    let near = |a: &Point2f64, b: &Point2f64| {
+        (a.x - b.x).abs() <= UNFAN_MATCH_EPS_M && (a.y - b.y).abs() <= UNFAN_MATCH_EPS_M
+    };
+    for g in storey.ceiling_apex_groups() {
+        if !matches!(g.apex_idxs.len(), 1 | 2) {
+            continue;
+        }
+        let ridge = (g.apex_idxs.len() == 2).then(|| {
+            (
+                storey.ceiling_apexes[g.apex_idxs[0]].point,
+                storey.ceiling_apexes[g.apex_idxs[1]].point,
+            )
+        });
+        for ring in &g.merged_rings {
+            let ring = strip_collinear(ring);
+            // The tapped ring vertex, if any (apex corners are not markers).
+            let Some(vi) = ring
+                .iter()
+                .enumerate()
+                .filter(|(_, v)| {
+                    (v.x - p.x).powi(2) + (v.y - p.y).powi(2) <= tol_m * tol_m
+                        && !g
+                            .apex_idxs
+                            .iter()
+                            .any(|&ia| near(&storey.ceiling_apexes[ia].point, v))
+                })
+                .min_by(|(_, u), (_, w)| {
+                    let du = (u.x - p.x).powi(2) + (u.y - p.y).powi(2);
+                    let dw = (w.x - p.x).powi(2) + (w.y - p.y).powi(2);
+                    du.partial_cmp(&dw).unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .map(|(i, _)| i)
+            else {
+                continue;
+            };
+            let v = ring[vi];
+            let Some((pa, pb)) = ridge
+                .filter(|(pa, pb)| gable_ring_roles(&ring, *pa, *pb, &anchor_overrides).is_some())
+            else {
+                // Hip / fan group — the pre-gable toggle.
+                return Some(CeilingFanTapAction::ToggleUnfanned(v));
+            };
+            let roles = gable_ring_roles(&ring, pa, pb, &anchor_overrides).expect("checked above");
+            if !roles.eligible[vi] {
+                log::debug!(
+                    "fan-marker tap at ({:.3}, {:.3}): a gable-wall vertex can't anchor a pitch",
+                    v.x,
+                    v.y
+                );
+                return None;
+            }
+            // The tapped vertex's SIDE, and that side's stored override(s):
+            // every override point matching a same-side ring vertex.
+            let side_of = |q: &Point2f64| {
+                let (dx, dy) = (pb.x - pa.x, pb.y - pa.y);
+                dx * (q.y - pa.y) - dy * (q.x - pa.x) > 0.0
+            };
+            let drop: Vec<Point2f64> = anchor_overrides
+                .iter()
+                .filter(|o| {
+                    ring.iter()
+                        .any(|rv| near(o, rv) && side_of(rv) == side_of(&v))
+                })
+                .copied()
+                .collect();
+            if roles.anchor[vi] {
+                if drop.is_empty() {
+                    log::debug!(
+                        "fan-marker tap at ({:.3}, {:.3}): already the auto anchor — nothing to clear",
+                        v.x,
+                        v.y
+                    );
+                    return None;
+                }
+                return Some(CeilingFanTapAction::ClearPlaneAnchor { drop });
+            }
+            return Some(CeilingFanTapAction::SetPlaneAnchor { anchor: v, drop });
+        }
+    }
+    None
 }
 
 // ── The closed-stroke RECT ridge (flat-topped hip / pavilion) ───────────────
@@ -1804,9 +1946,11 @@ mod tests {
     }
 
     /// The markers on the ee77622f gable-over-a-bay drawing mirror the
-    /// AUTOMATIC solve: the two bay corners are auto-embedded (struck
-    /// markers, tappable to re-pin), the four eave anchors show fanned —
-    /// so the marker set is visible even though only 4 vertices fan.
+    /// AUTOMATIC solve: each side's PITCH ANCHOR (the lex-smallest of the
+    /// nearest eave corners — the deterministic tie-break) renders as the
+    /// anchor marker, every other corner is embedded (struck, tappable to
+    /// re-anchor) — including the two bay corners, whose deviation is what
+    /// makes the marker set visible at all.
     #[test]
     fn fan_markers_flag_auto_embedded_bay_corners_on_a_gable() {
         let ring = vec![
@@ -1833,23 +1977,302 @@ mod tests {
         );
         let markers = ceiling_fan_markers(&storey);
         assert_eq!(markers.len(), 6, "all six footprint corners are markers");
-        let unfanned: Vec<Point2f64> = markers
-            .iter()
-            .filter(|m| !m.fanned)
-            .map(|m| m.pos)
-            .collect();
-        assert_eq!(
-            unfanned.len(),
-            2,
-            "exactly the two bay corners are auto-embedded: {markers:?}"
-        );
-        for p in [Point2f64::new(5.52, 8.31), Point2f64::new(6.52, 8.31)] {
+        let near = |m: &CeilingFanMarker, x: f64, y: f64| {
+            (m.pos.x - x).abs() <= 1e-6 && (m.pos.y - y).abs() <= 1e-6
+        };
+        // One anchor per side, lex-smallest of the 2.65/2.35 m ties.
+        let anchors: Vec<_> = markers.iter().filter(|m| m.anchor).collect();
+        assert_eq!(anchors.len(), 2, "one pitch anchor per side: {markers:?}");
+        assert!(anchors.iter().any(|m| near(m, 1.52, 2.31)), "north anchor");
+        assert!(anchors.iter().any(|m| near(m, 1.52, 7.31)), "south anchor");
+        assert!(anchors.iter().all(|m| m.fanned), "anchors keep their z");
+        // Everything else is embedded — the bay corners among them.
+        assert_eq!(markers.iter().filter(|m| !m.fanned).count(), 4);
+        for (x, y) in [(5.52, 8.31), (6.52, 8.31)] {
             assert!(
-                unfanned
+                markers
                     .iter()
-                    .any(|u| (u.x - p.x).abs() <= 1e-6 && (u.y - p.y).abs() <= 1e-6),
-                "bay corner {p:?} shows as embedded"
+                    .any(|m| near(m, x, y) && !m.fanned && !m.anchor),
+                "bay corner ({x}, {y}) shows as embedded"
             );
+        }
+    }
+
+    /// USER-SELECTED PLANE ANCHOR (the tap flow end to end, document side):
+    /// on the ee77622f gable, tapping the embedded bay corner yields
+    /// `SetPlaneAnchor`; applying it re-pitches the south plane to the bay
+    /// wall (the main-wall corners now embed ABOVE base); the markers show
+    /// the moved anchor; tapping the new anchor yields `ClearPlaneAnchor`,
+    /// and clearing restores the auto solve. A stale override is ignored.
+    #[test]
+    fn plane_anchor_override_moves_the_pitch_and_clears_back_to_auto() {
+        let ring = vec![
+            Point2f64::new(1.52, 2.31),
+            Point2f64::new(6.52, 2.31),
+            Point2f64::new(6.52, 8.31),
+            Point2f64::new(5.52, 8.31),
+            Point2f64::new(5.52, 7.31),
+            Point2f64::new(1.52, 7.31),
+        ];
+        let apexes = vec![
+            CeilingApex {
+                point: Point2f64::new(1.52, 4.66),
+                z_m: 3.0,
+            },
+            CeilingApex {
+                point: Point2f64::new(6.52, 4.66),
+                z_m: 3.0,
+            },
+        ];
+        let recompose = |storey: &mut Storey| {
+            storey.ceilings =
+                CeilingRegions::default_for_footprint(vec![ring.clone()], 2.0, Default::default())
+                    .with_apexes_shaped(
+                        &storey.ceiling_apexes,
+                        &[],
+                        &storey.ceiling_unfanned_points(),
+                        &storey.ceiling_plane_anchor_points(),
+                    );
+        };
+        let mut storey = storey_with_flat_ring(ring.clone(), 2.0);
+        storey.ceiling_apexes = apexes;
+        recompose(&mut storey);
+
+        // Tap the embedded bay corner → SetPlaneAnchor (nothing to drop
+        // yet). The returned canonical position is the MERGED-ring vertex —
+        // boolean-op output a few 1e-10 off the drawn corner, absorbed by
+        // the storage quantization + epsilon matching downstream.
+        let bay = Point2f64::new(5.52, 8.31);
+        let close =
+            |p: &Point2f64, q: &Point2f64| (p.x - q.x).abs() <= 1e-6 && (p.y - q.y).abs() <= 1e-6;
+        match ceiling_fan_tap_action(&storey, bay, 1e-3) {
+            Some(CeilingFanTapAction::SetPlaneAnchor { anchor, drop }) => {
+                assert!(close(&anchor, &bay), "canonical bay corner, got {anchor:?}");
+                assert!(drop.is_empty(), "no previous override to drop");
+            }
+            other => panic!("expected SetPlaneAnchor, got {other:?}"),
+        }
+        // Apply it (the controller's Ber::update_ceiling_plane_anchors) and
+        // re-derive: the south plane now meets base at the BAY wall
+        // (dist 3.65), so the main-wall corners embed ABOVE base.
+        storey.ceiling_plane_anchors = vec![(5.52, 8.31)];
+        recompose(&mut storey);
+        assert_eq!(storey.ceilings.regions.len(), 2, "still two planes");
+        let z_main = 3.0 - 2.65 / 3.65; // ≈ 2.274 — above the 2.0 base
+        let south = storey
+            .ceilings
+            .regions
+            .iter()
+            .find(|r| {
+                r.polygon
+                    .exterior
+                    .iter()
+                    .any(|v| (v.x - 5.52).abs() <= 1e-9 && (v.y - 8.31).abs() <= 1e-9)
+            })
+            .expect("south plane");
+        let z_at = |x: f64, y: f64| {
+            south
+                .polygon
+                .exterior
+                .iter()
+                .find(|v| (v.x - x).abs() <= 1e-9 && (v.y - y).abs() <= 1e-9)
+                .map(|v| v.z)
+                .unwrap_or_else(|| panic!("south plane misses ({x}, {y})"))
+        };
+        assert!(
+            (z_at(5.52, 8.31) - 2.0).abs() <= 1e-9,
+            "the override anchors at base"
+        );
+        assert!(
+            (z_at(6.52, 8.31) - 2.0).abs() <= 1e-9,
+            "co-distant bay corner on plane"
+        );
+        assert!(
+            (z_at(1.52, 7.31) - z_main).abs() <= 1e-9 && (z_at(5.52, 7.31) - z_main).abs() <= 1e-9,
+            "main-wall corners embed above base: got {} / {}",
+            z_at(1.52, 7.31),
+            z_at(5.52, 7.31)
+        );
+        // The markers mirror it: the south anchor moved to the bay corner.
+        let markers = ceiling_fan_markers(&storey);
+        assert!(
+            markers.iter().any(|m| m.anchor
+                && (m.pos.x - 5.52).abs() <= 1e-6
+                && (m.pos.y - 8.31).abs() <= 1e-6),
+            "the override renders as the anchor: {markers:?}"
+        );
+        // Tap the new anchor → ClearPlaneAnchor dropping the stored override.
+        match ceiling_fan_tap_action(&storey, bay, 1e-3) {
+            Some(CeilingFanTapAction::ClearPlaneAnchor { drop }) => {
+                assert_eq!(drop.len(), 1, "exactly the stored override drops");
+                assert!(close(&drop[0], &bay), "the stored override, got {drop:?}");
+            }
+            other => panic!("expected ClearPlaneAnchor, got {other:?}"),
+        }
+        storey.ceiling_plane_anchors.clear();
+        recompose(&mut storey);
+        let south = storey
+            .ceilings
+            .regions
+            .iter()
+            .find(|r| {
+                r.polygon
+                    .exterior
+                    .iter()
+                    .any(|v| (v.x - 5.52).abs() <= 1e-9 && (v.y - 8.31).abs() <= 1e-9)
+            })
+            .expect("south plane");
+        let bay_auto = south
+            .polygon
+            .exterior
+            .iter()
+            .find(|v| (v.x - 5.52).abs() <= 1e-9 && (v.y - 8.31).abs() <= 1e-9)
+            .unwrap();
+        assert!(
+            (bay_auto.z - (3.0 - 3.65 / 2.65)).abs() <= 1e-9,
+            "clearing restores the auto pitch (bay below base): {}",
+            bay_auto.z
+        );
+        // A STALE override (matching no ring vertex) is ignored entirely.
+        storey.ceiling_plane_anchors = vec![(99.0, 99.0)];
+        recompose(&mut storey);
+        let south = storey
+            .ceilings
+            .regions
+            .iter()
+            .find(|r| {
+                r.polygon
+                    .exterior
+                    .iter()
+                    .any(|v| (v.x - 5.52).abs() <= 1e-9 && (v.y - 8.31).abs() <= 1e-9)
+            })
+            .expect("south plane");
+        assert!(
+            south
+                .polygon
+                .exterior
+                .iter()
+                .any(|v| (v.y - 8.31).abs() <= 1e-9 && (v.z - (3.0 - 3.65 / 2.65)).abs() <= 1e-9),
+            "a stale override falls back to auto-nearest"
+        );
+    }
+
+    /// The USER'S HIP SCENARIO pinned (no code change expected): the ridge's
+    /// east endpoint pulled 2 m inside the wall (an interior end — no gable
+    /// snap), the bay corners manually unfanned → they embed ON the plane of
+    /// the effective solve's containing hub face, so "the plane continues in
+    /// those regions": the face through the bay is ONE planar polygon
+    /// holding its fanned neighbours at base and the hub at ridge height,
+    /// and the face count drops against the un-unfanned baseline.
+    #[test]
+    fn hip_manual_unfan_continues_the_neighbour_plane_over_the_bay() {
+        let ring = vec![
+            Point2f64::new(1.52, 2.31),
+            Point2f64::new(6.52, 2.31),
+            Point2f64::new(6.52, 8.31),
+            Point2f64::new(5.52, 8.31),
+            Point2f64::new(5.52, 7.31),
+            Point2f64::new(1.52, 7.31),
+        ];
+        // West end on the wall, EAST end 2 m short of x = 6.52 — a hip end.
+        let apexes = vec![
+            CeilingApex {
+                point: Point2f64::new(1.52, 4.66),
+                z_m: 3.0,
+            },
+            CeilingApex {
+                point: Point2f64::new(4.52, 4.66),
+                z_m: 3.0,
+            },
+        ];
+        let cid = Default::default();
+        let baseline = CeilingRegions::default_for_footprint(vec![ring.clone()], 2.0, cid)
+            .with_apexes(&apexes);
+        assert!(
+            baseline.regions.len() > 2,
+            "interior east end fans/hips: {} faces",
+            baseline.regions.len()
+        );
+        // Unfan the two bay corners.
+        let unfanned = vec![Point2f64::new(6.52, 8.31), Point2f64::new(5.52, 8.31)];
+        let out = CeilingRegions::default_for_footprint(vec![ring.clone()], 2.0, cid)
+            .with_apexes_hinted_unfanned(&apexes, &[], &unfanned);
+        assert!(
+            out.regions.len() < baseline.regions.len(),
+            "the bay facets fold away: {} → {}",
+            baseline.regions.len(),
+            out.regions.len()
+        );
+        let total: f64 = out
+            .regions
+            .iter()
+            .map(|r| {
+                let e = &r.polygon.exterior;
+                let n = e.len();
+                (0..n)
+                    .map(|i| e[i].x * e[(i + 1) % n].y - e[(i + 1) % n].x * e[i].y)
+                    .sum::<f64>()
+                    .abs()
+                    / 2.0
+            })
+            .sum();
+        assert!((total - 26.0).abs() < 1e-6, "coverage unchanged");
+        // The face over the bay is ONE planar polygon — the neighbours'
+        // plane continued: it holds the fanned neighbours (6.52, 2.31) and
+        // (5.52, 7.31) at base, hub B at ridge height, and both bay corners
+        // ON that same plane (below base — the roof keeps falling).
+        let bay_face = out
+            .regions
+            .iter()
+            .find(|r| {
+                r.polygon
+                    .exterior
+                    .iter()
+                    .any(|v| (v.x - 5.52).abs() <= 1e-9 && (v.y - 8.31).abs() <= 1e-9)
+            })
+            .expect("a face spans the bay");
+        let has = |x: f64, y: f64, z: f64| {
+            bay_face.polygon.exterior.iter().any(|v| {
+                (v.x - x).abs() <= 1e-9 && (v.y - y).abs() <= 1e-9 && (v.z - z).abs() <= 1e-9
+            })
+        };
+        assert!(
+            has(6.52, 2.31, 2.0) && has(5.52, 7.31, 2.0) && has(4.52, 4.66, 3.0),
+            "the containing face runs neighbour-to-neighbour through the hub: {:?}",
+            bay_face.polygon
+        );
+        // Both embedded corners lie ON that face's plane, below base.
+        let (nrm, d) = {
+            // Newell plane of the face (the merge guarantees planarity).
+            let e = &bay_face.polygon.exterior;
+            let (mut nx, mut ny, mut nz) = (0.0, 0.0, 0.0);
+            for i in 0..e.len() {
+                let (p, q) = (e[i], e[(i + 1) % e.len()]);
+                nx += (p.y - q.y) * (p.z + q.z);
+                ny += (p.z - q.z) * (p.x + q.x);
+                nz += (p.x - q.x) * (p.y + q.y);
+            }
+            let len = (nx * nx + ny * ny + nz * nz).sqrt();
+            let n = (nx / len, ny / len, nz / len);
+            let d = e
+                .iter()
+                .map(|v| n.0 * v.x + n.1 * v.y + n.2 * v.z)
+                .sum::<f64>()
+                / e.len() as f64;
+            (n, d)
+        };
+        for (x, y) in [(6.52, 8.31), (5.52, 8.31)] {
+            let v = bay_face
+                .polygon
+                .exterior
+                .iter()
+                .find(|v| (v.x - x).abs() <= 1e-9 && (v.y - y).abs() <= 1e-9)
+                .unwrap_or_else(|| panic!("bay corner ({x}, {y}) missing from the face"));
+            assert!(
+                (nrm.0 * v.x + nrm.1 * v.y + nrm.2 * v.z - d).abs() <= 1e-9,
+                "bay corner ({x}, {y}) sits on the continued plane"
+            );
+            assert!(v.z < 2.0, "the continued plane keeps falling past the eave");
         }
     }
 

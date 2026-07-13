@@ -1109,10 +1109,11 @@ pub struct SketchView<'a> {
     pub ceiling_point_mode: bool,
     pub ceiling_point_available: bool,
     pub ceiling_apex_views: &'a [((f64, f64), String)],
-    /// Tap-to-unfan fan-vertex markers `(position, fanned)` — rendered (and
+    /// Fan-vertex markers `(position, fanned, anchor)` — rendered (and
     /// tappable) only while roof-point mode is on and a fan/ridge group has
     /// them actionable (the controller returns them empty otherwise).
-    pub ceiling_fan_markers: &'a [((f64, f64), bool)],
+    /// `anchor` = a gable side's current pitch anchor (distinct render).
+    pub ceiling_fan_markers: &'a [((f64, f64), bool, bool)],
     pub pending_roof_point: Option<(f64, f64)>,
     /// The pending point's wall snap as one standard snap tag (its menu
     /// offers only "Don't snap", routed to UnsnapCeilingPoint).

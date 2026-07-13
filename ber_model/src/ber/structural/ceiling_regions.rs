@@ -551,13 +551,13 @@ impl CeilingRegions {
     ///
     /// - A TRUE-GABLE ridge (both endpoints on its region's boundary — the
     ///   assign-time gable-end snap) solves each side as ONE PLANE through
-    ///   the ridge and the side's nearest eave corner; every other vertex
-    ///   (bay/notch corners, gable-wall extras) EMBEDS on that plane, so the
-    ///   roof is two planes with zero taps (`gable_plan_classify` +
+    ///   the ridge and the side's ANCHOR eave corner (auto-nearest, or the
+    ///   user's plane-anchor override — see
+    ///   [`with_apexes_shaped`](Self::with_apexes_shaped)); every other
+    ///   vertex (bay/notch corners, gable-wall extras) EMBEDS on that plane,
+    ///   so the roof is two planes with zero taps (`gable_plan_classify` +
     ///   `embed_gable_sides` in `ceiling_geom` — the normative docs). The
-    ///   stored set TOGGLES against that auto baseline: re-fan an embedded
-    ///   corner (pin it at its own z) or unfan an anchor (pitch to the next
-    ///   wall).
+    ///   stored UNFANNED set does not apply on gable sides.
     /// - Any other fan/ridge: only stored-set vertices stop being fan
     ///   targets, each embedded on the plane of the EFFECTIVE solve's face
     ///   across it (`lift_unfanned_fan` / `lift_unfanned_hip_ridge`), so the
@@ -571,6 +571,28 @@ impl CeilingRegions {
         apexes: &[CeilingApex],
         hints: &[CeilingApexHint],
         unfanned: &[Point2f64],
+    ) -> Self {
+        self.with_apexes_shaped(apexes, hints, unfanned, &[])
+    }
+
+    /// The FULL shaping entry point:
+    /// [`with_apexes_hinted_unfanned`](Self::with_apexes_hinted_unfanned)
+    /// plus `plane_anchors` — the storey's durable `ceiling_plane_anchors`,
+    /// the user-selected GABLE pitch anchors ("this corner sets the
+    /// pitch"). An anchor point matching an ELIGIBLE eave vertex of a
+    /// true-gable side overrides that side's auto-nearest anchor; a stale
+    /// point matching nothing is ignored ([`gable_plan_classify`] in
+    /// `ceiling_geom` — the normative election doc). The set only affects
+    /// TRUE-GABLE ridges of the CEILING solve; hips, fans and the pavilion
+    /// ignore it, and roof AREAS deliberately keep auto-nearest
+    /// (`RoofArea::gable_overhang_regions`). Empty `plane_anchors` is
+    /// byte-identical to the delegating forms.
+    pub fn with_apexes_shaped(
+        self,
+        apexes: &[CeilingApex],
+        hints: &[CeilingApexHint],
+        unfanned: &[Point2f64],
+        plane_anchors: &[Point2f64],
     ) -> Self {
         if apexes.is_empty() {
             return self;
@@ -691,6 +713,7 @@ impl CeilingRegions {
                         &apexes[contained[0]],
                         &apexes[contained[1]],
                         unfanned,
+                        plane_anchors,
                     )));
                 }
             }
@@ -729,6 +752,21 @@ impl CeilingRegions {
         &self,
         apexes: &[CeilingApex],
         unfanned: &[Point2f64],
+    ) -> Vec<CeilingApexGroup> {
+        self.apex_groups_shaped(apexes, unfanned, &[])
+    }
+
+    /// [`apex_groups_unfanned`](Self::apex_groups_unfanned) plus the
+    /// storey's plane-anchor OVERRIDES: the gable base recovery classifies
+    /// each member face with the same anchors the solve used, so a moved
+    /// anchor's newly-embedded (off-base) corners don't disqualify the level
+    /// base. Callers with a `Storey` in hand should prefer
+    /// `Storey::ceiling_apex_groups`, which supplies both sets.
+    pub fn apex_groups_shaped(
+        &self,
+        apexes: &[CeilingApex],
+        unfanned: &[Point2f64],
+        plane_anchors: &[Point2f64],
     ) -> Vec<CeilingApexGroup> {
         use geo::bool_ops::BooleanOps;
         use geo::Area;
@@ -843,7 +881,7 @@ impl CeilingRegions {
                             .iter()
                             .map(|v| Point2f64::new(v.x, v.y))
                             .collect();
-                        if let Some(cls) = gable_plan_classify(&plan, pa, pb, unfanned) {
+                        if let Some(cls) = gable_plan_classify(&plan, pa, pb, plane_anchors) {
                             excluded.extend(
                                 plan.iter()
                                     .zip(&cls.fanned)

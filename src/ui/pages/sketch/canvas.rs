@@ -3137,7 +3137,9 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                         .and_then(|t| {
                             view.ceiling_fan_markers
                                 .iter()
-                                .map(|((mx, my), _)| ((*mx, *my), t.apply(*mx, *my).distance(pos)))
+                                .map(|((mx, my), _, _)| {
+                                    ((*mx, *my), t.apply(*mx, *my).distance(pos))
+                                })
                                 .filter(|(_, d)| *d <= 14.0)
                                 .min_by(|(_, a), (_, b)| a.total_cmp(b))
                                 .map(|(m, _)| m)
