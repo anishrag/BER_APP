@@ -1459,21 +1459,48 @@ impl AppController {
         // is toggled off and on again. Materializing first makes the region's
         // construction current, so the insulation lands where it's read from.
         self.materialize();
-        let ids = match self
+        let (ids, identity) = match self
             .structure_edit
             .as_ref()
             .and_then(|e| e.groups.get(group))
         {
-            Some(g) if g.ty.kind() == SurfaceKind::Ceilings => g.ids.clone(),
+            Some(g) if g.ty.kind() == SurfaceKind::Ceilings => (
+                g.ids.clone(),
+                match g.ty {
+                    ConstructionType::Ceiling(t) => Some((
+                        t,
+                        g.makeup.clone(),
+                        g.phase.clone(),
+                        g.explicit_name.clone(),
+                    )),
+                    _ => None,
+                },
+            ),
             _ => return,
         };
         // Each region in the group shares one construction; map the region ids
         // to their construction ids and write those (mirrors the photo attach).
         // Cross-storey like the other group ops.
-        let cids = self.construction_ids_for(SurfaceKind::Ceilings, &ids);
+        let mut cids = self.construction_ids_for(SurfaceKind::Ceilings, &ids);
         let Some(record) = self.current_record.as_mut() else {
             return;
         };
+        if cids.is_empty() {
+            // The session's region ids can go STALE mid-session (the
+            // inter-storey coalesce/re-split hands ceiling regions fresh ids
+            // on a materialize). Resolve the construction by the group's
+            // IDENTITY instead — exactly the (type, make-up, phase, name)
+            // key the stamping re-finds it by — so the insulation still
+            // lands on the construction the group's surfaces point at.
+            if let Some((t, makeup, phase, name)) = identity {
+                cids = vec![record.data.ensure_ceiling_construction_named(
+                    t,
+                    makeup,
+                    phase,
+                    name.as_deref(),
+                )];
+            }
+        }
         for cid in cids {
             record.data.set_ceiling_insulation(cid, insulation);
         }

@@ -2679,6 +2679,52 @@ mod tests {
         assert!((total - 24.0).abs() < 1e-6);
     }
 
+    /// PRESENTATION CONSISTENCY for a legacy in-scope/out-of-scope
+    /// construction SHARE (the "final house" record): with an InterStorey
+    /// region and an exposed nib both pointing at one COMPLETE construction,
+    /// every counter reads the IN-SCOPE membership — progress (1, 1), the
+    /// kind complete, nothing remaining. A 4/5-with-all-ticks state can't
+    /// arise from the share itself.
+    #[test]
+    fn interstorey_construction_share_counts_only_the_in_scope_member() {
+        let mut ber = Ber::default();
+        let cid = ber.ensure_ceiling_construction(
+            CeilingConstructionType::FlatRoof,
+            ConstructionMakeup::Unknown,
+            ConstructionPhase::default(),
+        );
+        let region = |x0: f64, x1: f64, exposure: CeilingExposure| CeilingRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(vec![
+                Point3f64::new(x0, 0.0, 2.4),
+                Point3f64::new(x1, 0.0, 2.4),
+                Point3f64::new(x1, 2.0, 2.4),
+                Point3f64::new(x0, 2.0, 2.4),
+            ]),
+            opes: Opes::default(),
+            construction_id: cid,
+            exposure,
+        };
+        ber.storeys.push(Storey {
+            ceilings: CeilingRegions {
+                regions: vec![
+                    region(0.0, 4.0, CeilingExposure::InterStorey),
+                    region(4.0, 6.0, CeilingExposure::ExposedRoof),
+                ],
+            },
+            ..Storey::default()
+        });
+        assert_eq!(
+            ber.structure_surface_progress(0, SurfaceKind::Ceilings),
+            (1, 1),
+            "the buried sharer is in neither counter"
+        );
+        assert!(ber
+            .incomplete_surface_ids(0, SurfaceKind::Ceilings)
+            .is_empty());
+        assert!(ber.structure_surfaces_complete(0, SurfaceKind::Ceilings));
+    }
+
     /// `Storey::ceiling_unfanned` and `Storey::ceiling_plane_anchors` are
     /// serde-ADDITIVE: an old record without either field loads with empty
     /// sets (fan-everything, auto-nearest anchors), and populated sets

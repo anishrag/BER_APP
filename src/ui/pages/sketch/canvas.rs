@@ -53,6 +53,12 @@ struct EditWindow {
     chip: bool,
     /// The group's connector target (world, in its storey's own frame).
     centroid: (f64, f64),
+    /// Whether `centroid` is a REAL target — an interior point of one of the
+    /// group's own in-scope member surfaces. `false` when no member resolves
+    /// in scope (a stale session): the box still lays out, but no connector
+    /// line/dot is drawn — a dot into a surface the group doesn't cover
+    /// (e.g. an inter-storey area) must never render.
+    has_target: bool,
     /// Which storey CELL `centroid` lives in — `Some` on the all-storeys
     /// layout (the target maps through that cell's transform); `None` on the
     /// single-storey layout (the active storey's own transform applies).
@@ -102,6 +108,9 @@ struct SlotSeed {
     group_index: usize,
     color: egui::Color32,
     anchor: (f64, f64),
+    /// Whether `anchor` is a real member-interior target (see
+    /// [`EditWindow::has_target`]).
+    has_target: bool,
     h: f32,
 }
 
@@ -155,6 +164,7 @@ fn place_windows_prescriptive(
             size: egui::vec2(EDIT_BOX_W, s.h),
             chip: false,
             centroid: s.anchor,
+            has_target: s.has_target,
             storey_idx: None,
             color: s.color,
         });
@@ -385,6 +395,8 @@ struct MarginSeed {
     color: egui::Color32,
     /// World-space connector target, in `storey_idx`'s frame.
     anchor: (f64, f64),
+    /// See [`EditWindow::has_target`].
+    has_target: bool,
     /// See [`EditWindow::storey_idx`].
     storey_idx: Option<usize>,
     /// The anchor under the full-rect fit (pre-reservation).
@@ -479,6 +491,7 @@ fn place_windows_in_margins(
         size,
         chip,
         centroid: seeds[k].anchor,
+        has_target: seeds[k].has_target,
         storey_idx: seeds[k].storey_idx,
         color: seeds[k].color,
     };
@@ -966,6 +979,7 @@ fn dragged_window(
     box_ui: &EditBoxUiState,
     group_index: usize,
     anchor: (f64, f64),
+    has_target: bool,
     storey_idx: Option<usize>,
     color: egui::Color32,
 ) -> Option<EditWindow> {
@@ -976,6 +990,7 @@ fn dragged_window(
         size: egui::vec2(EDIT_BOX_W, box_ui.heights[group_index]),
         chip: false,
         centroid: anchor,
+        has_target,
         storey_idx,
         color,
     })
@@ -1009,17 +1024,15 @@ fn compute_structure_edit_layout(
         return None;
     }
 
-    // Per GROUP (fans are in group order): the connector's world anchor.
-    let anchors: Vec<(f64, f64)> = fans
+    // Per GROUP (fans are in group order): the connector's world anchor —
+    // `None` when no member resolves IN SCOPE (the connector then doesn't
+    // draw; the group's fan centroid still steers the box layout).
+    let anchors: Vec<Option<(f64, f64)>> = fans
         .iter()
-        .map(|f| {
-            render::structure_fan::group_connector_anchor(
-                storey,
-                &edit.groups[f.group_index],
-                f.centroid,
-            )
-        })
+        .map(|f| render::structure_fan::group_connector_anchor(storey, &edit.groups[f.group_index]))
         .collect();
+    let layout_anchor =
+        |g: usize, fallback: (f64, f64)| -> (f64, f64) { anchors[g].unwrap_or(fallback) };
 
     // The session's slot order: the stored one (base optimisation already
     // done — user swaps live in it), or a freshly optimised base handed back
@@ -1030,7 +1043,13 @@ fn compute_structure_edit_layout(
         Some(order) => (order.clone(), None),
         None => {
             let t_full = render::fit_transform(rect, min_xy, max_xy, base);
-            let screen: Vec<egui::Pos2> = anchors.iter().map(|a| t_full.apply(a.0, a.1)).collect();
+            let screen: Vec<egui::Pos2> = fans
+                .iter()
+                .map(|f| {
+                    let a = layout_anchor(f.group_index, f.centroid);
+                    t_full.apply(a.0, a.1)
+                })
+                .collect();
             let order = optimise_slot_order(rect, &screen);
             (order.clone(), Some(order))
         }
@@ -1041,7 +1060,8 @@ fn compute_structure_edit_layout(
         .map(|&g| SlotSeed {
             group_index: g,
             color: render::structure_fan::group_color(g),
-            anchor: anchors[g],
+            anchor: layout_anchor(g, fans[g].centroid),
+            has_target: anchors[g].is_some(),
             h: box_ui.heights[g],
         })
         .collect();
@@ -1096,12 +1116,13 @@ fn compute_structure_edit_layout_all_storeys(
     let mut seeds: Vec<MarginSeed> = Vec::with_capacity(edit.groups.len());
     let mut pinned: Vec<EditWindow> = Vec::new();
     for (i, g) in edit.groups.iter().enumerate() {
-        let Some((s, anchor)) = render::structure_fan::group_anchor_all_storeys(ber, g) else {
+        let Some((s, anchor, has_target)) = render::structure_fan::group_anchor_all_storeys(ber, g)
+        else {
             continue;
         };
         let Some(t) = cells.get(s) else { continue };
         let color = render::structure_fan::group_color(i);
-        if let Some(w) = dragged_window(box_ui, i, anchor, Some(s), color) {
+        if let Some(w) = dragged_window(box_ui, i, anchor, has_target, Some(s), color) {
             pinned.push(w);
             continue;
         }
@@ -1109,6 +1130,7 @@ fn compute_structure_edit_layout_all_storeys(
             group_index: i,
             color,
             anchor,
+            has_target,
             storey_idx: Some(s),
             screen: t.apply(anchor.0, anchor.1),
             h: box_ui.heights[i],
@@ -2637,7 +2659,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     edit,
                     layout,
                     editable,
-                    |w| Some(t.apply(w.centroid.0, w.centroid.1)),
+                    |w| w.has_target.then(|| t.apply(w.centroid.0, w.centroid.1)),
                     on_event,
                 );
             }
@@ -2672,6 +2694,9 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     layout,
                     editable,
                     |w| {
+                        if !w.has_target {
+                            return None;
+                        }
                         w.storey_idx
                             .and_then(|s| cells.get(s))
                             .map(|t| t.apply(w.centroid.0, w.centroid.1))
@@ -4204,14 +4229,14 @@ fn external_photos_button<F: FnMut(UiEvent)>(
                             // vertically when expanded: the two grid rows
                             // split the available canvas height (minus room
                             // for the header + frame chrome + the 8px anchor
-                            // margins ≈ 60, and the inter-row grid spacing),
+                            // margins ≈ 70, and the inter-row grid spacing),
                             // and each thumbnail scales to fill its row after
                             // the label + button stack takes its share. On
                             // the ~2000px-wide tablet canvas that lands the
                             // thumbnails around 600x450 (4:3 kept). The panel
                             // is anchored bottom-right and grows UP-and-LEFT;
                             // constrain_to keeps it on-screen regardless.
-                            let max_h = (rect.height() - 60.0).max(220.0);
+                            let max_h = (rect.height() - 70.0).max(220.0);
                             let grid_spacing = egui::vec2(20.0, 16.0);
                             let row_h = (max_h - grid_spacing.y) / 2.0;
                             // ≈ status-label row + capture-button row + the
@@ -4227,12 +4252,29 @@ fn external_photos_button<F: FnMut(UiEvent)>(
                             // aren't letterboxed by a narrow column.
                             let col_w = thumb_w.max(300.0);
                             ui.set_max_width(2.0 * col_w + grid_spacing.x + 16.0);
-                            // min_row_height pins the content height to
-                            // ≈ max_h (2 rows + spacing) whether or not
-                            // photos are stored yet, so the scrollbar only
-                            // appears in the floored small-canvas case.
+                            // The viewport height must be PINNED, not left to
+                            // available space: an egui `Area` sizes its inner
+                            // `Ui` from the PREVIOUS frame's content
+                            // (`Area::content_ui` uses `state.rect()`), and
+                            // while the header was collapsed that's
+                            // header-sized — so a default ScrollArea
+                            // (`outer = available.at_most(max_size)`, then
+                            // floored to `min_scrolled_size` = 64) collapses
+                            // to a 64px-tall viewport and, with vertical
+                            // auto_shrink, STAYS there across frames (the
+                            // area's size feeds back on itself; only the
+                            // width — where scrolling is disabled — follows
+                            // content). `min_scrolled_height(max_h)` floors
+                            // the viewport independently of that stale
+                            // available height, and `auto_shrink` = false
+                            // vertically holds it at max_h even while entries
+                            // are photo-less — so the expanded panel always
+                            // fills the canvas, and the scrollbar only appears
+                            // in the floored small-canvas case above.
                             egui::ScrollArea::vertical()
                                 .max_height(max_h)
+                                .min_scrolled_height(max_h)
+                                .auto_shrink([true, false])
                                 .show(ui, |ui| {
                                     egui::Grid::new(ui.id().with("external_photo_grid"))
                                         .num_columns(2)
@@ -4246,6 +4288,7 @@ fn external_photos_button<F: FnMut(UiEvent)>(
                                                 external_photo_entry(
                                                     ui,
                                                     entry,
+                                                    view.deferred_photo_sides.contains(&entry.0),
                                                     egui::vec2(thumb_w, thumb_h),
                                                     on_event,
                                                 );
@@ -4265,13 +4308,18 @@ fn external_photos_button<F: FnMut(UiEvent)>(
 /// One side's entry in the [`external_photos_button`] grid: status label,
 /// thumbnail (when a photo is stored, scaled to `thumb_size` — computed by the
 /// caller so the two grid rows fill the canvas height), and the capture /
-/// annotate / rotate / remove button row.
+/// annotate / rotate / remove button row — plus, on the deferrable sides, the
+/// "Defer" toggle (`deferred` is its current state). Front never shows the
+/// toggle: deferring exists for apartments where you can't tell which unit is
+/// which from outside until you've been inside, but you always know the front
+/// because you walk in through it (see `ExternalSide::photo_deferrable`).
 fn external_photo_entry<F: FnMut(UiEvent)>(
     ui: &mut egui::Ui,
     (side, photo): &(
         ber_model::ber::common::ExternalSide,
         Option<crate::controller::app_controller::PhotoView>,
     ),
+    deferred: bool,
     thumb_size: egui::Vec2,
     on_event: &mut F,
 ) {
@@ -4279,6 +4327,15 @@ fn external_photo_entry<F: FnMut(UiEvent)>(
         match photo {
             Some(_) => {
                 ui.label(format!("✔ {}", side.label()));
+            }
+            None if deferred => {
+                // Deferred = will be collected at the END of the assessment
+                // (counts as set for the checklist meanwhile). Amber, not
+                // red: it's an acknowledged postponement, not a gap.
+                ui.colored_label(
+                    egui::Color32::from_rgb(230, 190, 80),
+                    format!("⏳ {}: deferred to end", side.label()),
+                );
             }
             None if side.photo_required() => {
                 ui.colored_label(
@@ -4322,6 +4379,24 @@ fn external_photo_entry<F: FnMut(UiEvent)>(
                     path,
                     quality,
                 }));
+            }
+            // Defer toggle: only while the side has NO photo (capturing
+            // fulfils/clears a deferral) and only on deferrable sides —
+            // never Front (see the fn doc for the apartment rationale).
+            if photo.is_none() && side.photo_deferrable() {
+                let label = if deferred { "Deferred ⏳" } else { "Defer" };
+                if ui
+                    .selectable_label(deferred, label)
+                    .on_hover_text(
+                        "Postpone this side's photo to the end of the assessment \
+                         (you'll be prompted for it before the BER can complete)",
+                    )
+                    .clicked()
+                {
+                    on_event(UiEvent::Sketch(SketchEvent::ToggleDeferExternalPhoto {
+                        side: *side,
+                    }));
+                }
             }
             if photo.is_some() {
                 // Paintbrush annotation over the stored photo
@@ -5945,6 +6020,7 @@ mod tests {
             group_index: i,
             color: egui::Color32::RED,
             anchor: (0.0, 0.0),
+            has_target: true,
             storey_idx: None,
             screen,
             h: EDIT_SLOT_H,
@@ -6181,6 +6257,7 @@ mod tests {
             group_index: i,
             color: egui::Color32::RED,
             anchor: (0.0, 0.0),
+            has_target: true,
             h: EDIT_SLOT_H,
         }
     }

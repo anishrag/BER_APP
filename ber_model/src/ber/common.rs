@@ -15,6 +15,15 @@ impl Default for ItemId {
     }
 }
 
+impl ItemId {
+    /// The stable NIL id — "references nothing": what the inter-storey
+    /// derivation clears an out-of-scope region's `construction_id` to
+    /// (stable across derives, unlike the random `default()`).
+    pub fn nil() -> Self {
+        ItemId(Uuid::nil())
+    }
+}
+
 impl Deref for ItemId {
     type Target = Uuid;
     fn deref(&self) -> &Self::Target {
@@ -68,6 +77,21 @@ impl ExternalSide {
     /// for both the completeness gate and the UI's required/optional labelling.
     pub fn photo_required(self) -> bool {
         matches!(self, ExternalSide::Front | ExternalSide::Back)
+    }
+
+    /// Whether the assessor may DEFER this side's photo to the end of the
+    /// assessment (the per-side "Defer" button on the external-photos panel).
+    /// A deferred side counts as SET for the completeness gates; the Final
+    /// phase then re-prompts for the deferred shots and blocks "BER complete"
+    /// until they're captured (defer = postpone, never skip).
+    ///
+    /// The FRONT is deliberately NOT deferrable — this asymmetry is domain
+    /// logic, don't "simplify" it away: deferring exists for apartments where
+    /// you can't tell which unit is which from the outside until you've been
+    /// inside — but you always know the front, because you walk in through
+    /// it, so the front photo is always takeable up-front.
+    pub fn photo_deferrable(self) -> bool {
+        !matches!(self, ExternalSide::Front)
     }
 }
 

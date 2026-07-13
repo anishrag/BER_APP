@@ -219,12 +219,35 @@ impl AppController {
 
     /// Confirm the Final review — record the dwelling Final-reviewed (BER
     /// complete) and raise the completion popup.
+    ///
+    /// DEFERRED-PHOTOS gate: sides deferred on the Mapping panel counted as
+    /// set back then precisely because they'd be collected HERE — so if any
+    /// deferred side still lacks its photo, this raises the "take them now"
+    /// prompt instead of completing (defer = postpone to the end, never
+    /// skip). The prompt's capture buttons clear the deferrals; its Continue
+    /// re-enters here and then completes.
     pub fn confirm_final_review(&mut self) {
+        if !self.deferred_photos_pending().is_empty() {
+            self.show_deferred_photos_prompt = true;
+            return;
+        }
+        self.show_deferred_photos_prompt = false;
         if let Some(r) = self.current_record.as_mut() {
             r.data.details_reviewed = true;
             let _ = self.mark_dirty();
         }
         self.show_ber_complete = true;
+    }
+
+    /// Whether the "you deferred these photos — take them now" prompt (the
+    /// stage between "Mark BER complete" and the completion popup) is showing.
+    pub fn show_deferred_photos_prompt(&self) -> bool {
+        self.show_deferred_photos_prompt
+    }
+    /// Dismiss the deferred-photos prompt WITHOUT completing (the "Go back"
+    /// choice — the BER stays un-complete until the photos are captured).
+    pub fn dismiss_deferred_photos_prompt(&mut self) {
+        self.show_deferred_photos_prompt = false;
     }
 
     /// Whether the "BER complete" popup is showing.

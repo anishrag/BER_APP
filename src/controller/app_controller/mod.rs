@@ -403,6 +403,11 @@ pub struct AppController {
     /// confirmed; cleared by the popup/summary buttons. Not persisted.
     show_ber_complete: bool,
     show_summary: bool,
+    /// Session flag: the "you deferred these photos — take them now" prompt is
+    /// up (raised by `confirm_final_review` when a deferred side still lacks
+    /// its photo, blocking completion until the shots are captured). Not
+    /// persisted — the DURABLE deferral state is `Ber::deferred_photo_sides`.
+    show_deferred_photos_prompt: bool,
     /// Phase-4 view sub-mode (form / aligning the image / marking sheltered
     /// sides). Session-only.
     final_mode: final_phase::FinalMode,
@@ -734,6 +739,7 @@ impl AppController {
             north_img_zoom: 1.0,
             show_ber_complete: false,
             show_summary: false,
+            show_deferred_photos_prompt: false,
             final_mode: final_phase::FinalMode::Form,
             partition_wall: None,
             partition_stroke: Vec::new(),

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::common::{ConstructionPhase, ConstructionPhases, ItemId, Photo, Year};
+use super::common::{ConstructionPhase, ConstructionPhases, ExternalSide, ItemId, Photo, Year};
 use super::fenestration::{Frame, Glazing, WindowNameSpecifics, WindowType};
 use super::structural::{
     CeilingApex, CeilingApexHint, CeilingConstruction, CeilingContinuation, CeilingRegions, Dormer,
@@ -78,6 +78,18 @@ pub struct Ber {
     pub orientation_deg: f32,
     pub solar: Vec<SolarElements>,
     pub photos: Vec<Photo>,
+    /// External-photo sides whose shot the assessor DEFERRED to the end of
+    /// the assessment (apartments: which unit is which is often only clear
+    /// once you've been inside). A deferred side counts as SET for the
+    /// Mapping completeness gates; the Final phase re-prompts for the
+    /// deferred shots and blocks "BER complete" until they're captured. Only
+    /// [`ExternalSide::photo_deferrable`] sides belong here — Front never
+    /// does (see that method for the domain rationale) — and the accessors
+    /// normalize a rogue `Front` entry away rather than honouring it.
+    /// `#[serde(default)]` so records written before this field load with
+    /// nothing deferred.
+    #[serde(default)]
+    pub deferred_photo_sides: Vec<ExternalSide>,
     /// The dwelling ROOF — the external roof structure(s) over the top storey,
     /// SEPARATE from each storey's ceiling (`Storey::ceilings` / the roof-point
     /// apexes). Drawn area-by-area in the Phase-1 roof step; only modelled when it
@@ -190,6 +202,40 @@ impl Ber {
             }
         }
         found
+    }
+
+    /// Whether `side`'s external photo is DEFERRED to the end of the
+    /// assessment. `Front` is never deferred
+    /// ([`ExternalSide::photo_deferrable`]) — a rogue stored `Front` entry is
+    /// normalized to "not deferred" here rather than honoured.
+    pub fn photo_deferred(&self, side: ExternalSide) -> bool {
+        side.photo_deferrable() && self.deferred_photo_sides.contains(&side)
+    }
+
+    /// Set / clear `side`'s photo deferral (deduplicating). No-op for a
+    /// non-deferrable side — Front, see [`ExternalSide::photo_deferrable`] for
+    /// why the front is always takeable up-front.
+    pub fn set_photo_deferred(&mut self, side: ExternalSide, deferred: bool) {
+        if !side.photo_deferrable() {
+            return;
+        }
+        self.deferred_photo_sides.retain(|s| *s != side);
+        if deferred {
+            self.deferred_photo_sides.push(side);
+        }
+    }
+
+    /// The deferred sides still LACKING an external photo, in
+    /// [`ExternalSide::ALL`] order — what the end-of-assessment prompt lists,
+    /// and what blocks "BER complete" until captured (defer = postpone to the
+    /// end, never skip).
+    pub fn deferred_photos_pending(&self) -> Vec<ExternalSide> {
+        ExternalSide::ALL
+            .iter()
+            .copied()
+            .filter(|&s| self.photo_deferred(s))
+            .filter(|&s| !self.photos.iter().any(|p| p.side == Some(s)))
+            .collect()
     }
 
     pub fn new() -> Self {
@@ -1251,6 +1297,80 @@ mod tests {
         assert!(
             ext.holes.is_empty(),
             "the island is solid (no hole): {ext:?}"
+        );
+    }
+
+    /// Photo deferral semantics: Front is never deferrable (`set` is a no-op
+    /// and a rogue stored `Front` entry reads back as NOT deferred — the
+    /// accessors normalize it away), toggling dedups, and
+    /// `deferred_photos_pending` lists only deferred sides still lacking an
+    /// external photo.
+    #[test]
+    fn photo_deferral_front_normalized_and_pending() {
+        let mut ber = Ber::default();
+
+        // Front: set is a no-op…
+        ber.set_photo_deferred(ExternalSide::Front, true);
+        assert!(ber.deferred_photo_sides.is_empty(), "Front never stored");
+        // …and a rogue stored entry is normalized away on read.
+        ber.deferred_photo_sides.push(ExternalSide::Front);
+        assert!(!ber.photo_deferred(ExternalSide::Front));
+        assert!(ber.deferred_photos_pending().is_empty());
+        ber.deferred_photo_sides.clear();
+
+        // Deferrable sides toggle, dedup, and clear.
+        ber.set_photo_deferred(ExternalSide::Back, true);
+        ber.set_photo_deferred(ExternalSide::Back, true);
+        assert_eq!(ber.deferred_photo_sides, vec![ExternalSide::Back]);
+        assert!(ber.photo_deferred(ExternalSide::Back));
+        ber.set_photo_deferred(ExternalSide::Left, true);
+        assert_eq!(
+            ber.deferred_photos_pending(),
+            vec![ExternalSide::Left, ExternalSide::Back],
+            "pending in ALL order"
+        );
+        ber.set_photo_deferred(ExternalSide::Back, false);
+        assert!(!ber.photo_deferred(ExternalSide::Back));
+
+        // A deferred side WITH a photo is no longer pending.
+        ber.photos.push(Photo {
+            side: Some(ExternalSide::Left),
+            ..Default::default()
+        });
+        assert!(ber.deferred_photos_pending().is_empty());
+        assert!(
+            ber.photo_deferred(ExternalSide::Left),
+            "the flag itself is untouched by pending-ness (capture clears it \
+             at the controller mutation, not here)"
+        );
+    }
+
+    /// The deferred list survives a serde round-trip, and a record written
+    /// BEFORE the field existed (no `deferred_photo_sides` key) loads with
+    /// nothing deferred.
+    #[test]
+    fn deferred_photo_sides_serde_roundtrip_and_old_record_default() {
+        let mut ber = Ber::default();
+        ber.set_photo_deferred(ExternalSide::Back, true);
+        ber.set_photo_deferred(ExternalSide::Right, true);
+        let json = serde_json::to_string(&ber).unwrap();
+        let back: Ber = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            back.deferred_photo_sides,
+            vec![ExternalSide::Back, ExternalSide::Right]
+        );
+
+        // Old record: strip the key entirely and reload.
+        let mut value: serde_json::Value = serde_json::to_value(&ber).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("deferred_photo_sides")
+            .expect("field present before the strip");
+        let old: Ber = serde_json::from_value(value).unwrap();
+        assert!(
+            old.deferred_photo_sides.is_empty(),
+            "pre-field records load with nothing deferred"
         );
     }
 }

@@ -15687,6 +15687,139 @@ fn external_photos_persist_and_reload() {
     let _ = std::fs::remove_file(&src);
 }
 
+/// DEFERRING a side's photo counts as SET for the external-photos gate (the
+/// Mapping checklist row goes green), the toggle turns back off before the
+/// end, and FRONT is not deferrable — deferring exists for apartments where
+/// you can't tell which unit is which until you've been inside, but you
+/// always know the front because you walk in through it, so a defer attempt
+/// on Front is a no-op and it stays genuinely required.
+#[test]
+fn deferred_photo_counts_as_set_and_front_not_deferrable() {
+    use ber_model::ber::common::ExternalSide;
+    let mut c = dimensioned_square_controller();
+    let tmp = std::env::temp_dir().join(format!("ber_ext_defer_{}", ItemId::default().0));
+    c.set_photos_dir(tmp.clone());
+    let src = std::env::temp_dir().join(format!("ber_ext_dsrc_{}.jpg", ItemId::default().0));
+    std::fs::write(&src, b"jpeg-bytes").unwrap();
+
+    // Front deferral is a NO-OP: the flag never sets, the gate stays red.
+    c.toggle_defer_external_photo(ExternalSide::Front);
+    assert!(
+        c.deferred_photo_sides().is_empty(),
+        "Front is not deferrable"
+    );
+    assert!(!c.external_photos_complete());
+
+    // Front photo + Back DEFERRED completes the gate (deferred counts as set).
+    c.add_external_photo(ExternalSide::Front, &src, PhotoQuality::Full);
+    assert!(!c.external_photos_complete(), "Back still missing");
+    c.toggle_defer_external_photo(ExternalSide::Back);
+    assert_eq!(c.deferred_photo_sides(), vec![ExternalSide::Back]);
+    assert!(
+        c.external_photos_complete(),
+        "a deferred required side counts as set"
+    );
+    assert_eq!(
+        checklist_status_of(&c, "External photos"),
+        ChecklistStatus::AllStoreys,
+        "checklist row green with Back deferred"
+    );
+
+    // Tapping Defer again BEFORE the end un-defers → gate red again.
+    c.toggle_defer_external_photo(ExternalSide::Back);
+    assert!(c.deferred_photo_sides().is_empty());
+    assert!(!c.external_photos_complete());
+    assert_eq!(
+        checklist_status_of(&c, "External photos"),
+        ChecklistStatus::Incomplete
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+    let _ = std::fs::remove_file(&src);
+}
+
+/// Capturing a photo for a deferred side CLEARS the deferral (defer =
+/// postpone, and the capture fulfils it), and the deferred flags survive a
+/// persist + reload alongside the photos.
+#[test]
+fn capturing_deferred_side_clears_deferral_and_flags_persist() {
+    use ber_model::ber::common::ExternalSide;
+    let mut c = dimensioned_square_controller();
+    let tmp = std::env::temp_dir().join(format!("ber_ext_defcap_{}", ItemId::default().0));
+    c.set_photos_dir(tmp.clone());
+    let src = std::env::temp_dir().join(format!("ber_ext_dcsrc_{}.jpg", ItemId::default().0));
+    std::fs::write(&src, b"jpeg-bytes").unwrap();
+
+    c.toggle_defer_external_photo(ExternalSide::Back);
+    c.toggle_defer_external_photo(ExternalSide::Left);
+    assert_eq!(c.deferred_photos_pending().len(), 2);
+
+    // Capture Back → its deferral clears; Left's stands.
+    c.add_external_photo(ExternalSide::Back, &src, PhotoQuality::Full);
+    assert_eq!(
+        c.deferred_photo_sides(),
+        vec![ExternalSide::Left],
+        "capture cleared Back's deferral"
+    );
+    assert_eq!(c.deferred_photos_pending(), vec![ExternalSide::Left]);
+
+    // The surviving flag persists with the record.
+    c.flush_if_dirty().unwrap();
+    let id = c.current_record.as_ref().unwrap().id;
+    c.open_ber(&id).unwrap();
+    assert_eq!(
+        c.deferred_photo_sides(),
+        vec![ExternalSide::Left],
+        "deferral survives a reload"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+    let _ = std::fs::remove_file(&src);
+}
+
+/// "Mark BER complete" is BLOCKED while a deferred side lacks its photo: the
+/// confirm raises the "take them now" prompt instead of completing; Go-back
+/// dismisses without completing; capturing the photo then lets the re-confirm
+/// complete (defer = postpone to the end, never skip).
+#[test]
+fn ber_completion_blocked_until_deferred_photos_captured() {
+    use ber_model::ber::common::ExternalSide;
+    let mut c = dimensioned_square_controller();
+    let tmp = std::env::temp_dir().join(format!("ber_ext_deffin_{}", ItemId::default().0));
+    c.set_photos_dir(tmp.clone());
+    let src = std::env::temp_dir().join(format!("ber_ext_dfsrc_{}.jpg", ItemId::default().0));
+    std::fs::write(&src, b"jpeg-bytes").unwrap();
+
+    c.add_external_photo(ExternalSide::Front, &src, PhotoQuality::Full);
+    c.toggle_defer_external_photo(ExternalSide::Back);
+    assert!(c.external_photos_complete(), "deferred Back counted as set");
+
+    // Confirm with Back still pending → the prompt, NOT completion.
+    c.confirm_final_review();
+    assert!(c.show_deferred_photos_prompt(), "prompt raised");
+    assert!(!c.details_reviewed(), "BER not completed");
+    assert!(!c.show_ber_complete(), "no completion popup");
+
+    // Go back: prompt down, still not complete.
+    c.dismiss_deferred_photos_prompt();
+    assert!(!c.show_deferred_photos_prompt());
+    assert!(!c.details_reviewed());
+
+    // Capture the deferred shot (clears the deferral) → confirm completes.
+    c.add_external_photo(ExternalSide::Back, &src, PhotoQuality::Full);
+    assert!(c.deferred_photos_pending().is_empty());
+    c.confirm_final_review();
+    assert!(!c.show_deferred_photos_prompt(), "prompt not re-raised");
+    assert!(
+        c.details_reviewed(),
+        "BER completes once nothing is pending"
+    );
+    assert!(c.show_ber_complete(), "completion popup up");
+
+    let _ = std::fs::remove_dir_all(&tmp);
+    let _ = std::fs::remove_file(&src);
+}
+
 /// Annotating an external photo (`annotate_external_photo`, the paintbrush
 /// takeover's Save) REPLACES the side's stored photo with the burned-in JPEG:
 /// a fresh store file holding exactly the passed bytes, a regenerated

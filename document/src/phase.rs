@@ -311,6 +311,14 @@ pub fn stamp_floor_constructions(ber: &mut Ber, idx: usize, doc: &crate::StoreyD
     }
     let n = ber.storeys[idx].floors.regions.len();
     for i in 0..n {
+        // Out-of-scope floors (derived inter-storey / party) never take a
+        // construction — the ceilings arm's stale-share guard, mirrored.
+        if !ber.storeys[idx].floors.regions[i]
+            .exposure
+            .in_structure_scope()
+        {
+            continue;
+        }
         let key = centroid_key(ber.storeys[idx].floors.regions[i].centroid());
         // Exact centroid key first; containment fallback on a miss (reshape/subdivide).
         let entry = doc.floor_constructions.get(&key).or_else(|| {
@@ -341,6 +349,16 @@ pub fn stamp_ceiling_constructions(ber: &mut Ber, idx: usize, doc: &crate::Store
     }
     let n = ber.storeys[idx].ceilings.regions.len();
     for i in 0..n {
+        // OUT-OF-SCOPE regions (derived inter-storey / party) never take a
+        // construction: a stale centroid key from a session that once
+        // covered the area must not re-home its construction onto a buried
+        // surface at every materialize (the "final house" stale-share bug).
+        if !ber.storeys[idx].ceilings.regions[i]
+            .exposure
+            .in_structure_scope()
+        {
+            continue;
+        }
         let key = centroid_key(ber.storeys[idx].ceilings.regions[i].centroid());
         // Exact centroid key first; containment fallback on a miss (the roof was
         // recomposed/re-carved on load, drifting its centroid off the seeded key).
@@ -471,6 +489,62 @@ mod tests {
         CeilingRegions, FloorRegions, Storey, WallExposure, WallRegions,
     };
     use domain::points::Point2f64;
+
+    /// The stale-share guard: a centroid KEY whose point sits on an
+    /// OUT-OF-SCOPE (derived inter-storey) ceiling region must not re-home a
+    /// construction onto it — only in-scope regions take a stamp. (The
+    /// "final house" record: a pre-fix session left keys at both the buried
+    /// area's and the porch nib's centroids; the buried key must go inert.)
+    #[test]
+    fn ceiling_construction_stamp_skips_out_of_scope_regions() {
+        use ber_model::ber::structural::{CeilingExposure, CeilingRegion, Opes, Polygon3D};
+        use domain::points::Point3f64;
+        let region = |x0: f64, x1: f64, exposure: CeilingExposure| CeilingRegion {
+            id: Default::default(),
+            polygon: Polygon3D::new(vec![
+                Point3f64::new(x0, 0.0, 2.4),
+                Point3f64::new(x1, 0.0, 2.4),
+                Point3f64::new(x1, 2.0, 2.4),
+                Point3f64::new(x0, 2.0, 2.4),
+            ]),
+            opes: Opes::default(),
+            construction_id: ber_model::ber::common::ItemId::nil(),
+            exposure,
+        };
+        let mut ber = Ber::default();
+        ber.storeys.push(Storey {
+            ceilings: CeilingRegions {
+                regions: vec![
+                    region(0.0, 4.0, CeilingExposure::InterStorey),
+                    region(4.0, 6.0, CeilingExposure::ExposedRoof),
+                ],
+            },
+            ..Storey::default()
+        });
+        let mut doc = crate::StoreyDoc::default();
+        // Keys at BOTH centroids — the legacy session's leftover state.
+        for c in [Point2f64::new(2.0, 1.0), Point2f64::new(5.0, 1.0)] {
+            doc.ceiling_constructions.insert(
+                centroid_key(c),
+                (
+                    Default::default(),
+                    Default::default(),
+                    Default::default(),
+                    Some("Porch roof".to_string()),
+                ),
+            );
+        }
+        stamp_ceiling_constructions(&mut ber, 0, &doc);
+        let nil = ber_model::ber::common::ItemId::nil();
+        assert_eq!(
+            ber.storeys[0].ceilings.regions[0].construction_id, nil,
+            "the buried region takes NO construction — the stale key is inert"
+        );
+        assert_ne!(
+            ber.storeys[0].ceilings.regions[1].construction_id, nil,
+            "the in-scope region is stamped normally"
+        );
+    }
 
     /// A 10×5 storey split into an UNASSIGNED (untagged base fabric) zone
     /// (x < 5) and an Extension1 zone (x > 5), with walls along `segs`. Years:

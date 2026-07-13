@@ -144,22 +144,19 @@ fn group_centroid(
 }
 
 /// The point a group's in-place connector LINE should target — always ON one
-/// of the group's OWN member surfaces. WALLS use the base midpoint of the wall
-/// (in the group) NEAREST the group centroid — pointing at an actual selected
-/// wall reads clearer than at the average position, which can land in empty
-/// space (e.g. an L-shaped wall run). FLOORS/CEILINGS use a representative
-/// INTERIOR point of the group's largest member region
-/// ([`manip_plan::ring_interior_point`]): the raw group centroid is a vertex
-/// average over member rings and is NOT guaranteed inside any of them — a
-/// concave post-carve remainder (the ExposedRoof band an inter-storey split
-/// leaves behind) puts it near the middle of the ORIGINAL un-split area,
-/// visibly outside the region the box labels. Falls back to `centroid` if no
-/// member resolves.
+/// of the group's OWN in-scope member surfaces, or `None` when no member
+/// resolves in scope (a stale session): the caller then draws NO connector at
+/// all — there is no honest fallback (the old bbox-centre/average fallbacks
+/// produced a dot in the middle of an inter-storey area the group doesn't
+/// cover — the "final house" report). WALLS use the base midpoint of the
+/// member wall nearest the group's member average; FLOORS/CEILINGS use a
+/// representative INTERIOR point of the group's largest in-scope member
+/// region ([`manip_plan::ring_interior_point`]): the raw group centroid is a
+/// vertex average over member rings and is NOT guaranteed inside any of them.
 pub(crate) fn group_connector_anchor(
     storey: &Storey,
     group: &crate::controller::app_controller::EditGroup,
-    centroid: (f64, f64),
-) -> (f64, f64) {
+) -> Option<(f64, f64)> {
     let kind = group.ty.kind();
     if kind != SurfaceKind::Walls {
         return group
@@ -175,9 +172,9 @@ pub(crate) fn group_connector_anchor(
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
             .and_then(|ring| manip_plan::ring_interior_point(&ring))
-            .map(|p| (p.x, p.y))
-            .unwrap_or(centroid);
+            .map(|p| (p.x, p.y));
     }
+    let centroid = group_centroid(storey, kind, group)?;
     let dist2 = |p: &(f64, f64)| (p.0 - centroid.0).powi(2) + (p.1 - centroid.1).powi(2);
     group
         .ids
@@ -188,7 +185,6 @@ pub(crate) fn group_connector_anchor(
                 .partial_cmp(&dist2(b))
                 .unwrap_or(std::cmp::Ordering::Equal)
         })
-        .unwrap_or(centroid)
 }
 
 /// A floor/ceiling region's plan exterior ring (world metres, open), for the
@@ -243,7 +239,7 @@ fn region_plan_ring(
 pub(crate) fn group_anchor_all_storeys(
     ber: &Ber,
     group: &crate::controller::app_controller::EditGroup,
-) -> Option<(usize, (f64, f64))> {
+) -> Option<(usize, (f64, f64), bool)> {
     let kind = group.ty.kind();
     let mut best: Option<(usize, u32, (f64, f64))> = None;
     for (s, storey) in ber.storeys.iter().enumerate() {
@@ -262,8 +258,12 @@ pub(crate) fn group_anchor_all_storeys(
         }
     }
     let (s, _, centroid) = best?;
-    let anchor = group_connector_anchor(&ber.storeys[s], group, centroid);
-    Some((s, anchor))
+    // A real member-interior target when one resolves in scope; else the
+    // cluster centroid steers the LAYOUT only (`false` = draw no connector).
+    match group_connector_anchor(&ber.storeys[s], group) {
+        Some(anchor) => Some((s, anchor, true)),
+        None => Some((s, centroid, false)),
+    }
 }
 
 /// A single region's plan centroid for `kind` (wall → base midpoint; floor /
@@ -569,7 +569,7 @@ mod tests {
             fresh: true,
             inferred: InferredRoofType::Ambiguous,
         };
-        let (ax, ay) = group_connector_anchor(&storey, &group, (1.17, 4.67));
+        let (ax, ay) = group_connector_anchor(&storey, &group).expect("an in-scope member anchors");
         let inside = |x0: f64, y0: f64, x1: f64, y1: f64| ax > x0 && ax < x1 && ay > y0 && ay < y1;
         assert!(
             inside(2.48, 8.63, 4.15, 9.73),
@@ -584,5 +584,15 @@ mod tests {
         assert!(region_plan_ring(&storey, SurfaceKind::Ceilings, inter_id).is_none());
         assert!(region_centroid(&storey, SurfaceKind::Ceilings, inter_id).is_none());
         assert!(region_plan_ring(&storey, SurfaceKind::Ceilings, nib_id).is_some());
+        // A group whose EVERY member is out of scope has no honest target:
+        // no connector at all, never a mid-plan dot.
+        let stale = EditGroup {
+            ids: vec![inter_id],
+            ..group.clone()
+        };
+        assert!(
+            group_connector_anchor(&storey, &stale).is_none(),
+            "no in-scope member → no connector target"
+        );
     }
 }

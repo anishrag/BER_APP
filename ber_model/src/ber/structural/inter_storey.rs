@@ -151,6 +151,14 @@ pub fn derive_inter_storey(ber: &mut Ber, dimensioned: &[bool]) {
             let ring = floor_plan_ring(r);
             if ring.len() >= 3 && fp.contains_ring(&ring) {
                 r.exposure = FloorExposure::InterStorey;
+                // An inter-storey surface is OUT of structure scope: it is
+                // never attributed, offered, reviewed or counted — so it
+                // must not keep (or share) a construction. Clearing here
+                // SELF-HEALS records where a pre-scope-fix session left an
+                // in-scope region sharing its construction with a buried
+                // one (the "final house" report). Stable nil id, so the
+                // derive stays exactly idempotent.
+                r.construction_id = ItemId::nil();
             }
         }
     }
@@ -175,6 +183,9 @@ pub fn derive_inter_storey(ber: &mut Ber, dimensioned: &[bool]) {
                 .collect();
             if ring.len() >= 3 && fp.contains_ring(&ring) {
                 r.exposure = CeilingExposure::InterStorey;
+                // See the floors arm: out-of-scope surfaces carry no
+                // construction — clears stale shares for good.
+                r.construction_id = ItemId::nil();
             }
         }
     }
@@ -429,7 +440,17 @@ fn coalesce_inter_storey_ceiling_cuts(ceilings: CeilingRegions) -> CeilingRegion
         'scan: for a in 0..regions.len() {
             for b in (a + 1)..regions.len() {
                 let (ra, rb) = (&regions[a], &regions[b]);
-                if ra.construction_id != rb.construction_id {
+                // Same construction — OR the buried side carries the NIL id
+                // the inter-storey stamp now clears to (the split's own
+                // trace): the fuse restores the exposed side's construction
+                // either way.
+                let nil = ItemId::nil();
+                let buried_cid = if ra.exposure == CeilingExposure::InterStorey {
+                    ra.construction_id
+                } else {
+                    rb.construction_id
+                };
+                if ra.construction_id != rb.construction_id && buried_cid != nil {
                     continue;
                 }
                 // Both flat (never touch a sloped apex/fan face) at one height.
@@ -462,7 +483,13 @@ fn coalesce_inter_storey_ceiling_cuts(ceilings: CeilingRegions) -> CeilingRegion
                 // Rebuild one FLAT region at the shared z, taking the EXPOSED
                 // side's exposure. Replace `a`, drop `b`.
                 let exposure = if a_is { rb.exposure } else { ra.exposure };
-                let cid = ra.construction_id;
+                // The EXPOSED side's construction survives the fuse (the
+                // buried side's is nil-cleared by the stamp).
+                let cid = if a_is {
+                    rb.construction_id
+                } else {
+                    ra.construction_id
+                };
                 let mut pts: Vec<Point3f64> = simple[0]
                     .exterior()
                     .coords()
@@ -741,6 +768,73 @@ fn process_wall(
 mod tests {
     use super::*;
     use crate::ber::structural::{Storey, WallRegions};
+
+    /// The "final house" STALE-SHARE self-heal: a ground storey whose whole
+    /// flat ceiling shares ONE construction, partly buried under the upper
+    /// storey. The derive stamps the buried piece `InterStorey` AND clears
+    /// its `construction_id` to the stable NIL id — out-of-scope surfaces
+    /// carry no construction, so a legacy in-scope/out-of-scope share can't
+    /// survive a re-derive — while the exposed remainder keeps the
+    /// construction. Idempotent: a second derive reproduces the exact state.
+    #[test]
+    fn derive_clears_construction_on_interstorey_stamp_and_heals_shares() {
+        let mut ber = Ber::default();
+        let ground = flat_storey(square(0.0, 0.0, 12.0, 12.0), 2.4, None);
+        let shared_cid = ground.ceilings.regions[0].construction_id;
+        ber.storeys.push(ground);
+        ber.storeys
+            .push(flat_storey(square(6.0, 6.0, 12.0, 12.0), 2.4, Some(0.3)));
+        derive_all(&mut ber);
+        let nil = ItemId::nil();
+        let s0 = &ber.storeys[0];
+        let buried: Vec<&CeilingRegion> = s0
+            .ceilings
+            .regions
+            .iter()
+            .filter(|r| r.exposure == CeilingExposure::InterStorey)
+            .collect();
+        assert!(!buried.is_empty(), "the covered piece derives InterStorey");
+        for r in &buried {
+            assert_eq!(
+                r.construction_id, nil,
+                "a buried piece carries NO construction"
+            );
+        }
+        let exposed: Vec<&CeilingRegion> = s0
+            .ceilings
+            .regions
+            .iter()
+            .filter(|r| r.exposure != CeilingExposure::InterStorey)
+            .collect();
+        assert!(!exposed.is_empty());
+        for r in &exposed {
+            assert_eq!(
+                r.construction_id, shared_cid,
+                "the exposed remainder keeps its construction"
+            );
+        }
+        // Idempotent — the coalesce/re-split/clear cycle reproduces itself.
+        let before = ceiling_descriptor(&ber.storeys[0].ceilings);
+        let cids_before: Vec<ItemId> = ber.storeys[0]
+            .ceilings
+            .regions
+            .iter()
+            .map(|r| r.construction_id)
+            .collect();
+        derive_all(&mut ber);
+        assert_eq!(ceiling_descriptor(&ber.storeys[0].ceilings), before);
+        let cids_after: Vec<ItemId> = ber.storeys[0]
+            .ceilings
+            .regions
+            .iter()
+            .map(|r| r.construction_id)
+            .collect();
+        let mut a: Vec<String> = cids_before.iter().map(|c| format!("{:?}", c)).collect();
+        let mut b: Vec<String> = cids_after.iter().map(|c| format!("{:?}", c)).collect();
+        a.sort();
+        b.sort();
+        assert_eq!(a, b, "construction links are re-derive stable");
+    }
 
     /// Run the derivation treating EVERY storey as dimensioned — the settled
     /// geometry these fixtures build directly. (The gate itself is exercised by

@@ -52,6 +52,82 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             });
         return;
     }
+    // Deferred-photos stage: raised INSTEAD of the completion popup when
+    // "Mark BER complete" was pressed while deferred sides still lack their
+    // photo (defer = postpone to the end, never skip — see
+    // `ExternalSide::photo_deferrable`). Capture buttons emit the same
+    // `AddExternalPhoto` the Mapping panel uses (the controller clears each
+    // deferral on capture); once none are pending, Continue re-confirms and
+    // the BER actually completes. "Go back" leaves the BER un-complete.
+    if view.show_deferred_photos_prompt {
+        egui::Window::new("Deferred photos")
+            .id(Id::new("deferred_photos_prompt"))
+            .order(egui::Order::Foreground)
+            .anchor(Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.set_min_width(360.0);
+                // Deferred sides still lacking a photo. `deferred_photo_sides`
+                // never contains Front (not deferrable) and capture clears the
+                // flag, so the photo cross-check is belt-and-braces.
+                let pending: Vec<_> = view
+                    .external_photos
+                    .iter()
+                    .filter(|(s, p)| view.deferred_photo_sides.contains(s) && p.is_none())
+                    .map(|(s, _)| *s)
+                    .collect();
+                if pending.is_empty() {
+                    ui.label(RichText::new("All deferred photos captured ✔").strong());
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button(RichText::new("Continue — complete BER").strong())
+                            .clicked()
+                        {
+                            on_event(UiEvent::Sketch(SketchEvent::ConfirmFinalReview));
+                        }
+                        if ui.button("Go back").clicked() {
+                            on_event(UiEvent::Sketch(SketchEvent::DismissDeferredPhotosPrompt));
+                        }
+                    });
+                    return;
+                }
+                ui.label(
+                    RichText::new("You deferred these photos — take them now")
+                        .strong()
+                        .size(16.0),
+                );
+                ui.label("The BER can only complete once every deferred side has its photo.");
+                ui.add_space(8.0);
+                for side in pending {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("⏳ {}", side.label()));
+                        // The shared capture widget (desktop file dialog /
+                        // Android camera), as on the Mapping panel — hi tier
+                        // High for legible elevation detail.
+                        if let Some((path, quality)) = crate::ui::widgets::photo_button_pair(
+                            ui,
+                            "Add",
+                            true,
+                            crate::ui::widgets::PhotoQuality::High,
+                            false,
+                        ) {
+                            on_event(UiEvent::Sketch(SketchEvent::AddExternalPhoto {
+                                side,
+                                path,
+                                quality,
+                            }));
+                        }
+                    });
+                }
+                ui.add_space(10.0);
+                if ui.button("Go back").clicked() {
+                    on_event(UiEvent::Sketch(SketchEvent::DismissDeferredPhotosPrompt));
+                }
+            });
+        return;
+    }
     if view.show_ber_complete {
         egui::Window::new("BER complete")
             .id(Id::new("ber_complete_popup"))

@@ -50,10 +50,14 @@ impl AppController {
         photo.side = Some(side);
         let undo_snap = self.current_history_snapshot();
         {
-            let photos = &mut self.current_record.as_mut().unwrap().data.photos;
+            let data = &mut self.current_record.as_mut().unwrap().data;
             // Re-shooting a side overwrites the prior photo for that side.
-            photos.retain(|p| p.side != Some(side));
-            photos.push(photo);
+            data.photos.retain(|p| p.side != Some(side));
+            data.photos.push(photo);
+            // Capturing a deferred side's photo CLEARS the deferral (defer =
+            // postpone to the end, so the capture fulfils it) — same undo
+            // snapshot, so undo restores both the photo slot and the flag.
+            data.set_photo_deferred(side, false);
         }
         let _ = self.mark_dirty();
         self.push_history_snapshot(undo_snap);
@@ -215,15 +219,62 @@ impl AppController {
     /// Whether the REQUIRED external sides have a photo — the dwelling-level gate
     /// for the "External photos" Mapping checklist row. Front + Back are
     /// mandatory; Left + Right are OPTIONAL (a mid-terrace or otherwise
-    /// inaccessible dwelling often has no reachable side elevations).
+    /// inaccessible dwelling often has no reachable side elevations). A
+    /// DEFERRED side counts as set — the Final phase re-collects it before
+    /// "BER complete" (Front can't be deferred, so the front photo is always
+    /// really required here).
     pub fn external_photos_complete(&self) -> bool {
         let Some(record) = self.current_record.as_ref() else {
             return false;
         };
-        let photos = &record.data.photos;
+        let data = &record.data;
         ExternalSide::ALL
             .iter()
             .filter(|s| s.photo_required())
-            .all(|&side| photos.iter().any(|p| p.side == Some(side)))
+            .all(|&side| {
+                data.photos.iter().any(|p| p.side == Some(side)) || data.photo_deferred(side)
+            })
+    }
+
+    /// Toggle `side`'s photo DEFERRAL (the panel's per-side "Defer" button):
+    /// deferred counts as set for the Mapping gates, and the Final phase
+    /// re-prompts for the shot before "BER complete". No-op for a
+    /// non-deferrable side (Front — see [`ExternalSide::photo_deferrable`])
+    /// or with no record. Snapshots for undo like the other photo mutations.
+    pub fn toggle_defer_external_photo(&mut self, side: ExternalSide) {
+        if !side.photo_deferrable() || self.current_record.is_none() {
+            return;
+        }
+        let undo_snap = self.current_history_snapshot();
+        {
+            let data = &mut self.current_record.as_mut().unwrap().data;
+            let now_deferred = !data.photo_deferred(side);
+            data.set_photo_deferred(side, now_deferred);
+        }
+        let _ = self.mark_dirty();
+        self.push_history_snapshot(undo_snap);
+    }
+
+    /// The sides currently flagged DEFERRED (normalized — never contains
+    /// Front), for the panel's per-side Defer toggles.
+    pub fn deferred_photo_sides(&self) -> Vec<ExternalSide> {
+        let Some(record) = self.current_record.as_ref() else {
+            return vec![];
+        };
+        ExternalSide::ALL
+            .iter()
+            .copied()
+            .filter(|&s| record.data.photo_deferred(s))
+            .collect()
+    }
+
+    /// The deferred sides still LACKING a photo — what the end-of-assessment
+    /// prompt lists and what blocks "BER complete"
+    /// ([`Ber::deferred_photos_pending`](ber_model::ber::ber_struct::Ber::deferred_photos_pending)).
+    pub fn deferred_photos_pending(&self) -> Vec<ExternalSide> {
+        self.current_record
+            .as_ref()
+            .map(|r| r.data.deferred_photos_pending())
+            .unwrap_or_default()
     }
 }

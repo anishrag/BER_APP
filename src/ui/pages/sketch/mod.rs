@@ -987,6 +987,17 @@ pub enum SketchEvent {
         side: ExternalSide,
         clockwise: bool,
     },
+    /// Toggle DEFERRING `side`'s external photo to the end of the assessment
+    /// (the panel's per-side "Defer" button; only deferrable sides emit it —
+    /// never Front, see [`ExternalSide::photo_deferrable`]). Deferred counts
+    /// as set for the Mapping gates; the Final phase re-prompts before "BER
+    /// complete".
+    ToggleDeferExternalPhoto {
+        side: ExternalSide,
+    },
+    /// Dismiss the Final-phase "you deferred these photos — take them now"
+    /// prompt without completing (its "Go back" button).
+    DismissDeferredPhotosPrompt,
     /// Open the paintbrush ANNOTATION takeover for `side`'s external photo
     /// (the "🖌" affordance wherever external photos are shown). Handled by the
     /// app shell, not the controller: it decodes the stored image into the
@@ -1357,6 +1368,11 @@ pub struct SketchView<'a> {
     /// Backs the floating "Add external pictures" panel. Shown in the Mapping
     /// phase when a record is loaded.
     pub external_photos: Vec<(ExternalSide, Option<PhotoView>)>,
+    /// The sides whose external photo is DEFERRED to the end of the
+    /// assessment (never contains Front — it isn't deferrable, see
+    /// [`ExternalSide::photo_deferrable`]). Backs the panel's per-side Defer
+    /// toggles and the Final-phase "take them now" prompt.
+    pub deferred_photo_sides: Vec<ExternalSide>,
     /// The assessor's current workflow phase — drives the phase signpost
     /// highlight, the checklist title, and which toolset the left panel shows.
     pub current_phase: AssessmentPhase,
@@ -1395,6 +1411,9 @@ pub struct SketchView<'a> {
     pub final_complete: bool,
     /// The Phase-4 "BER complete" popup is up.
     pub show_ber_complete: bool,
+    /// The Phase-4 "you deferred these photos — take them now" prompt is up
+    /// (blocks completion until every deferred side is captured).
+    pub show_deferred_photos_prompt: bool,
     /// The (dummy) summary screen is up.
     pub show_summary: bool,
     /// The open Structure-REVIEW takeover view, if active: the current group's

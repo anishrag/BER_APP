@@ -1230,8 +1230,13 @@ impl eframe::App for BerApp {
                                 )
                             };
                             // External elevation photos (Front/Right/Left/Back)
-                            // for the floating "Add external pictures" panel.
-                            let external_photos = self.app_controller.borrow().external_photos();
+                            // for the floating "Add external pictures" panel,
+                            // plus which sides are DEFERRED to the end (the
+                            // panel's Defer toggles + the Final-phase prompt).
+                            let (external_photos, deferred_photo_sides) = {
+                                let c = self.app_controller.borrow();
+                                (c.external_photos(), c.deferred_photo_sides())
+                            };
 
                             // Stage-1 review: whether it's confirmed (the Structure
                             // gate) and, when the review is open, the current side's
@@ -1258,9 +1263,13 @@ impl eframe::App for BerApp {
                                 let c = self.app_controller.borrow();
                                 (c.objects_reviewed(), c.details_reviewed())
                             };
-                            let (show_ber_complete, show_summary) = {
+                            let (show_ber_complete, show_deferred_photos_prompt, show_summary) = {
                                 let c = self.app_controller.borrow();
-                                (c.show_ber_complete(), c.show_summary())
+                                (
+                                    c.show_ber_complete(),
+                                    c.show_deferred_photos_prompt(),
+                                    c.show_summary(),
+                                )
                             };
                             // Phase-4 (Final) view-data (only while in that phase).
                             let (
@@ -1644,6 +1653,7 @@ impl eframe::App for BerApp {
                                 delete_confirm_pending,
                                 checklist,
                                 external_photos,
+                                deferred_photo_sides,
                                 current_phase,
                                 mapping_complete,
                                 mapping_reviewed,
@@ -1660,6 +1670,7 @@ impl eframe::App for BerApp {
                                 final_mode,
                                 final_complete,
                                 show_ber_complete,
+                                show_deferred_photos_prompt,
                                 show_summary,
                                 structure_review_view,
                                 object_pins,
@@ -2963,6 +2974,12 @@ impl eframe::App for BerApp {
                                     }
                                     SketchEvent::RemoveExternalPhoto { side } => {
                                         controller.borrow_mut().remove_external_photo(side);
+                                    }
+                                    SketchEvent::ToggleDeferExternalPhoto { side } => {
+                                        controller.borrow_mut().toggle_defer_external_photo(side);
+                                    }
+                                    SketchEvent::DismissDeferredPhotosPrompt => {
+                                        controller.borrow_mut().dismiss_deferred_photos_prompt();
                                     }
                                     SketchEvent::RotateExternalPhoto { side, clockwise } => {
                                         controller
