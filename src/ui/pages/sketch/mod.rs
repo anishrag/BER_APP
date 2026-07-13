@@ -193,6 +193,11 @@ pub enum SketchEvent {
     ApplyDimension(f32),
     /// User skipped the current dimension prompt.
     SkipDimension,
+    /// While the dimension prompt was up, the user tapped a wall carrying a
+    /// length label on the canvas: copy that displayed length (metres, shown
+    /// at 2 dp) into the dimension expression as the term at the caret. The
+    /// canvas resolves the tap to a length; the app shell owns the buffer.
+    CopyWallLengthIntoDimension(f32),
     /// User submitted a distance for the current POSITION prompt: how far the
     /// carved phase/step area (or its cut wall) sits from the highlighted
     /// storey-outline reference wall, along the prompt's axis.
@@ -293,6 +298,13 @@ pub enum SketchEvent {
     /// pieces (a divider, no riser) — routed to `keep_ceiling_same_height`
     /// (a 0.0 delta). Bounds a ridge's own area without a step.
     KeepCeilingSameHeight,
+    /// The step amount prompt's "At height" button: set the target area's
+    /// ceiling to this ABSOLUTE height (m) — the controller converts it to
+    /// the stored relative delta at assign time.
+    AssignCeilingStepAbsolute(f32),
+    /// The edit prompt's Delete: remove the SELECTED existing ceiling step
+    /// (divider or height step) entirely.
+    DeleteSelectedCeilingStep,
     /// "Don't snap" on the pending ceiling-step line's snap tag: revert the
     /// line to its drawn coordinate. Routed to the controller's dedicated
     /// `unsnap_ceiling_step_line` — NOT `ChooseSnap`/`UnsnapLast`, whose
@@ -1122,8 +1134,15 @@ pub struct SketchView<'a> {
     pub ceiling_step_region_polygons: &'a [(Vec<(f64, f64)>, String)],
     /// Same-height divider cut segments (world coords) — drawn as a faint
     /// dashed pass, visually distinct from the amber-solid height steps.
-    /// Divider regions are excluded from `ceiling_step_region_polygons`.
+    /// The dashed divider cut segments (dividers ALSO appear in
+    /// `ceiling_step_region_polygons` now — visible, selectable, deletable).
     pub ceiling_divider_lines: &'a [((f64, f64), (f64, f64))],
+    /// The step region selected for EDIT (its world ring — highlighted on
+    /// the canvas) and its current delta; `None` while not editing.
+    pub ceiling_step_editing: Option<(f64, Vec<(f64, f64)>)>,
+    /// The RESOLVED ceiling height over the pending step's target area —
+    /// the amount prompt's reference line + the Absolute mode's base.
+    pub ceiling_step_current_height: Option<f64>,
     pub pending_ceiling_step_line: Option<((f64, f64), (f64, f64))>,
     pub pending_ceiling_step_side_rects: &'a [Vec<(f64, f64)>],
     /// The pending line's wall snap as one standard snap tag (its menu

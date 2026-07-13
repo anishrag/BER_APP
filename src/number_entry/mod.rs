@@ -96,6 +96,70 @@ pub fn set_current_term(buf: &mut String, metres: f32) {
     }
 }
 
+/// Insert a COPIED wall length (the number on another wall's canvas label,
+/// hence the label's 2 dp formatting) into the expression as the TERM at the
+/// caret. `cursor` is a char index into `buf` (`None` / out-of-range = end —
+/// the keypad and laser flows are caret-less). Returns the caret position
+/// (char index) just after the inserted text.
+///
+/// Semantics — "a tap SETS the term at the caret", the tap-input twin of the
+/// laser's [`set_current_term`]:
+/// - Caret touching a number (inside / at either edge, or across the spaces
+///   of an operator gap): that whole term is REPLACED — so tapping a second
+///   wall corrects the term, like re-shooting the laser.
+/// - Caret in a fresh spot (empty buffer, or right after a `+`/`-`): the
+///   length is inserted as a new term — `"3.2 + "` + tap → `"3.2 + 1.45"`.
+///
+/// Either way a previously parseable expression stays parseable.
+pub fn insert_copied_length(buf: &mut String, cursor: Option<usize>, metres: f32) -> usize {
+    let text = format!("{metres:.2}");
+    let chars: Vec<char> = buf.chars().collect();
+    let len = chars.len();
+    let c = cursor.unwrap_or(len).min(len);
+    let is_num = |ch: char| ch.is_ascii_digit() || ch == '.';
+
+    // An index INSIDE the term the caret touches: directly adjacent first,
+    // else across the spaces of an operator gap (left neighbour wins).
+    let anchor: Option<usize> = if c > 0 && is_num(chars[c - 1]) {
+        Some(c - 1)
+    } else if c < len && is_num(chars[c]) {
+        Some(c)
+    } else {
+        let mut l = c;
+        while l > 0 && chars[l - 1] == ' ' {
+            l -= 1;
+        }
+        if l > 0 && is_num(chars[l - 1]) {
+            Some(l - 1)
+        } else {
+            let mut r = c;
+            while r < len && chars[r] == ' ' {
+                r += 1;
+            }
+            (r < len && is_num(chars[r])).then_some(r)
+        }
+    };
+
+    let (start, end_excl) = match anchor {
+        Some(a) => {
+            let mut s = a;
+            while s > 0 && is_num(chars[s - 1]) {
+                s -= 1;
+            }
+            let mut e = a + 1;
+            while e < len && is_num(chars[e]) {
+                e += 1;
+            }
+            (s, e)
+        }
+        None => (c, c),
+    };
+    let head: String = chars[..start].iter().collect();
+    let tail: String = chars[end_excl..].iter().collect();
+    *buf = format!("{head}{text}{tail}");
+    start + text.chars().count()
+}
+
 /// Parse a dimension expression. Supports:
 /// - A single non-negative number: `"4.2"`, `"0.5"`, `"0"`
 /// - Sums and differences of numbers: `"3.2 + 1.5"`, `"5 - 1.8 + 0.3"`
@@ -197,6 +261,91 @@ mod expression_tests {
         // remnant). Only negatives are rejected.
         assert!(approx(parse_dimension_expression("0").unwrap(), 0.0));
         assert!(approx(parse_dimension_expression("3 - 3").unwrap(), 0.0));
+    }
+}
+
+#[cfg(test)]
+mod copied_length_tests {
+    use super::{insert_copied_length, parse_dimension_expression};
+
+    /// Empty buffer: the tapped length becomes the first term (2 dp, matching
+    /// the wall's canvas label).
+    #[test]
+    fn tap_into_an_empty_buffer_starts_the_expression() {
+        let mut buf = String::new();
+        let caret = insert_copied_length(&mut buf, None, 3.2);
+        assert_eq!(buf, "3.20");
+        assert_eq!(caret, 4);
+        assert!(parse_dimension_expression(&buf).is_some());
+    }
+
+    /// Label rounding is applied HERE (one place): 2 dp, like the canvas label.
+    #[test]
+    fn inserted_text_uses_the_label_precision() {
+        let mut buf = String::new();
+        insert_copied_length(&mut buf, None, 1.456);
+        assert_eq!(buf, "1.46");
+    }
+
+    /// The headline chaining flow: `+` then tap appends the next term.
+    #[test]
+    fn tap_after_an_operator_appends_a_new_term() {
+        let mut buf = "3.2 + ".to_string();
+        let caret = insert_copied_length(&mut buf, None, 1.45);
+        assert_eq!(buf, "3.2 + 1.45");
+        assert_eq!(caret, buf.chars().count());
+        assert!((parse_dimension_expression(&buf).unwrap() - 4.65).abs() < 1e-4);
+        // Hardware-typed bare "+" works the same (the coordinator example).
+        let mut buf = "+".to_string();
+        insert_copied_length(&mut buf, None, 3.2);
+        assert_eq!(buf, "+3.20");
+        assert!(parse_dimension_expression(&buf).is_some());
+    }
+
+    /// A tap with the caret on a complete term REPLACES it — the laser's
+    /// re-shoot semantics, and it keeps the buffer parseable (no `3.201.45`).
+    #[test]
+    fn tap_on_a_bare_term_replaces_it() {
+        let mut buf = "3.20".to_string();
+        let caret = insert_copied_length(&mut buf, None, 1.45);
+        assert_eq!(buf, "1.45");
+        assert_eq!(caret, 4);
+    }
+
+    /// Cursor-aware: a caret INSIDE a mid-expression term replaces just that
+    /// term, leaving the neighbours alone; the caret lands after the new text.
+    #[test]
+    fn tap_with_caret_inside_a_middle_term_replaces_only_it() {
+        let mut buf = "3.2 + 1.5 - 0.6".to_string();
+        // Caret between '1' and '.5' (char index 7).
+        let caret = insert_copied_length(&mut buf, Some(7), 2.0);
+        assert_eq!(buf, "3.2 + 2.00 - 0.6");
+        assert_eq!(caret, 10);
+        assert!((parse_dimension_expression(&buf).unwrap() - 4.6).abs() < 1e-4);
+    }
+
+    /// A caret parked in an operator gap adopts the number across the spaces
+    /// (left first, else right) rather than gluing digits together.
+    #[test]
+    fn tap_in_an_operator_gap_replaces_the_adjacent_term() {
+        // "3 +| 2": right neighbour.
+        let mut buf = "3 + 2".to_string();
+        insert_copied_length(&mut buf, Some(3), 1.45);
+        assert_eq!(buf, "3 + 1.45");
+        // "3.2 |+ 1": left neighbour.
+        let mut buf = "3.2 + 1".to_string();
+        insert_copied_length(&mut buf, Some(4), 9.0);
+        assert_eq!(buf, "9.00 + 1");
+        assert!(parse_dimension_expression(&buf).is_some());
+    }
+
+    /// An out-of-range caret (stale state) clamps to the end instead of
+    /// panicking.
+    #[test]
+    fn out_of_range_cursor_clamps_to_end() {
+        let mut buf = "2 + ".to_string();
+        insert_copied_length(&mut buf, Some(99), 1.0);
+        assert_eq!(buf, "2 + 1.00");
     }
 }
 

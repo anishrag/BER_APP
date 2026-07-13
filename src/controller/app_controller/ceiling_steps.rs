@@ -80,6 +80,12 @@ pub(super) enum PendingCeilingStep {
         /// (the coordinate is exact); un-snapping from here reopens it.
         snap: Option<CeilingLineSnap>,
     },
+    /// An EXISTING committed step region (session-list index) selected by a
+    /// tap for EDIT: the amount prompt reopens with its current value — a
+    /// new value REPLACES the region's delta, the prompt's Delete removes
+    /// the region entirely. Dividers (Δ 0) select like any other step — the
+    /// dead-end the field report hit ("keep same height" then no way back).
+    EditExisting { region: usize },
 }
 
 impl AppController {
@@ -352,13 +358,29 @@ impl AppController {
     /// - any other stage → ignored (those are toolbar/prompt-driven).
     pub fn ceiling_step_tap(&mut self, world_x: f32, world_y: f32) {
         match self.pending_ceiling_step.as_ref() {
-            // No line stage open and no carve being dimensioned — the tap
-            // places a fresh line point. (A tap while a carve is in flight is
-            // ignored: its prompts are toolbar-driven, like the floor step's.)
+            // No line stage open and no carve being dimensioned. A tap INSIDE
+            // an existing step region (dividers included) SELECTS it for
+            // edit — the field report's dead-end was a committed step that
+            // could be neither re-selected nor removed. A tap on virgin
+            // ceiling places a fresh line point as before. (Placing a NEW
+            // line inside an already-stepped area is still possible via a
+            // drawn STROKE — the stroke path never selects.)
             None if self.ceiling_step_mode && !self.ceiling_carve_in_flight() => {
+                if let Some(region) = self.ceiling_step_region_at(world_x, world_y) {
+                    self.pending_ceiling_step = Some(PendingCeilingStep::EditExisting { region });
+                    return;
+                }
                 self.pending_ceiling_step = Some(PendingCeilingStep::Orientation {
                     point: Point2f32::new(world_x, world_y),
                 });
+            }
+            // While editing, tapping ANOTHER step region switches the
+            // selection to it (tapping empty ceiling keeps the current one —
+            // the prompt's Cancel is the way out).
+            Some(PendingCeilingStep::EditExisting { .. }) => {
+                if let Some(region) = self.ceiling_step_region_at(world_x, world_y) {
+                    self.pending_ceiling_step = Some(PendingCeilingStep::EditExisting { region });
+                }
             }
             Some(PendingCeilingStep::Side {
                 axis,
@@ -541,10 +563,123 @@ impl AppController {
 
     /// True while the resolved line awaits its step amount — or a carved
     /// ceiling-step area is fully dimensioned and awaiting its delta.
+    /// The SESSION-list index of the smallest committed step region (divider
+    /// or height step) containing plan point `(x, y)` — the tap-to-edit
+    /// hit-test. Smallest wins so a small step nested over a larger one
+    /// stays selectable.
+    fn ceiling_step_region_at(&self, x: f32, y: f32) -> Option<usize> {
+        let idx = self.current_storey_idx.unwrap_or(0);
+        self.ceiling_step_regions
+            .get(&idx)?
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| {
+                r.polygon.len() >= 3 && manip_plan::ring_contains_point(&r.polygon, x, y)
+            })
+            .min_by(|(_, a), (_, b)| {
+                let area = |r: &CeilingStepRegion| {
+                    let ring: Vec<domain::points::Point2f64> = r
+                        .polygon
+                        .iter()
+                        .map(|p| domain::points::to_f64(*p))
+                        .collect();
+                    domain::points::ring_area(&ring).abs()
+                };
+                area(a)
+                    .partial_cmp(&area(b))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(i, _)| i)
+    }
+
+    /// The selected-for-edit step's `(delta, ring)` while the EDIT stage is
+    /// open — the UI's highlight + prompt prefill. `None` otherwise.
+    pub fn ceiling_step_editing(&self) -> Option<(f64, Vec<(f64, f64)>)> {
+        let Some(PendingCeilingStep::EditExisting { region }) = self.pending_ceiling_step.as_ref()
+        else {
+            return None;
+        };
+        let idx = self.current_storey_idx.unwrap_or(0);
+        self.ceiling_step_regions
+            .get(&idx)
+            .and_then(|rs| rs.get(*region))
+            .map(|r| {
+                (
+                    r.delta_m,
+                    r.polygon.iter().map(|p| (p.x as f64, p.y as f64)).collect(),
+                )
+            })
+    }
+
+    /// The RESOLVED ceiling height (m, storey-local) over the pending step's
+    /// target area — the reference the amount prompt shows, and the base the
+    /// ABSOLUTE entry converts against. The representative point is the
+    /// chosen side's half-rect centre (line), the carved area's interior
+    /// point, or the selected region's interior point (edit). `None` when no
+    /// amount stage is open / nothing resolves there.
+    pub fn ceiling_step_current_height(&self) -> Option<f64> {
+        let idx = self.current_storey_idx.unwrap_or(0);
+        let pt = self.ceiling_step_target_point()?;
+        self.current_record
+            .as_ref()
+            .and_then(|r| r.data.storeys.get(idx))
+            .and_then(|s| s.ceilings.top_z_at(pt))
+    }
+
+    /// The representative plan point of the pending step's target area (see
+    /// [`ceiling_step_current_height`](Self::ceiling_step_current_height)).
+    fn ceiling_step_target_point(&self) -> Option<domain::points::Point2f64> {
+        use domain::points::Point2f64;
+        match self.pending_ceiling_step.as_ref() {
+            Some(PendingCeilingStep::Amount {
+                axis,
+                coord_m,
+                side,
+                ..
+            }) => {
+                let ((min_x, min_y), (max_x, max_y)) =
+                    self.document.outline.floor_plan.bounding_box()?;
+                let (lo, hi, cross_mid) = match axis {
+                    ParameterAxis::X => (min_x, max_x, (min_y + max_y) / 2.0),
+                    ParameterAxis::Y => (min_y, max_y, (min_x + max_x) / 2.0),
+                };
+                let along = match side {
+                    LineSide::Greater => (*coord_m + hi) / 2.0,
+                    LineSide::Less => (lo + *coord_m) / 2.0,
+                };
+                Some(match axis {
+                    ParameterAxis::X => Point2f64::new(along as f64, cross_mid as f64),
+                    ParameterAxis::Y => Point2f64::new(cross_mid as f64, along as f64),
+                })
+            }
+            Some(PendingCeilingStep::EditExisting { region }) => {
+                let idx = self.current_storey_idx.unwrap_or(0);
+                let r = self.ceiling_step_regions.get(&idx)?.get(*region)?;
+                let ring: Vec<Point2f64> = r
+                    .polygon
+                    .iter()
+                    .map(|p| domain::points::to_f64(*p))
+                    .collect();
+                manip_plan::ring_interior_point(&ring)
+            }
+            _ if self.ceiling_carve_amount_pending() => {
+                let ring: Vec<Point2f64> = self
+                    .document
+                    .floor_plan
+                    .get_points()
+                    .iter()
+                    .map(|p| domain::points::to_f64(*p))
+                    .collect();
+                manip_plan::ring_interior_point(&ring)
+            }
+            _ => None,
+        }
+    }
+
     pub fn ceiling_step_amount_pending(&self) -> bool {
         matches!(
             self.pending_ceiling_step,
-            Some(PendingCeilingStep::Amount { .. })
+            Some(PendingCeilingStep::Amount { .. }) | Some(PendingCeilingStep::EditExisting { .. })
         ) || self.ceiling_carve_amount_pending()
     }
 
@@ -581,7 +716,9 @@ impl AppController {
     /// is chosen (a point has no line yet) and when nothing is pending.
     pub fn pending_ceiling_step_line(&self) -> Option<((f64, f64), (f64, f64))> {
         let (axis, coord_m) = match self.pending_ceiling_step.as_ref()? {
-            PendingCeilingStep::Orientation { .. } => return None,
+            PendingCeilingStep::Orientation { .. } | PendingCeilingStep::EditExisting { .. } => {
+                return None; // no line — the edit highlight is the region ring
+            }
             PendingCeilingStep::Side { axis, coord_m, .. }
             | PendingCeilingStep::Position { axis, coord_m, .. }
             | PendingCeilingStep::Amount { axis, coord_m, .. } => (*axis, *coord_m),
@@ -633,7 +770,12 @@ impl AppController {
     /// so it equals the post-reload reconstruction. Outside undo —
     /// phases/steps parity.
     pub fn assign_ceiling_step_delta(&mut self, delta_m: f32) -> Result<(), String> {
-        // The line's parameters, or `None` for a dimensioned carve.
+        // The line's parameters, `None` for a dimensioned carve — or the
+        // EDIT path (an existing region's delta REPLACED in place).
+        let edit = match self.pending_ceiling_step.as_ref() {
+            Some(PendingCeilingStep::EditExisting { region }) => Some(*region),
+            _ => None,
+        };
         let line = match self.pending_ceiling_step.as_ref() {
             Some(PendingCeilingStep::Amount {
                 axis,
@@ -641,6 +783,7 @@ impl AppController {
                 side,
                 ..
             }) => Some((*axis, *coord_m, *side)),
+            Some(PendingCeilingStep::EditExisting { .. }) => None,
             _ if self.ceiling_carve_amount_pending() => None,
             _ => return Ok(()), // nothing awaiting an amount — no-op
         };
@@ -666,33 +809,47 @@ impl AppController {
                 -delta_m, default
             ));
         }
-        let region = match line {
-            Some((axis, coord_m, side)) => self
-                .document
-                .ceiling_step_region(axis, coord_m, side, delta_m as f64)
-                .ok_or("The storey has no outline to step.")?,
-            None => {
-                // The live buffer IS the dimensioned area (floor-step parity);
-                // its resolved ring is the region.
-                let polygon = self.document.floor_plan.get_points();
-                if polygon.len() < 3 {
-                    return Err(
-                        "The step area has no usable outline — cancel and redraw it.".into(),
-                    );
+        if let Some(region) = edit {
+            // EDIT: replace the selected region's delta in place — the same
+            // recompose tail re-derives the roof under the new value.
+            let Some(r) = self
+                .ceiling_step_regions
+                .get_mut(&idx)
+                .and_then(|rs| rs.get_mut(region))
+            else {
+                self.pending_ceiling_step = None;
+                return Err("That step no longer exists — reselect it.".into());
+            };
+            r.delta_m = delta_m as f64;
+        } else {
+            let region = match line {
+                Some((axis, coord_m, side)) => self
+                    .document
+                    .ceiling_step_region(axis, coord_m, side, delta_m as f64)
+                    .ok_or("The storey has no outline to step.")?,
+                None => {
+                    // The live buffer IS the dimensioned area (floor-step parity);
+                    // its resolved ring is the region.
+                    let polygon = self.document.floor_plan.get_points();
+                    if polygon.len() < 3 {
+                        return Err(
+                            "The step area has no usable outline — cancel and redraw it.".into(),
+                        );
+                    }
+                    CeilingStepRegion {
+                        polygon,
+                        delta_m: delta_m as f64,
+                    }
                 }
-                CeilingStepRegion {
-                    polygon,
-                    delta_m: delta_m as f64,
-                }
+            };
+            self.ceiling_step_regions
+                .entry(idx)
+                .or_default()
+                .push(region);
+            if line.is_none() {
+                // Discard the carve's live buffer, return to the outline.
+                self.abandon_step_shape();
             }
-        };
-        self.ceiling_step_regions
-            .entry(idx)
-            .or_default()
-            .push(region);
-        if line.is_none() {
-            // Discard the carve's live buffer, return to the outline.
-            self.abandon_step_shape();
         }
         self.pending_ceiling_step = None;
         self.mark_dirty()?;
@@ -704,6 +861,66 @@ impl AppController {
         self.materialize();
         self.reconstruct_ceiling_step_regions_for(idx);
         Ok(())
+    }
+
+    /// Assign the step by ABSOLUTE target height instead of a relative
+    /// delta — the amount prompt's "At height" button: the assessor types
+    /// the ceiling height the area should END UP at. Steps are stored
+    /// RELATIVE (the model's `with_z_deltas` composes deltas, the delta-0
+    /// divider absorption and every reload fixpoint ride on that), so the
+    /// delta is computed HERE, at assign time, against the RESOLVED height
+    /// over the target area ([`ceiling_step_current_height`]) — and, when
+    /// EDITING an existing step, corrected by its own current delta so the
+    /// area genuinely lands at the typed height:
+    /// `Δ_new = Δ_old + (typed − resolved)`. All the relative-path guards
+    /// (near-zero → divider, floor clip) apply to the computed delta.
+    ///
+    /// [`ceiling_step_current_height`]: Self::ceiling_step_current_height
+    pub fn assign_ceiling_step_absolute(&mut self, height_m: f32) -> Result<(), String> {
+        if !self.ceiling_step_amount_pending() {
+            return Ok(()); // nothing awaiting an amount — no-op
+        }
+        if !height_m.is_finite() {
+            return Err("Ceiling height must be a number.".into());
+        }
+        // Bring the resolved ceilings current — the conversion reads them.
+        self.materialize();
+        let current = self
+            .ceiling_step_current_height()
+            .ok_or("No resolved ceiling under that area — set the default height first.")?;
+        let old_delta = match self.pending_ceiling_step.as_ref() {
+            Some(PendingCeilingStep::EditExisting { region }) => {
+                let idx = self.current_storey_idx.unwrap_or(0);
+                self.ceiling_step_regions
+                    .get(&idx)
+                    .and_then(|rs| rs.get(*region))
+                    .map(|r| r.delta_m)
+                    .unwrap_or(0.0)
+            }
+            _ => 0.0,
+        };
+        let delta = old_delta + (height_m as f64 - current);
+        self.assign_ceiling_step_delta(delta as f32)
+    }
+
+    /// Delete the SELECTED existing step (the edit prompt's Delete button):
+    /// remove it from the session list and recompose — its pieces re-flatten
+    /// (or re-join, for a divider). No-op unless the edit stage is open.
+    pub fn delete_selected_ceiling_step(&mut self) {
+        let Some(PendingCeilingStep::EditExisting { region }) = self.pending_ceiling_step.take()
+        else {
+            return;
+        };
+        let idx = self.current_storey_idx.unwrap_or(0);
+        if let Some(rs) = self.ceiling_step_regions.get_mut(&idx) {
+            if region < rs.len() {
+                rs.remove(region);
+                let _ = self.mark_dirty();
+                self.recompose_ceilings(idx);
+                self.materialize();
+                self.reconstruct_ceiling_step_regions_for(idx);
+            }
+        }
     }
 
     /// Split the active ceiling-step line/area into two SAME-HEIGHT pieces
@@ -725,25 +942,40 @@ impl AppController {
         self.pending_ceiling_step = None;
     }
 
-    /// The current storey's committed HEIGHT-STEP regions, as `(ring, label)`
-    /// in world coords, for the UI's amber tint + label (label e.g. "+0.20 m"
-    /// / "−0.30 m"). Same-height DIVIDERS (`|Δ| < 1e-3`) are EXCLUDED — they'd
-    /// otherwise read as a solid amber ring labelled "+0.00 m"; the UI draws
-    /// them as a faint dashed cut instead (see
-    /// [`ceiling_divider_lines`](Self::ceiling_divider_lines)). NOT
-    /// index-aligned with `ceiling_step_regions` once dividers exist — for
-    /// deletion the UI uses the world ring to map back.
+    /// The current storey's committed step regions, as `(ring, label)` in
+    /// world coords, for the UI's amber tint + label. EVERY step shows —
+    /// same-height DIVIDERS included (labelled "divider"): the field report's
+    /// dead-end was an invisible, unselectable, undeletable divider, so
+    /// hiding them is over. Height steps carry the delta AND the resulting
+    /// height ("+0.30 m → 2.70 m", against the storey default — overlapping
+    /// steps compose, so treat it as a guide). The dashed divider cut
+    /// ([`ceiling_divider_lines`](Self::ceiling_divider_lines)) still draws
+    /// on top. Index-aligned with the raw session list now that nothing is
+    /// filtered; deletion still maps by world ring.
     pub fn ceiling_step_region_polygons(&self) -> Vec<(Vec<(f64, f64)>, String)> {
         let idx = self.current_storey_idx.unwrap_or(0);
+        let default = self
+            .current_record
+            .as_ref()
+            .and_then(|r| r.data.storeys.get(idx))
+            .and_then(|s| s.ceiling_height_m);
         self.ceiling_step_regions
             .get(&idx)
             .map(|regions| {
                 regions
                     .iter()
-                    .filter(|r| r.delta_m.abs() >= 1e-3)
                     .map(|r| {
                         let ring = r.polygon.iter().map(|p| (p.x as f64, p.y as f64)).collect();
-                        (ring, Self::ceiling_step_region_label(r.delta_m))
+                        let label = match (r.delta_m.abs() < 1e-3, default) {
+                            (true, _) => Self::ceiling_step_region_label(r.delta_m),
+                            (false, Some(d)) => format!(
+                                "{} → {:.2} m",
+                                Self::ceiling_step_region_label(r.delta_m),
+                                d + r.delta_m
+                            ),
+                            (false, None) => Self::ceiling_step_region_label(r.delta_m),
+                        };
+                        (ring, label)
                     })
                     .collect()
             })
@@ -794,10 +1026,9 @@ impl AppController {
 
     /// Delete the current storey's ceiling-step region matching `ring` (the
     /// world ring the UI feed carries) and re-commit — the roof pieces it had
-    /// stepped re-flatten to the default height on the next derive. A RING, not
-    /// a list index: the displayed feed
-    /// ([`ceiling_step_region_polygons`](Self::ceiling_step_region_polygons))
-    /// is divider-filtered, so its indices don't map to the raw region Vec.
+    /// stepped re-flatten to the default height on the next derive. A RING,
+    /// not a list index (kept from the divider-filtered era; ring identity
+    /// stays the stabler contract). Dividers are deletable like any step.
     /// No-op when no region's ring matches.
     pub fn delete_ceiling_step_region(&mut self, ring: &[(f64, f64)]) {
         let idx = self.current_storey_idx.unwrap_or(0);

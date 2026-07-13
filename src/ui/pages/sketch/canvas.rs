@@ -2367,6 +2367,22 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 view.ceiling_divider_lines,
             );
         }
+        // The step region SELECTED FOR EDIT: a strong amber outline over the
+        // committed wash, so it's obvious which step the prompt is changing.
+        if let Some((_, ring)) = view.ceiling_step_editing.as_ref() {
+            if let Some(t) =
+                render::active_storey_transform(rect, ber, current_storey_idx, mode, vp)
+            {
+                let pts: Vec<egui::Pos2> = ring.iter().map(|(x, y)| t.apply(*x, *y)).collect();
+                let n = pts.len();
+                for i in 0..n {
+                    painter.line_segment(
+                        [pts[i], pts[(i + 1) % n]],
+                        egui::Stroke::new(4.0, ceiling_step_tint),
+                    );
+                }
+            }
+        }
         render::render_cut_candidates(
             &painter,
             rect,
@@ -3622,6 +3638,46 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         }
     }
 
+    // Dimension-entry wall-length COPY: while the dimension prompt is up the
+    // canvas takes no other primary input (every tool is gated on
+    // `!dim_prompting`), so a tap is free to act as an INPUT key — tapping a
+    // wall that carries a length label inserts that displayed length into the
+    // dimension expression (as the term at the caret; after a `+` it starts
+    // the next term — the assessor chains `3.2 + 1.45` from walls measured
+    // once, without retyping). The wall being dimensioned (and its
+    // length-equivalents) can never self-insert: their length is the unknown
+    // being asked for, so they carry no label and aren't candidates — a tap
+    // on them simply does nothing. Suppressed under an overlay takeover
+    // (floor/ceiling carve dimensioning): the overlay draws different
+    // geometry with its own transform.
+    if dim_prompting
+        && matches!(mode, SketchMode::Storey2D)
+        && !touch_nav_active
+        && !overlay_mode
+        && response.clicked_by(egui::PointerButton::Primary)
+    {
+        if let (Some(pos), Some(t)) = (
+            response.interact_pointer_pos(),
+            canvas_transform(ber, current_storey_idx, rect, vp, true),
+        ) {
+            let (wx, wy) = t.inverse(pos.x, pos.y);
+            let tol_world = (14.0 / t.scale()) as f64;
+            if let Some(len) = nearest_labelled_wall_length(
+                ber,
+                current_storey_idx,
+                dimensioned_walls,
+                living_area_wall_labels,
+                wx,
+                wy,
+                tol_world,
+            ) {
+                on_event(UiEvent::Sketch(SketchEvent::CopyWallLengthIntoDimension(
+                    len,
+                )));
+            }
+        }
+    }
+
     // Exposure mode: a tap selects the wall under the pointer; a
     // primary drag near a selection handle slides that handle along
     // the wall. Takes priority over stroke/edit input (suppressed via
@@ -4525,6 +4581,66 @@ fn canvas_transform(
         b.storeys.get(i).and_then(render::storey_2d::bounding_box)?
     };
     Some(render::fit_transform(rect, min_xy, max_xy, view))
+}
+
+/// The length (metres) of the labelled wall nearest to world point
+/// `(wx, wy)`, within `tol` — or `None` when the tap lands on no label-
+/// carrying wall. Candidates are exactly the walls whose length label is
+/// on screen: the storey outline's known-length walls (`dimensioned_walls`,
+/// already gated on the Dimensions-category toggle) measured off the SAME
+/// resolved region ring the label is computed from, plus the living areas'
+/// known walls (endpoints + length precomputed by the controller). Used by
+/// the dimension-prompt tap-to-copy input; the caller applies the label's
+/// 2 dp rounding on insert, so what the assessor sees is what he gets.
+fn nearest_labelled_wall_length(
+    ber: Option<&Ber>,
+    current_storey_idx: Option<usize>,
+    dimensioned_walls: &[(usize, usize)],
+    living_area_wall_labels: &[Vec<((f64, f64), (f64, f64), f32)>],
+    wx: f64,
+    wy: f64,
+    tol: f64,
+) -> Option<f32> {
+    let mut best: Option<(f64, f32)> = None;
+    let mut consider = |d: f64, len: f32| {
+        if d <= tol && best.is_none_or(|(bd, _)| d < bd) {
+            best = Some((d, len));
+        }
+    };
+    if let Some(storey) = ber
+        .zip(current_storey_idx)
+        .and_then(|(b, i)| b.storeys.get(i))
+    {
+        for &(r, e) in dimensioned_walls {
+            let Some(region) = storey.floors.regions.get(r) else {
+                continue;
+            };
+            // `exterior()` repeats the first vertex at the end to close the
+            // ring, so edge `e` runs coords[e] → coords[e + 1] — the same
+            // indexing (and hence the same length) as `draw_dimensions`.
+            let coords: Vec<_> = region.polygon.exterior().coords().cloned().collect();
+            if coords.len() < 2 || e + 1 >= coords.len() {
+                continue;
+            }
+            let (a, b) = (coords[e], coords[e + 1]);
+            let len = ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt();
+            if len < 1e-3 {
+                continue;
+            }
+            let d = domain::points::point_to_segment_distance(wx, wy, a.x, a.y, b.x, b.y);
+            consider(d, len as f32);
+        }
+    }
+    for area in living_area_wall_labels {
+        for &(a, b, len) in area {
+            if len < 1e-3 {
+                continue;
+            }
+            let d = domain::points::point_to_segment_distance(wx, wy, a.0, a.1, b.0, b.1);
+            consider(d, len);
+        }
+    }
+    best.map(|(_, len)| len)
 }
 
 /// The transform the OVERLAID floor-exposure view is drawn with: fitted to the

@@ -1216,13 +1216,19 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         return;
     }
 
-    // ── Ceiling-step amount (Up / Down own the sign) ────────────────────────
+    // ── Ceiling-step amount (Up / Down own the sign; "At height" is the
+    // ABSOLUTE entry — the typed value is the ceiling height the area ends
+    // up at; the controller converts to the stored relative delta). The
+    // SAME box serves editing an EXISTING step (tap-selected): the title
+    // flips, the subtitle shows the step's current value + the area's
+    // resolved height, and a Delete removes the step entirely. ─────────────
     if view.ceiling_step_amount_pending {
         if view.copy_height_pick_pending {
             show_copy_height_hint(ctx, rect, view.copy_height_error, on_event);
             return;
         }
-        let actions = vec![
+        let editing = view.ceiling_step_editing.is_some();
+        let mut actions = vec![
             Action::new("Up", "Raise the ceiling on that side by the amount", |v| {
                 SketchEvent::AssignCeilingStepDelta(v.abs())
             }),
@@ -1230,6 +1236,11 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 "Down",
                 "Lower the ceiling on that side by the amount",
                 |v| SketchEvent::AssignCeilingStepDelta(-v.abs()),
+            ),
+            Action::new(
+                "At height",
+                "Set the area's ceiling TO this height (absolute metres above the floor)",
+                |v| SketchEvent::AssignCeilingStepAbsolute(v),
             ),
             copy_height_action(),
             Action::new(
@@ -1239,17 +1250,55 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             )
             .bare()
             .with_clear(),
-            Action::new("Cancel", "Discard this ceiling step", |_| {
-                SketchEvent::CancelPendingCeilingStep
-            })
+        ];
+        if editing {
+            actions.push(
+                Action::new(
+                    "Delete step",
+                    "Remove this step entirely — the area re-joins",
+                    |_| SketchEvent::DeleteSelectedCeilingStep,
+                )
+                .bare()
+                .with_clear(),
+            );
+        }
+        actions.push(
+            Action::new(
+                "Cancel",
+                if editing {
+                    "Leave this step as it is"
+                } else {
+                    "Discard this ceiling step"
+                },
+                |_| SketchEvent::CancelPendingCeilingStep,
+            )
             .bare()
             .with_clear(),
-        ];
+        );
+        // The reference line: the current step value (editing) and the
+        // area's RESOLVED ceiling height — what "At height" measures against.
+        let subtitle = match (
+            view.ceiling_step_editing.as_ref(),
+            view.ceiling_step_current_height,
+        ) {
+            (Some((delta, _)), Some(h)) if delta.abs() < 1e-3 => {
+                Some(format!("Currently: divider (no step) · area at {h:.2} m"))
+            }
+            (Some((delta, _)), Some(h)) => {
+                Some(format!("Currently: {delta:+.2} m · area at {h:.2} m"))
+            }
+            (None, Some(h)) => Some(format!("Area currently at {h:.2} m")),
+            _ => None,
+        };
         show_box(
             ctx,
             rect,
-            "Ceiling step (m)",
-            None,
+            if editing {
+                "Edit ceiling step (m)"
+            } else {
+                "Ceiling step (m)"
+            },
+            subtitle.as_deref(),
             "e.g. 0.2",
             view.ceiling_step_error,
             view.ceiling_amount_input,

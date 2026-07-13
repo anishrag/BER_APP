@@ -88,6 +88,62 @@ fn trim_corner_then_zero_remnants_makes_a_triangle() {
     }
 }
 
+/// Tap-to-copy invariant behind the dimension-entry wall tap: the canvas only
+/// offers LABELLED walls — `walls_with_known_length()` — as copy sources, so
+/// the wall currently being ASKED about (its length is the unknown) must
+/// never appear in that list at any point of the loop. That is the whole
+/// no-self-insert rule: the prompted wall carries no label, so a tap on it
+/// finds no candidate. Also pins the feature's precondition — once the first
+/// dimension lands, known walls DO coexist with the still-open prompt (there
+/// is something to copy from mid-loop).
+#[test]
+fn prompted_wall_is_never_a_known_length_copy_source() {
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    let square = vec![
+        Point2f32::new(0.0, 0.0),
+        Point2f32::new(10.0, 0.0),
+        Point2f32::new(10.0, 10.0),
+        Point2f32::new(0.0, 10.0),
+        Point2f32::new(0.2, 0.2),
+    ];
+    // Freshly captured (pixel-space, nothing dimensioned yet).
+    c.document.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.5, true).unwrap();
+    c.compute_next_dimension_prompt();
+    assert!(c.dimensioning_active(), "fresh outline starts prompting");
+    // Before any dimension lands nothing is known — no copy sources at all.
+    assert!(
+        c.walls_with_known_length().is_empty(),
+        "no labels (and so no tap-copy sources) before the first dimension"
+    );
+
+    let mut applied = 0;
+    while let Some(prompt) = c.current_dimension_prompt() {
+        assert!(applied < 12, "dimension loop didn't terminate");
+        let (ring, edge) = c
+            .document
+            .floor_plan
+            .find_vertex(prompt.wall_start_vertex)
+            .expect("prompted wall exists in the plan");
+        assert!(
+            !c.walls_with_known_length().contains(&(ring, edge)),
+            "the prompted wall must never be offered as a copy source \
+             (iteration {applied})"
+        );
+        if applied > 0 {
+            assert!(
+                !c.walls_with_known_length().is_empty(),
+                "once a dimension landed, known walls coexist with the open \
+                 prompt — the mid-loop tap has sources (iteration {applied})"
+            );
+        }
+        c.apply_dimension(4.0).expect("dimension applies");
+        applied += 1;
+    }
+    assert!(applied >= 2, "a square asks for at least width and height");
+    // Loop done: every outline wall's length is known → all are copyable.
+    assert!(!c.walls_with_known_length().is_empty());
+}
+
 /// Zeroing a regular (orthogonal) wall is rejected — only a trim cut wall
 /// can be collapsed. Guards against silently deleting a drawn wall.
 #[test]
@@ -5694,9 +5750,126 @@ fn deleting_a_divider_refuses_the_halves() {
     );
 }
 
-/// A-T8: a divider's label reads "divider"; the amber feed
-/// (`ceiling_step_region_polygons`) EXCLUDES it; `ceiling_divider_lines`
-/// emits its cut segment.
+/// STEP EDITING (field report 6962f3c5): a committed step is re-selectable
+/// by a tap inside its area — the edit stage opens with its current value —
+/// a new value REPLACES it (recompose reflects it), and the Delete
+/// affordance removes it entirely. A delta-0 divider goes through exactly
+/// the same loop (the old dead-end).
+#[test]
+fn existing_step_tap_selects_edits_and_deletes() {
+    let mut c = ceiling_ready_controller();
+    ceiling_step_to_amount_at_x4(&mut c);
+    c.assign_ceiling_step_delta(0.3).unwrap(); // right half raised to 2.7
+
+    // Tap inside the RAISED half → the edit stage opens on that region.
+    c.ceiling_step_tap(7.0, 5.0);
+    let (delta, ring) = c.ceiling_step_editing().expect("tap selects the step");
+    assert!(
+        (delta - 0.3).abs() < 1e-6,
+        "prefilled with the current value"
+    );
+    assert!(!ring.is_empty());
+    assert!(c.ceiling_step_amount_pending(), "the amount prompt reopens");
+
+    // Replace the value: +0.3 → −0.2. Recompose reflects it.
+    c.assign_ceiling_step_delta(-0.2).unwrap();
+    assert!(c.ceiling_step_editing().is_none(), "edit stage closed");
+    let zs = ceiling_flat_zs(&c);
+    assert!(
+        zs.iter().any(|z| (z - 2.2).abs() < 1e-6),
+        "the step now lowers to 2.2: {zs:?}"
+    );
+    assert!(
+        !zs.iter().any(|z| (z - 2.7).abs() < 1e-6),
+        "the old +0.3 value is gone: {zs:?}"
+    );
+
+    // Turn it into a DIVIDER (the field scenario), reselect it, delete it.
+    c.ceiling_step_tap(7.0, 5.0);
+    assert!(c.ceiling_step_editing().is_some());
+    c.keep_ceiling_same_height().unwrap(); // edit → delta 0: now a divider
+    c.ceiling_step_tap(7.0, 5.0);
+    let (delta, _) = c
+        .ceiling_step_editing()
+        .expect("the divider is still selectable — no more dead-end");
+    assert!(delta.abs() < 1e-6, "selected as a divider");
+    c.delete_selected_ceiling_step();
+    assert!(c.ceiling_step_editing().is_none());
+    let zs = ceiling_flat_zs(&c);
+    assert!(
+        zs.iter().all(|z| (z - 2.4).abs() < 1e-6),
+        "deleting the divider re-joins the flat ceiling: {zs:?}"
+    );
+}
+
+/// ABSOLUTE ENTRY (field report e8fec0b8): typing the target height 2.7 on a
+/// 2.4 m area is exactly the relative +0.3 — the delta is computed at
+/// assign time against the resolved height (steps stay stored RELATIVE, so
+/// the divider absorption and every reload fixpoint are untouched).
+#[test]
+fn absolute_height_entry_matches_relative_delta() {
+    let mut rel = ceiling_ready_controller();
+    ceiling_step_to_amount_at_x4(&mut rel);
+    rel.assign_ceiling_step_delta(0.3).unwrap();
+
+    let mut abs = ceiling_ready_controller();
+    ceiling_step_to_amount_at_x4(&mut abs);
+    abs.materialize(); // the app's render loop has always materialized by now
+    assert!(
+        (abs.ceiling_step_current_height()
+            .expect("resolved height shown")
+            - 2.4)
+            .abs()
+            < 1e-6,
+        "the prompt's reference is the area's resolved 2.4 m"
+    );
+    abs.assign_ceiling_step_absolute(2.7).unwrap();
+
+    // Equal within f32 conversion noise (the absolute path round-trips the
+    // computed delta through the f32 prompt plumbing).
+    let (r, a) = (ceiling_flat_zs(&rel), ceiling_flat_zs(&abs));
+    assert_eq!(r.len(), a.len());
+    for (rz, az) in r.iter().zip(&a) {
+        assert!(
+            (rz - az).abs() < 1e-6,
+            "absolute 2.7 over a 2.4 area == relative +0.3: {r:?} vs {a:?}"
+        );
+    }
+}
+
+/// ABSOLUTE EDIT: editing an existing +0.3 step, the prompt's reference is
+/// the area's RESOLVED height (2.7), and typing an absolute 2.9 lands the
+/// area at exactly 2.9 (Δ becomes +0.5 — corrected by the step's own
+/// current delta, not stacked on top of it).
+#[test]
+fn absolute_edit_prefills_resolved_height_and_lands_exactly() {
+    let mut c = ceiling_ready_controller();
+    ceiling_step_to_amount_at_x4(&mut c);
+    c.assign_ceiling_step_delta(0.3).unwrap();
+
+    c.ceiling_step_tap(7.0, 5.0);
+    assert!(c.ceiling_step_editing().is_some());
+    let current = c.ceiling_step_current_height().expect("resolved height");
+    assert!(
+        (current - 2.7).abs() < 1e-6,
+        "edit-in-absolute shows the RESOLVED 2.7, got {current}"
+    );
+    c.assign_ceiling_step_absolute(2.9).unwrap();
+    let zs = ceiling_flat_zs(&c);
+    assert!(
+        zs.iter().any(|z| (z - 2.9).abs() < 1e-6),
+        "the area lands at the typed 2.9: {zs:?}"
+    );
+    assert!(
+        !zs.iter().any(|z| (z - 3.0).abs() < 1e-6),
+        "the absolute entry replaces the old delta (no 2.4+0.3+0.2 stack): {zs:?}"
+    );
+}
+
+/// A-T8 (re-pinned for the step-editing overhaul): a divider's label reads
+/// "divider" and it now APPEARS in the amber feed — visible, selectable and
+/// deletable like any step (the field report's dead-end was an invisible
+/// divider). `ceiling_divider_lines` still emits its dashed cut segment.
 #[test]
 fn divider_label_feed_and_cut_segment() {
     let mut c = ceiling_ready_controller();
@@ -5709,10 +5882,12 @@ fn divider_label_feed_and_cut_segment() {
     assert_eq!(AppController::ceiling_step_region_label(0.0), "divider");
     assert_eq!(AppController::ceiling_step_region_label(0.2), "+0.20 m");
 
-    // The amber tint/label feed excludes dividers — both halves are dividers.
+    // The amber feed now INCLUDES the dividers, labelled as such.
+    let feed = c.ceiling_step_region_polygons();
+    assert!(!feed.is_empty(), "dividers show in the step feed");
     assert!(
-        c.ceiling_step_region_polygons().is_empty(),
-        "dividers don't show as amber height steps"
+        feed.iter().all(|(_, label)| label == "divider"),
+        "both halves label as dividers: {feed:?}"
     );
 
     // The faint dashed cut: one segment per divider, on the split axis (X = 4).
@@ -5726,10 +5901,10 @@ fn divider_label_feed_and_cut_segment() {
     }
 }
 
-/// A-T8b (delete contract): with a divider PRECEDING a height step in the raw
-/// region Vec, the displayed (divider-filtered) feed lists only the step;
-/// deleting via that feed's ring removes the STEP, not the divider — the
-/// world-ring lookup maps the filtered entry back to its raw Vec index.
+/// A-T8b (delete contract, re-pinned): the feed now lists EVERY region —
+/// divider first, height step second, in raw Vec order — and deleting via
+/// either entry's ring removes exactly that region (dividers are
+/// legitimately deletable now).
 #[test]
 fn deleting_from_the_filtered_feed_removes_the_right_region() {
     let mut c = ceiling_ready_controller();
@@ -5745,14 +5920,12 @@ fn deleting_from_the_filtered_feed_removes_the_right_region() {
     c.ceiling_step_regions.entry(0).or_default().push(divider);
     c.ceiling_step_regions.entry(0).or_default().push(step);
 
-    // The displayed feed is filtered to the height step alone.
+    // The feed lists BOTH, in raw order — the step with its resulting height.
     let feed = c.ceiling_step_region_polygons();
-    assert_eq!(
-        feed.len(),
-        1,
-        "only the +0.30 step shows; the divider is hidden"
-    );
-    assert_eq!(feed[0].1, "+0.30 m");
+    assert_eq!(feed.len(), 2, "divider AND step both visible");
+    assert_eq!(feed[0].1, "divider");
+    assert_eq!(feed[1].1, "+0.30 m → 2.70 m");
+    let feed = vec![feed[1].clone()];
 
     // Delete via the FEED's ring (what the UI button carries). It must remove
     // the step (raw index 1), not the divider (raw index 0).
@@ -15522,14 +15695,18 @@ fn structure_group_exposure_repaints_only_targeted_wall_span() {
     );
 }
 
-/// (d) A FACE-PARTITIONED wall's group is `exposure_locked` — the dropdown is
-/// shown disabled (the per-region partition tool owns its exposure).
+/// (d) A FACE-PARTITIONED wall's pieces MERGE into the ordinary attribute
+/// group (same fabric/phase/exposure — field decision d78f1e41: the lock no
+/// longer splits attribution grouping), and the merged group is
+/// `exposure_locked`: the bulk exposure dropdown is disabled, because the
+/// per-region partition tool owns the partitioned wall's exposure.
 #[test]
-fn face_partitioned_wall_group_is_exposure_locked() {
+fn face_partitioned_wall_merges_into_group_and_locks_its_exposure() {
     use document::PartitionCut;
     let mut c = dimensioned_square_controller();
     let (vid0, ..) = c.document.outline.floor_plan.perimeter_walls()[0];
-    // Face-partition wall0 with a single horizontal cut.
+    // Face-partition wall0 with a single horizontal cut (nothing painted —
+    // both pieces stay Unset, same as the three plain walls).
     c.document.commit_partition_cut(
         vid0,
         PartitionCut {
@@ -15545,9 +15722,19 @@ fn face_partitioned_wall_group_is_exposure_locked() {
     c.set_structure_select_mode(Some(SelectMode::All));
     c.begin_structure_edit();
     let e = c.structure_edit().expect("session opened");
+    assert_eq!(
+        e.groups.len(),
+        1,
+        "partition pieces merge with the same-fabric walls into ONE group"
+    );
+    assert_eq!(
+        e.groups[0].ids.len(),
+        5,
+        "3 plain walls + the partitioned wall's 2 pieces"
+    );
     assert!(
-        e.groups.iter().any(|g| g.exposure_locked),
-        "the partitioned wall's group is exposure-locked"
+        e.groups[0].exposure_locked,
+        "the merged group's exposure dropdown is locked (a member is partitioned)"
     );
 }
 
@@ -20115,36 +20302,80 @@ fn select_all_includes_partitioned_wall_exposed_piece_exactly_once() {
     assert_eq!(after.len(), 4, "no selection lost across the re-resolve");
 }
 
-/// REGRESSION (grouping half of d78f1e41): the exposed piece of a partitioned
-/// wall is OFFERED by the "Edit attributes" grouping (as an exposure-locked
-/// group, per the partition design), and assigning a construction to that
-/// group actually LANDS on the piece — the assignment maps the piece to its
-/// perimeter wall's `SurfaceRef` via the (now valid) base edge, where it used
-/// to fall off the perimeter match and vanish into a riser key that never
-/// re-matched.
+/// REGRESSION (grouping half of d78f1e41, final contract): the exposed piece
+/// of a partitioned wall MERGES automatically into the same-phase/same-fabric
+/// group with the storey's plain Exposed walls — ONE group, correct count —
+/// and attributing that group reaches the piece (the assignment maps it to
+/// its perimeter wall's `SurfaceRef` via the now-valid base edge, where it
+/// used to fall off the perimeter match). The non-heat-loss piece stays out
+/// of structure scope. The retired exposure-lock GROUP SPLIT survives only as
+/// the protection it was for: the merged group's bulk exposure control is
+/// locked, so a group-level exposure set can't paint over the partition's
+/// per-region exposures.
 #[test]
-fn partitioned_wall_exposed_piece_is_groupable_and_attributable() {
-    use ber_model::ber::structural::{ConstructionMakeup, ConstructionType, WallConstructionType};
+fn partitioned_wall_exposed_piece_merges_into_same_phase_group() {
+    use ber_model::ber::structural::{
+        ConstructionMakeup, ConstructionType, SurfaceExposure, WallConstructionType,
+    };
     let mut c = dimensioned_square_controller();
-    partition_back_wall_on_second_storey(&mut c);
-    let (exposed_id, _) = partition_piece_ids(&c, 1);
+    let part_vid = partition_back_wall_on_second_storey(&mut c);
+
+    // Paint the three PLAIN walls of storey 1 Exposed (full length), matching
+    // the partition piece's painted exposure — the same-fabric/-phase/-exposure
+    // group the piece must join.
+    for (vid, a, b) in c.document.outline.floor_plan.perimeter_walls() {
+        if vid == part_vid {
+            continue;
+        }
+        let len = manip_plan::segment_len(a, b);
+        c.document
+            .set_wall_section(vid, 0.0, len, len, WallExposure::Exposed);
+    }
+    c.mark_dirty().unwrap();
+    c.materialize();
+    let (exposed_id, nhl_id) = partition_piece_ids(&c, 1);
 
     set_only_kind(&mut c, SurfaceKind::Walls);
     c.set_structure_select_mode(Some(SelectMode::All));
     c.begin_structure_edit();
-    let (gidx, locked) = {
+    {
         let e = c.structure_edit().expect("session opened");
-        let gidx = e
-            .groups
-            .iter()
-            .position(|g| g.ids.contains(&exposed_id))
-            .expect("the exposed piece is offered in a group");
-        (gidx, e.groups[gidx].exposure_locked)
-    };
-    assert!(locked, "a partitioned wall's group is exposure-locked");
+        assert_eq!(
+            e.groups.len(),
+            1,
+            "the exposed piece merges into the plain walls' group automatically"
+        );
+        let g = &e.groups[0];
+        assert_eq!(g.ids.len(), 4, "3 plain Exposed walls + the exposed piece");
+        assert!(g.ids.contains(&exposed_id), "the piece is IN the group");
+        assert!(
+            !g.ids.contains(&nhl_id),
+            "the non-heat-loss piece stays out of scope"
+        );
+        assert!(
+            g.exposure_locked,
+            "the merged group's bulk exposure control is locked"
+        );
+    }
 
+    // The retained protection: a group-level exposure set is refused on a
+    // locked group — neither the partition piece nor the plain walls repaint.
+    c.set_structure_group_exposure(0, SurfaceExposure::Wall(WallExposure::SemiExposed));
+    c.materialize();
+    {
+        let storey = &c.current_record.as_ref().unwrap().data.storeys[1];
+        let exposed_count = storey
+            .walls
+            .regions
+            .iter()
+            .filter(|r| r.exposure == WallExposure::Exposed)
+            .count();
+        assert_eq!(exposed_count, 4, "bulk exposure set was a no-op (locked)");
+    }
+
+    // Attribution through the merged group reaches the piece.
     c.set_structure_group_attrs(
-        gidx,
+        0,
         ConstructionType::Wall(WallConstructionType::CavityWall),
         ConstructionMakeup::Default,
         Default::default(),
@@ -20152,7 +20383,7 @@ fn partitioned_wall_exposed_piece_is_groupable_and_attributable() {
     c.end_structure_edit();
     c.materialize();
 
-    let (exposed_id2, _) = partition_piece_ids(&c, 1);
+    let (exposed_id2, nhl_id2) = partition_piece_ids(&c, 1);
     let rec = c.current_record.as_ref().unwrap();
     let r = rec.data.storeys[1]
         .walls
@@ -20169,13 +20400,20 @@ fn partitioned_wall_exposed_piece_is_groupable_and_attributable() {
         WallConstructionType::CavityWall,
         "the group assignment landed on the exposed piece"
     );
-
-    // The attributed wall drops out of Remaining; the untouched plain walls stay.
-    c.set_structure_select_mode(Some(SelectMode::Remaining));
-    let remaining = c.structure_selected_ids().clone();
+    // The NHL piece shares the wall's construction slot (constructions are
+    // per-wall by design) but stays OUT of structure scope: never seeded,
+    // grouped, or counted.
     assert!(
-        !remaining.contains(&exposed_id2),
-        "attributed piece no longer Remaining"
+        !rec.data.storeys[1]
+            .surface_ids(SurfaceKind::Walls)
+            .contains(&nhl_id2),
+        "the non-heat-loss piece stays out of structure scope"
     );
-    assert_eq!(remaining.len(), 3, "the three plain walls remain");
+
+    // Everything in the group is attributed → nothing Remaining on storey 1.
+    c.set_structure_select_mode(Some(SelectMode::Remaining));
+    assert!(
+        c.structure_selected_ids().is_empty(),
+        "the whole merged group is attributed — nothing remains"
+    );
 }

@@ -36,10 +36,14 @@ pub struct EditGroup {
     /// ceilings. Part of the grouping key, so same-construction-but-different-
     /// exposure surfaces split into separate groups.
     pub exposure: SurfaceExposure,
-    /// Walls only: `true` when the group's wall(s) are FACE-PARTITIONED (their
+    /// Walls only: `true` when ANY wall in the group is FACE-PARTITIONED (its
     /// exposure is owned per-2-D-region by the wall partition tool, not by a
-    /// single along-wall value) — the dropdown is shown disabled. Always
-    /// `false` for floors/ceilings.
+    /// single along-wall value) — the group's exposure dropdown is shown
+    /// disabled. Deliberately NOT part of the grouping key: a partition
+    /// piece merges into the same-fabric/-phase/-exposure group like any
+    /// other wall (field decision d78f1e41); the lock only guards the BULK
+    /// exposure control, whose durable write skips partitioned walls anyway
+    /// (`set_wall_exposure_for_ids`). Always `false` for floors/ceilings.
     pub exposure_locked: bool,
     /// Editable label for the group, defaulting to "Group 1", "Group 2", … —
     /// the assessor can rename it. Session-scoped (reset when the edit reopens).
@@ -541,9 +545,13 @@ impl AppController {
     /// that group's surfaces, dispatching to the right durable store by the
     /// exposure value's kind. Mirror of
     /// [`set_structure_group_attrs`](Self::set_structure_group_attrs) for the
-    /// exposure dropdown. A locked (face-partitioned) wall group is left to the
-    /// per-region wall-partition tool — the UI disables the dropdown, but skip
-    /// here too as belt-and-braces. A kind mismatch between the picked exposure
+    /// exposure dropdown. A locked wall group — one CONTAINING a
+    /// face-partitioned wall (partition pieces merge into ordinary groups) —
+    /// is left to the per-region wall-partition tool: the UI disables the
+    /// dropdown, this skips as belt-and-braces, and the durable write
+    /// (`set_wall_exposure_for_ids`) skips partitioned walls per-id anyway,
+    /// so a bulk set can never paint over a partition's per-region
+    /// exposures. A kind mismatch between the picked exposure
     /// and the group's kind is a no-op (shouldn't happen — the dropdown only
     /// offers this kind's variants). Updates the in-session `group.exposure` so
     /// the dropdown reflects the new value immediately.
@@ -949,10 +957,16 @@ impl AppController {
             else {
                 continue;
             };
-            // `exposure_locked` is part of the key so a face-partitioned wall
-            // (locked) never shares a group with an editable wall of the same
-            // construction — the dropdown's enabled-ness must be uniform per group.
-            // The NAME is part of the key too: same-fabric groups with
+            // `exposure_locked` is NOT part of the key: a face-partitioned
+            // wall's piece merges into the same-fabric/-phase/-exposure group
+            // like any other wall (field decision d78f1e41 — attribution
+            // grouping follows the construction, not the partition tooling).
+            // The lock's only job is guarding the group's BULK exposure
+            // control from painting over per-region partition exposures, so
+            // it becomes an OR over the merged members below (one partition
+            // piece disables the whole group's dropdown; the durable write
+            // skips partitioned walls regardless).
+            // The NAME is part of the key: same-fabric groups with
             // different names are DIFFERENT groups ("Porch roof" vs "Main
             // house roof") and must never merge in a session. So is the
             // INFERRED roof-type class (ceilings): grouping follows geometry,
@@ -968,11 +982,13 @@ impl AppController {
                     && g.makeup == makeup
                     && g.phase == phase
                     && g.exposure == exposure
-                    && g.exposure_locked == exposure_locked
                     && g.explicit_name == explicit_name
                     && g.inferred == inferred
             }) {
-                Some(g) => g.ids.push(*id),
+                Some(g) => {
+                    g.ids.push(*id);
+                    g.exposure_locked |= exposure_locked;
+                }
                 None => {
                     // A FRESH group (nothing attributed yet) ALWAYS opens on
                     // the two-mode entry — existing-group dropdown or "New

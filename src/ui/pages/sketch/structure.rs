@@ -473,8 +473,9 @@ pub(crate) fn group_editor_ui<F: FnMut(UiEvent)>(
             });
     });
     // EXPOSURE dropdown — the boundary condition shared by the group's surfaces,
-    // mirroring the phase dropdown. When the group is LOCKED (a face-partitioned
-    // wall, whose exposure is owned per-2-D-region by the wall partition tool),
+    // mirroring the phase dropdown. When the group is LOCKED (it contains a
+    // face-partitioned wall, whose exposure is owned per-2-D-region by the wall
+    // partition tool — partition pieces merge into ordinary attribute groups),
     // it's shown disabled with a hint rather than as an editable control. A
     // derived Inter-storey group is likewise READ-ONLY: `derive_inter_storey`
     // owns that classification (re-stamped on every re-resolve), so offering
@@ -490,7 +491,9 @@ pub(crate) fn group_editor_ui<F: FnMut(UiEvent)>(
             false,
             egui::Button::new(egui::RichText::new(g.exposure.label()).size(EDITOR_FONT)),
         )
-        .on_disabled_hover_text("Exposure is per-region — set it in the wall partition tool.");
+        .on_disabled_hover_text(
+            "A wall in this group is partitioned — its exposure is per-region; set it in the wall partition tool.",
+        );
     } else if inter_storey {
         ui.add_enabled(
             false,

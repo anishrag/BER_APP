@@ -850,6 +850,8 @@ impl eframe::App for BerApp {
                                 ceiling_step_available,
                                 ceiling_step_region_polygons,
                                 ceiling_divider_lines,
+                                ceiling_step_editing,
+                                ceiling_step_current_height,
                                 pending_ceiling_step_line,
                                 pending_ceiling_step_side_rects,
                                 ceiling_step_snap_tag,
@@ -951,6 +953,8 @@ impl eframe::App for BerApp {
                                     controller_ref.ceiling_step_available(),
                                     controller_ref.ceiling_step_region_polygons(),
                                     controller_ref.ceiling_divider_lines(),
+                                    controller_ref.ceiling_step_editing(),
+                                    controller_ref.ceiling_step_current_height(),
                                     controller_ref.pending_ceiling_step_line(),
                                     controller_ref.pending_ceiling_step_side_rects(),
                                     controller_ref.ceiling_step_snap_tag(),
@@ -1521,6 +1525,8 @@ impl eframe::App for BerApp {
                                 ceiling_step_available,
                                 ceiling_step_region_polygons: &ceiling_step_region_polygons,
                                 ceiling_divider_lines: &ceiling_divider_lines,
+                                ceiling_step_editing: ceiling_step_editing.clone(),
+                                ceiling_step_current_height,
                                 pending_ceiling_step_line,
                                 pending_ceiling_step_side_rects: &pending_ceiling_step_side_rects,
                                 ceiling_step_snap_tag: ceiling_step_snap_tag.as_ref(),
@@ -1737,6 +1743,14 @@ impl eframe::App for BerApp {
                             let annotate_request: std::cell::Cell<
                                 Option<ber_model::ber::common::ExternalSide>,
                             > = std::cell::Cell::new(None);
+                            // A dimension-prompt wall-length copy tap can't
+                            // edit the expression buffer inside the event
+                            // closure (the in-render view mutably borrows
+                            // `sketch_state.dimension_input`), so the tapped
+                            // length is parked here and inserted right after
+                            // render — same pattern as `annotate_request`.
+                            let dim_copy_request: std::cell::Cell<Option<f32>> =
+                                std::cell::Cell::new(None);
                             SketchPage::render(ui, view, touch_nav, |event| match event {
                                 UiEvent::Sketch(sketch_event) => match sketch_event {
                                     // Logged, not expected: after a two-finger
@@ -1845,6 +1859,12 @@ impl eframe::App for BerApp {
                                     SketchEvent::SkipDimension => {
                                         controller.borrow_mut().skip_current_dimension();
                                         self.sketch_state.dimension_error = None;
+                                    }
+                                    SketchEvent::CopyWallLengthIntoDimension(metres) => {
+                                        // The buffer is mutably borrowed by the
+                                        // in-render view — park the length and
+                                        // insert after render (see the Cell).
+                                        dim_copy_request.set(Some(metres));
                                     }
                                     SketchEvent::ApplyPositionDimension(value) => {
                                         match controller
@@ -1995,6 +2015,24 @@ impl eframe::App for BerApp {
                                                 self.sketch_state.ceiling_step_error = Some(e);
                                             }
                                         }
+                                    }
+                                    SketchEvent::AssignCeilingStepAbsolute(h) => {
+                                        match controller
+                                            .borrow_mut()
+                                            .assign_ceiling_step_absolute(h)
+                                        {
+                                            Ok(()) => {
+                                                self.sketch_state.ceiling_step_error = None;
+                                            }
+                                            Err(e) => {
+                                                log::error!("ceiling step (absolute): {}", e);
+                                                self.sketch_state.ceiling_step_error = Some(e);
+                                            }
+                                        }
+                                    }
+                                    SketchEvent::DeleteSelectedCeilingStep => {
+                                        controller.borrow_mut().delete_selected_ceiling_step();
+                                        self.sketch_state.ceiling_step_error = None;
                                     }
                                     SketchEvent::KeepCeilingSameHeight => {
                                         match controller.borrow_mut().keep_ceiling_same_height() {
@@ -3140,6 +3178,40 @@ impl eframe::App for BerApp {
                                 self.sketch_state.photo_annotator = path.and_then(|p| {
                                     crate::ui::widgets::PhotoAnnotator::open(side, &p)
                                 });
+                            }
+                            // Deferred dimension wall-length copy (see
+                            // `dim_copy_request` above): insert the tapped
+                            // wall's displayed length into the dimension
+                            // expression as the term at the caret. The caret
+                            // is read from the dimension field's TextEdit
+                            // state when it's focused (native-keyboard
+                            // editing mid-expression); the keypad/laser
+                            // flows are caret-less, so `None` targets the
+                            // last term — the laser's re-shoot semantics.
+                            if let Some(metres) = dim_copy_request.take() {
+                                let focused = ctx.memory(|m| m.focused());
+                                let cursor = focused.and_then(|id| {
+                                    egui::widgets::text_edit::TextEditState::load(ctx, id)
+                                        .and_then(|s| s.cursor.char_range())
+                                        .map(|r| r.primary.index.min(r.secondary.index))
+                                });
+                                let caret = crate::number_entry::insert_copied_length(
+                                    &mut self.sketch_state.dimension_input,
+                                    cursor,
+                                    metres,
+                                );
+                                // Keep the visible caret just after the
+                                // inserted text (only when a caret was read —
+                                // i.e. the field is focused and has state).
+                                if let (Some(id), Some(_)) = (focused, cursor) {
+                                    let mut st =
+                                        egui::widgets::text_edit::TextEditState::load(ctx, id)
+                                            .unwrap_or_default();
+                                    st.cursor.set_char_range(Some(egui::text::CCursorRange::one(
+                                        egui::text::CCursor::new(caret),
+                                    )));
+                                    st.store(ctx, id);
+                                }
                             }
                         }
                     },
