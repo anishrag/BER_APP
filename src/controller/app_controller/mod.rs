@@ -100,7 +100,7 @@ mod storeys;
 mod strokes;
 mod view;
 
-use ceiling_points::{PendingCeilingContinuation, PendingCeilingPoint};
+use ceiling_points::{ContinuationTool, PendingCeilingContinuation, PendingCeilingPoint};
 use ceiling_rects::{PendingCeilingRect, RectPins};
 use ceiling_ridges::{PendingCeilingRidge, RidgeQuestion};
 use ceiling_steps::PendingCeilingStep;
@@ -280,9 +280,14 @@ pub struct AppController {
     /// DURABLE record is the same `Storey::ceiling_apexes`; see
     /// `ceiling_rects.rs`.
     pending_roof_rect: Option<PendingCeilingRect>,
-    /// The in-flight CONTINUE-from-neighbour pick (Ceiling shape mode):
-    /// `PickTarget` → `PickSource { target }` → commit. Transient — outside
-    /// undo, cleared on storey switch / mode exit / cancel. The DURABLE
+    /// Which CONTINUE-ceiling tool is toggled on (the Heights row's
+    /// "Neighbour ceiling" / "Ceiling from storey" toggles) — a mode like
+    /// the dormer/roof tools, mutually exclusive with them. `None` = off.
+    continuation_tool: Option<ContinuationTool>,
+    /// The in-flight CONTINUE-from pick while a continuation tool is on:
+    /// `PickTarget` → (`PickSource { target }` →) commit → back to
+    /// `PickTarget` (paint-style until the tool is toggled off). Transient —
+    /// outside undo, cleared on storey switch / mode exit. The DURABLE
     /// record is `Storey::ceiling_continuations`; see `ceiling_points.rs`.
     pending_ceiling_continuation: Option<PendingCeilingContinuation>,
     /// Two-step confirm for the destructive "Reset heights" button: the
@@ -694,6 +699,7 @@ impl AppController {
             pending_ceiling_step: None,
             ceiling_point_mode: false,
             pending_roof_point: None,
+            continuation_tool: None,
             pending_ceiling_continuation: None,
             reset_ceiling_confirm: false,
             pending_roof_ridge: None,

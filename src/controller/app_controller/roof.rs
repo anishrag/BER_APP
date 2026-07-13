@@ -111,6 +111,9 @@ impl AppController {
             self.pending_roof_rect = None;
             self.dormer_mode = false;
             self.pending_rect_is_dormer = false;
+            self.continuation_tool = None;
+            self.pending_ceiling_continuation = None;
+            self.reset_ceiling_confirm = false;
         } else {
             self.roof_gate_pending = false;
         }

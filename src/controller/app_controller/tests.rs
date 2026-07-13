@@ -19357,3 +19357,231 @@ fn copy_height_floor_step_commits_absolute_level_and_surfaces_guard() {
         "the new area joined the −0.3 level via the copy"
     );
 }
+
+/// A dimensioned T-PLAN controller (the test2 field record's shape): a 6×5
+/// rect x[1.3, 7.3] × y[2.45, 7.45] with a 2×2 stem x[3.3, 5.3] ×
+/// y[7.45, 9.45] on the south side.
+fn dimensioned_t_plan_controller() -> AppController {
+    let p = |x: f32, y: f32| Point2f32::new(x, y);
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    let _ = c.create_ber(
+        "T2".into(),
+        chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+    );
+    c.document.floor_plan = FloorPlan::from_points_to_orthogonal(
+        &[
+            p(1.3, 2.45),
+            p(1.3, 7.45),
+            p(3.3, 7.45),
+            p(3.3, 9.45),
+            p(5.3, 9.45),
+            p(5.3, 7.45),
+            p(7.3, 7.45),
+            p(7.3, 2.45),
+            p(1.34, 2.49),
+        ],
+        0.1,
+        true,
+    )
+    .unwrap();
+    c.document.dimensioning.scale_set = true;
+    c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
+    c.commit_to_ber().unwrap();
+    c
+}
+
+/// The "Neighbour ceiling" TOOL end to end: toggle on → tap the stepped
+/// stem (target) → tap the rect (source) → the stem re-emits on the rect's
+/// plane; the pick RESTARTS (paint-style); tapping the now-continued stem
+/// again CLEARS the link and the step reappears.
+#[test]
+fn neighbour_ceiling_tool_paints_and_clears_a_continuation() {
+    let mut c = dimensioned_t_plan_controller();
+    c.set_default_ceiling_height(2.0).unwrap();
+    // A real 0.4 m step over the stem → two regions at 2.0 / 2.4.
+    c.ceiling_step_regions.insert(
+        0,
+        vec![document::CeilingStepRegion {
+            polygon: vec![
+                Point2f32::new(3.3, 7.45),
+                Point2f32::new(3.3, 9.45),
+                Point2f32::new(5.3, 9.45),
+                Point2f32::new(5.3, 7.45),
+            ],
+            delta_m: 0.4,
+        }],
+    );
+    c.recompose_ceilings(0);
+    c.materialize();
+    let stem_z = |c: &AppController| {
+        let s = &c.current_record.as_ref().unwrap().data.storeys[0];
+        let i = *s
+            .ceilings
+            .claim_regions(domain::points::Point2f64::new(4.3, 8.45))
+            .first()
+            .expect("stem region");
+        s.ceilings.regions[i].flat_z().expect("flat stem")
+    };
+    assert!((stem_z(&c) - 2.4).abs() < 1e-9, "the step raised the stem");
+
+    c.set_neighbour_continuation_mode(true);
+    assert!(c.ceiling_continuation_picking_target());
+    c.ceiling_point_tap(4.3, 8.45); // target: the stem
+    assert!(c.ceiling_continuation_picking_source());
+    c.ceiling_point_tap(4.3, 4.95); // source: the rect
+    assert!(
+        (stem_z(&c) - 2.0).abs() < 1e-9,
+        "the stem now continues the rect's plane"
+    );
+    assert!(
+        c.ceiling_continuation_picking_target(),
+        "paint-style: the pick restarts at the target stage"
+    );
+    // Tapping the continued stem again clears the link — the step returns.
+    c.ceiling_point_tap(4.3, 8.45);
+    assert!((stem_z(&c) - 2.4).abs() < 1e-9, "cleared: the step is back");
+    assert!(c.ceiling_continuation_picking_target(), "still painting");
+    c.set_neighbour_continuation_mode(false);
+    assert!(!c.ceiling_continuation_picking_target());
+}
+
+/// TEST2 ON-DEVICE REGRESSION, the stale-divider variant: a delta-0 session
+/// DIVIDER over the stem (invisible in the UI — the delete feed filters
+/// dividers) splits the T before the ridge; the same-height absorption in
+/// the solve must still deliver two planes covering the whole T through the
+/// REAL flow.
+#[test]
+fn t_plan_gable_absorbs_a_stale_invisible_divider() {
+    let mut c = dimensioned_t_plan_controller();
+    c.set_default_ceiling_height(2.0).unwrap();
+    // The stale divider: a delta-0 step area over the stem, as canonicalize
+    // leaves it in the session list.
+    c.ceiling_step_regions.insert(
+        0,
+        vec![document::CeilingStepRegion {
+            polygon: vec![
+                Point2f32::new(3.3, 7.45),
+                Point2f32::new(3.3, 9.45),
+                Point2f32::new(5.3, 9.45),
+                Point2f32::new(5.3, 7.45),
+            ],
+            delta_m: 0.0,
+        }],
+    );
+    c.recompose_ceilings(0);
+    c.materialize();
+    assert_eq!(
+        c.current_record.as_ref().unwrap().data.storeys[0]
+            .ceilings
+            .regions
+            .len(),
+        2,
+        "the divider split the T (looks like one flat ceiling)"
+    );
+    c.set_roof_point_mode(true);
+    c.apply_roof_ridge_stroke_event(&[(1.0, 4.95), (7.6, 4.95)]);
+    let mut guard = 0;
+    while !c.ceiling_ridge_height_pending() && guard < 6 {
+        assert!(c.ceiling_ridge_pending(), "ridge flow died early");
+        c.skip_position_dimension().unwrap();
+        guard += 1;
+    }
+    c.assign_roof_ridge_height(3.0).unwrap();
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert_eq!(
+        storey.ceilings.regions.len(),
+        2,
+        "two planes over the WHOLE T despite the divider: {:?}",
+        storey
+            .ceilings
+            .regions
+            .iter()
+            .map(|r| &r.polygon)
+            .collect::<Vec<_>>()
+    );
+    let groups = storey.ceiling_apex_groups();
+    let ring_area: f64 = groups[0]
+        .merged_rings
+        .iter()
+        .map(|ring| {
+            let n = ring.len();
+            (0..n)
+                .map(|i| {
+                    let (p, q) = (ring[i], ring[(i + 1) % n]);
+                    p.x * q.y - q.x * p.y
+                })
+                .sum::<f64>()
+                .abs()
+                / 2.0
+        })
+        .sum();
+    assert!(
+        (ring_area - 34.0).abs() < 0.2,
+        "the stem stays in the roof group (≈34 m², got {ring_area})"
+    );
+}
+
+/// TEST2 ON-DEVICE REGRESSION: the wall-to-wall gable committed through the
+/// REAL ridge flow (stroke → snaps → stages → height, with the side hints
+/// the drawn flow stamps) over the T plan must solve to TWO planes whose
+/// group covers the WHOLE T — the field dump showed 5 regions with the stem
+/// dropped from the group's merged ring.
+#[test]
+fn t_plan_gable_through_the_real_ridge_flow_is_two_planes() {
+    let mut c = dimensioned_t_plan_controller();
+    c.set_default_ceiling_height(2.0).unwrap();
+    c.materialize();
+    c.set_roof_point_mode(true);
+    // A horizontal ridge stroke across the rect at y ≈ 4.95, overshooting
+    // both walls (the drawn-gable idiom — the end snap pulls it wall to
+    // wall).
+    c.apply_roof_ridge_stroke_event(&[(1.0, 4.95), (7.6, 4.95)]);
+    // Both ends snapped → the flow opens the CROSS position question (and
+    // possibly the start's); accept the drawn values.
+    let mut guard = 0;
+    while !c.ceiling_ridge_height_pending() && guard < 6 {
+        assert!(
+            c.ceiling_ridge_pending(),
+            "ridge flow died before the height stage"
+        );
+        c.skip_position_dimension().unwrap();
+        guard += 1;
+    }
+    assert!(guard < 6, "ridge stage loop didn't terminate");
+    c.assign_roof_ridge_height(3.0).unwrap();
+
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    // The dump's failure shape: 5 regions, stem outside the group.
+    assert_eq!(
+        storey.ceilings.regions.len(),
+        2,
+        "two planes over the whole T, got {:?}",
+        storey
+            .ceilings
+            .regions
+            .iter()
+            .map(|r| &r.polygon)
+            .collect::<Vec<_>>()
+    );
+    let groups = storey.ceiling_apex_groups();
+    assert_eq!(groups.len(), 1);
+    let ring_area: f64 = groups[0]
+        .merged_rings
+        .iter()
+        .map(|ring| {
+            let n = ring.len();
+            (0..n)
+                .map(|i| {
+                    let (p, q) = (ring[i], ring[(i + 1) % n]);
+                    p.x * q.y - q.x * p.y
+                })
+                .sum::<f64>()
+                .abs()
+                / 2.0
+        })
+        .sum();
+    assert!(
+        (ring_area - 34.0).abs() < 0.2,
+        "the group's merged ring covers rect + stem (≈34 m²), got {ring_area}"
+    );
+}

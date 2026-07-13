@@ -196,6 +196,7 @@ impl AppController {
         self.pending_ceiling_step = None;
         self.ceiling_point_mode = false;
         self.pending_roof_point = None;
+        self.continuation_tool = None;
         self.pending_ceiling_continuation = None;
         self.reset_ceiling_confirm = false;
         self.pending_roof_ridge = None;
@@ -285,6 +286,7 @@ impl AppController {
         self.pending_ceiling_step = None;
         self.ceiling_step_mode = false;
         self.pending_roof_point = None;
+        self.continuation_tool = None;
         self.pending_ceiling_continuation = None;
         self.reset_ceiling_confirm = false;
         self.pending_roof_ridge = None;
@@ -837,6 +839,7 @@ impl AppController {
         self.pending_ceiling_step = None;
         self.ceiling_step_mode = false;
         self.pending_roof_point = None;
+        self.continuation_tool = None;
         self.pending_ceiling_continuation = None;
         self.reset_ceiling_confirm = false;
         self.pending_roof_ridge = None;

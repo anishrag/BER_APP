@@ -66,6 +66,9 @@ impl AppController {
             self.ceiling_step_mode = false;
             self.pending_ceiling_step = None;
             self.ceiling_point_mode = false;
+            self.continuation_tool = None;
+            self.pending_ceiling_continuation = None;
+            self.reset_ceiling_confirm = false;
             // A surviving cut-pick would fire on the same stroke's tap.
             self.pending_cut = None;
             self.pending_phase_cut = None;

@@ -3114,10 +3114,12 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     // pending cut-pick owns the tap instead. Once a stage is pending —
     // a point's OR a ridge's (stroke = ridge shares the mode) — taps do
     // nothing (the prompts are toolbar/panel-driven).
-    if view.ceiling_point_mode
+    if ((view.ceiling_point_mode
         && !view.ceiling_point_pending
         && !view.ceiling_ridge_pending
-        && !view.ceiling_rect_pending
+        && !view.ceiling_rect_pending)
+        || view.neighbour_continuation_mode
+        || view.storey_continuation_mode)
         && matches!(edit_tool, EditTools::DrawPerpWalls)
         && !copy_pick
         && !cut_pending

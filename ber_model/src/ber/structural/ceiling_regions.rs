@@ -634,8 +634,19 @@ impl CeilingRegions {
         // hand-edited input; assign-time validation rejects creating one) is
         // warn-and-proceed, the ≥3-apex posture.
         let mut per_region: Vec<Vec<usize>> = vec![Vec::new(); self.regions.len()];
+        // Region pairs a MULTI-CLAIM apex straddles (a mono-pitch JUNCTION
+        // apex on their shared boundary): the side choice is deliberate, so
+        // the same-height absorption below must never fuse that pair.
+        let mut junction_pairs: Vec<(usize, usize)> = Vec::new();
         for (i, apex) in apexes.iter().enumerate() {
             let claims = self.claim_regions(apex.point);
+            if claims.len() > 1 {
+                for (k, &a) in claims.iter().enumerate() {
+                    for &b in &claims[k + 1..] {
+                        junction_pairs.push((a.min(b), a.max(b)));
+                    }
+                }
+            }
             match claims.split_first() {
                 None => log::warn!(
                     "ceiling apex at ({:.3}, {:.3}) lies in no ceiling region — skipped",
@@ -680,8 +691,26 @@ impl CeilingRegions {
                 }
             }
         }
+        // ABSORB INVISIBLE SAME-HEIGHT SPLITS before shaping (the test2
+        // field bug): a delta-0 step DIVIDER (or any same-height re-split —
+        // it survives canonicalize and is filtered out of the delete feed,
+        // so the assessor can neither see nor remove it) splits one flat
+        // ceiling into several regions. The apexes then claim only the
+        // PIECE they land in and the roof shapes over that piece alone —
+        // on the T plan the stem silently dropped out of the gable. Fix: a
+        // CLAIMED, FLAT region first merges with every ADJACENT flat region
+        // at the SAME height (transitively; adjacency = a real shared plan
+        // boundary piece) into ONE region, and the fan/ridge shapes the
+        // union — exactly what the un-split ceiling would have solved.
+        // Real steps (different z) and re-applied SLOPED faces (the
+        // re-apply identity paths) are untouched; the merged region takes
+        // the lowest-index member's fabric link (warned when members
+        // disagree — a divider placed for attribution is absorbed by the
+        // roof it now belongs to).
+        let (regions, per_region) =
+            absorb_level_neighbours(self.regions, per_region, &junction_pairs);
         let mut next: Vec<CeilingRegion> = Vec::new();
-        for (ri, region) in self.regions.into_iter().enumerate() {
+        for (ri, region) in regions.into_iter().enumerate() {
             if region.polygon.exterior.len() < 3 {
                 next.push(region);
                 continue;
@@ -1368,6 +1397,166 @@ impl CeilingRegions {
         }
         out
     }
+}
+
+/// The pre-shaping ABSORPTION pass of
+/// [`with_apexes_shaped`](CeilingRegions::with_apexes_shaped): every
+/// CLAIMED (apex-containing), FLAT region floods over its ADJACENT flat
+/// neighbours at the SAME height (within 1e-6 m; adjacency = a shared plan
+/// boundary piece longer than a millimetre — [`shared_plan_pieces`]) and
+/// the component is replaced by its plan-UNION as ONE region carrying the
+/// combined apex claims — so an invisible delta-0 divider can't shrink the
+/// area a fan/ridge shapes. The union must come out as ONE simple ring;
+/// anything else (holes, disjoint debris — shouldn't happen for a connected
+/// component) warns and leaves the component unmerged. Unclaimed / sloped /
+/// degenerate regions pass through untouched, preserving order; the merged
+/// region sits at its lowest member's position with that member's fabric
+/// link (warned when members disagree).
+///
+/// `junction_pairs` lists region pairs a MULTI-CLAIM apex straddles — a
+/// mono-pitch ridge ON their shared boundary, where sloping ONE side is the
+/// deliberate semantics (the ChooseArea flow) — and the flood never crosses
+/// those pairs: junctions keep their sides, only apex-INTERIOR pieces
+/// absorb their level neighbours.
+fn absorb_level_neighbours(
+    regions: Vec<CeilingRegion>,
+    claims: Vec<Vec<usize>>,
+    junction_pairs: &[(usize, usize)],
+) -> (Vec<CeilingRegion>, Vec<Vec<usize>>) {
+    use geo::bool_ops::BooleanOps;
+    use geo::Area;
+    const Z_EPS: f64 = 1e-6;
+    const MIN_SHARED_M: f64 = 1e-3;
+    let n = regions.len();
+    if n < 2 || claims.iter().all(|c| c.is_empty()) {
+        return (regions, claims);
+    }
+    let flat: Vec<Option<f64>> = regions.iter().map(|r| r.flat_z()).collect();
+    let rings: Vec<Vec<Point2f64>> = regions
+        .iter()
+        .map(|r| {
+            r.polygon
+                .exterior
+                .iter()
+                .map(|v| Point2f64::new(v.x, v.y))
+                .collect()
+        })
+        .collect();
+    let adjacent = |a: usize, b: usize| {
+        !junction_pairs.contains(&(a.min(b), a.max(b)))
+            && shared_plan_pieces(&rings[a], &rings[b])
+                .iter()
+                .any(|(p, q)| ((p.x - q.x).powi(2) + (p.y - q.y).powi(2)).sqrt() > MIN_SHARED_M)
+    };
+    // Flood from each still-unvisited CLAIMED flat region over same-height
+    // flat neighbours.
+    let mut comp_of: Vec<Option<usize>> = vec![None; n];
+    let mut comps: Vec<Vec<usize>> = Vec::new();
+    for seed in 0..n {
+        if claims[seed].is_empty() || comp_of[seed].is_some() {
+            continue;
+        }
+        let Some(z0) = flat[seed] else { continue };
+        let id = comps.len();
+        let mut members = vec![seed];
+        comp_of[seed] = Some(id);
+        let mut stack = vec![seed];
+        while let Some(k) = stack.pop() {
+            for j in 0..n {
+                if comp_of[j].is_none()
+                    && flat[j].is_some_and(|z| (z - z0).abs() <= Z_EPS)
+                    && adjacent(k, j)
+                {
+                    comp_of[j] = Some(id);
+                    members.push(j);
+                    stack.push(j);
+                }
+            }
+        }
+        members.sort_unstable();
+        comps.push(members);
+    }
+    if comps.iter().all(|m| m.len() < 2) {
+        return (regions, claims); // nothing split — the common case
+    }
+    let mut out_regions: Vec<CeilingRegion> = Vec::new();
+    let mut out_claims: Vec<Vec<usize>> = Vec::new();
+    let mut emitted: Vec<bool> = vec![false; comps.len()];
+    for ri in 0..n {
+        let Some(cid) = comp_of[ri].filter(|&c| comps[c].len() > 1) else {
+            out_regions.push(regions[ri].clone());
+            out_claims.push(claims[ri].clone());
+            continue;
+        };
+        if emitted[cid] {
+            continue; // the component was emitted at its first member
+        }
+        emitted[cid] = true;
+        let members = &comps[cid];
+        let z0 = flat[members[0]].expect("flood seeds are flat");
+        // Plan union of the members.
+        let mut acc = MultiPolygon::<f64>(Vec::new());
+        for &m in members {
+            acc = acc.union(&MultiPolygon(vec![regions[m].polygon.clone().into()]));
+        }
+        let pieces: Vec<Polygon<f64>> = acc
+            .0
+            .iter()
+            .flat_map(split_to_simple)
+            .filter(|p| p.unsigned_area() >= SLIVER_AREA_M2)
+            .collect();
+        let mut union_ring: Vec<Point2f64> = match pieces.as_slice() {
+            [one] => one
+                .exterior()
+                .coords()
+                .map(|c| Point2f64::new(c.x, c.y))
+                .collect(),
+            _ => {
+                log::warn!(
+                    "same-height ceiling absorption: {} members union into {} pieces — \
+                     left unmerged",
+                    members.len(),
+                    pieces.len()
+                );
+                for &m in members {
+                    out_regions.push(regions[m].clone());
+                    out_claims.push(claims[m].clone());
+                }
+                continue;
+            }
+        };
+        if union_ring.len() > 1 && union_ring.first() == union_ring.last() {
+            union_ring.pop();
+        }
+        if members
+            .iter()
+            .any(|&m| regions[m].construction_id != regions[members[0]].construction_id)
+        {
+            log::warn!(
+                "same-height ceiling absorption merges regions with different \
+                 constructions — the roof takes the first member's"
+            );
+        }
+        let seed = &regions[members[0]];
+        out_regions.push(CeilingRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(
+                union_ring
+                    .into_iter()
+                    .map(|p| Point3f64::new(p.x, p.y, z0))
+                    .collect(),
+            ),
+            opes: Opes::default(),
+            construction_id: seed.construction_id,
+            exposure: seed.exposure,
+        });
+        out_claims.push({
+            let mut c: Vec<usize> = members.iter().flat_map(|&m| claims[m].clone()).collect();
+            c.sort_unstable();
+            c
+        });
+    }
+    (out_regions, out_claims)
 }
 
 /// A planar region of the ceiling — pure geometry + openings (roof lights /

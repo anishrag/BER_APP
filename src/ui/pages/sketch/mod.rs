@@ -340,10 +340,14 @@ pub enum SketchEvent {
     ConfirmResetCeilingShape,
     /// Disarm the reset confirm without resetting.
     CancelResetCeilingShape,
-    /// "Continue from neighbour…": start the two-tap pick (target region,
-    /// then the source region whose plane continues over it).
-    StartCeilingContinuation,
-    /// Abandon the continue-from pick at any stage.
+    /// Toggle the "Neighbour ceiling" tool: paint-style continue-from picks
+    /// (tap the target region, then the neighbouring source region).
+    SetNeighbourContinuationMode(bool),
+    /// Toggle the "Ceiling from storey" tool: paint-style continue-from
+    /// picks against the storey above/below (auto-applied when only one
+    /// neighbouring storey exists).
+    SetStoreyContinuationMode(bool),
+    /// Step the in-flight continue-from pick back to its target stage.
     CancelCeilingContinuation,
     /// Commit the pending continue-from pick against the storey above
     /// (`up = true`) or below — the source region is auto-resolved under the
@@ -1176,8 +1180,10 @@ pub struct SketchView<'a> {
     /// Two-step "Reset heights" confirm: the button is ARMED (next tap
     /// executes the reset).
     pub reset_ceiling_pending: bool,
-    /// Continue-from-neighbour pick stages (ceiling-shape mode): waiting for
-    /// the TARGET tap / the SOURCE tap.
+    /// The CONTINUE-ceiling tools (Heights row toggles) and their pick
+    /// stages: waiting for the TARGET tap / the SOURCE tap.
+    pub neighbour_continuation_mode: bool,
+    pub storey_continuation_mode: bool,
     pub ceiling_continuation_picking_target: bool,
     pub ceiling_continuation_picking_source: bool,
     pub ceiling_rect_views: &'a [([(f64, f64); 4], String)],

@@ -2537,6 +2537,100 @@ mod tests {
         );
     }
 
+    /// THE test2 ON-DEVICE REGRESSION: a stale delta-0 step DIVIDER (it
+    /// survives canonicalize and is filtered out of the delete feed, so the
+    /// assessor can neither see nor remove it) had split the T into
+    /// rect + stem BEFORE the apexes — the ridge then claimed only the rect
+    /// and the stem silently dropped out of the roof (the field dump's
+    /// 5-region / rect-only merged ring). The same-height ABSORPTION now
+    /// fuses the pieces back before shaping: two planes over the whole T.
+    #[test]
+    fn stale_divider_split_t_still_solves_the_full_gable() {
+        let cid = ItemId::default();
+        // The device's exact plan (f32-offset coordinates from the dump).
+        let ring = vec![
+            Point2f64::new(1.2961, 2.4527),
+            Point2f64::new(1.2961, 7.4527),
+            Point2f64::new(3.2961, 7.4527),
+            Point2f64::new(3.2961, 9.4527),
+            Point2f64::new(5.2961, 9.4527),
+            Point2f64::new(5.2961, 7.4527),
+            Point2f64::new(7.2961, 7.4527),
+            Point2f64::new(7.2961, 2.4527),
+        ];
+        let stem = vec![
+            Point2f64::new(3.2961, 7.4527),
+            Point2f64::new(3.2961, 9.4527),
+            Point2f64::new(5.2961, 9.4527),
+            Point2f64::new(5.2961, 7.4527),
+        ];
+        let apexes = vec![
+            CeilingApex {
+                point: Point2f64::new(1.2961, 4.9527),
+                z_m: 3.0,
+            },
+            CeilingApex {
+                point: Point2f64::new(7.2961, 4.9527),
+                z_m: 3.0,
+            },
+        ];
+        let split = CeilingRegions::default_for_footprint(vec![ring], 2.0, cid)
+            .with_z_deltas(&[(stem, 0.0)]); // the invisible divider
+        assert_eq!(split.regions.len(), 2, "the divider split the T");
+        let out = split.with_apexes(&apexes);
+        assert_eq!(
+            out.regions.len(),
+            2,
+            "the absorption re-fuses the pieces: two planes over the whole T"
+        );
+        let total: f64 = out.regions.iter().map(plan_area).sum();
+        assert!((total - 34.0).abs() < 1e-6, "rect + stem all covered");
+        let groups = out.apex_groups(&apexes);
+        assert_eq!(groups.len(), 1);
+        let ring_area: f64 = groups[0]
+            .merged_rings
+            .iter()
+            .map(|ring| {
+                let n = ring.len();
+                (0..n)
+                    .map(|i| {
+                        let (p, q) = (ring[i], ring[(i + 1) % n]);
+                        p.x * q.y - q.x * p.y
+                    })
+                    .sum::<f64>()
+                    .abs()
+                    / 2.0
+            })
+            .sum();
+        assert!(
+            (ring_area - 34.0).abs() < 1e-6,
+            "the group's merged ring keeps the stem (got {ring_area})"
+        );
+        // The stem embeds below base on the south plane.
+        let south = out
+            .regions
+            .iter()
+            .find(|r| {
+                r.polygon
+                    .exterior
+                    .iter()
+                    .any(|v| (v.y - 9.4527).abs() <= 1e-9)
+            })
+            .expect("the south plane spans the stem");
+        for v in south
+            .polygon
+            .exterior
+            .iter()
+            .filter(|v| (v.y - 9.4527).abs() <= 1e-9)
+        {
+            assert!(
+                v.z < 2.0 - 0.5,
+                "stem wall embeds well below base, got {}",
+                v.z
+            );
+        }
+    }
+
     /// A ridge with INTERIOR endpoints keeps the hip solve — no gable
     /// auto-unfan: every boundary corner stays a fan target at base z.
     #[test]

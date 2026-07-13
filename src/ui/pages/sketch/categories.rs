@@ -54,6 +54,12 @@ pub enum Tool {
     /// Flat-topped DORMER tool toggle (a closed stroke carves a raised patch
     /// into the sloped attic ceiling; same gate as the ceiling points).
     Dormer,
+    /// "Neighbour ceiling" tool toggle: continue one ceiling area's surface
+    /// from a neighbouring area's plane (paint-style target→source taps).
+    NeighbourCeiling,
+    /// "Ceiling from storey" tool toggle: continue a ceiling area's surface
+    /// from the storey above/below over the same spot.
+    CeilingFromStorey,
     /// Phase-1 roof step toggle: gated whole-house roof-drawing takeover
     /// (whole-house outline shaded by top storey + roof controls).
     Roof,
@@ -121,6 +127,8 @@ pub const CATEGORIES: &[Category] = &[
             Tool::FloorSteps,
             Tool::CeilingSteps,
             Tool::CeilingPoints,
+            Tool::NeighbourCeiling,
+            Tool::CeilingFromStorey,
             Tool::Dormer,
             Tool::Roof,
         ],
@@ -252,6 +260,9 @@ pub struct ToolFlags {
     pub ceiling_point_available: bool,
     /// The destructive "Reset heights" button is ARMED (two-step confirm).
     pub reset_ceiling_pending: bool,
+    /// The CONTINUE-ceiling tool toggles (Heights row modes).
+    pub neighbour_continuation_mode: bool,
+    pub storey_continuation_mode: bool,
     pub dormer_mode: bool,
     pub dormer_available: bool,
     pub openings_mode: bool,
@@ -321,6 +332,8 @@ impl ToolFlags {
             ceiling_point_mode: view.ceiling_point_mode,
             ceiling_point_available: view.ceiling_point_available,
             reset_ceiling_pending: view.reset_ceiling_pending,
+            neighbour_continuation_mode: view.neighbour_continuation_mode,
+            storey_continuation_mode: view.storey_continuation_mode,
             dormer_mode: view.dormer_mode,
             dormer_available: view.dormer_available,
             openings_mode: view.openings_mode,
@@ -846,6 +859,44 @@ fn tool_ui<F: FnMut(UiEvent)>(
                 .clicked()
             {
                 on_event(UiEvent::Sketch(SketchEvent::RequestResetCeilingShape));
+            }
+        }
+        Tool::NeighbourCeiling => {
+            // Same gate as the ceiling-shape tools; the controller setter
+            // re-enforces it.
+            let enabled = !flags.read_only && flags.has_floor_plan && flags.ceiling_point_available;
+            if ui
+                .add_enabled(
+                    enabled,
+                    egui::Button::selectable(flags.neighbour_continuation_mode, "⤺ Neighbour ceiling"),
+                )
+                .hint(
+                    "Make one ceiling area's surface CONTINUE a neighbouring                      area's plane: tap the area to change, then the area to                      continue from (repeats until toggled off). Tapping an                      already-continued area clears it.",
+                )
+                .disabled_hint("Set the default ceiling height first (the Heights field above)")
+                .clicked()
+            {
+                on_event(UiEvent::Sketch(SketchEvent::SetNeighbourContinuationMode(
+                    !flags.neighbour_continuation_mode,
+                )));
+            }
+        }
+        Tool::CeilingFromStorey => {
+            let enabled = !flags.read_only && flags.has_floor_plan && flags.ceiling_point_available;
+            if ui
+                .add_enabled(
+                    enabled,
+                    egui::Button::selectable(flags.storey_continuation_mode, "⤺ Ceiling from storey"),
+                )
+                .hint(
+                    "Make a ceiling area's surface CONTINUE the storey above/                     below's ceiling plane over the same spot: tap the area to                      change (asks which storey only when both exist). Tapping                      an already-continued area clears it.",
+                )
+                .disabled_hint("Set the default ceiling height first (the Heights field above)")
+                .clicked()
+            {
+                on_event(UiEvent::Sketch(SketchEvent::SetStoreyContinuationMode(
+                    !flags.storey_continuation_mode,
+                )));
             }
         }
         Tool::Dormer => {

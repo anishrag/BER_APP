@@ -61,13 +61,26 @@ pub(super) enum PendingCeilingPoint {
     },
 }
 
-/// The in-flight CONTINUE-from-neighbour pick, advanced tap by tap:
-/// `PickTarget` (tap the region whose surface changes; tapping an
-/// already-continued region CLEARS its links instead) → `PickSource` (tap
-/// the neighbouring region to continue from, or the From-above/below
-/// buttons) → commit. Session-only, outside undo; cleared on storey switch,
-/// mode exit, and cancel. The DURABLE record is
-/// `Storey::ceiling_continuations`.
+/// Which CONTINUE-ceiling TOOL is active — two Heights-row toggles, modes
+/// like the dormer/roof tools:
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ContinuationTool {
+    /// "Neighbour ceiling": target region, then a neighbouring source
+    /// region on the SAME storey.
+    Neighbour,
+    /// "Ceiling from storey": target region, then the storey above/below
+    /// (auto-resolved when only one exists).
+    Storey,
+}
+
+/// The in-flight CONTINUE-from pick, advanced tap by tap while a
+/// [`ContinuationTool`] is on: `PickTarget` (tap the region whose surface
+/// changes; tapping an already-continued region CLEARS its links instead) →
+/// `PickSource` (tap the neighbouring region, or the From-above/below
+/// buttons) → commit → back to `PickTarget` (paint-style — the assessor may
+/// continue several areas — until the tool toggles off). Session-only,
+/// outside undo; cleared on storey switch and mode exit. The DURABLE record
+/// is `Storey::ceiling_continuations`.
 #[derive(Debug, Clone, Copy)]
 pub(super) enum PendingCeilingContinuation {
     PickTarget,
@@ -109,6 +122,7 @@ impl AppController {
         self.pending_roof_ridge = None;
         self.roof_ridge_notice = None;
         self.pending_roof_rect = None;
+        self.continuation_tool = None;
         self.pending_ceiling_continuation = None;
         self.reset_ceiling_confirm = false;
         self.dormer_mode = false;
@@ -144,16 +158,13 @@ impl AppController {
     /// = a corner snap for free), and the first UN-snapped axis opens its
     /// position prompt (X then Y; both snapped → straight to the height).
     pub fn ceiling_point_tap(&mut self, world_x: f32, world_y: f32) {
-        if !self.ceiling_point_mode {
-            return;
-        }
-        // A pending CONTINUE-from pick owns the tap (it can only be started
-        // with no other stage in flight).
-        if self.pending_ceiling_continuation.is_some() {
+        // A CONTINUE-ceiling tool owns every tap while it is on.
+        if self.continuation_tool.is_some() {
             self.ceiling_continuation_tap(world_x as f64, world_y as f64);
             return;
         }
-        if self.pending_roof_point.is_some()
+        if !self.ceiling_point_mode
+            || self.pending_roof_point.is_some()
             || self.ceiling_ridge_pending()
             || self.ceiling_rect_pending()
         {
@@ -629,40 +640,94 @@ impl AppController {
         )
     }
 
-    /// Start the CONTINUE-from-neighbour pick ("Continue from neighbour…"):
-    /// the next canvas tap picks the TARGET region. Only in ceiling-shape
-    /// mode with nothing else in flight.
-    pub fn start_ceiling_continuation(&mut self) {
-        if !self.ceiling_point_mode
-            || self.pending_roof_point.is_some()
-            || self.ceiling_ridge_pending()
-            || self.ceiling_rect_pending()
-        {
+    /// True while the "Neighbour ceiling" tool is toggled on.
+    pub fn neighbour_continuation_mode(&self) -> bool {
+        self.continuation_tool == Some(ContinuationTool::Neighbour)
+    }
+
+    /// True while the "Ceiling from storey" tool is toggled on.
+    pub fn storey_continuation_mode(&self) -> bool {
+        self.continuation_tool == Some(ContinuationTool::Storey)
+    }
+
+    /// Toggle the "Neighbour ceiling" tool (continue one ceiling area's
+    /// surface from a neighbouring area's plane).
+    pub fn set_neighbour_continuation_mode(&mut self, on: bool) {
+        self.set_continuation_tool(on.then_some(ContinuationTool::Neighbour));
+    }
+
+    /// Toggle the "Ceiling from storey" tool (continue a ceiling area's
+    /// surface from the storey above/below's plane over the same spot).
+    pub fn set_storey_continuation_mode(&mut self, on: bool) {
+        self.set_continuation_tool(on.then_some(ContinuationTool::Storey));
+    }
+
+    /// Enter/leave a CONTINUE-ceiling tool — a Heights-row MODE like the
+    /// dormer/roof tools (same gate as the ceiling-shape tools; mutually
+    /// exclusive with them and with every other drawing mode). Entering arms
+    /// the paint-style PickTarget loop; leaving clears it.
+    fn set_continuation_tool(&mut self, tool: Option<ContinuationTool>) {
+        self.pending_redraw = None;
+        if tool.is_some() && !self.ceiling_point_available() {
             return;
         }
-        self.pending_ceiling_continuation = Some(PendingCeilingContinuation::PickTarget);
+        self.continuation_tool = tool;
+        self.pending_ceiling_continuation = tool.map(|_| PendingCeilingContinuation::PickTarget);
+        self.reset_ceiling_confirm = false;
+        self.pending_roof_point = None;
+        self.pending_roof_ridge = None;
+        self.roof_ridge_notice = None;
+        self.pending_roof_rect = None;
+        self.pending_rect_is_dormer = false;
+        if tool.is_some() {
+            self.exit_openings_mode();
+            self.living_area_mode = false;
+            self.exposure_mode = false;
+            self.phase_mode = false;
+            self.step_mode = false;
+            self.ceiling_step_mode = false;
+            self.pending_ceiling_step = None;
+            self.ceiling_point_mode = false;
+            self.dormer_mode = false;
+            self.pending_cut = None;
+            self.pending_phase_cut = None;
+            self.pending_step_cut = None;
+            self.last_snap_action = None;
+            self.activate_shape(ActiveShape::Outline);
+            self.set_edit_mode(EditTools::DrawPerpWalls);
+        }
     }
 
-    /// Abandon the CONTINUE-from pick at any stage.
+    /// Step the in-flight pick back to PickTarget (the stage Cancel — the
+    /// tool itself stays on; toggling the tool off is the full exit).
     pub fn cancel_ceiling_continuation(&mut self) {
-        self.pending_ceiling_continuation = None;
+        if self.continuation_tool.is_some() {
+            self.pending_ceiling_continuation = Some(PendingCeilingContinuation::PickTarget);
+        } else {
+            self.pending_ceiling_continuation = None;
+        }
     }
 
-    /// A canvas tap while the CONTINUE-from pick is in flight (routed from
+    /// A canvas tap while a CONTINUE-ceiling tool is on (routed from
     /// [`ceiling_point_tap`](Self::ceiling_point_tap)):
     ///
     /// - `PickTarget`: the tapped ceiling region becomes the TARGET — unless
     ///   it already has continuation(s), in which case the tap CLEARS them
-    ///   (the documented affordance: re-picking a continued region undoes
-    ///   it) and the flow ends;
-    /// - `PickSource`: the tapped region becomes the SOURCE — its plane is
-    ///   continued over the target (same-storey link; the From-above/below
-    ///   buttons commit the cross-storey variant instead). Tapping the
-    ///   target's own region again is a logged no-op (pick a NEIGHBOUR).
+    ///   (re-picking a continued region undoes it) and the loop restarts.
+    ///   The "Ceiling from storey" tool then commits WITHOUT asking when
+    ///   only ONE neighbouring storey has a ceiling there, and opens the
+    ///   above/below choice when both do;
+    /// - `PickSource` ("Neighbour ceiling"): the tapped region becomes the
+    ///   SOURCE — its plane continues over the target. Tapping the target's
+    ///   own region again is a logged no-op (pick a NEIGHBOUR).
+    ///
+    /// Every commit restarts at PickTarget — paint-style, until the tool is
+    /// toggled off.
     pub fn ceiling_continuation_tap(&mut self, world_x: f64, world_y: f64) {
         let Some(stage) = self.pending_ceiling_continuation else {
             return;
         };
+        let tool = self.continuation_tool;
         let idx = self.current_storey_idx.unwrap_or(0);
         // The picks resolve against the RESOLVED ceilings.
         self.materialize();
@@ -687,18 +752,57 @@ impl AppController {
                 });
                 if already {
                     // The clear affordance: tapping a continued region with
-                    // the tool removes its link(s).
+                    // the tool removes its link(s); the loop restarts.
                     let record = self.current_record.as_mut().expect("checked above");
                     let removed = record.data.clear_ceiling_continuations_at(idx, p);
                     log::debug!("cleared {removed} ceiling continuation(s) at the tapped region");
-                    self.pending_ceiling_continuation = None;
-                    self.ceiling_edit_tail(idx);
-                } else {
-                    self.pending_ceiling_continuation =
-                        Some(PendingCeilingContinuation::PickSource { target: p });
+                    self.restart_continuation_pick(idx);
+                    return;
+                }
+                match tool {
+                    Some(ContinuationTool::Storey) => {
+                        // Which neighbouring storeys have a ceiling here?
+                        let record = self.current_record.as_ref().expect("checked above");
+                        let has = |i: i64| {
+                            usize::try_from(i)
+                                .ok()
+                                .and_then(|i| record.data.storeys.get(i))
+                                .is_some_and(|s| !s.ceilings.claim_regions(p).is_empty())
+                        };
+                        let (above, below) = (has(idx as i64 + 1), has(idx as i64 - 1));
+                        match (above, below) {
+                            (true, true) => {
+                                // Both exist — ask via the above/below buttons.
+                                self.pending_ceiling_continuation =
+                                    Some(PendingCeilingContinuation::PickSource { target: p });
+                            }
+                            (true, false) | (false, true) => {
+                                self.pending_ceiling_continuation =
+                                    Some(PendingCeilingContinuation::PickSource { target: p });
+                                if let Err(e) = self.ceiling_continuation_from_storey(above) {
+                                    log::warn!("ceiling continuation: {e}");
+                                }
+                            }
+                            (false, false) => {
+                                log::warn!(
+                                    "no neighbouring storey has a ceiling over that area — \
+                                     still picking"
+                                );
+                            }
+                        }
+                    }
+                    _ => {
+                        self.pending_ceiling_continuation =
+                            Some(PendingCeilingContinuation::PickSource { target: p });
+                    }
                 }
             }
             PendingCeilingContinuation::PickSource { target } => {
+                if tool == Some(ContinuationTool::Storey) {
+                    // The storey tool's source is a BUTTON choice, not a tap.
+                    log::debug!("pick the storey above/below (buttons), not a canvas tap");
+                    return;
+                }
                 let (Some(sr), Some(tr)) = (region_of(storey, p), region_of(storey, target)) else {
                     log::debug!("continuation source tap hit no ceiling region — still picking");
                     return;
@@ -709,18 +813,28 @@ impl AppController {
                 }
                 let record = self.current_record.as_mut().expect("checked above");
                 record.data.add_ceiling_continuation(idx, target, p, 0);
-                self.pending_ceiling_continuation = None;
-                self.ceiling_edit_tail(idx);
+                self.restart_continuation_pick(idx);
             }
         }
+    }
+
+    /// The post-commit tail of a continuation edit: the standard ceiling
+    /// edit tail, then back to PickTarget while the tool stays on
+    /// (paint-style).
+    fn restart_continuation_pick(&mut self, idx: usize) {
+        self.ceiling_edit_tail(idx);
+        self.pending_ceiling_continuation = self
+            .continuation_tool
+            .map(|_| PendingCeilingContinuation::PickTarget);
     }
 
     /// Commit the pending CONTINUE-from pick against the storey ABOVE
     /// (`up = true`) or BELOW: the source region is auto-resolved as the one
     /// containing the TARGET point on that storey (no cross-storey tapping),
     /// and the plane converts through the floor datums at recompose. `Err`
-    /// (user-facing) when no source stage is open, the storey doesn't exist,
-    /// or it has no ceiling region over the target point.
+    /// (user-facing) when the storey doesn't exist or has no ceiling region
+    /// over the target point (the pick then stays open). On success the loop
+    /// restarts at PickTarget.
     pub fn ceiling_continuation_from_storey(&mut self, up: bool) -> Result<(), String> {
         let Some(PendingCeilingContinuation::PickSource { target }) =
             self.pending_ceiling_continuation
@@ -747,8 +861,7 @@ impl AppController {
         record
             .data
             .add_ceiling_continuation(idx, target, target, offset);
-        self.pending_ceiling_continuation = None;
-        self.ceiling_edit_tail(idx);
+        self.restart_continuation_pick(idx);
         Ok(())
     }
 }

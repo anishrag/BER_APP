@@ -877,6 +877,8 @@ impl eframe::App for BerApp {
                                 ceiling_ridge_meet_edge_height,
                                 ceiling_ridge_pending,
                                 reset_ceiling_pending,
+                                neighbour_continuation_mode,
+                                storey_continuation_mode,
                                 ceiling_continuation_picking_target,
                                 ceiling_continuation_picking_source,
                                 ceiling_rect_views,
@@ -976,6 +978,8 @@ impl eframe::App for BerApp {
                                     controller_ref.ceiling_ridge_meet_edge_height(),
                                     controller_ref.ceiling_ridge_pending(),
                                     controller_ref.reset_ceiling_shape_pending(),
+                                    controller_ref.neighbour_continuation_mode(),
+                                    controller_ref.storey_continuation_mode(),
                                     controller_ref.ceiling_continuation_picking_target(),
                                     controller_ref.ceiling_continuation_picking_source(),
                                     controller_ref.ceiling_rect_views(),
@@ -1544,6 +1548,8 @@ impl eframe::App for BerApp {
                                     .borrow()
                                     .ceiling_ridge_area_options(),
                                 reset_ceiling_pending,
+                                neighbour_continuation_mode,
+                                storey_continuation_mode,
                                 ceiling_continuation_picking_target,
                                 ceiling_continuation_picking_source,
                                 ceiling_rect_views: &ceiling_rect_views,
@@ -2025,8 +2031,11 @@ impl eframe::App for BerApp {
                                     SketchEvent::CancelResetCeilingShape => {
                                         controller.borrow_mut().cancel_reset_ceiling_shape();
                                     }
-                                    SketchEvent::StartCeilingContinuation => {
-                                        controller.borrow_mut().start_ceiling_continuation();
+                                    SketchEvent::SetNeighbourContinuationMode(on) => {
+                                        controller.borrow_mut().set_neighbour_continuation_mode(on);
+                                    }
+                                    SketchEvent::SetStoreyContinuationMode(on) => {
+                                        controller.borrow_mut().set_storey_continuation_mode(on);
                                     }
                                     SketchEvent::CancelCeilingContinuation => {
                                         controller.borrow_mut().cancel_ceiling_continuation();
