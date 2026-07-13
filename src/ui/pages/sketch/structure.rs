@@ -285,7 +285,21 @@ pub(crate) fn group_editor_ui<F: FnMut(UiEvent)>(
     name_error: Option<&str>,
     on_event: &mut F,
 ) {
-    let relevant: Vec<&ExistingGroup> = existing.iter().filter(|e| e.ty.kind() == kind).collect();
+    // Kind filter + INFERENCE-COMPATIBILITY filter (ceilings): a region may
+    // only join a group whose ceiling construction type its own drawn
+    // geometry allows — `InferredRoofType::allows_join` states the rule
+    // ("can't add to a group insulated on rafter if it's a flat ceil and
+    // pitched roof"). Walls/floors carry `Unknown` → unfiltered, as before.
+    // Applies to BOTH pickers below (the fresh box's "Existing group…" and
+    // the full editor's "Add to existing group…" share this list).
+    let relevant: Vec<&ExistingGroup> = existing
+        .iter()
+        .filter(|e| e.ty.kind() == kind)
+        .filter(|e| match e.ty {
+            ConstructionType::Ceiling(t) => g.inferred.allows_join(t),
+            _ => true,
+        })
+        .collect();
     // COMPACT box (all kinds): whenever the full editor shows (not the
     // two-mode entry), the title and the name textbox merge onto ONE line
     // ("Wall (n) — [name]") instead of a centred heading plus a name row.
@@ -369,7 +383,8 @@ pub(crate) fn group_editor_ui<F: FnMut(UiEvent)>(
             // for the completeness tick painted above.
             let w = (ui.available_width() - 16.0).clamp(40.0, EDIT_NAME_W);
             ui.push_id(("structure_group_name", group_index), |ui| {
-                crate::ui::widgets::pads::text_input(ui, &mut name, w, "name")
+                // Select-all on focus: typing replaces "Group N" outright.
+                crate::ui::widgets::pads::text_input_select_all(ui, &mut name, w, "name")
             })
             .inner
             .changed
@@ -377,7 +392,8 @@ pub(crate) fn group_editor_ui<F: FnMut(UiEvent)>(
         .inner
     } else {
         ui.push_id(("structure_group_name", group_index), |ui| {
-            crate::ui::widgets::pads::text_input(ui, &mut name, EDIT_NAME_W, "name")
+            // Select-all on focus: typing replaces "Group N" outright.
+            crate::ui::widgets::pads::text_input_select_all(ui, &mut name, EDIT_NAME_W, "name")
         })
         .inner
         .changed

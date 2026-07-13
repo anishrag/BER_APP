@@ -166,9 +166,12 @@ pub(crate) fn group_connector_anchor(
             .ids
             .iter()
             .filter_map(|id| region_plan_ring(storey, kind, *id))
+            // |area| (not signed): a CW member ring must not lose the
+            // largest-member election to orientation.
             .max_by(|a, b| {
                 domain::points::ring_area(a)
-                    .partial_cmp(&domain::points::ring_area(b))
+                    .abs()
+                    .partial_cmp(&domain::points::ring_area(b).abs())
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
             .and_then(|ring| manip_plan::ring_interior_point(&ring))
@@ -189,8 +192,12 @@ pub(crate) fn group_connector_anchor(
 }
 
 /// A floor/ceiling region's plan exterior ring (world metres, open), for the
-/// interior-point anchor. `None` for walls (they use the base midpoint) and
-/// for ids that don't resolve.
+/// interior-point anchor. `None` for walls (they use the base midpoint), for
+/// ids that don't resolve, and — the test2 "connector points into the
+/// interstorey area" report — for regions that are OUT OF STRUCTURE SCOPE
+/// (inter-storey / party): a stale session membership must never let the
+/// connector target (largest-member election!) or the recolour land on a
+/// surface the Structure phase doesn't cover.
 fn region_plan_ring(
     storey: &Storey,
     kind: SurfaceKind,
@@ -199,17 +206,22 @@ fn region_plan_ring(
     use domain::points::Point2f64;
     match kind {
         SurfaceKind::Walls => None,
-        SurfaceKind::Floors => storey.floors.regions.iter().find(|r| r.id == id).map(|r| {
-            floor_ring(r)
-                .iter()
-                .map(|&(x, y)| Point2f64::new(x, y))
-                .collect()
-        }),
+        SurfaceKind::Floors => storey
+            .floors
+            .regions
+            .iter()
+            .find(|r| r.id == id && r.exposure.in_structure_scope())
+            .map(|r| {
+                floor_ring(r)
+                    .iter()
+                    .map(|&(x, y)| Point2f64::new(x, y))
+                    .collect()
+            }),
         SurfaceKind::Ceilings => storey
             .ceilings
             .regions
             .iter()
-            .find(|r| r.id == id)
+            .find(|r| r.id == id && r.exposure.in_structure_scope())
             .map(|r| {
                 r.polygon
                     .exterior
@@ -269,15 +281,20 @@ fn region_centroid(
             .find(|r| r.id == id)
             .and_then(|r| r.base_midpoint())
             .map(|m| (m.x, m.y)),
-        SurfaceKind::Floors => storey.floors.regions.iter().find(|r| r.id == id).map(|r| {
-            let c = r.centroid();
-            (c.x, c.y)
-        }),
+        SurfaceKind::Floors => storey
+            .floors
+            .regions
+            .iter()
+            .find(|r| r.id == id && r.exposure.in_structure_scope())
+            .map(|r| {
+                let c = r.centroid();
+                (c.x, c.y)
+            }),
         SurfaceKind::Ceilings => storey
             .ceilings
             .regions
             .iter()
-            .find(|r| r.id == id)
+            .find(|r| r.id == id && r.exposure.in_structure_scope())
             .map(|r| {
                 let c = r.centroid();
                 (c.x, c.y)
@@ -399,13 +416,25 @@ fn draw_fanned_surface(
             painter.line_segment([a, b], egui::Stroke::new(core, line));
         }
         SurfaceKind::Floors => {
-            let Some(r) = storey.floors.regions.iter().find(|r| r.id == id) else {
+            // Out-of-scope (inter-storey / party) surfaces never recolour —
+            // a stale membership must not paint what the phase doesn't cover.
+            let Some(r) = storey
+                .floors
+                .regions
+                .iter()
+                .find(|r| r.id == id && r.exposure.in_structure_scope())
+            else {
                 return;
             };
             fill_outline(painter, t, &floor_ring(r), offset, fill, line, active);
         }
         SurfaceKind::Ceilings => {
-            let Some(r) = storey.ceilings.regions.iter().find(|r| r.id == id) else {
+            let Some(r) = storey
+                .ceilings
+                .regions
+                .iter()
+                .find(|r| r.id == id && r.exposure.in_structure_scope())
+            else {
                 return;
             };
             let ring: Vec<(f64, f64)> = r.polygon.exterior.iter().map(|p| (p.x, p.y)).collect();
@@ -472,4 +501,88 @@ fn fill_outline(
         screen,
         egui::Stroke::new(if active { 2.5 } else { 1.5 }, line),
     ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::controller::app_controller::EditGroup;
+    use ber_model::ber::common::ItemId;
+    use ber_model::ber::roof::InferredRoofType;
+    use ber_model::ber::structural::SurfaceExposure;
+    use ber_model::ber::structural::{
+        CeilingConstructionType, CeilingExposure, CeilingRegion, CeilingRegions, ConstructionType,
+        Opes, Polygon3D,
+    };
+    use domain::points::Point3f64;
+
+    fn region(x0: f64, y0: f64, x1: f64, y1: f64, exposure: CeilingExposure) -> CeilingRegion {
+        CeilingRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(vec![
+                Point3f64::new(x0, y0, 2.4),
+                Point3f64::new(x1, y0, 2.4),
+                Point3f64::new(x1, y1, 2.4),
+                Point3f64::new(x0, y1, 2.4),
+            ]),
+            opes: Opes::default(),
+            construction_id: ItemId::default(),
+            exposure,
+        }
+    }
+
+    /// THE "final house" REGRESSION: a two-storey plan where the storey
+    /// above covers most of storey 0 (its ceiling there derives InterStorey)
+    /// and only a porch NIB stays an exposed roof. Even if the ceiling
+    /// group's membership carries the (larger) inter-storey region — a stale
+    /// session or a pre-derivation selection — the connector anchor must be
+    /// an interior point of the group's own IN-SCOPE member (the nib), never
+    /// a point inside the inter-storey area; and the out-of-scope region
+    /// must not resolve for the recolour either.
+    #[test]
+    fn ceiling_group_anchor_stays_inside_the_in_scope_nib() {
+        // Storey 0's ceilings: the big inter-storey area (Storey 1's
+        // footprint) and the exposed porch nib — the field record's shape.
+        let inter = region(-1.81, 0.71, 4.15, 8.63, CeilingExposure::InterStorey);
+        let nib = region(2.48, 8.63, 4.15, 9.73, CeilingExposure::ExposedRoof);
+        let (inter_id, nib_id) = (inter.id, nib.id);
+        let storey = ber_model::ber::structural::Storey {
+            ceilings: CeilingRegions {
+                regions: vec![inter, nib],
+            },
+            ..Default::default()
+        };
+        let group = EditGroup {
+            // The vulnerable membership: the inter-storey region FIRST and
+            // LARGER — the old largest-member election would anchor in it.
+            ids: vec![inter_id, nib_id],
+            ty: ConstructionType::Ceiling(CeilingConstructionType::Uninitialised),
+            makeup: Default::default(),
+            phase: Default::default(),
+            exposure: SurfaceExposure::Ceiling(CeilingExposure::ExposedRoof),
+            exposure_locked: false,
+            name: "Group 1".into(),
+            explicit_name: None,
+            photos: Vec::new(),
+            insulation: None,
+            show_editor: false,
+            fresh: true,
+            inferred: InferredRoofType::Ambiguous,
+        };
+        let (ax, ay) = group_connector_anchor(&storey, &group, (1.17, 4.67));
+        let inside = |x0: f64, y0: f64, x1: f64, y1: f64| ax > x0 && ax < x1 && ay > y0 && ay < y1;
+        assert!(
+            inside(2.48, 8.63, 4.15, 9.73),
+            "anchor ({ax:.2}, {ay:.2}) must be interior to the NIB"
+        );
+        assert!(
+            !inside(-1.81, 0.71, 4.15, 8.63),
+            "anchor must never land in the inter-storey area"
+        );
+        // The out-of-scope member resolves to no ring/centroid — the
+        // recolour path skips it entirely.
+        assert!(region_plan_ring(&storey, SurfaceKind::Ceilings, inter_id).is_none());
+        assert!(region_centroid(&storey, SurfaceKind::Ceilings, inter_id).is_none());
+        assert!(region_plan_ring(&storey, SurfaceKind::Ceilings, nib_id).is_some());
+    }
 }

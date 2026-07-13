@@ -836,6 +836,35 @@ pub enum InferredRoofType {
     Unknown,
 }
 
+impl InferredRoofType {
+    /// Whether a region with THIS inference may JOIN a group whose ceiling
+    /// construction type is `t` — the Structure editor's existing-group
+    /// compatibility filter (the user's own example: "can't add to a group
+    /// insulated on rafter if it's a flat ceil and pitched roof"):
+    ///
+    /// - `Definite(d)` → only groups typed exactly `d` (or still
+    ///   `Uninitialised` — nothing committed to conflict with);
+    /// - `Ambiguous` (a flat ceiling under a pitched roof — an attic void)
+    ///   → the insulation sits on the ceiling or on both, so
+    ///   `SlopedInsOnCeiling` / `SlopedInsOnCeilingAndRafter` (never
+    ///   `SlopedInsOnRafter`, never `FlatRoof`), plus `Uninitialised`;
+    /// - `Unknown` → no filter (today's behaviour).
+    ///
+    /// Walls/floors always carry `Unknown`, so only ceiling offers are ever
+    /// filtered.
+    pub fn allows_join(self, t: CeilingConstructionType) -> bool {
+        use CeilingConstructionType as T;
+        match self {
+            InferredRoofType::Unknown => true,
+            InferredRoofType::Definite(d) => t == d || t == T::Uninitialised,
+            InferredRoofType::Ambiguous => matches!(
+                t,
+                T::SlopedInsOnCeiling | T::SlopedInsOnCeilingAndRafter | T::Uninitialised
+            ),
+        }
+    }
+}
+
 impl crate::ber::ber_struct::Ber {
     /// Infer the roof type of ceiling `region` on storey `storey_idx` from
     /// the dwelling roof drawn over it ([`Roof`] on `Ber`). The covering
@@ -915,6 +944,44 @@ fn ring_polygon(ring: &[Point2f64]) -> geo::Polygon<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Structure editor's existing-group compatibility rule
+    /// ([`InferredRoofType::allows_join`]): Definite joins only its own type
+    /// (or Uninitialised); Ambiguous (flat ceiling under a pitched roof)
+    /// joins the on-ceiling variants only — never ins-on-rafter, never a
+    /// flat roof; Unknown joins anything.
+    #[test]
+    fn inferred_roof_type_join_compatibility() {
+        use CeilingConstructionType as T;
+        let definite = InferredRoofType::Definite(T::SlopedInsOnRafter);
+        assert!(definite.allows_join(T::SlopedInsOnRafter));
+        assert!(definite.allows_join(T::Uninitialised));
+        assert!(!definite.allows_join(T::FlatRoof));
+        assert!(!definite.allows_join(T::SlopedInsOnCeiling));
+
+        let ambiguous = InferredRoofType::Ambiguous;
+        assert!(ambiguous.allows_join(T::SlopedInsOnCeiling));
+        assert!(ambiguous.allows_join(T::SlopedInsOnCeilingAndRafter));
+        assert!(ambiguous.allows_join(T::Uninitialised));
+        assert!(
+            !ambiguous.allows_join(T::SlopedInsOnRafter),
+            "can't add a flat-ceiling-under-pitched-roof region to an ins-on-rafter group"
+        );
+        assert!(!ambiguous.allows_join(T::FlatRoof));
+
+        for t in [
+            T::FlatRoof,
+            T::SlopedInsOnRafter,
+            T::SlopedInsOnCeiling,
+            T::SlopedInsOnCeilingAndRafter,
+            T::Uninitialised,
+        ] {
+            assert!(
+                InferredRoofType::Unknown.allows_join(t),
+                "Unknown never filters"
+            );
+        }
+    }
 
     fn square_10() -> Vec<Vec<Point2f64>> {
         vec![vec![

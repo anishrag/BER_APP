@@ -70,6 +70,18 @@ pub fn text_input(ui: &mut egui::Ui, buf: &mut String, width: f32, hint: &str) -
     input_with_pad(ui, buf, width, hint, PadKind::Qwerty)
 }
 
+/// [`text_input`] that SELECTS the whole current text when the field GAINS
+/// focus, so typing replaces it without manual clearing — the group-name
+/// field idiom ("Group 1" should vanish on the first keystroke).
+pub fn text_input_select_all(
+    ui: &mut egui::Ui,
+    buf: &mut String,
+    width: f32,
+    hint: &str,
+) -> PadResponse {
+    input_with_pad_opts(ui, buf, width, hint, PadKind::Qwerty, true)
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum PadKind {
     Numeric,
@@ -83,11 +95,36 @@ fn input_with_pad(
     hint: &str,
     kind: PadKind,
 ) -> PadResponse {
+    input_with_pad_opts(ui, buf, width, hint, kind, false)
+}
+
+fn input_with_pad_opts(
+    ui: &mut egui::Ui,
+    buf: &mut String,
+    width: f32,
+    hint: &str,
+    kind: PadKind,
+    select_all_on_focus: bool,
+) -> PadResponse {
+    let char_len = buf.chars().count();
     let response = ui.add(
         egui::TextEdit::singleline(buf)
             .desired_width(width)
             .hint_text(hint),
     );
+    // SELECT-ALL on gaining focus (the group-name idiom): set the stored
+    // `TextEditState` cursor range over the whole text, so the next
+    // keystroke replaces it.
+    if select_all_on_focus && response.gained_focus() {
+        use egui::text::{CCursor, CCursorRange};
+        if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), response.id) {
+            state.cursor.set_char_range(Some(CCursorRange::two(
+                CCursor::new(0),
+                CCursor::new(char_len),
+            )));
+            state.store(ui.ctx(), response.id);
+        }
+    }
     let mut submitted = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
     let mut changed = response.changed();
 

@@ -974,19 +974,18 @@ impl AppController {
             }) {
                 Some(g) => g.ids.push(*id),
                 None => {
-                    // A FRESH group (nothing attributed yet) opens on the
-                    // two-mode entry — existing-group dropdown or "New group"
-                    // — instead of the full editor. A group about to be
-                    // PREFILLED (a Definite inference over a still-unset
-                    // stored type — the seed pass below) opens attributed:
-                    // straight to the editor, keeping the in-editor join
-                    // combo (its two-mode entry never showed).
+                    // A FRESH group (nothing attributed yet) ALWAYS opens on
+                    // the two-mode entry — existing-group dropdown or "New
+                    // group" — like every other kind; a Definite inference no
+                    // longer skips it. The inference applies when the
+                    // assessor taps "New group" (`begin_new_structure_group`)
+                    // — or immediately below, when NO compatible offer exists
+                    // and the two-mode entry would never show.
                     let type_set = match ty {
                         ConstructionType::Wall(t) => t.is_set(),
                         ConstructionType::Floor(t) => t.is_set(),
                         ConstructionType::Ceiling(t) => t.is_set(),
                     };
-                    let seeded = !type_set && matches!(inferred, InferredRoofType::Definite(_));
                     groups.push(EditGroup {
                         ids: vec![*id],
                         ty,
@@ -1000,8 +999,8 @@ impl AppController {
                         explicit_name,
                         photos,
                         insulation,
-                        show_editor: type_set || makeup.is_set() || seeded,
-                        fresh: !(type_set || makeup.is_set() || seeded),
+                        show_editor: type_set || makeup.is_set(),
+                        fresh: !(type_set || makeup.is_set()),
                         inferred,
                     })
                 }
@@ -1022,14 +1021,17 @@ impl AppController {
                 viewing_photos: None,
                 name_error: None,
             });
-            // PREFILL: a group whose geometry pins the roof type down
-            // (`Definite`) while its stored type is still unset gets the
-            // inferred type committed through the NORMAL attrs path — so it
-            // persists and counts toward completeness exactly like a
-            // hand-picked value, and the dropdown opens pre-selected. A
-            // stored pick (anything non-`Uninitialised`) is never touched:
-            // this only fires on `Uninitialised`, so an assessor override
-            // always stands.
+            // PREFILL only where the two-mode entry can NEVER show: a group
+            // whose geometry pins the roof type down (`Definite`) over a
+            // still-unset stored type, with NO inference-compatible existing
+            // offer of its kind (the UI falls through to the full editor
+            // when there is nothing to join — the inferred type must be in
+            // the dropdown when it opens). Groups WITH offers stay on the
+            // two-mode entry and get the same seed when the assessor taps
+            // "New group" (`begin_new_structure_group`). A stored pick is
+            // never touched: this only fires on `Uninitialised`, so an
+            // assessor override always stands.
+            let offers = self.structure_existing_groups();
             let seeds: Vec<(
                 usize,
                 CeilingConstructionType,
@@ -1046,7 +1048,18 @@ impl AppController {
                             (
                                 ConstructionType::Ceiling(CeilingConstructionType::Uninitialised),
                                 InferredRoofType::Definite(t),
-                            ) => Some((i, t, g.makeup.clone(), g.phase.clone())),
+                            ) => {
+                                let has_offer = offers.iter().any(|e| {
+                                    e.ty.kind() == SurfaceKind::Ceilings
+                                        && match e.ty {
+                                            ConstructionType::Ceiling(et) => {
+                                                g.inferred.allows_join(et)
+                                            }
+                                            _ => false,
+                                        }
+                                });
+                                (!has_offer).then(|| (i, t, g.makeup.clone(), g.phase.clone()))
+                            }
                             _ => None,
                         })
                         .collect()
@@ -1054,6 +1067,16 @@ impl AppController {
                 .unwrap_or_default();
             for (i, t, makeup, phase) in seeds {
                 self.set_structure_group_attrs(i, ConstructionType::Ceiling(t), makeup, phase);
+                if let Some(g) = self
+                    .structure_edit
+                    .as_mut()
+                    .and_then(|e| e.groups.get_mut(i))
+                {
+                    // The no-offer prefill behaves like the pre-two-mode
+                    // seeded box: full editor, in-editor join combo kept.
+                    g.show_editor = true;
+                    g.fresh = false;
+                }
             }
         }
     }
@@ -1618,15 +1641,33 @@ impl AppController {
     }
 
     /// "New group" on a fresh group box: skip the existing-group offer and
-    /// open the full attribute editor for `group` (blank, exactly as before
-    /// the two-mode entry existed). No model write — purely session UI flow.
+    /// open the full attribute editor for `group` — and THIS is where the
+    /// roof-type inference lands: a `Definite` inference over a still-unset
+    /// stored type is committed through the normal attrs path, so the type
+    /// dropdown opens pre-selected (and persists / counts toward
+    /// completeness like a hand-picked value). An `Ambiguous` inference
+    /// leaves the dropdown unset — the editor shows its hint instead. A
+    /// stored pick is never touched.
     pub fn begin_new_structure_group(&mut self, group: usize) {
-        if let Some(g) = self
+        let seed = match self
             .structure_edit
             .as_mut()
             .and_then(|e| e.groups.get_mut(group))
         {
-            g.show_editor = true;
+            Some(g) => {
+                g.show_editor = true;
+                match (g.ty, g.inferred) {
+                    (
+                        ConstructionType::Ceiling(CeilingConstructionType::Uninitialised),
+                        InferredRoofType::Definite(t),
+                    ) => Some((t, g.makeup.clone(), g.phase.clone())),
+                    _ => None,
+                }
+            }
+            None => return,
+        };
+        if let Some((t, makeup, phase)) = seed {
+            self.set_structure_group_attrs(group, ConstructionType::Ceiling(t), makeup, phase);
         }
     }
 

@@ -19390,6 +19390,64 @@ fn dimensioned_t_plan_controller() -> AppController {
     c
 }
 
+/// ITEM 1 (screenshot session): the inference lands when "New group" is
+/// tapped, not silently at session open. Driven via the reset-to-fresh path
+/// (the two-mode entry's state): resetting the prefilled group un-attributes
+/// it back to the two-mode entry; `begin_new_structure_group` then re-seeds
+/// the Definite type so the editor opens with the dropdown populated.
+#[test]
+fn new_group_tap_seeds_the_definite_inference() {
+    use ber_model::ber::roof::{InferredRoofType, RoofShape};
+    use ber_model::ber::structural::{CeilingConstructionType, ConstructionType};
+
+    let mut c = ceiling_ready_controller();
+    c.materialize();
+    // A FLAT roof over the whole (flat) ceiling → Definite(FlatRoof).
+    c.set_roof_mode(true);
+    c.confirm_all_storeys_added_roof();
+    c.roof_region_tap(5.0, 5.0, 0.5);
+    c.pick_roof_area_shape(RoofShape::Flat);
+    c.set_roof_mode(false);
+    c.materialize();
+
+    set_only_kind(&mut c, SurfaceKind::Ceilings);
+    c.set_structure_select_mode(Some(SelectMode::All));
+    c.begin_structure_edit();
+    let gi = {
+        let e = c.structure_edit().expect("session opened");
+        e.groups
+            .iter()
+            .position(|g| {
+                g.inferred == InferredRoofType::Definite(CeilingConstructionType::FlatRoof)
+            })
+            .expect("the Definite group")
+    };
+    // Back to the two-mode entry (un-attributed, fresh).
+    c.reset_structure_group(gi);
+    {
+        let g = &c.structure_edit().unwrap().groups[gi];
+        assert!(
+            g.fresh && !g.show_editor,
+            "reset returns to the two-mode entry"
+        );
+        assert_eq!(
+            g.ty,
+            ConstructionType::Ceiling(CeilingConstructionType::Uninitialised),
+            "reset un-attributes the type"
+        );
+    }
+    // "New group" applies the inference: the editor opens with the type
+    // dropdown already populated.
+    c.begin_new_structure_group(gi);
+    let g = &c.structure_edit().unwrap().groups[gi];
+    assert!(g.show_editor, "New group opens the full editor");
+    assert_eq!(
+        g.ty,
+        ConstructionType::Ceiling(CeilingConstructionType::FlatRoof),
+        "the Definite inference seeds the dropdown on New group"
+    );
+}
+
 /// The "Neighbour ceiling" TOOL end to end: toggle on → tap the stepped
 /// stem (target) → tap the rect (source) → the stem re-emits on the rect's
 /// plane; the pick RESTARTS (paint-style); tapping the now-continued stem
