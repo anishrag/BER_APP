@@ -359,6 +359,16 @@ pub(super) fn instruction(view: &SketchView<'_>) -> Option<&'static str> {
         {
             return Some("Pin the position on the plan — the distance is entered in the box.");
         }
+        if view.ceiling_continuation_picking_target {
+            return Some(
+                "Continue ceiling — tap the area to change (tapping a continued area clears it).",
+            );
+        }
+        if view.ceiling_continuation_picking_source {
+            return Some(
+                "Continue ceiling — tap the neighbouring area to continue from, or pick a storey.",
+            );
+        }
         if view.ceiling_point_mode {
             return Some(
                 "Ceiling shape — tap an apex, or draw a ridge / flat-top, then set heights.",
@@ -468,6 +478,55 @@ pub(super) fn render_controls<F: FnMut(UiEvent)>(
             // and the deletes are in the Delete panel.
             if view.ceiling_step_orientation_pending {
                 ceiling_step_toolbar(ui, on_event);
+            }
+            // CONTINUE-from-neighbour (ceiling-shape mode): the entry button
+            // while idle; the pick stages' cross-storey shortcuts + Cancel
+            // while in flight (the picks themselves are canvas taps — the
+            // stage instruction is in the bottom bar).
+            if view.ceiling_point_mode
+                && !view.ceiling_point_pending
+                && !view.ceiling_ridge_pending
+                && !view.ceiling_rect_pending
+            {
+                if view.ceiling_continuation_picking_target {
+                    if ui.button("Cancel").clicked() {
+                        on_event(UiEvent::Sketch(SketchEvent::CancelCeilingContinuation));
+                    }
+                } else if view.ceiling_continuation_picking_source {
+                    if ui
+                        .button("From storey above")
+                        .hint(
+                            "Continue the ceiling plane of the storey ABOVE (over the same                              spot) down into this area",
+                        )
+                        .clicked()
+                    {
+                        on_event(UiEvent::Sketch(SketchEvent::CeilingContinuationFromStorey {
+                            up: true,
+                        }));
+                    }
+                    if ui
+                        .button("From storey below")
+                        .hint(
+                            "Continue the ceiling plane of the storey BELOW (over the same                              spot) up into this area",
+                        )
+                        .clicked()
+                    {
+                        on_event(UiEvent::Sketch(SketchEvent::CeilingContinuationFromStorey {
+                            up: false,
+                        }));
+                    }
+                    if ui.button("Cancel").clicked() {
+                        on_event(UiEvent::Sketch(SketchEvent::CancelCeilingContinuation));
+                    }
+                } else if ui
+                    .button("⤺ Continue from neighbour…")
+                    .hint(
+                        "Make one ceiling area's surface CONTINUE a neighbouring area's                          plane (or a storey above/below): tap the area to change, then                          the area to continue from. Tapping an already-continued area                          clears it.",
+                    )
+                    .clicked()
+                {
+                    on_event(UiEvent::Sketch(SketchEvent::StartCeilingContinuation));
+                }
             }
             // Roof: the which-area-slopes choice is the only in-box decision; the
             // position-stage Cancel is top-right, heights/lengths in the number

@@ -61,6 +61,19 @@ pub(super) enum PendingCeilingPoint {
     },
 }
 
+/// The in-flight CONTINUE-from-neighbour pick, advanced tap by tap:
+/// `PickTarget` (tap the region whose surface changes; tapping an
+/// already-continued region CLEARS its links instead) → `PickSource` (tap
+/// the neighbouring region to continue from, or the From-above/below
+/// buttons) → commit. Session-only, outside undo; cleared on storey switch,
+/// mode exit, and cancel. The DURABLE record is
+/// `Storey::ceiling_continuations`.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum PendingCeilingContinuation {
+    PickTarget,
+    PickSource { target: Point2f64 },
+}
+
 impl AppController {
     /// True when the ceiling-point tool can be used — exactly the ceiling-step
     /// gate ([`ceiling_step_available`](Self::ceiling_step_available)): a
@@ -96,6 +109,8 @@ impl AppController {
         self.pending_roof_ridge = None;
         self.roof_ridge_notice = None;
         self.pending_roof_rect = None;
+        self.pending_ceiling_continuation = None;
+        self.reset_ceiling_confirm = false;
         self.dormer_mode = false;
         self.pending_rect_is_dormer = false;
         if on {
@@ -129,8 +144,16 @@ impl AppController {
     /// = a corner snap for free), and the first UN-snapped axis opens its
     /// position prompt (X then Y; both snapped → straight to the height).
     pub fn ceiling_point_tap(&mut self, world_x: f32, world_y: f32) {
-        if !self.ceiling_point_mode
-            || self.pending_roof_point.is_some()
+        if !self.ceiling_point_mode {
+            return;
+        }
+        // A pending CONTINUE-from pick owns the tap (it can only be started
+        // with no other stage in flight).
+        if self.pending_ceiling_continuation.is_some() {
+            self.ceiling_continuation_tap(world_x as f64, world_y as f64);
+            return;
+        }
+        if self.pending_roof_point.is_some()
             || self.ceiling_ridge_pending()
             || self.ceiling_rect_pending()
         {
@@ -522,5 +545,210 @@ impl AppController {
         self.recompose_ceilings(idx);
         self.materialize();
         self.reconstruct_ceiling_step_regions_for(idx);
+    }
+
+    /// The standard ceiling-edit tail shared by the reset / continuation
+    /// mutations: mark dirty, recompose the ceilings from the durable
+    /// inputs, re-derive, canonicalize the session step list. Outside undo —
+    /// ceiling-edit parity.
+    fn ceiling_edit_tail(&mut self, idx: usize) {
+        let _ = self.mark_dirty();
+        self.recompose_ceilings(idx);
+        self.materialize();
+        self.reconstruct_ceiling_step_regions_for(idx);
+    }
+
+    // ── Reset heights (ceiling shape → flat-at-default) ─────────────────────
+
+    /// True while the destructive "Reset heights" button is ARMED (first tap
+    /// done, awaiting the confirming second tap).
+    pub fn reset_ceiling_shape_pending(&self) -> bool {
+        self.reset_ceiling_confirm
+    }
+
+    /// First tap of "Reset heights": arm the confirm. No-op when the tool
+    /// gate is closed (no finalised outline / default height).
+    pub fn request_reset_ceiling_shape(&mut self) {
+        if self.ceiling_point_available() {
+            self.reset_ceiling_confirm = true;
+        }
+    }
+
+    /// Disarm the reset confirm without doing anything.
+    pub fn cancel_reset_ceiling_shape(&mut self) {
+        self.reset_ceiling_confirm = false;
+    }
+
+    /// The confirming second tap of "Reset heights": clear every durable
+    /// ceiling-shape input on the ACTIVE storey (`Storey::reset_ceiling_shape`
+    /// — steps, face-splits, apexes + hints, unfanned, plane anchors,
+    /// continuations; the default height, floor steps and dormers stay),
+    /// drop the SESSION step list, and recompose — one flat region at the
+    /// default height. Destructive and outside undo (ceiling-edit parity);
+    /// the two-step confirm is the guard.
+    pub fn confirm_reset_ceiling_shape(&mut self) {
+        if !self.reset_ceiling_confirm {
+            return;
+        }
+        self.reset_ceiling_confirm = false;
+        let idx = self.current_storey_idx.unwrap_or(0);
+        let Some(record) = self.current_record.as_mut() else {
+            return;
+        };
+        let Some(storey) = record.data.storeys.get_mut(idx) else {
+            return;
+        };
+        storey.reset_ceiling_shape();
+        // The session ceiling-step list mirrors the durable steps — clear it
+        // or the recompose would re-apply the dropped steps from the cache.
+        self.ceiling_step_regions.remove(&idx);
+        // Any in-flight ceiling stage refers to geometry that just vanished.
+        self.pending_roof_point = None;
+        self.pending_roof_ridge = None;
+        self.pending_roof_rect = None;
+        self.pending_ceiling_continuation = None;
+        self.ceiling_edit_tail(idx);
+    }
+
+    // ── Continue ceiling from a neighbouring region / another storey ────────
+
+    /// True while the CONTINUE-from pick is waiting for the TARGET tap.
+    pub fn ceiling_continuation_picking_target(&self) -> bool {
+        matches!(
+            self.pending_ceiling_continuation,
+            Some(PendingCeilingContinuation::PickTarget)
+        )
+    }
+
+    /// True while the CONTINUE-from pick is waiting for the SOURCE tap (or
+    /// one of the From-storey buttons).
+    pub fn ceiling_continuation_picking_source(&self) -> bool {
+        matches!(
+            self.pending_ceiling_continuation,
+            Some(PendingCeilingContinuation::PickSource { .. })
+        )
+    }
+
+    /// Start the CONTINUE-from-neighbour pick ("Continue from neighbour…"):
+    /// the next canvas tap picks the TARGET region. Only in ceiling-shape
+    /// mode with nothing else in flight.
+    pub fn start_ceiling_continuation(&mut self) {
+        if !self.ceiling_point_mode
+            || self.pending_roof_point.is_some()
+            || self.ceiling_ridge_pending()
+            || self.ceiling_rect_pending()
+        {
+            return;
+        }
+        self.pending_ceiling_continuation = Some(PendingCeilingContinuation::PickTarget);
+    }
+
+    /// Abandon the CONTINUE-from pick at any stage.
+    pub fn cancel_ceiling_continuation(&mut self) {
+        self.pending_ceiling_continuation = None;
+    }
+
+    /// A canvas tap while the CONTINUE-from pick is in flight (routed from
+    /// [`ceiling_point_tap`](Self::ceiling_point_tap)):
+    ///
+    /// - `PickTarget`: the tapped ceiling region becomes the TARGET — unless
+    ///   it already has continuation(s), in which case the tap CLEARS them
+    ///   (the documented affordance: re-picking a continued region undoes
+    ///   it) and the flow ends;
+    /// - `PickSource`: the tapped region becomes the SOURCE — its plane is
+    ///   continued over the target (same-storey link; the From-above/below
+    ///   buttons commit the cross-storey variant instead). Tapping the
+    ///   target's own region again is a logged no-op (pick a NEIGHBOUR).
+    pub fn ceiling_continuation_tap(&mut self, world_x: f64, world_y: f64) {
+        let Some(stage) = self.pending_ceiling_continuation else {
+            return;
+        };
+        let idx = self.current_storey_idx.unwrap_or(0);
+        // The picks resolve against the RESOLVED ceilings.
+        self.materialize();
+        let p = Point2f64::new(world_x, world_y);
+        let Some(storey) = self
+            .current_record
+            .as_ref()
+            .and_then(|r| r.data.storeys.get(idx))
+        else {
+            return;
+        };
+        let region_of = |s: &Storey, q: Point2f64| s.ceilings.claim_regions(q).first().copied();
+        match stage {
+            PendingCeilingContinuation::PickTarget => {
+                let Some(target_region) = region_of(storey, p) else {
+                    log::debug!("continuation target tap hit no ceiling region — still picking");
+                    return;
+                };
+                let already = storey.ceiling_continuations.iter().any(|c| {
+                    let tp = Point2f64::new(c.target.0 as f64, c.target.1 as f64);
+                    region_of(storey, tp) == Some(target_region)
+                });
+                if already {
+                    // The clear affordance: tapping a continued region with
+                    // the tool removes its link(s).
+                    let record = self.current_record.as_mut().expect("checked above");
+                    let removed = record.data.clear_ceiling_continuations_at(idx, p);
+                    log::debug!("cleared {removed} ceiling continuation(s) at the tapped region");
+                    self.pending_ceiling_continuation = None;
+                    self.ceiling_edit_tail(idx);
+                } else {
+                    self.pending_ceiling_continuation =
+                        Some(PendingCeilingContinuation::PickSource { target: p });
+                }
+            }
+            PendingCeilingContinuation::PickSource { target } => {
+                let (Some(sr), Some(tr)) = (region_of(storey, p), region_of(storey, target)) else {
+                    log::debug!("continuation source tap hit no ceiling region — still picking");
+                    return;
+                };
+                if sr == tr {
+                    log::debug!("continuation source is the target's own region — tap a neighbour");
+                    return;
+                }
+                let record = self.current_record.as_mut().expect("checked above");
+                record.data.add_ceiling_continuation(idx, target, p, 0);
+                self.pending_ceiling_continuation = None;
+                self.ceiling_edit_tail(idx);
+            }
+        }
+    }
+
+    /// Commit the pending CONTINUE-from pick against the storey ABOVE
+    /// (`up = true`) or BELOW: the source region is auto-resolved as the one
+    /// containing the TARGET point on that storey (no cross-storey tapping),
+    /// and the plane converts through the floor datums at recompose. `Err`
+    /// (user-facing) when no source stage is open, the storey doesn't exist,
+    /// or it has no ceiling region over the target point.
+    pub fn ceiling_continuation_from_storey(&mut self, up: bool) -> Result<(), String> {
+        let Some(PendingCeilingContinuation::PickSource { target }) =
+            self.pending_ceiling_continuation
+        else {
+            return Ok(()); // no source stage open — no-op
+        };
+        let idx = self.current_storey_idx.unwrap_or(0);
+        let offset: i8 = if up { 1 } else { -1 };
+        let which = if up { "above" } else { "below" };
+        let src_idx = idx as i64 + offset as i64;
+        let record = self
+            .current_record
+            .as_mut()
+            .ok_or("no storey to continue a ceiling on")?;
+        let src = usize::try_from(src_idx)
+            .ok()
+            .and_then(|i| record.data.storeys.get(i))
+            .ok_or_else(|| format!("There is no storey {which} this one."))?;
+        if src.ceilings.claim_regions(target).first().is_none() {
+            return Err(format!(
+                "The storey {which} has no ceiling over that area — set its ceiling height first."
+            ));
+        }
+        record
+            .data
+            .add_ceiling_continuation(idx, target, target, offset);
+        self.pending_ceiling_continuation = None;
+        self.ceiling_edit_tail(idx);
+        Ok(())
     }
 }

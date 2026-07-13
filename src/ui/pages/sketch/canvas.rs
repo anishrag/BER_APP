@@ -3132,7 +3132,13 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 // otherwise the tap would ALSO try to place a new roof
                 // point on top of the marker. The event carries the
                 // MARKER's own world position, not the finger's.
-                let marker_hit =
+                // A continuation pick owns the tap — the markers must not
+                // steal it.
+                let continuation_pick = view.ceiling_continuation_picking_target
+                    || view.ceiling_continuation_picking_source;
+                let marker_hit = if continuation_pick {
+                    None
+                } else {
                     render::active_storey_transform(rect, ber, current_storey_idx, mode, vp)
                         .and_then(|t| {
                             view.ceiling_fan_markers
@@ -3143,7 +3149,8 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                                 .filter(|(_, d)| *d <= 14.0)
                                 .min_by(|(_, a), (_, b)| a.total_cmp(b))
                                 .map(|(m, _)| m)
-                        });
+                        })
+                };
                 if let Some((mx, my)) = marker_hit {
                     on_event(UiEvent::Sketch(SketchEvent::CeilingFanMarkerTap {
                         world_x: mx,

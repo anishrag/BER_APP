@@ -876,6 +876,9 @@ impl eframe::App for BerApp {
                                 ceiling_ridge_height_pending,
                                 ceiling_ridge_meet_edge_height,
                                 ceiling_ridge_pending,
+                                reset_ceiling_pending,
+                                ceiling_continuation_picking_target,
+                                ceiling_continuation_picking_source,
                                 ceiling_rect_views,
                                 pending_roof_rect_outline,
                                 ceiling_rect_position_pending,
@@ -972,6 +975,9 @@ impl eframe::App for BerApp {
                                     controller_ref.ceiling_ridge_height_pending(),
                                     controller_ref.ceiling_ridge_meet_edge_height(),
                                     controller_ref.ceiling_ridge_pending(),
+                                    controller_ref.reset_ceiling_shape_pending(),
+                                    controller_ref.ceiling_continuation_picking_target(),
+                                    controller_ref.ceiling_continuation_picking_source(),
                                     controller_ref.ceiling_rect_views(),
                                     controller_ref.pending_roof_rect_outline(),
                                     controller_ref.ceiling_rect_position_pending(),
@@ -1537,6 +1543,9 @@ impl eframe::App for BerApp {
                                     .app_controller
                                     .borrow()
                                     .ceiling_ridge_area_options(),
+                                reset_ceiling_pending,
+                                ceiling_continuation_picking_target,
+                                ceiling_continuation_picking_source,
                                 ceiling_rect_views: &ceiling_rect_views,
                                 pending_roof_rect_outline,
                                 ceiling_rect_position_pending,
@@ -2005,6 +2014,36 @@ impl eframe::App for BerApp {
                                         controller
                                             .borrow_mut()
                                             .toggle_ceiling_fan_vertex(world_x, world_y);
+                                    }
+                                    SketchEvent::RequestResetCeilingShape => {
+                                        controller.borrow_mut().request_reset_ceiling_shape();
+                                    }
+                                    SketchEvent::ConfirmResetCeilingShape => {
+                                        controller.borrow_mut().confirm_reset_ceiling_shape();
+                                        self.sketch_state.roof_error = None;
+                                    }
+                                    SketchEvent::CancelResetCeilingShape => {
+                                        controller.borrow_mut().cancel_reset_ceiling_shape();
+                                    }
+                                    SketchEvent::StartCeilingContinuation => {
+                                        controller.borrow_mut().start_ceiling_continuation();
+                                    }
+                                    SketchEvent::CancelCeilingContinuation => {
+                                        controller.borrow_mut().cancel_ceiling_continuation();
+                                    }
+                                    SketchEvent::CeilingContinuationFromStorey { up } => {
+                                        match controller
+                                            .borrow_mut()
+                                            .ceiling_continuation_from_storey(up)
+                                        {
+                                            Ok(()) => {
+                                                self.sketch_state.roof_error = None;
+                                            }
+                                            Err(e) => {
+                                                log::error!("ceiling continuation: {}", e);
+                                                self.sketch_state.roof_error = Some(e);
+                                            }
+                                        }
                                     }
                                     SketchEvent::AssignCeilingApexHeight(z_m) => {
                                         match controller.borrow_mut().assign_roof_apex(z_m) {

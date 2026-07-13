@@ -83,6 +83,13 @@ pub struct Storey {
     /// older records load (empty = auto-nearest everywhere).
     #[serde(default)]
     pub ceiling_plane_anchors: Vec<(f32, f32)>,
+    /// CONTINUE-from-neighbour ceiling surface links (see
+    /// [`CeilingContinuation`]): each re-emits its target region as its
+    /// source region's plane at recompose, after the base solve. Durable
+    /// INPUT; stale entries are skipped. `#[serde(default)]` so older
+    /// records load (empty = no continuations).
+    #[serde(default)]
+    pub ceiling_continuations: Vec<CeilingContinuation>,
     /// Flat-topped DORMER patches carved into this storey's sloped attic
     /// ceiling: each raises its `footprint` to a single flat `top_z_m` while the
     /// surrounding roof KEEPS its slope (the dormer does NOT reslope its
@@ -218,7 +225,6 @@ impl Storey {
         None
     }
 
-    /// Drop all DERIVED geometry — floors, walls, living areas, ceilings, and the
     /// The storey's UNFANNED ceiling vertices as plan points — the form
     /// the `CeilingRegions` shaping/grouping calls consume.
     pub fn ceiling_unfanned_points(&self) -> Vec<Point2f64> {
@@ -248,6 +254,24 @@ impl Storey {
             &self.ceiling_unfanned_points(),
             &self.ceiling_plane_anchor_points(),
         )
+    }
+
+    /// RESET the storey's ceiling SHAPE back to flat-at-default: clears every
+    /// durable ceiling-shape input — steps, structure face-splits, apexes +
+    /// side hints, the unfanned set, the plane anchors, and the
+    /// continuations — so the next recompose derives ONE flat region at the
+    /// default ceiling height. Deliberately KEEPS `ceiling_height_m` (the
+    /// default itself), the dormers, and everything floor-side. The shell
+    /// wraps this with its confirm + recompose tail; destructive and outside
+    /// undo like every ceiling edit.
+    pub fn reset_ceiling_shape(&mut self) {
+        self.ceiling_steps.clear();
+        self.ceiling_splits.clear();
+        self.ceiling_apexes.clear();
+        self.ceiling_apex_hints.clear();
+        self.ceiling_unfanned.clear();
+        self.ceiling_plane_anchors.clear();
+        self.ceiling_continuations.clear();
     }
 
     /// Drop all DERIVED geometry — floors, walls, living areas, ceilings, and the

@@ -264,22 +264,33 @@ pub(crate) const GABLE_DIST_EPS_M: f64 = 1e-4;
 ///
 /// Classification, per ring vertex:
 /// - `side`: signed perpendicular offset from the ridge LINE (m).
-/// - `eligible`: the vertex owns at least one NON-GABLE boundary edge — an
-///   edge whose hub triangle has real plan width (its hub is off the edge's
-///   line by more than the epsilon). Vertices whose every incident edge is
-///   part of a vertical gable END (edges collinear with their hub — e.g. an
-///   extra vertex on the gable wall) never anchor a slope and their z never
-///   surfaces (their faces are all slivers).
+/// - `eligible`: the vertex is CONVEX and owns at least one NON-GABLE
+///   boundary edge. REFLEX (concave) corners — the armpits of a T / notch
+///   plan — are never anchors (and never take an override): an eave plane
+///   meets base at a WALL, and an armpit can sit strictly nearer the ridge
+///   than any real eave (a reflex anchor would pitch the plane so steeply
+///   the far wall plunges toward the floor — the test2 field report).
+///   Vertices whose every incident edge is part of a vertical gable END
+///   (edges collinear with their hub — e.g. an extra vertex on the gable
+///   wall) never anchor either; their z never surfaces (their faces are
+///   all slivers).
 /// - `anchors`: ONE anchor per side — the eave vertex the side's slope
-///   plane is pitched to. By default the NEAREST eligible vertex to the
-///   ridge line (deterministic tie-break: smaller distance, then lex-smaller
-///   `(x, y)` — solve and markers must agree on which tied corner anchors).
-///   A point of `anchor_overrides` (the storey's durable
-///   `ceiling_plane_anchors`, matched within [`UNFAN_MATCH_EPS_M`]) that
-///   lands on an ELIGIBLE vertex of a side OVERRIDES that side's anchor —
-///   the user's "this corner sets the pitch"; several matches on one side
-///   take the nearest of them (warned); a stale override matching nothing
-///   is ignored (auto-nearest stands).
+///   plane is pitched to. AUTO election picks the side's DOMINANT EAVE:
+///   among the side's ridge-PARALLEL non-gable boundary edges (endpoint
+///   distances equal within [`GABLE_DIST_EPS_M`] — real eave runs), band
+///   them by distance and take the band with the LARGEST summed length
+///   (tie → the nearer band), then the lex-smallest `(x, y)` eligible
+///   vertex at that distance (deterministic — solve and markers must agree
+///   on which tied corner anchors). So a T with the ridge down its stem
+///   pitches on the long MAIN walls (the stem tucks under the plane, its
+///   corners embedding above base), not on the short stem walls nearer the
+///   ridge. A side with no parallel eave run — or none carrying an eligible
+///   vertex — falls back to the NEAREST eligible vertex. A point of
+///   `anchor_overrides` (the storey's durable `ceiling_plane_anchors`,
+///   matched within [`UNFAN_MATCH_EPS_M`]) landing on an ELIGIBLE vertex of
+///   a side OVERRIDES the auto election — the user's "this corner sets the
+///   pitch"; several matches on one side take the nearest of them (warned);
+///   a stale override matching nothing is ignored.
 /// - `fanned`: exactly the anchors — every other vertex EMBEDS on its side
 ///   plane ([`ridge_triangles`]). Note the stored UNFANNED set does NOT
 ///   apply on gable sides (the old tap-to-pin made kinks; anchor selection
@@ -338,12 +349,30 @@ pub(crate) fn gable_plan_classify(
             el <= 1e-9 || cross2.abs() / el <= APEX_BOUNDARY_EPS_M
         })
         .collect();
+    // Ring turning sense (shoelace sign) for the convexity test.
+    let orient: f64 = (0..n)
+        .map(|i| {
+            let (p, q) = (ring[i], ring[(i + 1) % n]);
+            p.x * q.y - q.x * p.y
+        })
+        .sum();
+    // CONVEX corner: turns with the ring's own sense (reflex armpits and
+    // collinear filler vertices don't — neither may anchor an eave plane).
+    let convex = |i: usize| {
+        let p = ring[(i + n - 1) % n];
+        let c = ring[i];
+        let q = ring[(i + 1) % n];
+        let cr = (c.x - p.x) * (q.y - c.y) - (c.y - p.y) * (q.x - c.x);
+        cr * orient > 0.0
+    };
     // Vertex i touches edges (i−1) and i.
     let eligible: Vec<bool> = (0..n)
-        .map(|i| !edge_gable[(i + n - 1) % n] || !edge_gable[i])
+        .map(|i| (!edge_gable[(i + n - 1) % n] || !edge_gable[i]) && convex(i))
         .collect();
     // Anchor election per side: an eligible matched OVERRIDE wins (nearest
-    // of several, warned); else the nearest eligible vertex. Deterministic
+    // of several, warned); else the DOMINANT-EAVE auto rule (band the
+    // side's ridge-parallel eave edges by distance, longest band wins, tie
+    // → nearer), falling back to the nearest eligible vertex. Deterministic
     // tie-break by (distance, x, y).
     let matches_override = |i: usize| {
         anchor_overrides.iter().any(|o| {
@@ -362,8 +391,8 @@ pub(crate) fn gable_plan_classify(
     let mut anchors: [Option<usize>; 2] = [None, None];
     let mut overridden = [false, false];
     for s in [false, true] {
-        let on_side =
-            |i: usize| (side[i] > 0.0) == s && side[i].abs() > GABLE_DIST_EPS_M && eligible[i];
+        let side_sign = |i: usize| (side[i] > 0.0) == s && side[i].abs() > GABLE_DIST_EPS_M;
+        let on_side = |i: usize| side_sign(i) && eligible[i];
         let hits: Vec<usize> = (0..n)
             .filter(|&i| on_side(i) && matches_override(i))
             .collect();
@@ -375,7 +404,44 @@ pub(crate) fn gable_plan_classify(
         }
         let (choice, is_override) = match hits.iter().copied().min_by(cmp) {
             Some(i) => (Some(i), true),
-            None => ((0..n).filter(|&i| on_side(i)).min_by(cmp), false),
+            None => {
+                // DOMINANT EAVE: the side's ridge-parallel non-gable edges,
+                // banded by distance; largest summed length wins, tie → the
+                // nearer band.
+                let mut bands: Vec<(f64, f64)> = Vec::new(); // (dist, total len)
+                for i in 0..n {
+                    let j = (i + 1) % n;
+                    if edge_gable[i] || !side_sign(i) || !side_sign(j) {
+                        continue;
+                    }
+                    if (side[i].abs() - side[j].abs()).abs() > GABLE_DIST_EPS_M {
+                        continue; // not ridge-parallel — no eave run
+                    }
+                    let d = (side[i].abs() + side[j].abs()) / 2.0;
+                    let el =
+                        ((ring[j].x - ring[i].x).powi(2) + (ring[j].y - ring[i].y).powi(2)).sqrt();
+                    match bands
+                        .iter_mut()
+                        .find(|(bd, _)| (*bd - d).abs() <= GABLE_DIST_EPS_M)
+                    {
+                        Some((_, l)) => *l += el,
+                        None => bands.push((d, el)),
+                    }
+                }
+                let dominant = bands
+                    .iter()
+                    .copied()
+                    .max_by(|(da, la), (db, lb)| la.total_cmp(lb).then(db.total_cmp(da)));
+                let banded = dominant.and_then(|(d, _)| {
+                    (0..n)
+                        .filter(|&i| on_side(i) && (side[i].abs() - d).abs() <= GABLE_DIST_EPS_M)
+                        .min_by(cmp)
+                });
+                (
+                    banded.or_else(|| (0..n).filter(|&i| on_side(i)).min_by(cmp)),
+                    false,
+                )
+            }
         };
         anchors[usize::from(s)] = choice;
         overridden[usize::from(s)] = is_override && choice.is_some();
@@ -400,7 +466,8 @@ pub(crate) fn gable_plan_classify(
 pub struct GableRingRoles {
     /// This vertex is a side's CURRENT pitch anchor (auto or override).
     pub anchor: Vec<bool>,
-    /// This vertex may anchor a slope (owns a non-gable eave edge).
+    /// This vertex may anchor a slope (CONVEX, and owns a non-gable eave
+    /// edge — reflex armpits and gable-wall extras never anchor).
     pub eligible: Vec<bool>,
     /// The vertex's embedded z DIFFERS from its own base — the roof
     /// genuinely deviates over it (its ridge distance differs from its

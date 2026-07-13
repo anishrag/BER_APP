@@ -250,6 +250,8 @@ pub struct ToolFlags {
     pub ceiling_step_available: bool,
     pub ceiling_point_mode: bool,
     pub ceiling_point_available: bool,
+    /// The destructive "Reset heights" button is ARMED (two-step confirm).
+    pub reset_ceiling_pending: bool,
     pub dormer_mode: bool,
     pub dormer_available: bool,
     pub openings_mode: bool,
@@ -318,6 +320,7 @@ impl ToolFlags {
             ceiling_step_available: view.ceiling_step_available,
             ceiling_point_mode: view.ceiling_point_mode,
             ceiling_point_available: view.ceiling_point_available,
+            reset_ceiling_pending: view.reset_ceiling_pending,
             dormer_mode: view.dormer_mode,
             dormer_available: view.dormer_available,
             openings_mode: view.openings_mode,
@@ -811,6 +814,38 @@ fn tool_ui<F: FnMut(UiEvent)>(
                 on_event(UiEvent::Sketch(SketchEvent::SetCeilingPointMode(
                     !flags.ceiling_point_mode,
                 )));
+            }
+            // Reset heights: a TWO-STEP destructive reset of the ceiling
+            // shape back to flat-at-default (steps, splits, apexes, fan/
+            // anchor overrides and continuations cleared; the default
+            // height itself, floor steps and dormers stay). First tap arms,
+            // second executes — outside undo, so the confirm is the guard.
+            if flags.reset_ceiling_pending {
+                if ui
+                    .button("⚠ Really reset?")
+                    .hint(
+                        "Second tap WIPES this storey's ceiling shape (steps, ridges,                          high points…) back to one flat ceiling at the default height.                          Cannot be undone.",
+                    )
+                    .clicked()
+                {
+                    on_event(UiEvent::Sketch(SketchEvent::ConfirmResetCeilingShape));
+                }
+                if ui
+                    .button("✕")
+                    .hint("Keep the ceiling shape as it is")
+                    .clicked()
+                {
+                    on_event(UiEvent::Sketch(SketchEvent::CancelResetCeilingShape));
+                }
+            } else if ui
+                .add_enabled(enabled, egui::Button::new("↺ Reset heights"))
+                .hint(
+                    "Reset this storey's ceiling shape to one flat ceiling at the                      default height (removes steps, ridges, high points, dividers                      and continuations — the default height, floor steps and                      dormers stay). Asks to confirm.",
+                )
+                .disabled_hint("Set the default ceiling height first (the Heights field above)")
+                .clicked()
+            {
+                on_event(UiEvent::Sketch(SketchEvent::RequestResetCeilingShape));
             }
         }
         Tool::Dormer => {

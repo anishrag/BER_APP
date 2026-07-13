@@ -813,6 +813,11 @@ impl AppController {
         if !dormer_patches.is_empty() {
             ceilings = ceilings.with_flat_patches(&dormer_patches);
         }
+        // CONTINUE-from links re-emit their target regions as the source
+        // region's plane — after the whole base solve (so the source plane
+        // is final) and before the face-splits (which carve the continued
+        // surface in place). Model logic lives in `Ber`.
+        ceilings = record.data.apply_ceiling_continuations(idx, ceilings);
         if !splits.is_empty() {
             ceilings = ceilings.split_faces_coplanar(&splits);
         }

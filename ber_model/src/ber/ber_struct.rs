@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 use super::common::{ConstructionPhase, ConstructionPhases, ItemId, Photo, Year};
 use super::fenestration::{Frame, Glazing, WindowNameSpecifics, WindowType};
 use super::structural::{
-    CeilingApex, CeilingApexHint, CeilingConstruction, Dormer, FloorConstruction, Storey,
-    ThermalMassInfo, WallConstruction,
+    CeilingApex, CeilingApexHint, CeilingConstruction, CeilingContinuation, CeilingRegions, Dormer,
+    FloorConstruction, Storey, ThermalMassInfo, WallConstruction,
 };
 use super::systems::{HeatingSystem, SolarElements, VentilationSystem};
 use domain::points::Point2f64;
@@ -601,6 +601,178 @@ impl Ber {
         Some(changed)
     }
 
+    /// Append a CONTINUE-from ceiling surface link to storey `storey_idx`
+    /// (see [`CeilingContinuation`]): the region containing `target` will be
+    /// re-emitted at every recompose as the plane of the region containing
+    /// `source` (on this storey for `offset` 0, the storey above/below for
+    /// ±1 — cross-storey links store `source == target`). Both points are
+    /// QUANTIZED to the f32 grid like an apex. Validation (regions existing,
+    /// distinct) happens upstream in the shell's pick flow; a link that goes
+    /// stale is skipped at apply. No-op when the storey doesn't exist.
+    pub fn add_ceiling_continuation(
+        &mut self,
+        storey_idx: usize,
+        target: Point2f64,
+        source: Point2f64,
+        offset: i8,
+    ) {
+        let qt = CeilingApex::quantize_point(target);
+        let qs = CeilingApex::quantize_point(source);
+        if let Some(storey) = self.storeys.get_mut(storey_idx) {
+            storey.ceiling_continuations.push(CeilingContinuation {
+                target: (qt.x as f32, qt.y as f32),
+                source: (qs.x as f32, qs.y as f32),
+                source_storey_offset: offset,
+            });
+        }
+    }
+
+    /// Remove every continuation of storey `storey_idx` whose TARGET point is
+    /// claimed by the same resolved ceiling region as `p` — the "tap an
+    /// already-continued region to clear it" affordance. Returns how many
+    /// entries were removed (0 when none matched / no storey).
+    pub fn clear_ceiling_continuations_at(&mut self, storey_idx: usize, p: Point2f64) -> usize {
+        let Some(storey) = self.storeys.get_mut(storey_idx) else {
+            return 0;
+        };
+        let Some(&region) = storey.ceilings.claim_regions(p).first() else {
+            return 0;
+        };
+        let ceilings = &storey.ceilings;
+        let before = storey.ceiling_continuations.len();
+        storey.ceiling_continuations.retain(|c| {
+            let tp = Point2f64::new(c.target.0 as f64, c.target.1 as f64);
+            ceilings.claim_regions(tp).first() != Some(&region)
+        });
+        before - storey.ceiling_continuations.len()
+    }
+
+    /// Apply storey `storey_idx`'s stored ceiling CONTINUATIONS onto
+    /// `ceilings` — the shell's recompose calls this AFTER the base solve
+    /// (default → steps → apexes → dormers) and BEFORE the structure
+    /// face-splits, so a split carves the continued surface rather than
+    /// re-deriving it. Per entry, in STORED order (so chains work — a later
+    /// entry sourcing from an earlier target reads the already-continued
+    /// plane):
+    ///
+    /// - the TARGET region is the one claiming `target` in the in-progress
+    ///   `ceilings`;
+    /// - the SOURCE plane is the region claiming `source` — in `ceilings`
+    ///   for a same-storey link, or on the ±1 storey's STORED resolved
+    ///   ceilings for a cross-storey one, converted through the storeys'
+    ///   floor datums (world z → target-local z) so a slope continues
+    ///   physically straight through;
+    /// - the target is re-emitted as that plane over its own ring (fresh
+    ///   id, default opes — the split-parity convention; construction +
+    ///   exposure kept).
+    ///
+    /// A CYCLE (walking same-storey source→target provenance from this
+    /// entry's source lands back inside this entry's own target) is warned
+    /// and skipped. Entries whose points resolve to no region, to the SAME
+    /// region, to a missing storey, or to a plan-degenerate source are
+    /// skipped (stale-safe — the assessor may have reshaped everything
+    /// since).
+    pub fn apply_ceiling_continuations(
+        &self,
+        storey_idx: usize,
+        mut ceilings: CeilingRegions,
+    ) -> CeilingRegions {
+        use super::structural::{region_plane, ring_to_poly, Polygon3D};
+        use domain::points::Point3f64;
+        use geo::Contains;
+        let Some(storey) = self.storeys.get(storey_idx) else {
+            return ceilings;
+        };
+        if storey.ceiling_continuations.is_empty() {
+            return ceilings;
+        }
+        let datums = self.storey_floor_datums();
+        // Same-storey provenance for the cycle walk: (target plan ring,
+        // source point) per applied entry.
+        let mut applied: Vec<(Vec<Point2f64>, Point2f64)> = Vec::new();
+        for c in &storey.ceiling_continuations {
+            let tp = Point2f64::new(c.target.0 as f64, c.target.1 as f64);
+            let sp = Point2f64::new(c.source.0 as f64, c.source.1 as f64);
+            let Some(&ti) = ceilings.claim_regions(tp).first() else {
+                log::debug!("ceiling continuation: target {tp:?} resolves to no region — skipped");
+                continue;
+            };
+            let target_ring: Vec<Point2f64> = ceilings.regions[ti]
+                .polygon
+                .exterior
+                .iter()
+                .map(|v| Point2f64::new(v.x, v.y))
+                .collect();
+            // The source plane, in TARGET-storey-local z.
+            let plane = if c.source_storey_offset == 0 {
+                match ceilings.claim_regions(sp).first() {
+                    Some(&si) if si != ti => region_plane(&ceilings.regions[si]),
+                    Some(_) => {
+                        log::debug!(
+                            "ceiling continuation: source {sp:?} is the target's own region — skipped"
+                        );
+                        continue;
+                    }
+                    None => None,
+                }
+            } else {
+                let src_idx = storey_idx as i64 + c.source_storey_offset as i64;
+                let src = usize::try_from(src_idx)
+                    .ok()
+                    .and_then(|i| self.storeys.get(i));
+                src.and_then(|s| {
+                    let &si = s.ceilings.claim_regions(sp).first()?;
+                    let (c0, cx, cy) = region_plane(&s.ceilings.regions[si])?;
+                    let shift = datums.get(src_idx as usize).copied().unwrap_or(0.0)
+                        - datums.get(storey_idx).copied().unwrap_or(0.0);
+                    Some((c0 + shift, cx, cy))
+                })
+            };
+            let Some((c0, cx, cy)) = plane else {
+                log::debug!("ceiling continuation: source {sp:?} resolves to no plane — skipped");
+                continue;
+            };
+            // CYCLE GUARD: walk same-storey provenance from the source point;
+            // reaching this entry's own target ring means the chain loops.
+            let target_poly = ring_to_poly(&target_ring);
+            let mut probe = sp;
+            let mut cyclic = c.source_storey_offset == 0
+                && target_poly.contains(&geo::Point::new(probe.x, probe.y));
+            let mut hops = 0;
+            while !cyclic && hops <= applied.len() {
+                let Some((_, next)) = applied.iter().find(|(ring, _)| {
+                    ring_to_poly(ring).contains(&geo::Point::new(probe.x, probe.y))
+                }) else {
+                    break;
+                };
+                probe = *next;
+                cyclic = target_poly.contains(&geo::Point::new(probe.x, probe.y));
+                hops += 1;
+            }
+            if cyclic {
+                log::warn!("ceiling continuation {tp:?} ← {sp:?} closes a cycle — skipped");
+                continue;
+            }
+            // Re-emit the target as the source plane over its own ring.
+            let old = &ceilings.regions[ti];
+            let verts: Vec<Point3f64> = target_ring
+                .iter()
+                .map(|p| Point3f64::new(p.x, p.y, c0 + cx * p.x + cy * p.y))
+                .collect();
+            ceilings.regions[ti] = super::structural::CeilingRegion {
+                id: ItemId::default(),
+                polygon: Polygon3D::new(verts),
+                opes: Default::default(),
+                construction_id: old.construction_id,
+                exposure: old.exposure,
+            };
+            if c.source_storey_offset == 0 {
+                applied.push((target_ring, sp));
+            }
+        }
+        ceilings
+    }
+
     /// Append a flat-topped DORMER to storey `storey_idx`'s durable dormer
     /// list (replayed at resolve by [`CeilingRegions::with_flat_patches`]).
     /// Each footprint vertex is QUANTIZED to the f32 grid, exactly as
@@ -634,7 +806,10 @@ impl Ber {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ber::structural::{Opes, Polygon3D, Storey, WallExposure, WallRegion, WallRegions};
+    use crate::ber::structural::{
+        CeilingExposure, CeilingRegion, Opes, Polygon3D, Storey, WallExposure, WallRegion,
+        WallRegions,
+    };
     use domain::points::Point3f64;
 
     fn p3(x: f64, y: f64, z: f64) -> Point3f64 {
@@ -663,6 +838,203 @@ mod tests {
             None,
             "missing storey is a no-op"
         );
+    }
+
+    /// A ceiling region over the axis-aligned rect `x[x0, x1] × y[y0, y1]`
+    /// with z linear in x: `z = z_at_x0 + (z_at_x1 − z_at_x0)·(x − x0)/(x1 − x0)`
+    /// (flat when equal).
+    fn slab(x0: f64, x1: f64, z_at_x0: f64, z_at_x1: f64) -> CeilingRegion {
+        let z = |x: f64| z_at_x0 + (z_at_x1 - z_at_x0) * (x - x0) / (x1 - x0);
+        CeilingRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(vec![
+                Point3f64::new(x0, 0.0, z(x0)),
+                Point3f64::new(x1, 0.0, z(x1)),
+                Point3f64::new(x1, 2.0, z(x1)),
+                Point3f64::new(x0, 2.0, z(x0)),
+            ]),
+            opes: Opes::default(),
+            construction_id: ItemId::default(),
+            exposure: CeilingExposure::default(),
+        }
+    }
+
+    /// The z of the vertex at `(x, y)` in the region containing `p`.
+    fn z_at(regions: &CeilingRegions, p: Point2f64, x: f64, y: f64) -> f64 {
+        regions.regions[*regions.claim_regions(p).first().expect("region")]
+            .polygon
+            .exterior
+            .iter()
+            .find(|v| (v.x - x).abs() <= 1e-9 && (v.y - y).abs() <= 1e-9)
+            .unwrap_or_else(|| panic!("no vertex at ({x}, {y})"))
+            .z
+    }
+
+    /// Continuations apply in STORED order (chains work), re-emitting each
+    /// target as its source's plane; stale entries are skipped.
+    #[test]
+    fn ceiling_continuations_chain_and_skip_stale() {
+        let mut ber = Ber::default();
+        ber.storeys.push(Storey::default());
+        // A x[0,2] SLOPED (z = 2 + 0.5x), B x[2,4] flat 2.4, C x[4,6] flat 2.6.
+        let ceilings = CeilingRegions {
+            regions: vec![
+                slab(0.0, 2.0, 2.0, 3.0),
+                slab(2.0, 4.0, 2.4, 2.4),
+                slab(4.0, 6.0, 2.6, 2.6),
+            ],
+        };
+        ber.add_ceiling_continuation(0, Point2f64::new(3.0, 1.0), Point2f64::new(1.0, 1.0), 0);
+        ber.add_ceiling_continuation(0, Point2f64::new(5.0, 1.0), Point2f64::new(3.0, 1.0), 0);
+        // Stale: resolves to no region — ignored.
+        ber.add_ceiling_continuation(0, Point2f64::new(99.0, 99.0), Point2f64::new(1.0, 1.0), 0);
+        let out = ber.apply_ceiling_continuations(0, ceilings);
+        assert_eq!(out.regions.len(), 3, "re-emit, not re-split");
+        // B continues A's plane (z = 2 + 0.5x): 3.0 at x=2, 4.0 at x=4.
+        assert!((z_at(&out, Point2f64::new(3.0, 1.0), 2.0, 0.0) - 3.0).abs() <= 1e-9);
+        assert!((z_at(&out, Point2f64::new(3.0, 1.0), 4.0, 0.0) - 4.0).abs() <= 1e-9);
+        // C chains through B onto the same plane: 5.0 at x=6.
+        assert!((z_at(&out, Point2f64::new(5.0, 1.0), 6.0, 0.0) - 5.0).abs() <= 1e-9);
+    }
+
+    /// A continuation CYCLE (A←B, B←C, C←A) is detected by the provenance
+    /// walk and the closing entry skipped — C keeps its own plane instead of
+    /// inheriting the chain.
+    #[test]
+    fn ceiling_continuation_cycle_is_skipped() {
+        let mut ber = Ber::default();
+        ber.storeys.push(Storey::default());
+        let ceilings = CeilingRegions {
+            regions: vec![
+                slab(0.0, 2.0, 2.0, 2.0), // A flat 2.0
+                slab(2.0, 4.0, 3.0, 3.0), // B flat 3.0
+                slab(4.0, 6.0, 4.0, 4.0), // C flat 4.0
+            ],
+        };
+        let (pa, pb, pc) = (
+            Point2f64::new(1.0, 1.0),
+            Point2f64::new(3.0, 1.0),
+            Point2f64::new(5.0, 1.0),
+        );
+        ber.add_ceiling_continuation(0, pa, pb, 0); // A ← B
+        ber.add_ceiling_continuation(0, pb, pc, 0); // B ← C
+        ber.add_ceiling_continuation(0, pc, pa, 0); // C ← A: closes the loop
+        let out = ber.apply_ceiling_continuations(0, ceilings);
+        assert!(
+            (z_at(&out, pa, 0.0, 0.0) - 3.0).abs() <= 1e-9,
+            "A took B's plane"
+        );
+        assert!(
+            (z_at(&out, pb, 2.0, 0.0) - 4.0).abs() <= 1e-9,
+            "B took C's plane"
+        );
+        assert!(
+            (z_at(&out, pc, 4.0, 0.0) - 4.0).abs() <= 1e-9,
+            "the cycle-closing entry is skipped — C keeps its own plane"
+        );
+    }
+
+    /// A cross-storey continuation converts the source plane through the
+    /// floor datums: the storey below's sloped ceiling continues physically
+    /// straight into the storey above's local frame.
+    #[test]
+    fn ceiling_continuation_from_storey_below_converts_datums() {
+        let mut ber = Ber::default();
+        let mut below = Storey::default();
+        below.ceiling_height_m = Some(2.5); // legacy stacking → datum₁ = 2.5
+        below.ceilings = CeilingRegions {
+            regions: vec![slab(0.0, 4.0, 2.0, 4.0)], // z = 2 + 0.5x (below-local)
+        };
+        let mut above = Storey::default();
+        above.ceilings = CeilingRegions {
+            regions: vec![slab(0.0, 4.0, 2.4, 2.4)],
+        };
+        ber.storeys.push(below);
+        ber.storeys.push(above);
+        let p = Point2f64::new(1.0, 1.0);
+        ber.add_ceiling_continuation(1, p, p, -1);
+        let ceilings = ber.storeys[1].ceilings.clone();
+        let out = ber.apply_ceiling_continuations(1, ceilings);
+        // Above-local plane: (2 + 0.5x) + datum₀(0) − datum₁(2.5) = −0.5 + 0.5x.
+        assert!((z_at(&out, p, 0.0, 0.0) - (-0.5)).abs() <= 1e-9);
+        assert!((z_at(&out, p, 4.0, 0.0) - 1.5).abs() <= 1e-9);
+    }
+
+    /// `clear_ceiling_continuations_at` removes exactly the entries whose
+    /// target shares the tapped region.
+    #[test]
+    fn clear_ceiling_continuations_at_removes_the_regions_entries() {
+        let mut ber = Ber::default();
+        let mut storey = Storey::default();
+        storey.ceilings = CeilingRegions {
+            regions: vec![slab(0.0, 2.0, 2.0, 2.0), slab(2.0, 4.0, 2.4, 2.4)],
+        };
+        ber.storeys.push(storey);
+        let (in_a1, in_a2, in_b) = (
+            Point2f64::new(0.5, 1.0),
+            Point2f64::new(1.5, 1.0),
+            Point2f64::new(3.0, 1.0),
+        );
+        ber.add_ceiling_continuation(0, in_a1, in_b, 0);
+        ber.add_ceiling_continuation(0, in_a2, in_b, 0);
+        ber.add_ceiling_continuation(0, in_b, in_a1, 0);
+        assert_eq!(
+            ber.clear_ceiling_continuations_at(0, Point2f64::new(1.0, 0.5)),
+            2,
+            "both region-A entries removed"
+        );
+        assert_eq!(ber.storeys[0].ceiling_continuations.len(), 1);
+        assert_eq!(
+            ber.clear_ceiling_continuations_at(0, Point2f64::new(9.0, 9.0)),
+            0
+        );
+    }
+
+    /// `Storey::reset_ceiling_shape` clears every ceiling-SHAPE input and
+    /// nothing else: the default height, the dormers and the floor-side
+    /// fields survive.
+    #[test]
+    fn reset_ceiling_shape_clears_inputs_keeps_height_and_dormers() {
+        use crate::ber::structural::{CeilingContinuation, Dormer};
+        let mut storey = Storey::default();
+        storey.ceiling_height_m = Some(2.6);
+        storey.ceiling_steps = vec![(vec![Point2f64::new(0.0, 0.0)], 0.3)];
+        storey.ceiling_splits = vec![vec![Point2f64::new(0.0, 0.0)]];
+        storey.ceiling_apexes = vec![CeilingApex {
+            point: Point2f64::new(1.0, 1.0),
+            z_m: 4.0,
+        }];
+        storey.ceiling_apex_hints = vec![CeilingApexHint {
+            apex: (1.0, 1.0),
+            region: (0.5, 0.5),
+        }];
+        storey.ceiling_unfanned = vec![(2.0, 2.0)];
+        storey.ceiling_plane_anchors = vec![(3.0, 3.0)];
+        storey.ceiling_continuations = vec![CeilingContinuation {
+            target: (1.0, 1.0),
+            source: (3.0, 1.0),
+            source_storey_offset: 0,
+        }];
+        storey.dormers = vec![Dormer {
+            footprint: vec![
+                Point2f64::new(0.0, 0.0),
+                Point2f64::new(1.0, 0.0),
+                Point2f64::new(1.0, 1.0),
+            ],
+            top_z_m: 2.9,
+        }];
+        storey.floor_splits = vec![vec![Point2f64::new(0.0, 0.0)]];
+        storey.reset_ceiling_shape();
+        assert!(storey.ceiling_steps.is_empty());
+        assert!(storey.ceiling_splits.is_empty());
+        assert!(storey.ceiling_apexes.is_empty());
+        assert!(storey.ceiling_apex_hints.is_empty());
+        assert!(storey.ceiling_unfanned.is_empty());
+        assert!(storey.ceiling_plane_anchors.is_empty());
+        assert!(storey.ceiling_continuations.is_empty());
+        assert_eq!(storey.ceiling_height_m, Some(2.6), "default height kept");
+        assert_eq!(storey.dormers.len(), 1, "dormers kept");
+        assert_eq!(storey.floor_splits.len(), 1, "floor-side fields untouched");
     }
 
     /// The plane-anchor setter swaps overrides in one call: remove the

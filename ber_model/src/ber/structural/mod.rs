@@ -2382,6 +2382,161 @@ mod tests {
         );
     }
 
+    /// The test2 field report's T-shaped plan: a 6×5 rect x[1.3, 7.3] ×
+    /// y[2.45, 7.45] with a 2×2 stem x[3.3, 5.3] × y[7.45, 9.45] centred on
+    /// the south side. Base 2.0.
+    fn t_plan_ring() -> Vec<Point2f64> {
+        vec![
+            Point2f64::new(1.3, 2.45),
+            Point2f64::new(1.3, 7.45),
+            Point2f64::new(3.3, 7.45),
+            Point2f64::new(3.3, 9.45),
+            Point2f64::new(5.3, 9.45),
+            Point2f64::new(5.3, 7.45),
+            Point2f64::new(7.3, 7.45),
+            Point2f64::new(7.3, 2.45),
+        ]
+    }
+
+    /// TEST2 REGRESSION, horizontal mid-ridge: the gable across the T's main
+    /// rect solves to exactly 2 planes anchored at the OUTER y = 7.45
+    /// corners — the reflex armpits (3.3/5.3, 7.45) are at the same 2.5 m
+    /// ridge distance but are INELIGIBLE (concave), and the dominant-eave
+    /// band (the two outer wall runs, 4 m total, vs the stem's 2 m) keeps
+    /// the pitch on the main walls. The stem embeds below base on the south
+    /// plane.
+    #[test]
+    fn t_plan_horizontal_ridge_is_two_planes_with_the_stem_embedded() {
+        let cid = ItemId::default();
+        let apexes = vec![
+            CeilingApex {
+                point: Point2f64::new(1.3, 4.95),
+                z_m: 3.0,
+            },
+            CeilingApex {
+                point: Point2f64::new(7.3, 4.95),
+                z_m: 3.0,
+            },
+        ];
+        let out = CeilingRegions::default_for_footprint(vec![t_plan_ring()], 2.0, cid)
+            .with_apexes(&apexes);
+        assert_eq!(
+            out.regions.len(),
+            2,
+            "two planes over the T: {:?}",
+            out.regions.iter().map(|r| &r.polygon).collect::<Vec<_>>()
+        );
+        let total: f64 = out.regions.iter().map(plan_area).sum();
+        assert!((total - 34.0).abs() < 1e-6, "rect (30) + stem (4) covered");
+        // South plane: eave at y = 7.45 (z 2.0, incl. the reflex armpits ON
+        // the plane), stem south wall embedded at 3.0 − 4.5/2.5 = 1.2.
+        let south = out
+            .regions
+            .iter()
+            .find(|r| {
+                r.polygon
+                    .exterior
+                    .iter()
+                    .any(|v| (v.y - 9.45).abs() <= 1e-9)
+            })
+            .expect("the south plane reaches the stem");
+        for v in &south.polygon.exterior {
+            let expect = if (v.y - 4.95).abs() <= 1e-9 {
+                3.0
+            } else if (v.y - 7.45).abs() <= 1e-9 {
+                2.0
+            } else {
+                1.2
+            };
+            assert!(
+                (v.z - expect).abs() <= 1e-9,
+                "south plane vertex {v:?} expected z {expect}"
+            );
+        }
+        // The markers agree: anchors on OUTER (convex) corners only.
+        let roles = gable_ring_roles(
+            &t_plan_ring(),
+            Point2f64::new(1.3, 4.95),
+            Point2f64::new(7.3, 4.95),
+            &[],
+        )
+        .expect("a true gable");
+        let ring = t_plan_ring();
+        for (i, v) in ring.iter().enumerate() {
+            let armpit = ((v.x - 3.3).abs() <= 1e-9 || (v.x - 5.3).abs() <= 1e-9)
+                && (v.y - 7.45).abs() <= 1e-9;
+            if armpit {
+                assert!(
+                    !roles.eligible[i] && !roles.anchor[i],
+                    "reflex armpit {v:?} must never anchor"
+                );
+            }
+        }
+        assert!(
+            roles.anchor.iter().filter(|a| **a).count() == 2,
+            "one anchor per side"
+        );
+    }
+
+    /// TEST2 REGRESSION, vertical stem-axis ridge (endpoints on the north
+    /// edge and the stem's south edge): the DOMINANT-EAVE rule pitches each
+    /// side on the 5 m MAIN wall (band length 5 beats the stem wall's 2,
+    /// despite the stem wall being nearer at 1 m — and the reflex armpit at
+    /// 1 m is ineligible anyway). Two planes; the stem's side corners embed
+    /// ABOVE base (the stem tucks under the big roof, its walls rising into
+    /// it via the roof-void split).
+    #[test]
+    fn t_plan_stem_axis_ridge_pitches_on_the_dominant_main_walls() {
+        let cid = ItemId::default();
+        let apexes = vec![
+            CeilingApex {
+                point: Point2f64::new(4.3, 2.45),
+                z_m: 3.0,
+            },
+            CeilingApex {
+                point: Point2f64::new(4.3, 9.45),
+                z_m: 3.0,
+            },
+        ];
+        let out = CeilingRegions::default_for_footprint(vec![t_plan_ring()], 2.0, cid)
+            .with_apexes(&apexes);
+        assert_eq!(
+            out.regions.len(),
+            2,
+            "two planes along the stem axis: {:?}",
+            out.regions.iter().map(|r| &r.polygon).collect::<Vec<_>>()
+        );
+        let total: f64 = out.regions.iter().map(plan_area).sum();
+        assert!((total - 34.0).abs() < 1e-6);
+        // West plane: pitched to the main wall x = 1.3 (dist 3.0) → slope
+        // 1/3 per metre; the stem's west wall (x = 3.3, dist 1.0) embeds at
+        // 3.0 − 1/3 ≈ 2.667, ABOVE the 2.0 base; the main wall stays the
+        // 2.0 eave. Every face vertex z is on its plane.
+        let z_stem = 3.0 - 1.0 / 3.0;
+        let west = out
+            .regions
+            .iter()
+            .find(|r| r.polygon.exterior.iter().any(|v| (v.x - 1.3).abs() <= 1e-9))
+            .expect("the west plane");
+        for v in &west.polygon.exterior {
+            let expect = if (v.x - 4.3).abs() <= 1e-9 {
+                3.0 // the ridge
+            } else if (v.x - 1.3).abs() <= 1e-9 {
+                2.0 // the dominant main-wall eave
+            } else {
+                z_stem // the stem wall, tucked under the plane
+            };
+            assert!(
+                (v.z - expect).abs() <= 1e-9,
+                "west plane vertex {v:?} expected z {expect}"
+            );
+        }
+        assert!(
+            (z_stem - 2.0) > 0.5,
+            "the stem corners sit clearly above base — the roof passes over the stem"
+        );
+    }
+
     /// A ridge with INTERIOR endpoints keeps the hip solve — no gable
     /// auto-unfan: every boundary corner stays a fan target at base z.
     #[test]
@@ -2439,14 +2594,30 @@ mod tests {
         let mut storey = Storey::default();
         storey.ceiling_unfanned = vec![(6.0, 2.0), (-2.0, 2.0)];
         storey.ceiling_plane_anchors = vec![(5.52, 8.31)];
+        storey.ceiling_continuations = vec![CeilingContinuation {
+            target: (1.0, 1.0),
+            source: (3.0, 1.0),
+            source_storey_offset: -1,
+        }];
         let json = serde_json::to_value(&storey).unwrap();
         let back: Storey = serde_json::from_value(json.clone()).unwrap();
         assert_eq!(back.ceiling_unfanned, vec![(6.0, 2.0), (-2.0, 2.0)]);
         assert_eq!(back.ceiling_plane_anchors, vec![(5.52, 8.31)]);
+        assert_eq!(back.ceiling_continuations, storey.ceiling_continuations);
+        // A continuation entry saved before `source_storey_offset` existed
+        // defaults to SAME-storey.
+        let mut entry = serde_json::to_value(&storey.ceiling_continuations[0]).unwrap();
+        entry
+            .as_object_mut()
+            .unwrap()
+            .remove("source_storey_offset");
+        let legacy_entry: CeilingContinuation = serde_json::from_value(entry).unwrap();
+        assert_eq!(legacy_entry.source_storey_offset, 0);
         // An "old" record: the same JSON with the fields removed.
         let mut old = json;
         old.as_object_mut().unwrap().remove("ceiling_unfanned");
         old.as_object_mut().unwrap().remove("ceiling_plane_anchors");
+        old.as_object_mut().unwrap().remove("ceiling_continuations");
         let legacy: Storey = serde_json::from_value(old).unwrap();
         assert!(
             legacy.ceiling_unfanned.is_empty(),
@@ -2455,6 +2626,10 @@ mod tests {
         assert!(
             legacy.ceiling_plane_anchors.is_empty(),
             "records saved before the field default to auto-nearest anchors"
+        );
+        assert!(
+            legacy.ceiling_continuations.is_empty(),
+            "records saved before the field default to no continuations"
         );
     }
 

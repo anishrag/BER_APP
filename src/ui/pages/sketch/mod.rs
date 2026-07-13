@@ -333,6 +333,24 @@ pub enum SketchEvent {
         world_x: f64,
         world_y: f64,
     },
+    /// First tap of the destructive "Reset heights" button: ARM the confirm.
+    RequestResetCeilingShape,
+    /// The confirming second tap: reset the active storey's ceiling shape to
+    /// flat-at-default (steps/splits/apexes/anchors/continuations cleared).
+    ConfirmResetCeilingShape,
+    /// Disarm the reset confirm without resetting.
+    CancelResetCeilingShape,
+    /// "Continue from neighbour…": start the two-tap pick (target region,
+    /// then the source region whose plane continues over it).
+    StartCeilingContinuation,
+    /// Abandon the continue-from pick at any stage.
+    CancelCeilingContinuation,
+    /// Commit the pending continue-from pick against the storey above
+    /// (`up = true`) or below — the source region is auto-resolved under the
+    /// target point on that storey.
+    CeilingContinuationFromStorey {
+        up: bool,
+    },
     /// A roof-RIDGE stroke (world coords) drawn in roof-point mode — fitted
     /// to an axis-aligned segment placing TWO apexes at once (stroke = ridge,
     /// tap = point: the ceiling-step stroke/tap routing pattern).
@@ -1155,6 +1173,13 @@ pub struct SketchView<'a> {
     /// open length stage is identified by its AXIS (LenX/LenY share the
     /// ridge length input buffer — the two flows are never pending at once);
     /// the height entry reuses `ceiling_apex_input`.
+    /// Two-step "Reset heights" confirm: the button is ARMED (next tap
+    /// executes the reset).
+    pub reset_ceiling_pending: bool,
+    /// Continue-from-neighbour pick stages (ceiling-shape mode): waiting for
+    /// the TARGET tap / the SOURCE tap.
+    pub ceiling_continuation_picking_target: bool,
+    pub ceiling_continuation_picking_source: bool,
     pub ceiling_rect_views: &'a [([(f64, f64); 4], String)],
     pub pending_roof_rect_outline: Option<[(f64, f64); 4]>,
     pub ceiling_rect_position_pending: bool,

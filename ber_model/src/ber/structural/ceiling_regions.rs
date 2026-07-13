@@ -48,6 +48,31 @@ impl CeilingApex {
     }
 }
 
+/// CONTINUE one ceiling region's surface from another region's plane: the
+/// TARGET region (the one containing `target`) is re-emitted as the SOURCE
+/// region's plane evaluated over the target's own ring — a plane
+/// continuation across a step/split boundary, or across a storey. Durable
+/// INPUT like [`CeilingApex`], replayed by `Ber::apply_ceiling_continuations`
+/// at recompose AFTER the base solve (steps → apexes → dormers), in stored
+/// order so chains work. Points are f32-grid quantized on store
+/// (`Ber::add_ceiling_continuation`); entries whose points no longer resolve
+/// to regions are ignored (stale-safe).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CeilingContinuation {
+    /// An interior plan point of the TARGET region (f32 grid, world metres).
+    pub target: (f32, f32),
+    /// An interior plan point of the SOURCE region. For a cross-storey
+    /// continuation this equals `target` — the source region is the one
+    /// under the same plan point on the other storey.
+    pub source: (f32, f32),
+    /// Which storey the source region lives on, relative to the target's:
+    /// `0` = same storey, `+1` = the storey above, `-1` = the storey below.
+    /// Cross-storey planes are converted through the storeys' floor datums
+    /// (world z), so a slope continues physically straight through.
+    #[serde(default)]
+    pub source_storey_offset: i8,
+}
+
 /// A flat-topped DORMER patch carved into an already-sloped attic ceiling: the
 /// `footprint` region is set to the single flat height `top_z_m` while the
 /// SURROUNDING roof keeps its slope — the dormer does NOT reslope its

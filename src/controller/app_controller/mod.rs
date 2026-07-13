@@ -100,7 +100,7 @@ mod storeys;
 mod strokes;
 mod view;
 
-use ceiling_points::PendingCeilingPoint;
+use ceiling_points::{PendingCeilingContinuation, PendingCeilingPoint};
 use ceiling_rects::{PendingCeilingRect, RectPins};
 use ceiling_ridges::{PendingCeilingRidge, RidgeQuestion};
 use ceiling_steps::PendingCeilingStep;
@@ -280,6 +280,15 @@ pub struct AppController {
     /// DURABLE record is the same `Storey::ceiling_apexes`; see
     /// `ceiling_rects.rs`.
     pending_roof_rect: Option<PendingCeilingRect>,
+    /// The in-flight CONTINUE-from-neighbour pick (Ceiling shape mode):
+    /// `PickTarget` → `PickSource { target }` → commit. Transient — outside
+    /// undo, cleared on storey switch / mode exit / cancel. The DURABLE
+    /// record is `Storey::ceiling_continuations`; see `ceiling_points.rs`.
+    pending_ceiling_continuation: Option<PendingCeilingContinuation>,
+    /// Two-step confirm for the destructive "Reset heights" button: the
+    /// first tap arms this, the second executes. Cleared on cancel / storey
+    /// switch / mode changes. See `ceiling_points.rs`.
+    reset_ceiling_confirm: bool,
     /// True when the editor is placing a flat-topped DORMER (a raised
     /// rectangular patch carved into an already-sloped attic ceiling —
     /// unlike the pavilion rect, it does NOT reslope its neighbours; its
@@ -685,6 +694,8 @@ impl AppController {
             pending_ceiling_step: None,
             ceiling_point_mode: false,
             pending_roof_point: None,
+            pending_ceiling_continuation: None,
+            reset_ceiling_confirm: false,
             pending_roof_ridge: None,
             pending_roof_rect: None,
             dormer_mode: false,
