@@ -20006,3 +20006,176 @@ fn t_plan_gable_through_the_real_ridge_flow_is_two_planes() {
         "the group's merged ring covers rect + stem (≈34 m²), got {ring_area}"
     );
 }
+
+// ─── Wall-face partition vs Structure selection (field report d78f1e41) ─────
+
+/// Build the field scenario on a SECOND storey: a two-storey 10×10 stack whose
+/// storey-1 back wall (wall 2) is face-partitioned by a horizontal cut at
+/// 1.2 m — lower section painted NonHeatLoss, upper painted Exposed. Returns
+/// the partitioned wall's `VertexId`.
+fn partition_back_wall_on_second_storey(c: &mut AppController) -> VertexId {
+    use document::PartitionCut;
+    c.add_storey().unwrap();
+    finalise_current_storey_as_square(c, 10.0);
+    assert_eq!(c.current_storey_idx(), Some(1));
+    let (vid, ..) = c.document.outline.floor_plan.perimeter_walls()[2];
+    c.document.commit_partition_cut(
+        vid,
+        PartitionCut {
+            a: Point2f32::new(0.0, 1.2),
+            b: Point2f32::new(10.0, 1.2),
+        },
+    );
+    c.document.set_partition_region_exposure(
+        vid,
+        Point2f32::new(5.0, 0.5),
+        WallExposure::NonHeatLoss,
+        10.0,
+        2.4,
+    );
+    c.document.set_partition_region_exposure(
+        vid,
+        Point2f32::new(5.0, 2.0),
+        WallExposure::Exposed,
+        10.0,
+        2.4,
+    );
+    c.mark_dirty().unwrap();
+    c.materialize();
+    vid
+}
+
+/// The resolved region ids of the partitioned wall's pieces, `(exposed, nhl)`.
+fn partition_piece_ids(c: &AppController, storey_idx: usize) -> (ItemId, ItemId) {
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[storey_idx];
+    let find = |e: WallExposure| {
+        storey
+            .walls
+            .regions
+            .iter()
+            .find(|r| r.exposure == e)
+            .unwrap_or_else(|| panic!("a {e:?} piece resolves"))
+            .id
+    };
+    (find(WallExposure::Exposed), find(WallExposure::NonHeatLoss))
+}
+
+/// REGRESSION (field report d78f1e41): a face-partitioned wall — one exposed
+/// + one non-heat-loss section — PARTICIPATES in Structure→Walls "Select All"
+/// through its exposed piece, exactly once; `Remaining` agrees (it is a
+/// subset of All over the same scope); and the selection survives a
+/// re-resolve without collapsing the wall's stacked pieces onto one another
+/// (the remap key carries the base z). Before the fix the exposed piece kept
+/// a raw `split_by_line` ring whose base edge degenerated to a point, so the
+/// piece was invisible to the selection marquee, un-clickable, and its
+/// construction/span/key lookups all failed.
+#[test]
+fn select_all_includes_partitioned_wall_exposed_piece_exactly_once() {
+    let mut c = dimensioned_square_controller();
+    partition_back_wall_on_second_storey(&mut c);
+    let (exposed_id, nhl_id) = partition_piece_ids(&c, 1);
+
+    set_only_kind(&mut c, SurfaceKind::Walls);
+    c.set_structure_select_mode(Some(SelectMode::All));
+    let all = c.structure_selected_ids().clone();
+    assert!(
+        all.contains(&exposed_id),
+        "Select All includes the partitioned wall's exposed piece"
+    );
+    assert!(
+        !all.contains(&nhl_id),
+        "the non-heat-loss piece stays out of structure scope"
+    );
+    assert_eq!(all.len(), 4, "3 plain walls + the exposed piece");
+
+    // Remaining ⊆ All: nothing attributed yet, so they coincide.
+    c.set_structure_select_mode(Some(SelectMode::Remaining));
+    let remaining = c.structure_selected_ids().clone();
+    assert_eq!(
+        remaining, all,
+        "Remaining agrees with All (nothing done yet)"
+    );
+
+    // A re-resolve re-mints every wall id; the remap must keep the exposed
+    // piece selected — and must NOT drift it onto the stacked NonHeatLoss
+    // piece (they share a plan base edge; the key's base z disambiguates).
+    c.set_structure_select_mode(Some(SelectMode::All));
+    c.mark_dirty().unwrap();
+    c.materialize();
+    let (exposed_id2, nhl_id2) = partition_piece_ids(&c, 1);
+    let after = c.structure_selected_ids().clone();
+    assert!(
+        after.contains(&exposed_id2),
+        "selection re-points onto the re-minted exposed piece"
+    );
+    assert!(
+        !after.contains(&nhl_id2),
+        "…and never onto the out-of-scope stacked piece"
+    );
+    assert_eq!(after.len(), 4, "no selection lost across the re-resolve");
+}
+
+/// REGRESSION (grouping half of d78f1e41): the exposed piece of a partitioned
+/// wall is OFFERED by the "Edit attributes" grouping (as an exposure-locked
+/// group, per the partition design), and assigning a construction to that
+/// group actually LANDS on the piece — the assignment maps the piece to its
+/// perimeter wall's `SurfaceRef` via the (now valid) base edge, where it used
+/// to fall off the perimeter match and vanish into a riser key that never
+/// re-matched.
+#[test]
+fn partitioned_wall_exposed_piece_is_groupable_and_attributable() {
+    use ber_model::ber::structural::{ConstructionMakeup, ConstructionType, WallConstructionType};
+    let mut c = dimensioned_square_controller();
+    partition_back_wall_on_second_storey(&mut c);
+    let (exposed_id, _) = partition_piece_ids(&c, 1);
+
+    set_only_kind(&mut c, SurfaceKind::Walls);
+    c.set_structure_select_mode(Some(SelectMode::All));
+    c.begin_structure_edit();
+    let (gidx, locked) = {
+        let e = c.structure_edit().expect("session opened");
+        let gidx = e
+            .groups
+            .iter()
+            .position(|g| g.ids.contains(&exposed_id))
+            .expect("the exposed piece is offered in a group");
+        (gidx, e.groups[gidx].exposure_locked)
+    };
+    assert!(locked, "a partitioned wall's group is exposure-locked");
+
+    c.set_structure_group_attrs(
+        gidx,
+        ConstructionType::Wall(WallConstructionType::CavityWall),
+        ConstructionMakeup::Default,
+        Default::default(),
+    );
+    c.end_structure_edit();
+    c.materialize();
+
+    let (exposed_id2, _) = partition_piece_ids(&c, 1);
+    let rec = c.current_record.as_ref().unwrap();
+    let r = rec.data.storeys[1]
+        .walls
+        .regions
+        .iter()
+        .find(|r| r.id == exposed_id2)
+        .unwrap();
+    let wc = rec
+        .data
+        .wall_construction(r.construction_id)
+        .expect("piece points at a real construction");
+    assert_eq!(
+        wc.construction_type,
+        WallConstructionType::CavityWall,
+        "the group assignment landed on the exposed piece"
+    );
+
+    // The attributed wall drops out of Remaining; the untouched plain walls stay.
+    c.set_structure_select_mode(Some(SelectMode::Remaining));
+    let remaining = c.structure_selected_ids().clone();
+    assert!(
+        !remaining.contains(&exposed_id2),
+        "attributed piece no longer Remaining"
+    );
+    assert_eq!(remaining.len(), 3, "the three plain walls remain");
+}

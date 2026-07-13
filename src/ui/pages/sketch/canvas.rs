@@ -4196,6 +4196,15 @@ fn view_buttons<F: FnMut(UiEvent)>(
 /// desktop file picker (`rfd`). The chosen path is emitted as
 /// [`SketchEvent::AddExternalPhoto`]; the controller never sees a file dialog.
 ///
+/// SIZING RULE (settled after three rounds of field feedback — don't
+/// re-oscillate): CONTENT-DRIVEN WITH A CAP. Comfortable fixed thumbnails
+/// (~400x300 on the tablet, shrunk only by the portrait width budget), rows
+/// at their natural content height, panel height = content height, capped at
+/// the canvas height minus margins (scrollbar only when the cap bites). The
+/// panel must never stretch to fill the canvas ("full height only if it
+/// needs to"), and never exceed the canvas width (the collapse header must
+/// stay tappable in portrait).
+///
 /// TODO(android-camera): the file picker is a DESKTOP stand-in. On Android the
 /// Add/Replace action should instead launch the camera; it would emit the same
 /// `AddExternalPhoto { side, path }` with the captured image's path, so nothing
@@ -4224,17 +4233,12 @@ fn external_photos_button<F: FnMut(UiEvent)>(
                     egui::CollapsingHeader::new("📷 Add external pictures")
                         .default_open(false)
                         .show(ui, |ui| {
-                            // Two-column grid of side entries (Front | Right,
-                            // Left | Back), sized to FILL the canvas
-                            // vertically when expanded: the two grid rows
-                            // split the available canvas height (minus room
-                            // for the header + frame chrome + the 8px anchor
-                            // margins ≈ 70, and the inter-row grid spacing),
-                            // and each thumbnail scales to fill its row after
-                            // the label + button stack takes its share. On
-                            // the ~2000px-wide tablet canvas that lands the
-                            // thumbnails around 600x450 (4:3 kept). The panel
-                            // is anchored bottom-right and grows UP-and-LEFT;
+                            // CONTENT-DRIVEN WITH A CAP (the settled sizing
+                            // rule — see the fn doc): comfortable fixed
+                            // thumbnails, natural row heights, panel height =
+                            // content height, capped at the canvas. Nothing
+                            // stretches to fill. The panel is anchored
+                            // bottom-right and grows UP-and-LEFT;
                             // constrain_to keeps it on-screen regardless.
                             let max_h = (rect.height() - 70.0).max(220.0);
                             let grid_spacing = egui::vec2(20.0, 16.0);
@@ -4243,37 +4247,28 @@ fn external_photos_button<F: FnMut(UiEvent)>(
                             // bottom-right and growing left, an over-wide
                             // panel pushes the HEADER (and its collapse
                             // triangle) off the left edge, leaving the user
-                            // unable to collapse it. In PORTRAIT the canvas
-                            // (~1200px) is narrower than the height-driven
-                            // landscape panel (~1240px), so the thumbnails
-                            // shrink to fit instead. 40 ≈ popup-frame padding
-                            // + collapsing indent + scrollbar around the grid.
+                            // unable to collapse it (portrait is the tight
+                            // case). 40 ≈ popup-frame padding + collapsing
+                            // indent + scrollbar around the grid.
                             const GRID_CHROME_W: f32 = 40.0;
                             let avail_grid_w = (rect.width() - 16.0 - GRID_CHROME_W).max(150.0);
                             // ≈ status-label row + capture-button row + the
                             // item spacing around the thumbnail between them.
                             const ENTRY_TEXT_AND_BUTTONS_H: f32 = 62.0;
-                            // Two columns of the height-driven thumbnails
-                            // (shrunk to the width budget if needed) — unless
-                            // even shrunk-two-column thumbs would be absurd
-                            // (< 220px wide): then one column of four rows.
+                            // Two columns — unless even shrunk two-column
+                            // thumbs would be absurd (< 220px wide): then one
+                            // column of four rows.
                             let thumb_w_2col_cap = (avail_grid_w - grid_spacing.x) / 2.0;
                             let cols: usize = if thumb_w_2col_cap >= 220.0 { 2 } else { 1 };
-                            let rows = 4.0 / cols as f32;
-                            let row_h = (max_h - (rows - 1.0) * grid_spacing.y) / rows;
-                            // Height-driven ideal (fills the row at 4:3),
-                            // then capped by the column's width budget — the
-                            // height pin below stays either way (capped
-                            // thumbs just centre in their full-height row).
-                            // The floor keeps entries usable on a tiny
-                            // canvas; the ScrollArea then caps + scrolls.
                             let thumb_w_cap = if cols == 2 {
                                 thumb_w_2col_cap
                             } else {
                                 avail_grid_w
                             };
-                            let thumb_h_ideal = (row_h - ENTRY_TEXT_AND_BUTTONS_H).max(150.0);
-                            let thumb_w = (thumb_h_ideal * (4.0 / 3.0)).min(thumb_w_cap);
+                            // Comfortable FIXED thumbnail size (4:3), shrunk
+                            // only by the width budget (portrait) — not
+                            // scaled up to fill the canvas height.
+                            let thumb_w = 400.0_f32.min(thumb_w_cap);
                             let thumb_h = thumb_w * (3.0 / 4.0);
                             // Column fits the thumbnail — floored at 300 so
                             // the capture-button row never drives layout, but
@@ -4282,6 +4277,30 @@ fn external_photos_button<F: FnMut(UiEvent)>(
                             ui.set_max_width(
                                 cols as f32 * col_w + (cols as f32 - 1.0) * grid_spacing.x + 16.0,
                             );
+                            // CONTENT-height estimate: a grid row is its
+                            // tallest entry — text + buttons, plus the
+                            // thumbnail (or its equal-sized placeholder) when
+                            // the side has a photo. Padded a little: the
+                            // estimate is only a FLOOR for the viewport pin
+                            // below (auto_shrink trims overshoot back to the
+                            // real content height; undershoot would clip).
+                            let entry_h = |i: usize| -> f32 {
+                                let has_thumb = view
+                                    .external_photos
+                                    .get(i)
+                                    .is_some_and(|(_, p)| p.is_some());
+                                ENTRY_TEXT_AND_BUTTONS_H + if has_thumb { thumb_h } else { 0.0 }
+                            };
+                            let n = view.external_photos.len();
+                            let row_count = n.div_ceil(cols).max(1);
+                            let mut content_h = grid_spacing.y * (row_count - 1) as f32 + 24.0;
+                            for r in 0..row_count {
+                                content_h += (0..cols)
+                                    .map(|c| r * cols + c)
+                                    .filter(|&i| i < n)
+                                    .map(entry_h)
+                                    .fold(0.0_f32, f32::max);
+                            }
                             // The viewport height must be PINNED, not left to
                             // available space: an egui `Area` sizes its inner
                             // `Ui` from the PREVIOUS frame's content
@@ -4294,22 +4313,22 @@ fn external_photos_button<F: FnMut(UiEvent)>(
                             // auto_shrink, STAYS there across frames (the
                             // area's size feeds back on itself; only the
                             // width — where scrolling is disabled — follows
-                            // content). `min_scrolled_height(max_h)` floors
-                            // the viewport independently of that stale
-                            // available height, and `auto_shrink` = false
-                            // vertically holds it at max_h even while entries
-                            // are photo-less — so the expanded panel always
-                            // fills the canvas, and the scrollbar only appears
-                            // in the floored small-canvas case above.
+                            // content). The pin is the padded CONTENT
+                            // estimate (capped at the canvas), floored via
+                            // `min_scrolled_height` so the stale available
+                            // height can't collapse it, while vertical
+                            // auto_shrink trims it back to the real content —
+                            // net: panel height = content height, capped, and
+                            // the scrollbar appears only when the cap bites.
+                            let pin_h = content_h.min(max_h);
                             egui::ScrollArea::vertical()
                                 .max_height(max_h)
-                                .min_scrolled_height(max_h)
-                                .auto_shrink([true, false])
+                                .min_scrolled_height(pin_h)
+                                .auto_shrink([true, true])
                                 .show(ui, |ui| {
                                     egui::Grid::new(ui.id().with("external_photo_grid"))
                                         .num_columns(cols)
                                         .min_col_width(col_w)
-                                        .min_row_height(row_h)
                                         .spacing(grid_spacing)
                                         .show(ui, |ui| {
                                             for (i, entry) in
@@ -4336,8 +4355,8 @@ fn external_photos_button<F: FnMut(UiEvent)>(
 }
 
 /// One side's entry in the [`external_photos_button`] grid: status label,
-/// thumbnail (when a photo is stored, scaled to `thumb_size` — computed by the
-/// caller so the two grid rows fill the canvas height), and the capture /
+/// thumbnail (when a photo is stored, scaled to `thumb_size` — the caller's
+/// comfortable fixed size, shrunk only by the width budget), and the capture /
 /// annotate / rotate / remove button row — plus, on the deferrable sides, the
 /// "Defer" toggle (`deferred` is its current state). Front never shows the
 /// toggle: deferring exists for apartments where you can't tell which unit is

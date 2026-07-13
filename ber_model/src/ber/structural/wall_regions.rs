@@ -590,12 +590,15 @@ pub fn split_wall_by_line(wall: &WallRegion, p0: Point3f64, p1: Point3f64) -> Ve
 /// Returns the region unchanged when no rotation yields a valid frame (a
 /// degenerate sliver).
 ///
-/// SCOPE: called by the InterStorey derivation on its horizontal-cut outputs
-/// only. The wall-face PARTITION path (the other `split_wall_by_line` caller)
-/// deliberately keeps its raw rings — its pieces are exposure carriers keyed
-/// by the partition recipe, and normalising them would surface their spans to
-/// the 1-D section recovery, which a partitioned wall must stay out of.
-pub(crate) fn rebase_ring_start(mut region: WallRegion) -> WallRegion {
+/// SCOPE: called on every horizontal-cut output — by the InterStorey
+/// derivation AND by the wall-face partition resolve (`document`'s
+/// `split_partitioned_wall`). A piece with a degenerate base is invisible to
+/// every base-edge consumer (selection marquee, click hit-test, construction/
+/// phase stamping, span recovery, opening hosting), so BOTH splitters must
+/// normalise. The 1-D section recovery keeps partitioned walls out by the
+/// partition RECIPE (`sections_from_wall_regions` skips face-partitioned
+/// walls), not by leaving their rings base-less.
+pub fn rebase_ring_start(mut region: WallRegion) -> WallRegion {
     let n = region.polygon.exterior.len();
     if n < 3 || region.base_frame().is_some() {
         return region; // degenerate, or already contract-conforming

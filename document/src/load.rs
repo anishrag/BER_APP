@@ -14,9 +14,10 @@ impl StoreyDoc {
     /// Outline: rebuilt from the resolved floor footprint
     /// ([`FloorRegions::footprint_ring`]) with exact stored points, so it
     /// round-trips. Loaded geometry is finalised: metre scale set, nothing to
-    /// dimension. Living areas and wall-exposure sections are reconstructed
-    /// from their resolved regions. Everything else (active shape, edit
-    /// cursor, pending arc) starts fresh.
+    /// dimension. Living areas, wall-face partitions (from the Layer-1
+    /// recipe) and wall-exposure sections are reconstructed from their
+    /// resolved regions. Everything else (active shape, edit cursor, pending
+    /// arc) starts fresh.
     pub fn from_storey(storey: &Storey) -> StoreyDoc {
         let mut doc = StoreyDoc::default();
         if let Some(ring) = storey.floors.footprint_ring() {
@@ -33,6 +34,11 @@ impl StoreyDoc {
             dimensioning: doc.dimensioning.clone(),
         };
         doc.living_areas = reconstruct_living_areas(&storey.living_areas);
+        // Partitions BEFORE sections: the 1-D recovery skips face-partitioned
+        // walls by the working map, so it must be rebuilt (from the Layer-1
+        // recipe) first — otherwise a partition piece's base span would
+        // recover as a phantom painted section.
+        doc.wall_face_partitions = doc.wall_face_partitions_from_storey(storey);
         doc.wall_sections = doc.sections_from_wall_regions(&storey.walls);
         doc
     }

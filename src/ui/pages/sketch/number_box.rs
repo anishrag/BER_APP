@@ -266,22 +266,19 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         let mut full_height_display = full_span
             .map(|i| fmt_span(i.face_height_m))
             .unwrap_or_default();
-        // The Overall-mode door-leaf HEIGHT field also locks to the face
-        // height under Full height (the door runs floor → roofline; the
-        // sidelights' tops track the door top).
-        let mut ds_door_h_display = full_span
-            .map(|i| fmt_span(i.face_height_m))
-            .unwrap_or_default();
-        // Documents the split rule while a composite full-span tick is on.
+        // Documents the split rules while a composite full-span tick is on:
+        // Full width — door width typed, sidelights share the rest; Full
+        // height — door height typed, sidelights run to the roofline and the
+        // transom fills the strip left above the door.
         let ds_full_note = (ds_mode.is_some() && (full_width || full_height)).then(
             || match (full_width, full_height) {
                 (true, true) => {
-                    "Whole wall, floor → roofline: type the door width — the sidelight(s) share the rest. No transom; needs an empty wall."
+                    "Whole wall + face: type the door size — the sidelight(s) share the remaining width; the transom tops the door. Needs an empty wall."
                 }
                 (true, false) => {
                     "Full width: type the door width — the sidelight(s) share the rest of the wall. No end margins; needs an empty wall."
                 }
-                _ => "Full height: door + sidelights run floor → roofline, sills 0, no transom.",
+                _ => "Full height: sidelights run floor → roofline; the transom fills the strip above the typed door.",
             },
         );
         // The window-type choice settled on a previous frame (the picker below
@@ -457,18 +454,15 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     measurable: true,
                     check: None,
                 });
-                // Under Full height the door leaf's height locks to the face
-                // height too (floor → roofline, like the overall H above).
+                // The door LEAF height stays TYPED even under Full height —
+                // the transom fills whatever strip the door leaves below the
+                // face (only the overall H above locks to the face).
                 box_fields.push(BoxField {
                     label: &f[3].label,
                     hint: f[3].hint,
-                    buf: if full_height {
-                        &mut ds_door_h_display
-                    } else {
-                        &mut *view.door_height_input
-                    },
+                    buf: &mut *view.door_height_input,
                     required: true,
-                    enabled: !full_height,
+                    enabled: true,
                     measurable: true,
                     check: None,
                 });

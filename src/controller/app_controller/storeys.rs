@@ -3,18 +3,28 @@
 use super::*;
 
 /// The durable, geometry-independent key a Structure-phase SELECTION re-points
-/// by across the id-churning re-resolve: a wall's quantized base edge, or a
-/// floor/roof area's quantized plan centroid. Walls and floors mint fresh
-/// region ids on EVERY resolve (`WallRegions::regenerate` / `FloorRegions`
-/// partition), so a selection (or open "Edit attributes" session) keyed by raw
-/// id would dangle after any re-derive — silently dropping later edits. This is
-/// the selection analogue of the attribute side-tables' `SurfaceRef` /
-/// `CentroidKey`. (Roof ids are stable — regions-as-truth — so re-pointing them
-/// is a harmless no-op, handled uniformly.)
+/// by across the id-churning re-resolve: a wall's quantized base edge PLUS its
+/// quantized base z, or a floor/roof area's quantized plan centroid. Walls and
+/// floors mint fresh region ids on EVERY resolve (`WallRegions::regenerate` /
+/// `FloorRegions` partition), so a selection (or open "Edit attributes"
+/// session) keyed by raw id would dangle after any re-derive — silently
+/// dropping later edits. This is the selection analogue of the attribute
+/// side-tables' `SurfaceRef` / `CentroidKey`. (Roof ids are stable —
+/// regions-as-truth — so re-pointing them is a harmless no-op, handled
+/// uniformly.) The base z (mm) disambiguates VERTICALLY STACKED pieces of one
+/// wall — a face-partitioned or InterStorey-split wall resolves to several
+/// regions sharing the same plan base edge, and a plan-only key would remap
+/// every stacked selection onto the first piece.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SurfaceKey {
-    Wall((i64, i64, i64, i64)),
+    Wall((i64, i64, i64, i64), i64),
     Area((i64, i64)),
+}
+
+/// A wall region's base z quantized to mm — the stacked-piece discriminator of
+/// [`SurfaceKey::Wall`].
+fn wall_base_z_mm(e0: &domain::points::Point3f64) -> i64 {
+    (e0.z * 1000.0).round() as i64
 }
 
 /// The live region id of `kind` whose durable [`SurfaceKey`] matches `key`, in
@@ -24,18 +34,21 @@ enum SurfaceKey {
 fn structure_id_for_key(storey: &Storey, kind: SurfaceKind, key: SurfaceKey) -> Option<ItemId> {
     let wall_key = |r: &ber_model::ber::structural::WallRegion| {
         r.base_edge().map(|(e0, e1)| {
-            document::riser_key(
-                domain::points::Point2f64::new(e0.x, e0.y),
-                domain::points::Point2f64::new(e1.x, e1.y),
+            (
+                document::riser_key(
+                    domain::points::Point2f64::new(e0.x, e0.y),
+                    domain::points::Point2f64::new(e1.x, e1.y),
+                ),
+                wall_base_z_mm(&e0),
             )
         })
     };
     match (kind, key) {
-        (SurfaceKind::Walls, SurfaceKey::Wall(k)) => storey
+        (SurfaceKind::Walls, SurfaceKey::Wall(k, z)) => storey
             .walls
             .regions
             .iter()
-            .find(|r| wall_key(r) == Some(k))
+            .find(|r| wall_key(r) == Some((k, z)))
             .map(|r| r.id),
         (SurfaceKind::Floors, SurfaceKey::Area(k)) => storey
             .floors
@@ -73,10 +86,13 @@ impl AppController {
                     .iter()
                     .find(|r| r.id == id)?
                     .base_edge()?;
-                Some(SurfaceKey::Wall(document::riser_key(
-                    domain::points::Point2f64::new(e0.x, e0.y),
-                    domain::points::Point2f64::new(e1.x, e1.y),
-                )))
+                Some(SurfaceKey::Wall(
+                    document::riser_key(
+                        domain::points::Point2f64::new(e0.x, e0.y),
+                        domain::points::Point2f64::new(e1.x, e1.y),
+                    ),
+                    wall_base_z_mm(&e0),
+                ))
             }
             SurfaceKind::Floors => {
                 let r = storey.floors.regions.iter().find(|r| r.id == id)?;

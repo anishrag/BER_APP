@@ -525,6 +525,17 @@ impl StoreyDoc {
     /// span of its own. An `Unset` piece with painted stack above therefore
     /// recovers exactly like an `InterStorey` band (same duplicate guards); a
     /// plain `Unset` piece with nothing painted above still never recovers.
+    ///
+    /// A FACE-PARTITIONED wall ([`wall_face_partitions`]) never recovers 1-D
+    /// sections at all — its resolved pieces are exposure carriers of the 2-D
+    /// partition recipe (each piece a first-class wall with a real base span
+    /// since the resolve rebases them), and recovering those spans here would
+    /// turn the partition into overlapping phantom `wall_sections`. The
+    /// caller must have the working partition map populated before recovery
+    /// (`from_storey` does; the shell reconstructs partitions before
+    /// sections).
+    ///
+    /// [`wall_face_partitions`]: StoreyDoc::wall_face_partitions
     pub fn sections_from_wall_regions(
         &self,
         walls: &WallRegions,
@@ -549,6 +560,9 @@ impl StoreyDoc {
             let Some((vid, start_m, end_m, _len)) = self.recover_wall_region_span(region) else {
                 continue; // region's base edge isn't on any current wall (a riser)
             };
+            if self.is_wall_partitioned(vid) {
+                continue; // 2-D partition piece — the recipe owns its exposure
+            }
             recovered_ids.insert(region.id);
             out.entry(vid).or_default().push(ExposureSection {
                 start_m,
@@ -566,6 +580,9 @@ impl StoreyDoc {
             let Some((vid, start_m, end_m, _len)) = self.recover_wall_region_span(band) else {
                 continue;
             };
+            if self.is_wall_partitioned(vid) {
+                continue; // 2-D partition piece — the recipe owns its exposure
+            }
             out.entry(vid).or_default().push(ExposureSection {
                 start_m,
                 end_m,

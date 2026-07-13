@@ -5,7 +5,8 @@ use crate::{CeilingStepRegion, PhaseRegion, StepRegion, StoreyDoc};
 use ber_model::ber::ber_struct::Ber;
 use ber_model::ber::common::{ConstructionPhase, ItemId};
 use ber_model::ber::structural::{
-    split_wall_by_line, CeilingRegions, FloorRegions, Polygon3D, Storey, WallExposure, WallRegions,
+    rebase_ring_start, split_wall_by_line, CeilingRegions, FloorRegions, Polygon3D, Storey,
+    WallExposure, WallRegions,
 };
 use domain::points::{to_f64, Point2f32, Point2f64, Point3f64};
 
@@ -456,6 +457,17 @@ pub fn resolve_storey(
 /// base_z-AGNOSTICALLY (the wall may extend below the floor on upper storeys):
 /// each sub-poly vertex and each stored sample project to wall-local `(along, z)`
 /// and the containing sample's exposure wins (default [`WallExposure::Unset`]).
+///
+/// Every sub-wall is REBASED onto the wall vertex-order contract
+/// ([`rebase_ring_start`], same as the InterStorey derivation's horizontal
+/// cuts): `split_by_line` leaves a piece ABOVE a cut with its ring opening ON
+/// the cut line, whose `base_edge()` degenerates to a zero-plan-length
+/// vertical edge — making the piece invisible to every base-edge consumer
+/// (Structure selection marquee + click hit-test, construction/phase
+/// stamping, span recovery, opening hosting). The 1-D section recovery keeps
+/// partitioned walls out via the partition recipe
+/// ([`StoreyDoc::sections_from_wall_regions`] skips them), so the rebased
+/// spans never leak back in as painted sections.
 fn apply_face_partitions(s: &StoreyDoc, storey: &mut Storey) {
     if s.wall_face_partitions.is_empty() {
         return;
@@ -577,13 +589,13 @@ fn split_partitioned_wall(
                 })
                 .map(|(_, e)| *e)
                 .unwrap_or(WallExposure::Unset);
-            ber_model::ber::structural::WallRegion {
+            rebase_ring_start(ber_model::ber::structural::WallRegion {
                 id: ItemId::default(),
                 polygon: poly,
                 exposure,
                 opes: Default::default(),
                 construction_id: region.construction_id,
-            }
+            })
         })
         .collect()
 }
@@ -4937,6 +4949,175 @@ mod tests {
             "two halves ({sub_area}) sum to the full face ({full_area})"
         );
         let _ = (a, b);
+    }
+
+    /// A doc with the FIELD partition shape: one horizontal cut at 1.2 m on
+    /// wall 0 of a 4×4 square, lower region painted NonHeatLoss, upper painted
+    /// Exposed. Returns `(doc, ber, vid, len)`.
+    fn horizontal_partition_doc() -> (StoreyDoc, Ber, manip_plan::VertexId, f32) {
+        let mut doc = square_doc(&[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(4.0, 0.0),
+            Point2f32::new(4.0, 4.0),
+            Point2f32::new(0.0, 4.0),
+        ]);
+        let (vid, a, b) = doc.outline.floor_plan.perimeter_walls()[0];
+        let len = manip_plan::segment_len(a, b);
+        let height = 2.4_f32;
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &[]);
+        ber.set_default_ceiling_height(Some(0), 2.4);
+        doc.commit_partition_cut(
+            vid,
+            crate::PartitionCut {
+                a: Point2f32::new(0.0, 1.2),
+                b: Point2f32::new(len, 1.2),
+            },
+        );
+        doc.set_partition_region_exposure(
+            vid,
+            Point2f32::new(len * 0.5, 0.5),
+            WallExposure::NonHeatLoss,
+            len,
+            height,
+        );
+        doc.set_partition_region_exposure(
+            vid,
+            Point2f32::new(len * 0.5, 2.0),
+            WallExposure::Exposed,
+            len,
+            height,
+        );
+        (doc, ber, vid, len)
+    }
+
+    /// REGRESSION (the "Select All misses the partitioned back wall" field
+    /// report): every partition sub-wall is a FIRST-CLASS wall. The piece
+    /// ABOVE a horizontal cut used to keep its raw `split_by_line` ring —
+    /// its ring opened ON the cut, so `base_edge()` degenerated to a
+    /// zero-plan-length vertical edge and every base-edge consumer went
+    /// blind: no selection marquee, no click hit, no span recovery, wrong
+    /// construction/phase stamping. Now both pieces carry a full-plan-span
+    /// base edge (the upper one at the cut height), both recover their
+    /// wall span, the in-scope Exposed piece seeds `Select All`
+    /// (`surface_ids`) exactly once, and a plan tap on the wall line hits it
+    /// (`surface_at`).
+    #[test]
+    fn face_partition_pieces_are_first_class_walls() {
+        use ber_model::ber::structural::SurfaceKind;
+        let (doc, ber, vid, len) = horizontal_partition_doc();
+        let storey = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+
+        let pieces: Vec<_> = storey
+            .walls
+            .regions
+            .iter()
+            .filter(|r| {
+                matches!(
+                    r.exposure,
+                    WallExposure::Exposed | WallExposure::NonHeatLoss
+                )
+            })
+            .collect();
+        assert_eq!(pieces.len(), 2, "the partitioned wall resolves as 2 pieces");
+        for r in &pieces {
+            let (e0, e1) = r
+                .base_edge()
+                .expect("every partition piece has a base edge");
+            let plan_len = ((e1.x - e0.x).powi(2) + (e1.y - e0.y).powi(2)).sqrt();
+            assert!(
+                (plan_len - len as f64).abs() < 1e-3,
+                "full-plan-span base (got {plan_len}, exposure {:?})",
+                r.exposure
+            );
+            let (svid, s0, s1, _wlen) = doc
+                .recover_wall_region_span(r)
+                .expect("piece recovers its wall span");
+            assert_eq!(svid, vid);
+            assert!(s0.abs() < 1e-3 && (s1 - len).abs() < 1e-3, "span 0..len");
+        }
+        // The upper (Exposed) piece's base sits at the cut height; the lower at 0.
+        let base_z = |e: WallExposure| {
+            pieces
+                .iter()
+                .find(|r| r.exposure == e)
+                .and_then(|r| r.base_edge())
+                .map(|(e0, _)| e0.z)
+                .unwrap()
+        };
+        assert!((base_z(WallExposure::Exposed) - 1.2).abs() < 1e-3);
+        assert!(base_z(WallExposure::NonHeatLoss).abs() < 1e-3);
+
+        // Select All's seed: the Exposed piece participates EXACTLY ONCE; the
+        // NonHeatLoss piece stays out of structure scope.
+        let ids = storey.surface_ids(SurfaceKind::Walls);
+        let exposed_id = pieces
+            .iter()
+            .find(|r| r.exposure == WallExposure::Exposed)
+            .unwrap()
+            .id;
+        let nhl_id = pieces
+            .iter()
+            .find(|r| r.exposure == WallExposure::NonHeatLoss)
+            .unwrap()
+            .id;
+        assert_eq!(ids.iter().filter(|id| **id == exposed_id).count(), 1);
+        assert!(!ids.contains(&nhl_id), "non-heat-loss piece out of scope");
+
+        // Click-select: a plan tap on the wall line hits the in-scope piece.
+        let (a, b) = doc.outline.floor_plan.wall_endpoints(vid).unwrap();
+        let mid = (((a.x + b.x) * 0.5) as f64, ((a.y + b.y) * 0.5) as f64);
+        assert_eq!(
+            storey.surface_at(SurfaceKind::Walls, mid.0, mid.1, 0.1),
+            Some(exposed_id),
+            "tapping the wall picks the exposed piece"
+        );
+    }
+
+    /// A face-partitioned wall's pieces — now carrying REAL base spans — must
+    /// NOT leak into the 1-D section recovery (the partition recipe owns
+    /// their exposure); a plain painted wall on the same storey still
+    /// recovers. Guards both directions of the recovery skip.
+    #[test]
+    fn face_partition_pieces_never_recover_as_1d_sections() {
+        let (mut doc, ber, vid, _len) = horizontal_partition_doc();
+        // Paint a plain 1-D section on the NEXT wall as the positive control.
+        let (other_vid, oa, ob) = doc.outline.floor_plan.perimeter_walls()[1];
+        let olen = manip_plan::segment_len(oa, ob);
+        doc.set_wall_section(other_vid, 0.0, olen, olen, WallExposure::SemiExposed);
+
+        let storey = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+        let recovered = doc.sections_from_wall_regions(&storey.walls);
+        assert!(
+            !recovered.contains_key(&vid),
+            "partitioned wall recovers NO 1-D sections: {recovered:?}"
+        );
+        let other = recovered
+            .get(&other_vid)
+            .expect("the plain painted wall still recovers");
+        assert_eq!(other.len(), 1);
+        assert_eq!(other[0].exposure, WallExposure::SemiExposed);
+    }
+
+    /// The COLD-LOAD path (`from_storey`, no snapshot) rebuilds the partition
+    /// working map BEFORE recovering 1-D sections, so a partition piece's
+    /// base span doesn't come back as a phantom painted section.
+    #[test]
+    fn from_storey_rebuilds_partitions_and_skips_their_sections() {
+        let (doc, ber, _vid, _len) = horizontal_partition_doc();
+        let storey = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+
+        let loaded = StoreyDoc::from_storey(&storey);
+        let new_vid = loaded.outline.floor_plan.perimeter_walls()[0].0;
+        assert!(
+            loaded.is_wall_partitioned(new_vid),
+            "partition working map rebuilt from the Layer-1 recipe on load"
+        );
+        assert!(
+            !loaded.wall_sections.contains_key(&new_vid),
+            "no phantom 1-D sections for the partitioned wall: {:?}",
+            loaded.wall_sections.get(&new_vid)
+        );
     }
 
     /// LAYER-1 ROUND-TRIP: a face partition survives a snapshot-less reload.

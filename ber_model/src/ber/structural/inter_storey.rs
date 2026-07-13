@@ -147,19 +147,39 @@ pub fn derive_inter_storey(ber: &mut Ber, dimensioned: &[bool]) {
         }
         let storey = &mut ber.storeys[i];
         storey.floors = split_floors_intact(std::mem::take(&mut storey.floors), &fp.rings);
-        for r in &mut storey.floors.regions {
+        let mut buried: Vec<usize> = Vec::new();
+        for (ri, r) in storey.floors.regions.iter_mut().enumerate() {
             let ring = floor_plan_ring(r);
             if ring.len() >= 3 && fp.contains_ring(&ring) {
                 r.exposure = FloorExposure::InterStorey;
-                // An inter-storey surface is OUT of structure scope: it is
-                // never attributed, offered, reviewed or counted — so it
-                // must not keep (or share) a construction. Clearing here
-                // SELF-HEALS records where a pre-scope-fix session left an
-                // in-scope region sharing its construction with a buried
-                // one (the "final house" report). Stable nil id, so the
-                // derive stays exactly idempotent.
-                r.construction_id = ItemId::nil();
+                buried.push(ri);
             }
+        }
+        // An inter-storey floor is OUT of structure scope: it is never
+        // attributed, offered, reviewed or counted — so it must not keep
+        // (or share) the FABRIC it was never assessed for (the "final
+        // house" stale-share report). But a floor region's construction is
+        // ALSO the durable record of the Mapping-phase CONSTRUCTION-PHASE
+        // zones (`phase_regions_from_floors` / `construction_phase_complete`
+        // read it) — clearing it to nil wiped the upper storey's phase
+        // tagging on every materialize and turned the "Construction phase"
+        // checklist row red (field report 8a4fcf1e). Reset to the
+        // PHASE-ONLY construction instead — fabric dropped, phase kept —
+        // the floors mirror of the buried inter-storey wall-band reset
+        // below. `ensure` is find-or-create, so the id is stable and the
+        // derive stays exactly idempotent.
+        for ri in buried {
+            let cid = ber.storeys[i].floors.regions[ri].construction_id;
+            let phase = ber
+                .floor_construction(cid)
+                .map(|c| c.base.construction_phase.clone())
+                .unwrap_or_default();
+            let reset = ber.ensure_floor_construction(
+                FloorConstructionType::default(),
+                ConstructionMakeup::default(),
+                phase,
+            );
+            ber.storeys[i].floors.regions[ri].construction_id = reset;
         }
     }
 
@@ -834,6 +854,65 @@ mod tests {
         a.sort();
         b.sort();
         assert_eq!(a, b, "construction links are re-derive stable");
+    }
+
+    /// Field report 8a4fcf1e ("construction phase went red on the second
+    /// storey"): a buried inter-storey FLOOR must keep its construction
+    /// PHASE. The floor partition is the durable record of the Mapping-phase
+    /// zones (`storey_phase_zones` / the checklist's
+    /// `construction_phase_complete` read the floor constructions' phases) —
+    /// nil-clearing the buried regions wiped the upper storey's tagging on
+    /// every materialize. The derive must drop the FABRIC (out-of-scope
+    /// hygiene) but re-home the region onto the phase-only construction,
+    /// mirroring the buried wall-band reset. Idempotent across re-derives.
+    #[test]
+    fn buried_inter_storey_floor_keeps_its_construction_phase() {
+        use crate::ber::common::ConstructionPhase;
+        use crate::ber::structural::{ConstructionMakeup, FloorConstructionType};
+        let mut ber = Ber::default();
+        let ring = square(0.0, 0.0, 8.0, 4.0);
+        ber.storeys.push(flat_storey(ring.clone(), 2.4, None));
+        ber.storeys.push(flat_storey(ring, 2.4, Some(0.3)));
+        // The upper floor was phase-tagged Original WITH real fabric (the
+        // Mapping partition + a Structure-phase attribution).
+        let tagged = ber.ensure_floor_construction_named(
+            FloorConstructionType::SolidFloor,
+            ConstructionMakeup::Default,
+            ConstructionPhase::Original,
+            Some("old floor"),
+        );
+        ber.storeys[1].floors.regions[0].construction_id = tagged;
+
+        derive_all(&mut ber);
+
+        let r = &ber.storeys[1].floors.regions[0];
+        assert_eq!(r.exposure, FloorExposure::InterStorey, "buried → stamped");
+        assert_ne!(r.construction_id, ItemId::nil(), "phase record survives");
+        let c = ber
+            .floor_construction(r.construction_id)
+            .expect("buried floor still references a construction");
+        assert_eq!(
+            c.base.construction_phase,
+            ConstructionPhase::Original,
+            "the construction PHASE is kept"
+        );
+        assert_eq!(
+            c.construction_type,
+            FloorConstructionType::default(),
+            "the FABRIC is dropped (out-of-scope hygiene)"
+        );
+        // Zone reconstruction still sees the phase (what the session rebuild
+        // and the checklist read).
+        let zones = ber.storey_phase_zones(1);
+        assert_eq!(zones.len(), 1, "the Original zone survives the derive");
+        assert_eq!(zones[0].0, ConstructionPhase::Original);
+        // Idempotent: a second derive reproduces the exact construction link.
+        let cid = r.construction_id;
+        derive_all(&mut ber);
+        assert_eq!(
+            ber.storeys[1].floors.regions[0].construction_id, cid,
+            "re-derive is exactly stable"
+        );
     }
 
     /// Run the derivation treating EVERY storey as dimensioned — the settled
