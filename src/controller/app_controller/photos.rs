@@ -277,4 +277,63 @@ impl AppController {
             .map(|r| r.data.deferred_photos_pending())
             .unwrap_or_default()
     }
+
+    /// Backfill the missing THUMBNAIL for `side`'s stored external photo, off
+    /// the UI thread. The panel previews ONLY thumbnails — texturing a
+    /// full-res ~12 MP camera file costs ~48 MB, OOM territory on the tablet
+    /// — so a photo without one (a record from before thumbnails existed, or
+    /// a failed generation) shows a placeholder that requests this every
+    /// frame. Guards: at most ONE attempt per photo per session (an
+    /// undecodable file must not retry each frame), and a no-op while any
+    /// photo job is in flight — a fresh capture's own background job is
+    /// about to deliver its thumbnail anyway. The result lands through the
+    /// shared photo-job queue
+    /// ([`apply_finished_photos`](Self::apply_finished_photos)) with
+    /// `provisional == file_path`, which marks it as a backfill there: the
+    /// photo's file already stands and must survive the orphan cleanup.
+    pub fn ensure_external_photo_thumbnail(&mut self, side: ExternalSide) {
+        if self.photos_processing() {
+            return;
+        }
+        let Some((id, file_path)) = self.current_record.as_ref().and_then(|r| {
+            r.data
+                .photos
+                .iter()
+                .find(|p| p.side == Some(side) && p.thumbnail_path.is_none())
+                .map(|p| (p.id, p.file_path.clone()))
+        }) else {
+            return;
+        };
+        if !self.thumbnail_backfill_attempted.insert(id) {
+            return;
+        }
+        if std::fs::create_dir_all(&self.photos_dir).is_err() {
+            return;
+        }
+        // Absolute dir so the stored thumbnail path loads as `file://`
+        // regardless of cwd (as `ingest_photo`).
+        let dir =
+            std::fs::canonicalize(&self.photos_dir).unwrap_or_else(|_| self.photos_dir.clone());
+        let thumb_dest = dir.join(format!("{}_thumb.jpg", id.0));
+        let results = self.photo_results.clone();
+        let inflight = self.photo_jobs_inflight.clone();
+        inflight.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        std::thread::spawn(move || {
+            let outcome = Self::write_thumbnail(std::path::Path::new(&file_path), &thumb_dest)
+                .then(|| {
+                    (
+                        file_path.clone(),
+                        Some(thumb_dest.to_string_lossy().into_owned()),
+                    )
+                });
+            if let Ok(mut q) = results.lock() {
+                q.push(super::structure::PhotoJobResult {
+                    id,
+                    outcome,
+                    provisional: file_path,
+                });
+            }
+            inflight.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        });
+    }
 }

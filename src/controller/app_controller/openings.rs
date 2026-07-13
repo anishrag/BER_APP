@@ -140,11 +140,18 @@ pub struct OpeningFieldsPrompt {
     /// and the glazed parts of Door + sidelights. A plain solid Door has none.
     pub offer_window_type: bool,
     /// `Some` when the box should offer the "Full width" / "Full height"
-    /// checkboxes (a plain Window or Door hosted on a wall, placing or
-    /// editing): the resolved spans the ticked, disabled fields display —
-    /// the wall length and the wall face height (floor → roofline) at the
-    /// pick. `None` for the other tools (roof/multi-storey/assembly/complex).
+    /// checkboxes (a plain Window, Door, or door+sidelights composite hosted
+    /// on a wall, placing or editing): the resolved spans the ticked, disabled
+    /// fields display — the wall length and the wall face height (floor →
+    /// roofline) at the pick. `None` for the other tools (roof/multi-storey/
+    /// complex).
     pub full_span: Option<FullSpanInfo>,
+    /// What the box's Overshading picker should DEFAULT to for this tool:
+    /// `VeryLittle` for a roof window (it looks at the sky), `Average`
+    /// otherwise. The UI reseeds its persistent pick only when this default
+    /// CHANGES (switching tool groups), so repeat placements keep the
+    /// assessor's choice.
+    pub default_overshading: Overshading,
     /// Bumped on every fresh host pick — the UI resets the box's field focus when
     /// it changes, so a new placement starts on the first field.
     pub seq: u64,
@@ -692,10 +699,12 @@ impl AppController {
         let offer_full_surface = p.tool == OpeningToolKind::Window
             && matches!(p.target, PendingOpeningTarget::Wall { .. })
             && self.pending_wall_empty();
-        // Full-width / Full-height checkboxes: plain Window or Door on a wall.
+        // Full-width / Full-height checkboxes: plain Window, Door, or the
+        // door+sidelights composite, hosted on a wall. (The UI additionally
+        // limits the composite's checkboxes to its Overall input mode.)
         let full_span = match (p.tool, p.target) {
             (
-                OpeningToolKind::Window | OpeningToolKind::Door,
+                OpeningToolKind::Window | OpeningToolKind::Door | OpeningToolKind::DoorSidelights,
                 PendingOpeningTarget::Wall {
                     wall_id, along_m, ..
                 },
@@ -718,6 +727,12 @@ impl AppController {
             complex_window: is_cx.then_some(cx_kind),
             offer_window_type,
             full_span,
+            // A rooflight looks at the sky — rarely overshaded.
+            default_overshading: if p.tool == OpeningToolKind::RoofWindow {
+                Overshading::VeryLittle
+            } else {
+                Overshading::Average
+            },
             seq: self.placement_seq,
             edit: None,
         })
@@ -773,6 +788,9 @@ impl AppController {
             complex_window: None,
             offer_window_type: true,
             full_span,
+            // Unused for an edit: the prefill below seeds the picker from the
+            // window's own overshading (after any default-change reseed).
+            default_overshading: Overshading::Average,
             seq: self.placement_seq,
             edit: Some(OpeningEditPrefill {
                 width_m: w.width_m,
@@ -1054,7 +1072,25 @@ impl AppController {
                         door_type_name: "Door".to_string(),
                     },
                 };
-                openings::compose_door_sidelights(storey, wall_id, along_m, spec).map(|_| ())
+                // The checkboxes route to the full-span composers: Full width
+                // = the assembly spans the wall exactly (door width typed, the
+                // sidelight(s) share the leftover; empty-wall rule), Full
+                // height = everything runs floor → roofline (no transom).
+                match (full_width, full_height) {
+                    (false, false) => {
+                        openings::compose_door_sidelights(storey, wall_id, along_m, spec)
+                    }
+                    (true, false) => {
+                        openings::compose_full_width_door_sidelights(storey, wall_id, spec)
+                    }
+                    (false, true) => openings::compose_full_height_door_sidelights(
+                        storey, wall_id, along_m, spec,
+                    ),
+                    (true, true) => {
+                        openings::compose_full_wall_door_sidelights(storey, wall_id, spec)
+                    }
+                }
+                .map(|_| ())
             }
             _ => return Ok(()), // tool/target mismatch — nothing to place
         };

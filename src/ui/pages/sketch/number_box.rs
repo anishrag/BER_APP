@@ -164,6 +164,17 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     if let Some(prompt) = view.opening_fields_prompt.as_ref() {
         let title = prompt.title.clone();
         let error = view.opening_dim_error;
+        // Each tool group has its own Overshading DEFAULT (rooflights: "Very
+        // little" — they look at the sky, so obstacles rarely shade them). The
+        // pick persists across placements (repeat windows are one pick), so
+        // reseed ONLY when the default itself changes — switching tool groups
+        // — never on every pick. Runs BEFORE the per-seq block so an edit
+        // prompt's prefill (below) wins over the reseed.
+        let ov_id = Id::new("ber_opening_default_overshading");
+        if ctx.data(|d| d.get_temp::<Overshading>(ov_id)) != Some(prompt.default_overshading) {
+            ctx.data_mut(|d| d.insert_temp(ov_id, prompt.default_overshading));
+            *view.overshading = prompt.default_overshading;
+        }
         // A fresh host pick (new seq) starts the box on its first field, so the
         // keypad/laser don't keep editing whichever field the last placement left
         // focused.
@@ -231,15 +242,20 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             let (w, h, shape) = window_shape_from_inputs(kind, &dims[..n]);
             format!("area ≈ {:.2} m²", window_shape_area(shape, w, h))
         });
-        // Full width / Full height (plain Window or Door on a wall — the prompt
-        // carries the resolved spans): ticking a box disables its field, which
-        // then displays the wall span the opening will take. The flags ride the
-        // Place / Apply events by value (settled previous-frame values, like
-        // the other toggles); the controller re-resolves the spans against the
-        // LIVE wall when it places.
+        // Full width / Full height (plain Window, Door, or door+sidelights on
+        // a wall — the prompt carries the resolved spans): ticking a box
+        // disables its field, which then displays the wall span the opening
+        // will take. The flags ride the Place / Apply events by value (settled
+        // previous-frame values, like the other toggles); the controller
+        // re-resolves the spans against the LIVE wall when it places. The
+        // COMPOSITE offers them in its Overall input mode only — there the
+        // whole-doorset W/H fields map 1:1 onto the wall spans, while Detailed
+        // mode types every piece explicitly.
+        let ds_detailed = ds_mode == Some(DoorSidelightsMode::Detailed);
         let full_span = prompt.full_span;
-        let full_width = full_span.is_some() && *view.opening_full_width;
-        let full_height = full_span.is_some() && *view.opening_full_height;
+        let offer_full = full_span.is_some() && !ds_detailed;
+        let full_width = offer_full && *view.opening_full_width;
+        let full_height = offer_full && *view.opening_full_height;
         let fmt_span = |v: f32| {
             let s = format!("{v:.3}");
             s.trim_end_matches('0').trim_end_matches('.').to_string()
@@ -250,6 +266,24 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         let mut full_height_display = full_span
             .map(|i| fmt_span(i.face_height_m))
             .unwrap_or_default();
+        // The Overall-mode door-leaf HEIGHT field also locks to the face
+        // height under Full height (the door runs floor → roofline; the
+        // sidelights' tops track the door top).
+        let mut ds_door_h_display = full_span
+            .map(|i| fmt_span(i.face_height_m))
+            .unwrap_or_default();
+        // Documents the split rule while a composite full-span tick is on.
+        let ds_full_note = (ds_mode.is_some() && (full_width || full_height)).then(
+            || match (full_width, full_height) {
+                (true, true) => {
+                    "Whole wall, floor → roofline: type the door width — the sidelight(s) share the rest. No transom; needs an empty wall."
+                }
+                (true, false) => {
+                    "Full width: type the door width — the sidelight(s) share the rest of the wall. No end margins; needs an empty wall."
+                }
+                _ => "Full height: door + sidelights run floor → roofline, sills 0, no transom.",
+            },
+        );
         // The window-type choice settled on a previous frame (the picker below
         // mutates it for the NEXT frame; a Place click reads the settled value),
         // captured by value into the action events.
@@ -387,7 +421,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 required: f[0].required,
                 enabled: !full_width,
                 measurable: true,
-                check: full_span.is_some().then(|| BoxCheck {
+                check: offer_full.then(|| BoxCheck {
                     label: "Full width",
                     value: &mut *view.opening_full_width,
                 }),
@@ -403,7 +437,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 required: f[1].required,
                 enabled: !full_height,
                 measurable: true,
-                check: full_span.is_some().then(|| BoxCheck {
+                check: offer_full.then(|| BoxCheck {
                     label: "Full height",
                     value: &mut *view.opening_full_height,
                 }),
@@ -423,23 +457,30 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     measurable: true,
                     check: None,
                 });
+                // Under Full height the door leaf's height locks to the face
+                // height too (floor → roofline, like the overall H above).
                 box_fields.push(BoxField {
                     label: &f[3].label,
                     hint: f[3].hint,
-                    buf: &mut *view.door_height_input,
+                    buf: if full_height {
+                        &mut ds_door_h_display
+                    } else {
+                        &mut *view.door_height_input
+                    },
                     required: true,
-                    enabled: true,
+                    enabled: !full_height,
                     measurable: true,
                     check: None,
                 });
                 // One sill for the whole assembly — active only when ticked.
-                // Reuses the left-sill buffer + the (repurposed) "has a sill" flag.
+                // Reuses the left-sill buffer + the (repurposed) "has a sill"
+                // flag. Full height forces sill 0, so it deactivates too.
                 box_fields.push(BoxField {
                     label: &f[4].label,
                     hint: f[4].hint,
                     buf: &mut *view.sidelight_left_sill_input,
                     required: false,
-                    enabled: left_has_sill,
+                    enabled: left_has_sill && !full_height,
                     measurable: true,
                     check: None,
                 });
@@ -640,7 +681,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             ctx,
             rect,
             &title,
-            cx_area_label.as_deref(),
+            cx_area_label.as_deref().or(ds_full_note),
             error,
             &mut box_fields,
             &mut checks,

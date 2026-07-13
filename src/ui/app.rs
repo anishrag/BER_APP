@@ -2981,6 +2981,11 @@ impl eframe::App for BerApp {
                                     SketchEvent::DismissDeferredPhotosPrompt => {
                                         controller.borrow_mut().dismiss_deferred_photos_prompt();
                                     }
+                                    SketchEvent::EnsureExternalPhotoThumbnail { side } => {
+                                        controller
+                                            .borrow_mut()
+                                            .ensure_external_photo_thumbnail(side);
+                                    }
                                     SketchEvent::RotateExternalPhoto { side, clockwise } => {
                                         controller
                                             .borrow_mut()

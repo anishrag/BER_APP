@@ -11642,6 +11642,137 @@ fn roof_window_survives_id_remint_between_tap_and_confirm() {
     );
 }
 
+/// A NEW roof window defaults its overshading to "Very little" (it looks at
+/// the sky): the placement prompt tells the box to prefill `VeryLittle`, and
+/// the model op itself defaults there (so the legacy single-flow path lands it
+/// too). Wall windows keep the `Average` default.
+#[test]
+fn roof_window_defaults_overshading_to_very_little() {
+    use ber_model::ber::fenestration::{Frame, Glazing, Overshading};
+    let mut c = dimensioned_square_controller();
+    // The roof (ceiling) region only resolves once a ceiling height is set.
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.materialize();
+    c.select_opening_tool(OpeningToolKind::RoofWindow);
+    c.openings_pointer_down(5.0, 5.0, 0.5);
+    let p = c
+        .opening_fields_prompt(
+            DoorSidelightsMode::default(),
+            ber_model::ber::fenestration::ComplexWindowKind::default(),
+        )
+        .expect("roof placement staged");
+    assert_eq!(
+        p.default_overshading,
+        Overshading::VeryLittle,
+        "rooflight prompt prefills Very little"
+    );
+    assert!(p.full_span.is_none(), "no wall spans for a roof window");
+    // The legacy path applies no per-window override — the model default holds.
+    c.place_pending_window(0.8, 1.1, 0.0, Glazing::Double, Frame::WoodUPVC, 2010)
+        .expect("roof window places");
+    c.materialize();
+    let ber = &c.current_record.as_ref().unwrap().data;
+    assert_eq!(
+        ber.storeys[0].windows[0].overshading,
+        Overshading::VeryLittle,
+        "the placed rooflight defaults to Very little"
+    );
+    // A wall-window prompt keeps the Average default.
+    c.select_opening_tool(OpeningToolKind::Window);
+    c.openings_pointer_down(5.0, -0.2, 0.5);
+    let p = c
+        .opening_fields_prompt(
+            DoorSidelightsMode::default(),
+            ber_model::ber::fenestration::ComplexWindowKind::default(),
+        )
+        .expect("wall placement staged");
+    assert_eq!(
+        p.default_overshading,
+        Overshading::Average,
+        "wall windows keep the Average default"
+    );
+}
+
+/// The composite door+sidelights offers the Full width / Full height
+/// checkboxes too: with Full width ticked, the assembly spans the wall exactly
+/// — door width typed, the sidelights share the leftover — with no end
+/// margins (empty-wall rule inside the model op).
+#[test]
+fn full_span_checkbox_composes_a_full_width_doorset() {
+    use ber_model::ber::fenestration::OpeningPlacement;
+    use ber_model::ber::openings::SidelightLayout;
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    c.select_opening_tool(OpeningToolKind::DoorSidelights);
+    c.openings_pointer_down(5.0, -0.2, 0.5);
+    let p = c
+        .opening_fields_prompt(
+            DoorSidelightsMode::Overall,
+            ber_model::ber::fenestration::ComplexWindowKind::default(),
+        )
+        .expect("placement staged");
+    let span = p.full_span.expect("the composite offers the checkboxes");
+    // Full width, Overall mode: the (disabled) overall-W field reads the wall
+    // length; the door leaf width is typed. No transom (overall H == door H).
+    c.place_opening(
+        1.0,
+        2.0,
+        true,
+        false,
+        Some(DoorSidelightsPlacement::Overall {
+            overall_w: span.wall_len_m,
+            overall_h: 2.0,
+            layout: SidelightLayout::Both,
+            sill: None,
+            transom_semicircular: false,
+        }),
+        None,
+        WindowTypeChoice::default(),
+        ber_model::ber::fenestration::Overshading::Average,
+        Vec::new(),
+    )
+    .expect("full-width doorset places");
+    c.materialize();
+    let ber = &c.current_record.as_ref().unwrap().data;
+    assert_eq!(ber.storeys[0].doors.len(), 1, "door panel placed");
+    assert_eq!(
+        ber.storeys[0].windows.len(),
+        2,
+        "two sidelights, no transom"
+    );
+    let d = &ber.storeys[0].doors[0];
+    assert!((d.width_m - 1.0).abs() < 1e-3, "door width as typed");
+    let expected_side = (span.wall_len_m - 1.0) / 2.0;
+    for w in &ber.storeys[0].windows {
+        assert!(
+            (w.width_m - expected_side).abs() < 1e-2,
+            "sidelights share the leftover equally: {} vs {expected_side}",
+            w.width_m
+        );
+    }
+    // Flush to both wall ends — no end margins. The sidelights are the outer
+    // members, so their edges are the assembly's.
+    let mut edges: Vec<(f32, f32)> = ber.storeys[0]
+        .windows
+        .iter()
+        .filter_map(|w| match &w.placement {
+            Some(OpeningPlacement::Wall { along_m, .. }) => {
+                Some((along_m - w.width_m / 2.0, along_m + w.width_m / 2.0))
+            }
+            _ => None,
+        })
+        .collect();
+    edges.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    assert!(
+        edges.first().unwrap().0.abs() < 1e-2,
+        "flush left: {edges:?}"
+    );
+    assert!(
+        (edges.last().unwrap().1 - span.wall_len_m).abs() < 1e-2,
+        "flush right: {edges:?}"
+    );
+}
+
 /// The multi-field placement (toolbar tool → tap → floating box with Width +
 /// Height): selecting the tool enters openings mode, the tap stages the host and
 /// asks for both measurements at once, and `place_opening` lands a window with a
@@ -15818,6 +15949,105 @@ fn ber_completion_blocked_until_deferred_photos_captured() {
 
     let _ = std::fs::remove_dir_all(&tmp);
     let _ = std::fs::remove_file(&src);
+}
+
+/// The external-photos panel previews ONLY thumbnails (never the full-res
+/// original — ~48 MB of texture a shot). `ensure_external_photo_thumbnail`
+/// BACKFILLS a missing thumbnail through the background photo pipeline
+/// (records from before thumbnails existed), leaving the original file
+/// untouched; an undecodable file gets ONE attempt and then keeps the
+/// placeholder — no per-frame retry, no thumbnail.
+#[test]
+fn external_photo_thumbnail_backfill() {
+    use ber_model::ber::common::{ExternalSide, Photo};
+    let mut c = dimensioned_square_controller();
+    let tmp = std::env::temp_dir().join(format!("ber_ext_thumb_{}", ItemId::default().0));
+    c.set_photos_dir(tmp.clone());
+    std::fs::create_dir_all(&tmp).unwrap();
+
+    // A decodable stored photo with NO thumbnail, as an old record would hold.
+    let img_path = tmp.join("legacy_front.png");
+    image::RgbImage::from_pixel(800, 600, image::Rgb([10, 20, 30]))
+        .save(&img_path)
+        .unwrap();
+    c.current_record.as_mut().unwrap().data.photos.push(Photo {
+        id: ItemId::default(),
+        file_path: img_path.to_string_lossy().into_owned(),
+        thumbnail_path: None,
+        description: None,
+        side: Some(ExternalSide::Front),
+    });
+
+    c.ensure_external_photo_thumbnail(ExternalSide::Front);
+    let mut spins = 0;
+    while c.photos_processing() && spins < 2000 {
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        spins += 1;
+    }
+    assert!(spins < 2000, "backfill job finished");
+    assert!(c.apply_finished_photos(), "thumbnail folded into the photo");
+    let stored = c
+        .current_record
+        .as_ref()
+        .unwrap()
+        .data
+        .photos
+        .iter()
+        .find(|p| p.side == Some(ExternalSide::Front))
+        .unwrap();
+    assert!(
+        stored
+            .thumbnail_path
+            .as_ref()
+            .is_some_and(|t| std::path::Path::new(t).exists()),
+        "thumbnail backfilled to disk"
+    );
+    assert_eq!(
+        stored.file_path,
+        img_path.to_string_lossy(),
+        "the original file path is untouched"
+    );
+    assert!(img_path.exists(), "the original file survives the backfill");
+
+    // An UNDECODABLE file: one failed attempt, then the guard stops retries —
+    // a second request spawns no job and the thumbnail stays absent.
+    let bad_path = tmp.join("bad_back.jpg");
+    std::fs::write(&bad_path, b"not-an-image").unwrap();
+    c.current_record.as_mut().unwrap().data.photos.push(Photo {
+        id: ItemId::default(),
+        file_path: bad_path.to_string_lossy().into_owned(),
+        thumbnail_path: None,
+        description: None,
+        side: Some(ExternalSide::Back),
+    });
+    c.ensure_external_photo_thumbnail(ExternalSide::Back);
+    spins = 0;
+    while c.photos_processing() && spins < 2000 {
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        spins += 1;
+    }
+    assert!(spins < 2000, "failed job finished");
+    assert!(
+        !c.apply_finished_photos(),
+        "a failed backfill changes nothing"
+    );
+    c.ensure_external_photo_thumbnail(ExternalSide::Back);
+    assert!(
+        !c.photos_processing(),
+        "no retry job after the one failed attempt"
+    );
+    let back = c
+        .current_record
+        .as_ref()
+        .unwrap()
+        .data
+        .photos
+        .iter()
+        .find(|p| p.side == Some(ExternalSide::Back))
+        .unwrap();
+    assert!(back.thumbnail_path.is_none(), "placeholder case stands");
+
+    let _ = std::fs::remove_dir_all(&tmp);
 }
 
 /// Annotating an external photo (`annotate_external_photo`, the paintbrush

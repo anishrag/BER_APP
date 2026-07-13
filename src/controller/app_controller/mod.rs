@@ -408,6 +408,11 @@ pub struct AppController {
     /// its photo, blocking completion until the shots are captured). Not
     /// persisted — the DURABLE deferral state is `Ber::deferred_photo_sides`.
     show_deferred_photos_prompt: bool,
+    /// Photos whose missing THUMBNAIL this session already tried to backfill
+    /// (`ensure_external_photo_thumbnail` — the panel previews only
+    /// thumbnails). One attempt each: a failure (e.g. an undecodable file)
+    /// must not re-decode every frame the placeholder is visible.
+    thumbnail_backfill_attempted: std::collections::HashSet<ItemId>,
     /// Phase-4 view sub-mode (form / aligning the image / marking sheltered
     /// sides). Session-only.
     final_mode: final_phase::FinalMode,
@@ -740,6 +745,7 @@ impl AppController {
             show_ber_complete: false,
             show_summary: false,
             show_deferred_photos_prompt: false,
+            thumbnail_backfill_attempted: std::collections::HashSet::new(),
             final_mode: final_phase::FinalMode::Form,
             partition_wall: None,
             partition_stroke: Vec::new(),

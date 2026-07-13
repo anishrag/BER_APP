@@ -1305,12 +1305,20 @@ impl AppController {
                 }
                 changed = true;
             } else {
-                // The photo was removed before the job finished — clean up orphans.
-                let _ = std::fs::remove_file(&file_path);
+                // The photo was removed before the job finished — clean up
+                // orphans. `file_path == provisional` is a thumbnail BACKFILL
+                // job (photos.rs): the "product" is the photo's own
+                // long-standing file, which a removal deliberately leaves on
+                // disk (undo restores the entry pointing at it) — delete only
+                // the freshly produced thumbnail then. Ingest jobs always
+                // name the final file apart from the provisional copy.
+                if file_path != job.provisional {
+                    let _ = std::fs::remove_file(&file_path);
+                    let _ = std::fs::remove_file(&job.provisional);
+                }
                 if let Some(t) = &thumbnail_path {
                     let _ = std::fs::remove_file(t);
                 }
-                let _ = std::fs::remove_file(&job.provisional);
             }
         }
         if changed {
@@ -3001,15 +3009,17 @@ impl AppController {
 
 /// A completed background photo-processing job, queued for
 /// [`apply_finished_photos`](AppController::apply_finished_photos) to fold into
-/// the model by id.
+/// the model by id. Produced by ingest here and by the thumbnail BACKFILL in
+/// `photos.rs` (which sets `provisional == file_path`: the photo file already
+/// stood, only the thumbnail is new) — hence the `pub(super)` fields.
 pub(super) struct PhotoJobResult {
     /// The provisional photo's id (minted at ingest), used to find it in the model.
-    id: ItemId,
+    pub(super) id: ItemId,
     /// Final `(file_path, thumbnail_path)` on success; `None` if processing failed
     /// (the provisional copy then stands as the photo).
-    outcome: Option<(String, Option<String>)>,
+    pub(super) outcome: Option<(String, Option<String>)>,
     /// The provisional fast-copy path, deleted once the final file supersedes it.
-    provisional: String,
+    pub(super) provisional: String,
 }
 
 /// Stored-photo quality tier, chosen per attach site. Drives how a captured

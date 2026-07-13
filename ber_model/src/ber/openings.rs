@@ -410,7 +410,9 @@ pub fn add_wall_door(
 }
 
 /// Add a roof window at a free plan point inside a roof region (no
-/// redistribution — rooflights don't line up like wall windows).
+/// redistribution — rooflights don't line up like wall windows). Overshading
+/// DEFAULTS to `VeryLittle` — a rooflight looks at the sky, so surrounding
+/// buildings/trees rarely shade it (the assessor can still override).
 pub fn add_roof_window(
     storey: &mut Storey,
     ceiling_region_id: ItemId,
@@ -446,7 +448,8 @@ pub fn add_roof_window(
         assembly_id: None,
         multi_storey: false,
         shape: WindowShape::Rectangular,
-        overshading: Overshading::Average,
+        // Rooflights face the sky: obstacles rarely overshade them.
+        overshading: Overshading::VeryLittle,
     });
     Ok(id)
 }
@@ -841,6 +844,22 @@ pub fn compose_door_sidelights(
     if wall_length(storey, wall_id).is_none() {
         return Err(OpeningError::NoHostRegion);
     }
+    let (assembly_id, added) = push_door_sidelights_members(storey, wall_id, along_m, &spec);
+    redistribute_or_rollback(storey, wall_id, &added)?;
+    Ok(assembly_id)
+}
+
+/// Push the members of a door+sidelights assembly (sidelight windows, transom,
+/// door panel) centred at `along_m`, all under one fresh assembly id. LAYOUT
+/// ONLY — no feasibility check: [`compose_door_sidelights`] redistributes (and
+/// rolls back) afterwards; the full-width composer has already sized the
+/// members to exactly the wall. Returns the assembly id + the pushed members.
+fn push_door_sidelights_members(
+    storey: &mut Storey,
+    wall_id: ItemId,
+    along_m: f32,
+    spec: &DoorSidelightsSpec,
+) -> (ItemId, Vec<OpeningRef>) {
     let assembly_id = ItemId::default();
     let left_w = spec.left_sidelight_m.unwrap_or(0.0).max(0.0);
     let right_w = spec.right_sidelight_m.unwrap_or(0.0).max(0.0);
@@ -931,8 +950,113 @@ pub fn compose_door_sidelights(
     });
     link_door(storey, wall_id, door_id);
     added.push(OpeningRef::Door(door_id));
-    redistribute_or_rollback(storey, wall_id, &added)?;
+    (assembly_id, added)
+}
+
+/// Rewrite a composite spec to run FULL HEIGHT: door (and thus the sidelights,
+/// whose tops track the door top) floor → `face_m`, sidelight sills 0, and NO
+/// transom — the door already reaches the roofline, so there's no strip left
+/// above it.
+fn spec_at_full_height(mut spec: DoorSidelightsSpec, face_m: f32) -> DoorSidelightsSpec {
+    spec.door_height_m = face_m;
+    spec.left_sill_m = None;
+    spec.right_sill_m = None;
+    spec.transom_m = None;
+    spec
+}
+
+/// Compose a door+sidelights assembly that spans the WHOLE wall length — the
+/// composite "Full width": no end margins, the assembly's total width equals
+/// the wall length exactly. The DOOR width is as typed in the spec; the
+/// leftover (`wall − door`) goes to the PRESENT sidelight(s) — all of it to a
+/// lone side, an equal split when both (or neither) are present — mirroring
+/// [`DoorSidelightsSpec::from_overall`]'s layout rule. Requires an EMPTY wall
+/// (same rule as [`add_full_wall_door`]): full width plus anything else can
+/// never fit, refused as `WallTooShort`. Not redistributed. Heights/sills/
+/// transom come from the spec unchanged.
+pub fn compose_full_width_door_sidelights(
+    storey: &mut Storey,
+    wall_id: ItemId,
+    mut spec: DoorSidelightsSpec,
+) -> Result<ItemId, OpeningError> {
+    if spec.door_width_m <= 0.0 || spec.door_height_m <= 0.0 {
+        return Err(OpeningError::ZeroSize);
+    }
+    let Some(len) = wall_length(storey, wall_id) else {
+        return Err(OpeningError::NoHostRegion);
+    };
+    let existing = wall_openings(storey, wall_id);
+    if !existing.is_empty() {
+        // A full-width assembly plus anything else can never fit the wall.
+        let others: f32 = existing.iter().map(|o| o.width_m).sum();
+        return Err(OpeningError::WallTooShort {
+            needed_m: len + others,
+            available_m: len,
+        });
+    }
+    let leftover = len - spec.door_width_m;
+    if leftover < 0.0 {
+        return Err(OpeningError::WallTooShort {
+            needed_m: spec.door_width_m,
+            available_m: len,
+        });
+    }
+    let present = |w: Option<f32>| w.is_some_and(|w| w > 0.0);
+    match (
+        present(spec.left_sidelight_m),
+        present(spec.right_sidelight_m),
+    ) {
+        (true, false) => {
+            spec.left_sidelight_m = Some(leftover);
+            spec.right_sidelight_m = None;
+        }
+        (false, true) => {
+            spec.left_sidelight_m = None;
+            spec.right_sidelight_m = Some(leftover);
+        }
+        // Both present — or neither (a bare door): even split, mirroring
+        // `from_overall`'s `Both` fallback.
+        _ => {
+            spec.left_sidelight_m = Some(leftover / 2.0);
+            spec.right_sidelight_m = Some(leftover / 2.0);
+        }
+    }
+    let (assembly_id, _) = push_door_sidelights_members(storey, wall_id, len / 2.0, &spec);
     Ok(assembly_id)
+}
+
+/// Compose a door+sidelights assembly at FULL face height with the widths as
+/// typed — the composite "Full height": door + sidelights all run sill 0 up to
+/// the roofline at `along_m` (no transom), under the NORMAL margin +
+/// redistribution rules for the width (see [`compose_door_sidelights`]).
+pub fn compose_full_height_door_sidelights(
+    storey: &mut Storey,
+    wall_id: ItemId,
+    along_m: f32,
+    spec: DoorSidelightsSpec,
+) -> Result<ItemId, OpeningError> {
+    let Some(face) = wall_face_height(storey, wall_id, along_m) else {
+        return Err(OpeningError::NoHostRegion);
+    };
+    compose_door_sidelights(storey, wall_id, along_m, spec_at_full_height(spec, face))
+}
+
+/// Compose a door+sidelights assembly filling the WHOLE wall face — both
+/// checkboxes: full width (empty-wall rule, door width typed, sidelights share
+/// the leftover — see [`compose_full_width_door_sidelights`]) AND full height
+/// (floor → roofline, no transom).
+pub fn compose_full_wall_door_sidelights(
+    storey: &mut Storey,
+    wall_id: ItemId,
+    spec: DoorSidelightsSpec,
+) -> Result<ItemId, OpeningError> {
+    let Some(len) = wall_length(storey, wall_id) else {
+        return Err(OpeningError::NoHostRegion);
+    };
+    let Some(face) = wall_face_height(storey, wall_id, len / 2.0) else {
+        return Err(OpeningError::NoHostRegion);
+    };
+    compose_full_width_door_sidelights(storey, wall_id, spec_at_full_height(spec, face))
 }
 
 /// Move an opening to a new along-centre and sill. An assembly member moves the
@@ -3041,6 +3165,176 @@ mod tests {
         assert!(
             sidelight_touch,
             "sidelights are flush against the door panel"
+        );
+    }
+
+    #[test]
+    fn roof_window_defaults_to_very_little_overshading() {
+        // A rooflight looks at the sky — new roof windows default to
+        // `VeryLittle`; wall windows keep the `Average` default.
+        let rid = ItemId::default();
+        let mut s = Storey {
+            ceilings: CeilingRegions {
+                regions: vec![CeilingRegion {
+                    id: rid,
+                    polygon: Polygon3D::new(vec![
+                        p3(0.0, 0.0, 2.7),
+                        p3(6.0, 0.0, 2.7),
+                        p3(6.0, 6.0, 2.7),
+                        p3(0.0, 6.0, 2.7),
+                    ]),
+                    opes: Opes::default(),
+                    construction_id: ItemId::default(),
+                    exposure: CeilingExposure::default(),
+                }],
+            },
+            ..Storey::default()
+        };
+        let id = add_roof_window(&mut s, rid, (2.0, 2.0), 0.8, 1.1, ItemId::default()).unwrap();
+        let w = s.windows.iter().find(|w| w.id == id).unwrap();
+        assert_eq!(w.overshading, Overshading::VeryLittle);
+
+        let (mut s, wid) = storey_with_wall(4.0);
+        let id = add_wall_window(&mut s, wid, 2.0, 1.0, 1.2, 1.0, ItemId::default()).unwrap();
+        let w = s.windows.iter().find(|w| w.id == id).unwrap();
+        assert_eq!(
+            w.overshading,
+            Overshading::Average,
+            "wall default unchanged"
+        );
+    }
+
+    /// The composite spec used by the full-span composer tests: a 1.0 m door
+    /// with token sidelights either side (their widths are re-derived by the
+    /// full-width ops) and no transom/sills unless a test says otherwise.
+    fn composite_spec() -> DoorSidelightsSpec {
+        DoorSidelightsSpec {
+            door_width_m: 1.0,
+            door_height_m: 2.0,
+            left_sidelight_m: Some(0.3),
+            right_sidelight_m: Some(0.3),
+            left_sill_m: None,
+            right_sill_m: None,
+            transom_m: None,
+            transom_semicircular: false,
+            window_type_id: ItemId::default(),
+            door_type_name: "front".into(),
+        }
+    }
+
+    #[test]
+    fn compose_full_width_spans_the_wall_exactly() {
+        // Full width on an empty 4 m wall: door width typed (1.0), the two
+        // sidelights share the 3 m leftover equally — the widths sum EXACTLY
+        // to the wall length, flush to both ends (no end margins).
+        let (mut s, wid) = storey_with_wall(4.0);
+        let aid = compose_full_width_door_sidelights(&mut s, wid, composite_spec()).unwrap();
+        assert_eq!(s.doors.len(), 1);
+        assert_eq!(s.windows.len(), 2);
+        assert!((s.doors[0].width_m - 1.0).abs() < 1e-4, "door as typed");
+        assert!(s.windows.iter().all(|w| w.assembly_id == Some(aid)));
+        assert!(
+            s.windows.iter().all(|w| (w.width_m - 1.5).abs() < 1e-4),
+            "even sidelight split"
+        );
+        let sp = spans(&s);
+        let total: f32 = sp.iter().map(|(l, r)| r - l).sum();
+        assert!(
+            (total - 4.0).abs() < 1e-3,
+            "widths sum to the wall: {total}"
+        );
+        assert!(sp.first().unwrap().0.abs() < 1e-3, "flush left: {sp:?}");
+        assert!(
+            (sp.last().unwrap().1 - 4.0).abs() < 1e-3,
+            "flush right: {sp:?}"
+        );
+    }
+
+    #[test]
+    fn compose_full_width_lone_sidelight_takes_all_the_leftover() {
+        let (mut s, wid) = storey_with_wall(4.0);
+        let spec = DoorSidelightsSpec {
+            right_sidelight_m: None,
+            ..composite_spec()
+        };
+        compose_full_width_door_sidelights(&mut s, wid, spec).unwrap();
+        assert_eq!(s.windows.len(), 1, "left sidelight only");
+        assert!(
+            (s.windows[0].width_m - 3.0).abs() < 1e-4,
+            "the lone side takes the whole leftover"
+        );
+    }
+
+    #[test]
+    fn compose_full_width_rejected_on_occupied_wall() {
+        let (mut s, wid) = storey_with_wall(4.0);
+        add_wall_window(&mut s, wid, 1.0, 0.8, 1.0, 1.0, ItemId::default()).unwrap();
+        let err = compose_full_width_door_sidelights(&mut s, wid, composite_spec()).unwrap_err();
+        assert!(matches!(err, OpeningError::WallTooShort { .. }));
+        assert_eq!(s.windows.len(), 1, "nothing added");
+        assert!(s.doors.is_empty(), "no door panel added");
+    }
+
+    #[test]
+    fn compose_full_height_runs_floor_to_roofline() {
+        // Full height with typed widths: door + sidelights all sill 0 up to
+        // the 2.4 m face, the transom dropped (no strip left above the door),
+        // and the NORMAL margin path still applies — it redistributes beside
+        // an existing window rather than demanding an empty wall.
+        let (mut s, wid) = storey_with_wall(6.0);
+        add_wall_window(&mut s, wid, 5.5, 0.6, 1.0, 1.0, ItemId::default()).unwrap();
+        let spec = DoorSidelightsSpec {
+            left_sill_m: Some(0.6),
+            right_sill_m: Some(0.6),
+            transom_m: Some(0.4),
+            ..composite_spec()
+        };
+        let aid = compose_full_height_door_sidelights(&mut s, wid, 2.0, spec).unwrap();
+        assert!(
+            (s.doors[0].height_m - 2.4).abs() < 1e-3,
+            "door = face height"
+        );
+        let members: Vec<_> = s
+            .windows
+            .iter()
+            .filter(|w| w.assembly_id == Some(aid))
+            .collect();
+        assert_eq!(members.len(), 2, "two sidelights, NO transom");
+        for w in members {
+            assert!((w.height_m - 2.4).abs() < 1e-3, "sidelight = face height");
+            match &w.placement {
+                Some(OpeningPlacement::Wall { sill_m, .. }) => {
+                    assert!(sill_m.abs() < 1e-4, "sidelight sill forced to 0");
+                }
+                _ => panic!("expected a wall placement"),
+            }
+        }
+        let sp = spans(&s);
+        assert_eq!(sp.len(), 4, "existing window + 3 assembly members");
+        assert!(sp.first().unwrap().0 >= END_MARGIN_M - 1e-4, "margins kept");
+    }
+
+    #[test]
+    fn compose_full_wall_fills_the_whole_face() {
+        // Both checkboxes: widths span the wall exactly AND everything runs
+        // floor → roofline.
+        let (mut s, wid) = storey_with_wall(4.0);
+        let spec = DoorSidelightsSpec {
+            transom_m: Some(0.4),
+            ..composite_spec()
+        };
+        let aid = compose_full_wall_door_sidelights(&mut s, wid, spec).unwrap();
+        let sp = spans(&s);
+        let total: f32 = sp.iter().map(|(l, r)| r - l).sum();
+        assert!((total - 4.0).abs() < 1e-3, "spans the wall: {total}");
+        assert!((s.doors[0].height_m - 2.4).abs() < 1e-3, "face height");
+        assert_eq!(
+            s.windows
+                .iter()
+                .filter(|w| w.assembly_id == Some(aid))
+                .count(),
+            2,
+            "transom dropped at full height"
         );
     }
 

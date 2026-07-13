@@ -4238,20 +4238,50 @@ fn external_photos_button<F: FnMut(UiEvent)>(
                             // constrain_to keeps it on-screen regardless.
                             let max_h = (rect.height() - 70.0).max(220.0);
                             let grid_spacing = egui::vec2(20.0, 16.0);
-                            let row_h = (max_h - grid_spacing.y) / 2.0;
+                            // WIDTH budget: the panel must NEVER exceed the
+                            // canvas width minus a margin — anchored
+                            // bottom-right and growing left, an over-wide
+                            // panel pushes the HEADER (and its collapse
+                            // triangle) off the left edge, leaving the user
+                            // unable to collapse it. In PORTRAIT the canvas
+                            // (~1200px) is narrower than the height-driven
+                            // landscape panel (~1240px), so the thumbnails
+                            // shrink to fit instead. 40 ≈ popup-frame padding
+                            // + collapsing indent + scrollbar around the grid.
+                            const GRID_CHROME_W: f32 = 40.0;
+                            let avail_grid_w = (rect.width() - 16.0 - GRID_CHROME_W).max(150.0);
                             // ≈ status-label row + capture-button row + the
                             // item spacing around the thumbnail between them.
                             const ENTRY_TEXT_AND_BUTTONS_H: f32 = 62.0;
-                            // Floor keeps entries usable on a tiny canvas —
-                            // the ScrollArea then caps + scrolls instead.
-                            let thumb_h = (row_h - ENTRY_TEXT_AND_BUTTONS_H).max(150.0);
-                            let thumb_w = thumb_h * (4.0 / 3.0);
-                            // Column fits the thumbnail (floored at 300 so the
-                            // capture-button row never drives layout); the
-                            // panel widens to match so the taller thumbnails
-                            // aren't letterboxed by a narrow column.
-                            let col_w = thumb_w.max(300.0);
-                            ui.set_max_width(2.0 * col_w + grid_spacing.x + 16.0);
+                            // Two columns of the height-driven thumbnails
+                            // (shrunk to the width budget if needed) — unless
+                            // even shrunk-two-column thumbs would be absurd
+                            // (< 220px wide): then one column of four rows.
+                            let thumb_w_2col_cap = (avail_grid_w - grid_spacing.x) / 2.0;
+                            let cols: usize = if thumb_w_2col_cap >= 220.0 { 2 } else { 1 };
+                            let rows = 4.0 / cols as f32;
+                            let row_h = (max_h - (rows - 1.0) * grid_spacing.y) / rows;
+                            // Height-driven ideal (fills the row at 4:3),
+                            // then capped by the column's width budget — the
+                            // height pin below stays either way (capped
+                            // thumbs just centre in their full-height row).
+                            // The floor keeps entries usable on a tiny
+                            // canvas; the ScrollArea then caps + scrolls.
+                            let thumb_w_cap = if cols == 2 {
+                                thumb_w_2col_cap
+                            } else {
+                                avail_grid_w
+                            };
+                            let thumb_h_ideal = (row_h - ENTRY_TEXT_AND_BUTTONS_H).max(150.0);
+                            let thumb_w = (thumb_h_ideal * (4.0 / 3.0)).min(thumb_w_cap);
+                            let thumb_h = thumb_w * (3.0 / 4.0);
+                            // Column fits the thumbnail — floored at 300 so
+                            // the capture-button row never drives layout, but
+                            // never past the width budget per column.
+                            let col_w = thumb_w.max(300.0).min(thumb_w_cap);
+                            ui.set_max_width(
+                                cols as f32 * col_w + (cols as f32 - 1.0) * grid_spacing.x + 16.0,
+                            );
                             // The viewport height must be PINNED, not left to
                             // available space: an egui `Area` sizes its inner
                             // `Ui` from the PREVIOUS frame's content
@@ -4277,7 +4307,7 @@ fn external_photos_button<F: FnMut(UiEvent)>(
                                 .auto_shrink([true, false])
                                 .show(ui, |ui| {
                                     egui::Grid::new(ui.id().with("external_photo_grid"))
-                                        .num_columns(2)
+                                        .num_columns(cols)
                                         .min_col_width(col_w)
                                         .min_row_height(row_h)
                                         .spacing(grid_spacing)
@@ -4292,8 +4322,8 @@ fn external_photos_button<F: FnMut(UiEvent)>(
                                                     egui::vec2(thumb_w, thumb_h),
                                                     on_event,
                                                 );
-                                                // Two entries per grid row.
-                                                if i % 2 == 1 {
+                                                // `cols` entries per grid row.
+                                                if (i + 1) % cols == 0 {
                                                     ui.end_row();
                                                 }
                                             }
@@ -4349,16 +4379,39 @@ fn external_photo_entry<F: FnMut(UiEvent)>(
                 ui.weak(format!("○ {} (optional)", side.label()));
             }
         }
-        // Thumbnail preview of the stored photo (prefer the
-        // lightweight thumbnail; fall back to the original).
+        // Thumbnail preview of the stored photo — ONLY ever the lightweight
+        // thumbnail, NEVER the full-res original: texturing a ~12 MP camera
+        // file costs ~48 MB of texture per photo, OOM territory on the
+        // tablet. While a photo has no thumbnail (the capture job's
+        // downscale is still running, an old record from before thumbnails,
+        // or a failed generation) show a placeholder and ask the controller
+        // to backfill one via the background photo pipeline — emitted every
+        // frame the gap is visible; the controller attempts once per photo.
+        // The full-res image stays reachable through the explicit 🖌
+        // annotate takeover below.
         if let Some(p) = photo {
-            let src = p.thumbnail_path.as_deref().unwrap_or(&p.file_path);
-            ui.add(
-                egui::Image::new(format!("file://{src}"))
-                    .fit_to_exact_size(thumb_size)
-                    .maintain_aspect_ratio(true)
-                    .corner_radius(4.0),
-            );
+            match p.thumbnail_path.as_deref() {
+                Some(src) => {
+                    ui.add(
+                        egui::Image::new(format!("file://{src}"))
+                            .fit_to_exact_size(thumb_size)
+                            .maintain_aspect_ratio(true)
+                            .corner_radius(4.0),
+                    );
+                }
+                None => {
+                    on_event(UiEvent::Sketch(SketchEvent::EnsureExternalPhotoThumbnail {
+                        side: *side,
+                    }));
+                    ui.add_sized(
+                        thumb_size,
+                        egui::Label::new(
+                            egui::RichText::new("🖼 preparing preview…")
+                                .color(egui::Color32::from_gray(150)),
+                        ),
+                    );
+                }
+            }
         }
         ui.horizontal(|ui| {
             // The shared capture widget: desktop file dialog

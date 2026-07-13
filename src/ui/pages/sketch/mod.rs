@@ -998,6 +998,14 @@ pub enum SketchEvent {
     /// Dismiss the Final-phase "you deferred these photos — take them now"
     /// prompt without completing (its "Go back" button).
     DismissDeferredPhotosPrompt,
+    /// `side`'s stored external photo has NO thumbnail to preview (the panel
+    /// never textures the full-res original — ~48 MB a shot). Ask the
+    /// controller to backfill one through the background photo pipeline.
+    /// Emitted every frame the gap is visible; the controller attempts once
+    /// per photo per session.
+    EnsureExternalPhotoThumbnail {
+        side: ExternalSide,
+    },
     /// Open the paintbrush ANNOTATION takeover for `side`'s external photo
     /// (the "🖌" affordance wherever external photos are shown). Handled by the
     /// app shell, not the controller: it decodes the stored image into the
