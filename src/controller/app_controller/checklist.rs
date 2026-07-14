@@ -130,12 +130,21 @@ impl AppController {
     /// of Mapping, after every storey).
     fn roof_status(&self) -> ChecklistStatus {
         use ber_model::ber::structural::CeilingExposure;
+        // A ceiling region below this plan area is a numerical resolve artifact
+        // (a collapsed sliver — e.g. two edges a fraction of a micrometre
+        // apart), not a real surface to roof over. Gating on it would leave the
+        // roof stuck red forever: its centroid can land exactly on a covering
+        // roof footprint's boundary, where `covers_on`'s strict interior
+        // containment returns false. Matches the `MIN_PIECE_AREA_M2` used in the
+        // roof-void / storey splitters (1e-4 m² — far below any real ceiling
+        // patch, comfortably above sliver noise).
+        const MIN_ROOFABLE_AREA_M2: f64 = 1e-4;
         let Some(record) = self.current_record.as_ref() else {
             return ChecklistStatus::Incomplete;
         };
         let ber = &record.data;
-        // Every roofable ceiling region across the stack (a spot with sky/attic
-        // above) paired with its owning storey.
+        // Every roofable ceiling region across the stack (a real spot with
+        // sky/attic above) paired with its owning storey.
         let regions: Vec<(usize, _)> = ber
             .storeys
             .iter()
@@ -148,7 +157,7 @@ impl AppController {
                         !matches!(
                             r.exposure,
                             CeilingExposure::Party | CeilingExposure::InterStorey
-                        )
+                        ) && r.area() > MIN_ROOFABLE_AREA_M2
                     })
                     .map(move |r| (idx, r.centroid()))
             })

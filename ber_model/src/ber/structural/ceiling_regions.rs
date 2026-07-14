@@ -291,7 +291,6 @@ impl CeilingRegions {
     /// [`region_plane`]: super::region_plane
     pub fn split_faces_coplanar(self, rings: &[Vec<Point2f64>]) -> Self {
         use geo::bool_ops::BooleanOps;
-        use geo::Area;
         if rings.is_empty() {
             return self;
         }
@@ -314,15 +313,28 @@ impl CeilingRegions {
                     continue;
                 };
                 let region_poly: Polygon<f64> = region.polygon.clone().into();
-                let inside = region_poly.intersection(&area_poly);
-                let inside_area: f64 = inside.0.iter().map(|p| p.unsigned_area()).sum();
-                if inside_area < SLIVER_AREA_M2 {
+                // Thickness-aware: keep only NON-degenerate pieces on each
+                // side (a thin strip along a near-coincident edge slips past
+                // the area floor — field report 797a7ff5).
+                let inside_pieces: Vec<Polygon<f64>> = region_poly
+                    .intersection(&area_poly)
+                    .0
+                    .iter()
+                    .flat_map(split_to_simple)
+                    .filter(|p| !plan_piece_is_degenerate(p))
+                    .collect();
+                if inside_pieces.is_empty() {
                     next.push(region); // carve misses this face — keep it intact
                     continue;
                 }
-                let outside = region_poly.difference(&area_poly);
-                let outside_area: f64 = outside.0.iter().map(|p| p.unsigned_area()).sum();
-                if outside_area < SLIVER_AREA_M2 {
+                let outside_pieces: Vec<Polygon<f64>> = region_poly
+                    .difference(&area_poly)
+                    .0
+                    .iter()
+                    .flat_map(split_to_simple)
+                    .filter(|p| !plan_piece_is_degenerate(p))
+                    .collect();
+                if outside_pieces.is_empty() {
                     next.push(region); // carve fully covers this face — keep it intact
                     continue;
                 }
@@ -348,17 +360,8 @@ impl CeilingRegions {
                         exposure,
                     }
                 };
-                for poly in inside.0.iter().flat_map(split_to_simple) {
-                    if poly.unsigned_area() < SLIVER_AREA_M2 {
-                        continue;
-                    }
-                    next.push(mk(&poly));
-                }
-                for poly in outside.0.iter().flat_map(split_to_simple) {
-                    if poly.unsigned_area() < SLIVER_AREA_M2 {
-                        continue;
-                    }
-                    next.push(mk(&poly));
+                for poly in inside_pieces.iter().chain(&outside_pieces) {
+                    next.push(mk(poly));
                 }
             }
             regions = next;
@@ -635,6 +638,15 @@ impl CeilingRegions {
         // area it slopes) resolves by hint; without one it is
         // warn-and-proceed on the first claimant, the ≥3-apex posture.
         let mut per_region: Vec<Vec<usize>> = vec![Vec::new(); self.regions.len()];
+        // Hints pair to apexes ONE-TO-ONE, consumed in order: two ridges that
+        // meet at a shared corner store that corner as TWO apexes at the SAME
+        // plan point, each with its OWN side hint (its ridge's region). A
+        // by-point-only lookup handed BOTH duplicates the first matching hint,
+        // so the second ridge lost its shared end and collapsed to a
+        // single-apex point (field report c9a58da7). Consuming the first
+        // still-unused hint at the apex's point — in the push order, which is
+        // apex order — gives each duplicate its own ridge's hint.
+        let mut used_hint: Vec<bool> = vec![false; hints.len()];
         for (i, apex) in apexes.iter().enumerate() {
             let claims = self.claim_regions(apex.point);
             match claims.split_first() {
@@ -650,19 +662,19 @@ impl CeilingRegions {
                         // Multi-claim (internal shared boundary): a side hint for
                         // this apex picks the area whose interior it names; else
                         // first-claim (warn), as before.
-                        let hinted = hints
-                            .iter()
-                            .find(|h| {
-                                (h.apex.0 as f64 - apex.point.x).abs() < 1e-3
-                                    && (h.apex.1 as f64 - apex.point.y).abs() < 1e-3
+                        let hi = (0..hints.len()).find(|&k| {
+                            !used_hint[k]
+                                && (hints[k].apex.0 as f64 - apex.point.x).abs() < 1e-3
+                                && (hints[k].apex.1 as f64 - apex.point.y).abs() < 1e-3
+                        });
+                        let hinted = hi.and_then(|k| {
+                            used_hint[k] = true;
+                            let h = &hints[k];
+                            let rp = GeoPoint::new(h.region.0 as f64, h.region.1 as f64);
+                            claims.iter().copied().find(|&ri| {
+                                Polygon::<f64>::from(self.regions[ri].polygon.clone()).contains(&rp)
                             })
-                            .and_then(|h| {
-                                let rp = GeoPoint::new(h.region.0 as f64, h.region.1 as f64);
-                                claims.iter().copied().find(|&ri| {
-                                    Polygon::<f64>::from(self.regions[ri].polygon.clone())
-                                        .contains(&rp)
-                                })
-                            });
+                        });
                         match hinted {
                             Some(ri) => ri,
                             None => {

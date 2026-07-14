@@ -122,7 +122,8 @@ impl AppController {
         };
         let mut segments: Vec<[Point2f32; 2]> = Vec::new();
         for region in regions {
-            let ring = &region.polygon;
+            // The phase ring is f64; snap references are f32 canvas-space.
+            let ring: Vec<Point2f32> = region.polygon.iter().copied().map(to_f32).collect();
             let n = ring.len();
             for i in 0..n {
                 segments.push([ring[i], ring[(i + 1) % n]]);
@@ -318,8 +319,15 @@ impl AppController {
             return;
         }
         // The live buffer IS the dimensioned phase area; its resolved ring is what
-        // we store (metre-precise, so surface containment is accurate).
-        let polygon = self.document.floor_plan.get_points();
+        // we store (metre-precise, so surface containment is accurate). Widened
+        // to f64 to match the reconstructed/inherited zones' precision.
+        let polygon: Vec<Point2f64> = self
+            .document
+            .floor_plan
+            .get_points()
+            .into_iter()
+            .map(to_f64)
+            .collect();
         if polygon.len() < 3 {
             return;
         }
@@ -427,19 +435,25 @@ impl AppController {
     pub fn assign_rest_to_original(&mut self) {
         self.sync_active();
         let idx = self.current_storey_idx.unwrap_or(0);
+        // `available_region_rings` works on the f32 outline; narrow the f64
+        // phase rings to f32 for the boolean, widen the leftover back to f64.
         let phase_rings: Vec<Vec<Point2f32>> = self
             .phase_regions
             .get(&idx)
-            .map(|rs| rs.iter().map(|r| r.polygon.clone()).collect())
+            .map(|rs| {
+                rs.iter()
+                    .map(|r| r.polygon.iter().copied().map(to_f32).collect())
+                    .collect()
+            })
             .unwrap_or_default();
         let rings = self.document.available_region_rings(&phase_rings);
         if rings.is_empty() {
             return;
         }
         let entry = self.phase_regions.entry(idx).or_default();
-        for polygon in rings {
+        for ring in rings {
             entry.push(PhaseRegion {
-                polygon,
+                polygon: ring.into_iter().map(to_f64).collect(),
                 phase: ConstructionPhase::Original,
             });
         }

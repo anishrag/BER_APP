@@ -61,6 +61,50 @@ mod tests {
         ]
     }
 
+    /// THE THICKNESS-AWARE SPLIT GUARD ([`plan_piece_is_degenerate`], field
+    /// report 797a7ff5): the long-thin strip that slips past the area-only
+    /// floor — a 6.02 m × 0.48 µm boolean-op sliver is 2.87e-6 m²
+    /// (> [`SLIVER_AREA_M2`] = 1e-6, so the area guard KEEPS it) yet has a
+    /// minor bbox dimension far below [`MIN_PIECE_MINOR_M`] → dropped. Real
+    /// regions and the sub-area-floor debris are classified as before.
+    #[test]
+    fn plan_piece_is_degenerate_drops_the_thin_strip() {
+        use geo::{LineString, Polygon};
+        let poly = |ring: &[(f64, f64)]| Polygon::new(LineString::from(ring.to_vec()), vec![]);
+        // The exact 797a7ff5 strip: 6.02 m long, 0.48 µm thick.
+        let strip = poly(&[
+            (1.09293, 4.4649),
+            (7.11193, 4.4649),
+            (7.11193, 4.4649 + 4.77e-7),
+            (1.09293, 4.4649 + 4.77e-7),
+        ]);
+        use geo::Area;
+        assert!(
+            strip.unsigned_area() > SLIVER_AREA_M2,
+            "the strip clears the AREA floor (that's why it escaped): {:.2e} m²",
+            strip.unsigned_area()
+        );
+        assert!(
+            plan_piece_is_degenerate(&strip),
+            "but the thickness guard drops it (minor dim ≪ 1 mm)"
+        );
+        // A real 6 m × 6 m region survives.
+        let real = poly(&[(0.0, 0.0), (6.0, 0.0), (6.0, 6.0), (0.0, 6.0)]);
+        assert!(!plan_piece_is_degenerate(&real), "a real region is kept");
+        // A borderline strip AT the 1 mm threshold is kept.
+        let ok = poly(&[(0.0, 0.0), (6.0, 0.0), (6.0, 1.1e-3), (0.0, 1.1e-3)]);
+        assert!(
+            !plan_piece_is_degenerate(&ok),
+            "≥ 1 mm thick is a real strip"
+        );
+        // A sub-area-floor speck is still dropped (the area arm).
+        let speck = poly(&[(0.0, 0.0), (5e-4, 0.0), (5e-4, 5e-4), (0.0, 5e-4)]);
+        assert!(
+            plan_piece_is_degenerate(&speck),
+            "sub-1e-6 m² speck dropped"
+        );
+    }
+
     // ── CeilingRegion::plan_span_through ────────────────────────────────────
 
     /// A flat region over `ring` at z = 2.4 (the span is plan-only; z is
@@ -3143,6 +3187,115 @@ mod tests {
         // Beyond the band: nothing.
         assert!(regions.claim_regions(Point2f64::new(-1.0, 2.0)).is_empty());
         assert!(regions.claim_regions(Point2f64::new(5.0, 9.0)).is_empty());
+    }
+
+    /// TWO RIDGES SHARING A CORNER APEX (field report c9a58da7): an L-plan
+    /// with a raised square in the crook, and BOTH arms drawn with a ridge
+    /// rising to meet the square. The shared square-corner (1.37, 2.24) is
+    /// stored as TWO apexes at the SAME plan point — one per ridge — each
+    /// with its OWN side hint (its arm's region). The by-point-only hint
+    /// lookup handed BOTH duplicates the first ridge's hint, so the second
+    /// arm lost its shared end and fanned to a single point. With one-to-one
+    /// hint consumption each arm keeps its own ridge end, so BOTH arms solve
+    /// as ridges (a z=5 EDGE, not a point) meeting the flat square.
+    #[test]
+    fn two_ridges_sharing_a_corner_apex_both_solve_as_ridges() {
+        let cid = ItemId::default();
+        // L footprint (dump coordinates).
+        let l = vec![
+            Point2f64::new(0.3743, 3.2417),
+            Point2f64::new(2.3743, 3.2417),
+            Point2f64::new(2.3743, 2.2417),
+            Point2f64::new(1.3743, 2.2417),
+            Point2f64::new(1.3743, 1.2417),
+            Point2f64::new(0.3743, 1.2417),
+        ];
+        // The raised square (top-left of the L crook), +3.0 → 5.0.
+        let sq = square(0.3743, 2.2417, 1.3743, 3.2417);
+        let base =
+            CeilingRegions::default_for_footprint(vec![l], 2.0, cid).with_z_deltas(&[(sq, 3.0)]);
+        let apex = |x: f64, y: f64| CeilingApex {
+            point: Point2f64::new(x, y),
+            z_m: 5.0,
+        };
+        // Ridge A: (0.37,2.24)-(1.37,2.24); ridge B: (1.37,2.24)-(1.37,3.24).
+        // The corner (1.37,2.24) appears TWICE — once per ridge.
+        let apexes = vec![
+            apex(0.3743, 2.2417),
+            apex(1.3743, 2.2417),
+            apex(1.3743, 2.2417),
+            apex(1.3743, 3.2417),
+        ];
+        let hint = |ax: f32, ay: f32, rx: f32, ry: f32| CeilingApexHint {
+            apex: (ax, ay),
+            region: (rx, ry),
+        };
+        // Hints in apex order: A's ends → the stem region (0.87,1.94);
+        // B's ends → the right-arm region (1.67,2.74).
+        let hints = vec![
+            hint(0.3743, 2.2417, 0.8743, 1.9417),
+            hint(1.3743, 2.2417, 0.8743, 1.9417),
+            hint(1.3743, 2.2417, 1.6743, 2.7417),
+            hint(1.3743, 3.2417, 1.6743, 2.7417),
+        ];
+        let out = base.with_apexes_hinted(&apexes, &hints);
+
+        // Exactly one flat region — the raised square at 5.0. Everything
+        // else slopes (both ridge arms rose).
+        let flat: Vec<&CeilingRegion> = out
+            .regions
+            .iter()
+            .filter(|r| r.flat_z().is_some())
+            .collect();
+        assert_eq!(flat.len(), 1, "only the raised square stays flat");
+        assert!(flat[0].flat_z().is_some_and(|z| (z - 5.0).abs() < 1e-6));
+
+        // A z=5 ridge EDGE in a SLOPED region for each arm — two apex points
+        // at 5.0 sharing a sloped face, NOT one arm collapsing to a single
+        // point. The flat square is excluded (all four of ITS corners sit at
+        // 5.0, so it would trivially match either edge); `touch_x` further
+        // pins ridge B's edge to the RIGHT ARM (a vertex at x ≈ 2.37), not
+        // the stem or square.
+        let sloped_edge = |a: Point2f64, b: Point2f64, touch_x: Option<f64>| {
+            out.regions
+                .iter()
+                .filter(|r| r.flat_z().is_none())
+                .any(|r| {
+                    let at = |p: Point2f64| {
+                        r.polygon.exterior.iter().any(|v| {
+                            (v.x - p.x).abs() < 1e-6
+                                && (v.y - p.y).abs() < 1e-6
+                                && (v.z - 5.0).abs() < 1e-6
+                        })
+                    };
+                    let touches = touch_x.is_none_or(|tx| {
+                        r.polygon.exterior.iter().any(|v| (v.x - tx).abs() < 1e-6)
+                    });
+                    at(a) && at(b) && touches
+                })
+        };
+        // Ridge A rises the stem: edge (0.37,2.24)-(1.37,2.24) at 5.0, in a
+        // sloped region reaching the stem's west wall (x ≈ 0.37).
+        assert!(
+            sloped_edge(
+                Point2f64::new(0.3743, 2.2417),
+                Point2f64::new(1.3743, 2.2417),
+                Some(0.3743),
+            ),
+            "ridge A rises the stem as an edge, not a point"
+        );
+        // Ridge B rises the RIGHT arm: edge (1.37,2.24)-(1.37,3.24) at 5.0,
+        // in a sloped region reaching the arm's east wall (x ≈ 2.37). The
+        // c9a58da7 bug left the shared corner (1.37,2.24) at the 2.0 base
+        // here, so this edge did not exist and the arm fanned to a point.
+        assert!(
+            sloped_edge(
+                Point2f64::new(1.3743, 2.2417),
+                Point2f64::new(1.3743, 3.2417),
+                Some(2.3743),
+            ),
+            "ridge B rises the right arm as an edge, not a point (the c9a58da7 regression)"
+        );
     }
 
     /// THE SYMMETRIC BAND (field report cd36f510): a point within the

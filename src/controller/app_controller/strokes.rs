@@ -84,6 +84,10 @@ impl AppController {
     pub fn set_edit_mode(&mut self, mode: EditTools) {
         // Picking an edit tool leaves navigation mode (clicks/drags act again).
         self.navigation_mode = false;
+        // Switching tools ends the interaction that produced the last action's
+        // elective-snap tags — drop them so they don't linger on the canvas
+        // under the new tool (they belong only to the tool/stroke that made them).
+        self.last_snap_action = None;
         if !matches!(mode, EditTools::Move) {
             // Leaving Move mode clears the selection so a stale highlight
             // doesn't carry over into the next tool.
@@ -113,6 +117,9 @@ impl AppController {
         self.set_roof_point_mode(false);
         self.set_living_area_mode(false);
         self.close_wall_partition();
+        // Deselecting every tool ends the interaction the snap tags belong to —
+        // clear them so they don't hang on the canvas in navigation mode.
+        self.last_snap_action = None;
         self.navigation_mode = true;
     }
 

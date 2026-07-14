@@ -89,9 +89,17 @@ pub(crate) fn centroid_override_by_containment<'a, V>(
 
 /// A session-only tagged area: a world-space (metre) ring + the phase to stamp
 /// onto surfaces inside it.
+///
+/// The ring is `Point2f64` — the reconstructed/inherited zones come straight
+/// from [`Ber::storey_phase_zones`] (f64, the parametric floor source), so the
+/// phase boundary equals the floor-region boundary BIT-FOR-BIT. An earlier
+/// f32 round-trip landed it one ULP (~0.48 µm) off the shared storey edge and
+/// the partition shaved a degenerate strip (field report 797a7ff5). Session
+/// only — reconstructed each resolve/load, never serialized — so the type is
+/// free to be f64 with no persistence migration.
 #[derive(Debug, Clone)]
 pub struct PhaseRegion {
-    pub polygon: Vec<Point2f32>,
+    pub polygon: Vec<Point2f64>,
     pub phase: ConstructionPhase,
 }
 
@@ -412,13 +420,16 @@ pub fn inherited_phase_regions(ber: &Ber, below_idx: usize) -> Vec<PhaseRegion> 
 /// remainder) is skipped. Empty when nothing is tagged.
 ///
 /// The zone derivation itself is [`Ber::storey_phase_zones`] (the data-model
-/// home — the suggestion engine reads the same zones); this fn just projects
-/// its f64 rings into the session `PhaseRegion` (f32) shape.
+/// home — the suggestion engine reads the same zones); this fn just wraps its
+/// f64 rings in the session `PhaseRegion` shape. Kept f64 (no `to_f32`): the
+/// resolve partition then sees the phase boundary bit-identical to the floor
+/// edge it came from, so no degenerate strip is shaved (field report
+/// 797a7ff5).
 pub fn phase_regions_from_floors(ber: &Ber, idx: usize) -> Vec<PhaseRegion> {
     ber.storey_phase_zones(idx)
         .into_iter()
         .map(|(phase, ring)| PhaseRegion {
-            polygon: ring.iter().copied().map(to_f32).collect(),
+            polygon: ring,
             phase,
         })
         .collect()
@@ -448,7 +459,8 @@ pub fn phase_snap_segments(ber: &Ber, idx: usize, outline: &[Point2f32]) -> Vec<
     let on_outline = |p: Point2f32| manip_plan::dist_to_ring(outline, p) <= ON_OUTLINE_EPS_M;
     let mut segments: Vec<[Point2f32; 2]> = Vec::new();
     for region in phase_regions_from_floors(ber, idx) {
-        let ring = &region.polygon;
+        // Snap references are f32 canvas-space; narrow the f64 zone ring.
+        let ring: Vec<Point2f32> = region.polygon.iter().copied().map(to_f32).collect();
         let n = ring.len();
         for i in 0..n {
             let (a, b) = (ring[i], ring[(i + 1) % n]);

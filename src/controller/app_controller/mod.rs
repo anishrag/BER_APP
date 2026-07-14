@@ -76,7 +76,7 @@ use crate::engine::Db;
 use ber_model::ber::ber_struct::{Ber, IntakeDetails};
 use ber_model::ber::common::{ConstructionPhase, ConstructionPhases, ItemId};
 use ber_model::ber::structural::{FloorRegions, Storey, SurfaceCounts, WallExposure};
-use domain::points::{to_f32, Point2f32, Point2f64};
+use domain::points::{to_f32, to_f64, Point2f32, Point2f64};
 use domain::sketch::{DisplayMode, EditTools, SketchMode};
 use manip_plan::{
     Axis, CollinearitySuggestion, FloorPlan, ParameterAxis, SubareaOutcome, VertexId,

@@ -1783,6 +1783,81 @@ fn place_window_with_vertical_fallback(
     Err(last_err)
 }
 
+/// Confine every PLACED WALL opening to its host region's base edge — the wall
+/// end AND every partition/section boundary is a HARD LIMIT on the stored
+/// width, not merely on the drawn `vertices`. A window belongs to ONE section.
+///
+/// Direct placement ([`add_wall_window`]/[`add_wall_door`]/redistribution and
+/// the full-* ops) already bounds each opening to its host region, so a
+/// straddle can't be *placed*. But the resolve re-home
+/// (`reanchor_openings`) picks a sub-wall by the opening's CENTRE after a wall
+/// is subdivided — a face partition or reshape splits one wall into several
+/// per-section regions — WITHOUT re-bounding the opening's WIDTH against the
+/// new, possibly shorter, host. A pre-existing wide opening would then span
+/// past its section into the neighbour (half in one exposure section, half in
+/// another). [`opening_vertices`] already clamps the DRAWN rectangle to
+/// `[0, len]`, so the geometry never crosses; this snaps the STORED
+/// `width_m`/`along_m` to that same clamped extent, so the durable model — and
+/// the width×height glazing area derived from it
+/// ([`super::fenestration::window_shape_area`]) — agrees with the drawing and
+/// stays within one section. Call in the resolve openings tail, AFTER the
+/// re-home and BEFORE [`derive_opening_vertices`].
+///
+/// Only openings that actually overflow are trimmed/recentred; within-section
+/// openings are untouched, so it's idempotent. Roof and unplaced openings are
+/// skipped (roof windows aren't wall-bounded).
+pub fn confine_wall_openings_to_host(storey: &mut Storey) {
+    // The clamped (width, centre) for one opening, or `None` when it already
+    // fits (mirrors the `[0, len]` clamp in `opening_vertices`).
+    let confine = |placement: &Option<OpeningPlacement>, width_m: f32| -> Option<(f32, f32)> {
+        let Some(OpeningPlacement::Wall {
+            wall_id, along_m, ..
+        }) = placement.as_ref()
+        else {
+            return None; // roof / unplaced — not wall-bounded
+        };
+        let (_, _, len, _) = storey
+            .walls
+            .regions
+            .iter()
+            .find(|r| r.id == *wall_id)?
+            .base_frame()?;
+        let len = len as f32;
+        let half = width_m * 0.5;
+        let centre = along_m.clamp(0.0, len);
+        let left = (centre - half).clamp(0.0, len);
+        let right = (centre + half).clamp(0.0, len);
+        let (new_w, new_c) = (right - left, (left + right) * 0.5);
+        ((new_w - width_m).abs() > 1e-4 || (new_c - *along_m).abs() > 1e-4)
+            .then_some((new_w, new_c))
+    };
+    let set =
+        |placement: &mut Option<OpeningPlacement>, up: Option<(f32, f32)>, width: &mut f32| {
+            if let Some((nw, nc)) = up {
+                *width = nw;
+                if let Some(OpeningPlacement::Wall { along_m, .. }) = placement.as_mut() {
+                    *along_m = nc;
+                }
+            }
+        };
+    let win: Vec<_> = storey
+        .windows
+        .iter()
+        .map(|w| confine(&w.placement, w.width_m))
+        .collect();
+    for (w, up) in storey.windows.iter_mut().zip(win) {
+        set(&mut w.placement, up, &mut w.width_m);
+    }
+    let drs: Vec<_> = storey
+        .doors
+        .iter()
+        .map(|d| confine(&d.placement, d.width_m))
+        .collect();
+    for (d, up) in storey.doors.iter_mut().zip(drs) {
+        set(&mut d.placement, up, &mut d.width_m);
+    }
+}
+
 /// Recompute the `vertices` cache of every PLACED opening (`placement: Some`)
 /// from its durable placement + the resolved host region geometry. Legacy
 /// openings (`placement: None`) keep their stored vertices. Call at the END of
@@ -2626,6 +2701,115 @@ mod tests {
         assert!(matches!(err, OpeningError::WallTooShort { .. }));
         assert_eq!(s.windows.len(), 1, "no window added");
         assert_eq!(s.walls.regions[0].opes.windows.len(), 1, "opes untouched");
+    }
+
+    #[test]
+    fn placing_a_window_wider_than_the_section_is_rejected() {
+        // A partition SECTION is a wall region. A window wider than the section
+        // (width + 2 end margins > section length) is refused by the normal
+        // placement path — it can never straddle into the neighbouring section.
+        let (mut s, wid) = storey_with_wall(1.5);
+        let err = add_wall_window(&mut s, wid, 0.75, 1.6, 1.0, 0.5, ItemId::default()).unwrap_err();
+        assert!(matches!(err, OpeningError::WallTooShort { .. }));
+        assert!(s.windows.is_empty(), "nothing placed");
+        // A window that DOES fit inside the section is unaffected.
+        add_wall_window(&mut s, wid, 0.75, 1.0, 1.0, 0.5, ItemId::default())
+            .expect("within-section placement is fine");
+        assert_eq!(s.windows.len(), 1);
+    }
+
+    #[test]
+    fn confine_trims_an_opening_that_overflows_its_section() {
+        // Simulate the post-repartition state the resolve re-home leaves: a wide
+        // window (stored width 3.0) homed to a 2.0 m section, its extent running
+        // past the section end into the neighbour. Confining snaps the STORED
+        // width/centre to the section so the window belongs to ONE section.
+        let (mut s, wid) = storey_with_wall(2.0);
+        s.windows.push(window(
+            ItemId::default(),
+            3.0, // wider than the 2.0 m section
+            1.2,
+            Some(OpeningPlacement::Wall {
+                wall_id: wid,
+                along_m: 1.0,
+                sill_m: 0.5,
+            }),
+        ));
+        confine_wall_openings_to_host(&mut s);
+        let w = &s.windows[0];
+        assert!(
+            (w.width_m - 2.0).abs() < 1e-3,
+            "trimmed to the section length"
+        );
+        match &w.placement {
+            Some(OpeningPlacement::Wall { along_m, .. }) => {
+                assert!((along_m - 1.0).abs() < 1e-3, "centred in the section");
+            }
+            _ => panic!("expected a wall placement"),
+        }
+        // Derivation now draws exactly the (trimmed) stored width — no straddle.
+        derive_opening_vertices(&mut s);
+        let (a, b) = ((0.0f64), (2.0f64));
+        let xs: Vec<f64> = s.windows[0].vertices.iter().map(|v| v.0 as f64).collect();
+        assert!(
+            xs.iter().all(|&x| x >= a - 1e-3 && x <= b + 1e-3),
+            "drawn within [0,len]: {xs:?}"
+        );
+    }
+
+    #[test]
+    fn confine_recentres_an_opening_pushed_past_the_section_end() {
+        // Centre near the section boundary with half-width spilling over: the
+        // stored extent is clamped to [0, len] and re-centred, so the window
+        // sits flush inside its section rather than crossing the boundary.
+        let (mut s, wid) = storey_with_wall(2.0);
+        s.windows.push(window(
+            ItemId::default(),
+            1.0,
+            1.2,
+            Some(OpeningPlacement::Wall {
+                wall_id: wid,
+                along_m: 1.8, // centre 0.2 m from the end; right edge at 2.3 > 2.0
+                sill_m: 0.5,
+            }),
+        ));
+        confine_wall_openings_to_host(&mut s);
+        match &s.windows[0].placement {
+            Some(OpeningPlacement::Wall { along_m, .. }) => {
+                let half = s.windows[0].width_m / 2.0;
+                assert!(
+                    along_m + half <= 2.0 + 1e-3,
+                    "right edge inside the section"
+                );
+                assert!(along_m - half >= -1e-3, "left edge inside the section");
+            }
+            _ => panic!("expected a wall placement"),
+        }
+    }
+
+    #[test]
+    fn confine_leaves_within_section_openings_untouched() {
+        // A window comfortably inside its section is not moved or resized, and a
+        // second confine pass is a no-op (idempotent).
+        let (mut s, wid) = storey_with_wall(4.0);
+        add_wall_window(&mut s, wid, 2.0, 1.0, 1.2, 1.0, ItemId::default()).unwrap();
+        let before = (
+            s.windows[0].width_m,
+            match &s.windows[0].placement {
+                Some(OpeningPlacement::Wall { along_m, .. }) => *along_m,
+                _ => panic!(),
+            },
+        );
+        confine_wall_openings_to_host(&mut s);
+        confine_wall_openings_to_host(&mut s);
+        let after = (
+            s.windows[0].width_m,
+            match &s.windows[0].placement {
+                Some(OpeningPlacement::Wall { along_m, .. }) => *along_m,
+                _ => panic!(),
+            },
+        );
+        assert!((before.0 - after.0).abs() < 1e-6 && (before.1 - after.1).abs() < 1e-6);
     }
 
     #[test]

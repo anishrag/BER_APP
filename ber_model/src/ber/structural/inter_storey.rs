@@ -365,7 +365,6 @@ impl PlanFootprint {
 /// `Storey::floor_splits`.
 fn split_floors_intact(floors: FloorRegions, rings: &[Vec<Point2f64>]) -> FloorRegions {
     use geo::bool_ops::BooleanOps;
-    use geo::Area;
     let mut regions = floors.regions;
     for ring in rings {
         if ring.len() < 3 {
@@ -374,15 +373,29 @@ fn split_floors_intact(floors: FloorRegions, rings: &[Vec<Point2f64>]) -> FloorR
         let cut = ring_to_poly(ring);
         let mut next: Vec<FloorRegion> = Vec::new();
         for region in regions {
-            let inside = region.polygon.intersection(&cut);
-            let inside_area: f64 = inside.0.iter().map(|p| p.unsigned_area()).sum();
-            if inside_area < SLIVER_AREA_M2 {
+            // Thickness-aware: keep only NON-degenerate pieces per side, so a
+            // reconstructed cut a hair off a shared edge can't shave a strip
+            // (field report 797a7ff5). A degenerate-only side means the cut
+            // misses / fully covers → keep the region intact (preserving id).
+            let inside_pieces: Vec<Polygon<f64>> = region
+                .polygon
+                .intersection(&cut)
+                .0
+                .into_iter()
+                .filter(|p| !plan_piece_is_degenerate(p))
+                .collect();
+            if inside_pieces.is_empty() {
                 next.push(region); // cut misses this region — keep it intact
                 continue;
             }
-            let outside = region.polygon.difference(&cut);
-            let outside_area: f64 = outside.0.iter().map(|p| p.unsigned_area()).sum();
-            if outside_area < SLIVER_AREA_M2 {
+            let outside_pieces: Vec<Polygon<f64>> = region
+                .polygon
+                .difference(&cut)
+                .0
+                .into_iter()
+                .filter(|p| !plan_piece_is_degenerate(p))
+                .collect();
+            if outside_pieces.is_empty() {
                 next.push(region); // cut fully covers it — keep it intact
                 continue;
             }
@@ -394,10 +407,8 @@ fn split_floors_intact(floors: FloorRegions, rings: &[Vec<Point2f64>]) -> FloorR
                 exposure: region.exposure,
                 height_m: region.height_m,
             };
-            for poly in inside.0.iter().chain(outside.0.iter()) {
-                if poly.unsigned_area() >= SLIVER_AREA_M2 {
-                    next.push(mk(poly));
-                }
+            for poly in inside_pieces.iter().chain(&outside_pieces) {
+                next.push(mk(poly));
             }
         }
         regions = next;

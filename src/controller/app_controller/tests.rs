@@ -1126,6 +1126,41 @@ fn phase_boundary_snaps_onto_a_floor_step_line() {
     );
 }
 
+/// Snap tags belong to the interaction that produced them: once the assessor
+/// picks a different edit tool, the markers must clear at once rather than
+/// hanging on the canvas under the new tool.
+#[test]
+fn switching_tools_clears_the_snap_tags() {
+    let mut c = dimensioned_square_controller();
+    let p = |x: f32, y: f32| Point2f32::new(x, y);
+    // Same setup as `phase_boundary_snaps_onto_a_floor_step_line`: a floor step
+    // derives a step line the phase carve snaps onto, recording a snap decision.
+    c.step_regions.entry(0).or_default().push(StepRegion {
+        polygon: vec![p(5.0, 0.0), p(10.0, 0.0), p(10.0, 10.0), p(5.0, 10.0)],
+        level_m: -0.3,
+    });
+    c.commit_to_ber().unwrap();
+    c.set_phase_mode(true);
+    c.apply_phase_region_stroke_event(&[
+        (5.03, 2.0),
+        (8.0, 2.0),
+        (8.0, 8.0),
+        (5.03, 8.0),
+        (5.08, 2.05),
+    ]);
+    assert!(
+        !c.snap_overlay().is_empty(),
+        "precondition: a snap tag is showing after the carve"
+    );
+
+    // Pick a different edit tool — the snap markers must vanish immediately.
+    c.set_edit_mode(EditTools::Move);
+    assert!(
+        c.snap_overlay().is_empty(),
+        "the snap tags clear the moment another tool is selected"
+    );
+}
+
 /// The reported case: a living area drawn as a square with a nook, in a
 /// dimensioned (metre-scale) storey. The orthogonalizer's coordinate-merge
 /// is scale-relative, so the nook is PRESERVED (it isn't merged away by a
@@ -3211,7 +3246,10 @@ fn phase_polygon_stamps_contained_walls() {
     c.set_all_remaining_exposed(); // all 4 perimeter walls → regions
                                    // Tag the right side (x >= 6) as Extension1.
     c.phase_regions.entry(0).or_default().push(PhaseRegion {
-        polygon: vec![p(6., -1.), p(12., -1.), p(12., 12.), p(6., 12.)],
+        polygon: (vec![p(6., -1.), p(12., -1.), p(12., 12.), p(6., 12.)])
+            .into_iter()
+            .map(to_f64)
+            .collect(),
         phase: ConstructionPhase::Extension1,
     });
     c.commit_to_ber().unwrap();
@@ -3247,7 +3285,10 @@ fn phase_area_splits_floor_into_regions() {
     let p = |x: f32, y: f32| Point2f32::new(x, y);
     let mut c = dimensioned_square_controller();
     c.phase_regions.entry(0).or_default().push(PhaseRegion {
-        polygon: vec![p(5., 0.), p(10., 0.), p(10., 10.), p(5., 10.)],
+        polygon: (vec![p(5., 0.), p(10., 0.), p(10., 10.), p(5., 10.)])
+            .into_iter()
+            .map(to_f64)
+            .collect(),
         phase: ConstructionPhase::Extension1,
     });
     c.commit_to_ber().unwrap();
@@ -3278,7 +3319,10 @@ fn phase_split_survives_reload() {
     let p = |x: f32, y: f32| Point2f32::new(x, y);
     let mut c = dimensioned_square_controller();
     c.phase_regions.entry(0).or_default().push(PhaseRegion {
-        polygon: vec![p(5., 0.), p(10., 0.), p(10., 10.), p(5., 10.)],
+        polygon: (vec![p(5., 0.), p(10., 0.), p(10., 10.), p(5., 10.)])
+            .into_iter()
+            .map(to_f64)
+            .collect(),
         phase: ConstructionPhase::Extension1,
     });
     c.commit_to_ber().unwrap();
@@ -3563,7 +3607,10 @@ fn wall_takes_the_phase_of_its_interior_floor_zone() {
     let mut c = dimensioned_square_controller();
     c.set_all_remaining_exposed();
     c.phase_regions.entry(0).or_default().push(PhaseRegion {
-        polygon: vec![p(6., -1.), p(12., -1.), p(12., 12.), p(6., 12.)],
+        polygon: (vec![p(6., -1.), p(12., -1.), p(12., 12.), p(6., 12.)])
+            .into_iter()
+            .map(to_f64)
+            .collect(),
         phase: ConstructionPhase::Extension1,
     });
     c.commit_to_ber().unwrap();
@@ -3596,7 +3643,10 @@ fn phase_survives_reload_via_reconstruction() {
     let mut c = dimensioned_square_controller();
     c.set_all_remaining_exposed();
     c.phase_regions.entry(0).or_default().push(PhaseRegion {
-        polygon: vec![p(6., -1.), p(12., -1.), p(12., 12.), p(6., 12.)],
+        polygon: (vec![p(6., -1.), p(12., -1.), p(12., 12.), p(6., 12.)])
+            .into_iter()
+            .map(to_f64)
+            .collect(),
         phase: ConstructionPhase::Extension1,
     });
     c.commit_to_ber().unwrap();
@@ -4061,12 +4111,15 @@ fn exposure_drag_snaps_to_a_phase_line() {
     let (nx, ny) = (-(b0.y - a0.y) / len, (b0.x - a0.x) / len);
     let p4 = along(4.0);
     c.phase_regions.entry(0).or_default().push(PhaseRegion {
-        polygon: vec![
+        polygon: (vec![
             a0,
             Point2f32::new(p4.0, p4.1),
             Point2f32::new(p4.0 + nx * 3.0, p4.1 + ny * 3.0),
             Point2f32::new(a0.x + nx * 3.0, a0.y + ny * 3.0),
-        ],
+        ])
+        .into_iter()
+        .map(to_f64)
+        .collect(),
         phase: ConstructionPhase::Original,
     });
 
@@ -6506,7 +6559,10 @@ fn phase_tagged_ceiling_exposure_survives_reload() {
     c.set_ceiling_step_mode(false);
     // Phase-tag the right half so the reload heal recomposes this storey's ceilings.
     c.phase_regions.entry(0).or_default().push(PhaseRegion {
-        polygon: vec![p(5., 0.), p(10., 0.), p(10., 10.), p(5., 10.)],
+        polygon: (vec![p(5., 0.), p(10., 0.), p(10., 10.), p(5., 10.)])
+            .into_iter()
+            .map(to_f64)
+            .collect(),
         phase: ConstructionPhase::Extension1,
     });
     c.mark_dirty().unwrap();
@@ -6568,7 +6624,10 @@ fn open_ber_heals_spurious_phase_induced_roof_split() {
 
     // Tag the right half (x>=5) as Extension1 — a genuine phase boundary at x=5.
     c.phase_regions.entry(0).or_default().push(PhaseRegion {
-        polygon: vec![p(5., 0.), p(10., 0.), p(10., 10.), p(5., 10.)],
+        polygon: (vec![p(5., 0.), p(10., 0.), p(10., 10.), p(5., 10.)])
+            .into_iter()
+            .map(to_f64)
+            .collect(),
         phase: ConstructionPhase::Extension1,
     });
 
@@ -13062,7 +13121,10 @@ fn structure_carve_snaps_to_phase_line_and_pins_the_wall() {
     let p = |x: f32, y: f32| Point2f32::new(x, y);
     let mut c = dimensioned_square_controller(); // storey 0 = 10x10 m
     c.phase_regions.entry(0).or_default().push(PhaseRegion {
-        polygon: vec![p(5., 0.), p(10., 0.), p(10., 10.), p(5., 10.)],
+        polygon: (vec![p(5., 0.), p(10., 0.), p(10., 10.), p(5., 10.)])
+            .into_iter()
+            .map(to_f64)
+            .collect(),
         phase: ConstructionPhase::Extension1,
     });
     c.mark_dirty().unwrap();
@@ -17357,7 +17419,10 @@ fn outline_world_snaps_to_below_storey_phase_boundary() {
     // the phase partition reaches the persisted floors — what the upper-storey
     // snap reads back via `document::phase_regions_from_floors`.
     c.phase_regions.entry(0).or_default().push(PhaseRegion {
-        polygon: vec![p(5., 0.), p(10., 0.), p(10., 10.), p(5., 10.)],
+        polygon: (vec![p(5., 0.), p(10., 0.), p(10., 10.), p(5., 10.)])
+            .into_iter()
+            .map(to_f64)
+            .collect(),
         phase: ConstructionPhase::Extension1,
     });
     c.mark_dirty().unwrap();
@@ -17452,7 +17517,10 @@ fn outline_world_phase_snapped_wall_is_pinned_pre_known() {
     let p = |x: f32, y: f32| Point2f32::new(x, y);
     let mut c = dimensioned_square_controller(); // storey 0 = 10x10 m
     c.phase_regions.entry(0).or_default().push(PhaseRegion {
-        polygon: vec![p(5., 0.), p(10., 0.), p(10., 10.), p(5., 10.)],
+        polygon: (vec![p(5., 0.), p(10., 0.), p(10., 10.), p(5., 10.)])
+            .into_iter()
+            .map(to_f64)
+            .collect(),
         phase: ConstructionPhase::Extension1,
     });
     c.mark_dirty().unwrap();
@@ -17493,7 +17561,10 @@ fn outline_world_unsnap_phase_boundary_reopens_dimension_prompt() {
     let p = |x: f32, y: f32| Point2f32::new(x, y);
     let mut c = dimensioned_square_controller(); // storey 0 = 10x10 m
     c.phase_regions.entry(0).or_default().push(PhaseRegion {
-        polygon: vec![p(5., 0.), p(10., 0.), p(10., 10.), p(5., 10.)],
+        polygon: (vec![p(5., 0.), p(10., 0.), p(10., 10.), p(5., 10.)])
+            .into_iter()
+            .map(to_f64)
+            .collect(),
         phase: ConstructionPhase::Extension1,
     });
     c.mark_dirty().unwrap();
@@ -21761,5 +21832,110 @@ fn rejected_all_snapped_ridge_stroke_surfaces_a_notice() {
     assert!(
         !notice.is_empty(),
         "the notice carries the rejection message"
+    );
+}
+
+/// Minor bbox dimension (m) of a plan ring — the thickness the sliver guard
+/// measures. Shared by the degenerate-region assertions below.
+fn plan_minor_dim(ext: &[domain::points::Point3f64]) -> f64 {
+    let (mut nx, mut xx, mut ny, mut xy) = (
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+    );
+    for v in ext {
+        nx = nx.min(v.x);
+        xx = xx.max(v.x);
+        ny = ny.min(v.y);
+        xy = xy.max(v.y);
+    }
+    (xx - nx).min(xy - ny)
+}
+
+/// Shoelace plan area of a `Polygon3D` exterior (xy projection).
+fn plan_area3(ext: &[domain::points::Point3f64]) -> f64 {
+    let n = ext.len();
+    (0..n)
+        .map(|i| {
+            let (p, q) = (&ext[i], &ext[(i + 1) % n]);
+            p.x * q.y - q.x * p.y
+        })
+        .sum::<f64>()
+        .abs()
+        / 2.0
+}
+
+/// FIELD REPORT 797a7ff5 — the degenerate-sliver artifact: an L-plan two-storey
+/// with an Original/Extension phase boundary coincident with the storey1/
+/// storey0 shared edge (y = 4.4649). The phase-zone ring had round-tripped
+/// through f32, landing one ULP (~0.48 µm) off the f64 outline edge, so the
+/// floor partition + inter-storey / coplanar splits shaved a 6.02 m × 0.48 µm
+/// strip that cleared every area-only guard — persisted as storey1 floor
+/// reg1, storey1 ceiling reg0, and storey0 ceiling reg0 (all minor dim
+/// 4.77e-7 m in the dump).
+///
+/// The fix carries phase-zone rings in f64 (bit-identical to the floor edge)
+/// AND adds a thickness-aware split guard. Re-resolving the dump must leave
+/// NO degenerate region on either storey's floors or ceilings, with the real
+/// coverage intact (floors and ceilings still cover the full footprint, the
+/// phase split preserved).
+#[test]
+fn dump_797a7ff5_no_degenerate_sliver_after_resolve() {
+    let dump = "/tmp/claude-1000/-home-anishrag-WORK-BER-APP-Branch2/\
+c3838f4c-8dc1-4e86-92de-029cef93c73d/scratchpad/bugs-new6/07-14T1534_797a7ff5/state.json";
+    std::fs::copy(dump, crate::engine::checkpoint::DEFAULT_PATH).unwrap();
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    assert!(c.load_checkpoint(), "checkpoint loads");
+    let _ = std::fs::remove_file(crate::engine::checkpoint::DEFAULT_PATH);
+
+    // Re-resolve every storey from its inputs (the fix acts at partition /
+    // split time, so the persisted strip only clears on re-derivation).
+    let n = c.current_record.as_ref().unwrap().data.storeys.len();
+    for i in 0..n {
+        c.set_current_storey(Some(i)).unwrap();
+        c.commit_to_ber().unwrap();
+    }
+
+    const MIN_MINOR_M: f64 = 1e-3;
+    let record = c.current_record.as_ref().unwrap();
+    for (i, storey) in record.data.storeys.iter().enumerate() {
+        let mut floor_area = 0.0;
+        for (j, r) in storey.floors.regions.iter().enumerate() {
+            let ext: Vec<domain::points::Point3f64> = r
+                .polygon
+                .exterior()
+                .coords()
+                .map(|co| domain::points::Point3f64::new(co.x, co.y, 0.0))
+                .collect();
+            assert!(
+                plan_minor_dim(&ext) >= MIN_MINOR_M,
+                "storey {i} floor {j} is a degenerate sliver (minor {:.2e} m)",
+                plan_minor_dim(&ext)
+            );
+            floor_area += plan_area3(&ext);
+        }
+        let mut ceil_area = 0.0;
+        for (j, r) in storey.ceilings.regions.iter().enumerate() {
+            let ext = &r.polygon.exterior;
+            assert!(
+                plan_minor_dim(ext) >= MIN_MINOR_M,
+                "storey {i} ceiling {j} is a degenerate sliver (minor {:.2e} m)",
+                plan_minor_dim(ext)
+            );
+            ceil_area += plan_area3(ext);
+        }
+        // Coverage intact: floors and ceilings still cover the same footprint.
+        assert!(floor_area > 1.0, "storey {i} floors cover real area");
+        assert!(
+            (floor_area - ceil_area).abs() < 1e-3,
+            "storey {i} floor/ceiling coverage matches ({floor_area} vs {ceil_area})"
+        );
+    }
+    // The phase split survived on the ground storey (Original + Extension) —
+    // more than one floor region, all non-degenerate (checked above).
+    assert!(
+        record.data.storeys[0].floors.regions.len() >= 2,
+        "the Original/Extension phase split is preserved on the ground storey"
     );
 }

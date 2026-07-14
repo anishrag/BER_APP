@@ -66,6 +66,33 @@ pub fn strip_collinear(ring: &[Point2f64]) -> Vec<Point2f64> {
 /// drawing the line in the same place.
 pub(crate) const SLIVER_AREA_M2: f64 = 1e-6;
 
+/// The minor bounding-box dimension (m) below which a boolean-op piece is a
+/// degenerate SLIVER — a long-thin strip that slips past the area guard. A
+/// 6 m × 0.48 µm strip is 2.87e-6 m² (> [`SLIVER_AREA_M2`], so the
+/// area-only check misses it) yet is physically not a region (field report
+/// 797a7ff5: a phase boundary one f32 ULP off the shared storey edge). ~1 mm
+/// is far below any real floor/ceiling division and far above the
+/// f32↔f64 / near-coincident-edge noise that produces these strips.
+pub(crate) const MIN_PIECE_MINOR_M: f64 = 1e-3;
+
+/// Whether a plan piece must be dropped at split time: sub-[`SLIVER_AREA_M2`]
+/// area OR a minor bbox dimension below [`MIN_PIECE_MINOR_M`] (the
+/// thickness-aware guard the area-only checks miss). Defence in depth for
+/// every boolean split — `FloorRegions::partition`,
+/// `CeilingRegions::split_faces_coplanar`, and inter-storey
+/// `split_floors_intact` — so a near-coincident-edge mismatch can't
+/// resurrect a degenerate strip.
+pub(crate) fn plan_piece_is_degenerate(poly: &Polygon<f64>) -> bool {
+    use geo::{Area, BoundingRect};
+    if poly.unsigned_area() < SLIVER_AREA_M2 {
+        return true;
+    }
+    match poly.bounding_rect() {
+        Some(bb) => bb.width().min(bb.height()) < MIN_PIECE_MINOR_M,
+        None => true,
+    }
+}
+
 /// Plan tolerance (m) for matching a ring vertex to a stored UNFANNED point
 /// (`Storey::ceiling_unfanned`). Looser than the 1e-6 apex-corner identity:
 /// the unfanned points are f32-quantized ring vertices, but the ring a later

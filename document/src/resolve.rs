@@ -8,7 +8,7 @@ use ber_model::ber::structural::{
     rebase_ring_start, split_wall_by_line, CeilingRegions, FloorRegions, Polygon3D, Storey,
     WallExposure, WallRegions,
 };
-use domain::points::{to_f64, Point2f32, Point2f64, Point3f64};
+use domain::points::{to_f32, to_f64, Point2f32, Point2f64, Point3f64};
 
 /// Placeholder top for derived wall quads until the storey's ceiling height is
 /// set — never visible in 3D (gated); walls re-extrude on the next materialize
@@ -96,10 +96,11 @@ pub fn resolve_storey(
     // floor PARTITION below.
     let phase_area_rings: Vec<(Vec<Point2f64>, ConstructionPhase)> = phase_regions
         .iter()
-        .map(|r| {
-            let ring = r.polygon.iter().copied().map(to_f64).collect();
-            (ring, r.phase.clone())
-        })
+        // The ring is already f64 (from `storey_phase_zones` via
+        // `phase_regions_from_floors`) — NO f32 round-trip, so it stays
+        // bit-identical to the floor edge the partition clips against
+        // (field report 797a7ff5: an f32 ULP offset shaved a sliver).
+        .map(|r| (r.polygon.clone(), r.phase.clone()))
         .collect();
     // Construction ids are LOOKED UP, not created — the caller ensured them
     // (`ensure_storey_constructions`), keeping this read-only. `floor_cid` is
@@ -360,7 +361,11 @@ pub fn resolve_storey(
     //    roof carve; session-driven, recomputed every resolve like those.
     let mut wall_cuts: Vec<[Point2f64; 2]> = storey.wall_splits.clone();
     for region in phase_regions {
-        wall_cuts.extend(s.outline.floor_plan.interior_cut_edges(&region.polygon));
+        // `interior_cut_edges` works on the f32 outline; narrow the f64 ring
+        // (wall-split precision is unaffected — the sliver fix is the f64
+        // FLOOR partition above, not this cut).
+        let ring: Vec<Point2f32> = region.polygon.iter().copied().map(to_f32).collect();
+        wall_cuts.extend(s.outline.floor_plan.interior_cut_edges(&ring));
     }
     let walls = walls.apply_splits(&wall_cuts);
     // RISER regions append after the perimeter rebuild — derived geometry,
@@ -433,6 +438,12 @@ pub fn resolve_storey(
     // recompute each placed opening's `vertices` and drop any whose host the
     // edit removed.
     reanchor_openings(s, &mut storey, &previous_walls);
+    // The re-home above picks a sub-wall by the opening's CENTRE but does not
+    // re-bound its WIDTH; after a wall is split into per-section regions (a face
+    // partition or reshape), a pre-existing wide opening could span past its
+    // section. Confine each opening to its host region's base edge so a window
+    // belongs to ONE section (stored width matches the clamped drawing).
+    ber_model::ber::openings::confine_wall_openings_to_host(&mut storey);
     ber_model::ber::openings::derive_opening_vertices(&mut storey);
     ber_model::ber::openings::prune_orphaned_openings(&mut storey);
     // Each wall/roof region's `opes` is a DERIVED index of the openings on it,
@@ -1654,16 +1665,19 @@ mod tests {
         };
         let phase = vec![
             PhaseRegion {
-                polygon: vec![
+                polygon: (vec![
                     Point2f32::new(2.2785, 4.3270),
                     Point2f32::new(9.7785, 4.3270),
                     Point2f32::new(9.7785, y),
                     Point2f32::new(2.2785, y),
-                ],
+                ])
+                .into_iter()
+                .map(to_f64)
+                .collect(),
                 phase: ConstructionPhase::Extension1,
             },
             PhaseRegion {
-                polygon: vec![
+                polygon: (vec![
                     Point2f32::new(2.2785, y),
                     Point2f32::new(9.7785, y),
                     Point2f32::new(9.7785, 16.9270),
@@ -1672,7 +1686,10 @@ mod tests {
                     Point2f32::new(5.2785, 18.8270),
                     Point2f32::new(5.2785, 17.3270),
                     Point2f32::new(2.2785, 17.3270),
-                ],
+                ])
+                .into_iter()
+                .map(to_f64)
+                .collect(),
                 phase: ConstructionPhase::Original,
             },
         ];
@@ -2034,12 +2051,15 @@ mod tests {
         // Only the Extension zone is a phase region (Original = remainder), as
         // `phase_regions_from_floors` reconstructs it.
         let phase = vec![PhaseRegion {
-            polygon: vec![
+            polygon: (vec![
                 Point2f32::new(1.3, 5.3),
                 Point2f32::new(1.3, 2.3),
                 Point2f32::new(4.3, 2.3),
                 Point2f32::new(4.3, 5.3),
-            ],
+            ])
+            .into_iter()
+            .map(to_f64)
+            .collect(),
             phase: ConstructionPhase::Extension1,
         }];
         let mut ber = Ber::default();
@@ -2071,12 +2091,15 @@ mod tests {
                                      // A dated phase zone over the LEFT half only → the right half is the
                                      // Unassigned remainder (the untagged extend-bump case).
         let left = vec![PhaseRegion {
-            polygon: vec![
+            polygon: (vec![
                 Point2f32::new(0.0, 0.0),
                 Point2f32::new(2.0, 0.0),
                 Point2f32::new(2.0, 4.0),
                 Point2f32::new(0.0, 4.0),
-            ],
+            ])
+            .into_iter()
+            .map(to_f64)
+            .collect(),
             phase: ConstructionPhase::Extension1,
         }];
         let mut ber = Ber::default();
@@ -2094,12 +2117,15 @@ mod tests {
         // Assign it by extending the dated zone over the WHOLE outline → every
         // region is Extension1, so the gate completes (and the seam is gone).
         let full = vec![PhaseRegion {
-            polygon: vec![
+            polygon: (vec![
                 Point2f32::new(0.0, 0.0),
                 Point2f32::new(4.0, 0.0),
                 Point2f32::new(4.0, 4.0),
                 Point2f32::new(0.0, 4.0),
-            ],
+            ])
+            .into_iter()
+            .map(to_f64)
+            .collect(),
             phase: ConstructionPhase::Extension1,
         }];
         ensure_storey_constructions(&mut ber, 0, &full);
@@ -2139,11 +2165,11 @@ mod tests {
         // TAG ORDER: whole storey Original FIRST, dormer 2022 LAST (most recent).
         let phase = vec![
             PhaseRegion {
-                polygon: whole,
+                polygon: (whole).into_iter().map(to_f64).collect(),
                 phase: ConstructionPhase::Original,
             },
             PhaseRegion {
-                polygon: dormer,
+                polygon: (dormer).into_iter().map(to_f64).collect(),
                 phase: ConstructionPhase::Extension1,
             },
         ];
@@ -2225,11 +2251,11 @@ mod tests {
         // TAG ORDER: whole storey Original FIRST, dormer Extension1 LAST (newest).
         let phase = vec![
             PhaseRegion {
-                polygon: whole,
+                polygon: (whole).into_iter().map(to_f64).collect(),
                 phase: ConstructionPhase::Original,
             },
             PhaseRegion {
-                polygon: dormer,
+                polygon: (dormer).into_iter().map(to_f64).collect(),
                 phase: ConstructionPhase::Extension1,
             },
         ];
@@ -2379,12 +2405,15 @@ mod tests {
     fn phase_area_carves_roof_like_the_floor() {
         let doc = unit_square_doc();
         let phase = vec![PhaseRegion {
-            polygon: vec![
+            polygon: (vec![
                 Point2f32::new(0.0, 0.0),
                 Point2f32::new(2.0, 0.0),
                 Point2f32::new(2.0, 4.0),
                 Point2f32::new(0.0, 4.0),
-            ],
+            ])
+            .into_iter()
+            .map(to_f64)
+            .collect(),
             phase: ConstructionPhase::Extension1,
         }];
         let mut ber = Ber::default();
@@ -2687,12 +2716,15 @@ mod tests {
     fn phase_area_splits_the_walls_it_crosses() {
         let doc = unit_square_doc();
         let phase = vec![PhaseRegion {
-            polygon: vec![
+            polygon: (vec![
                 Point2f32::new(0.0, 0.0),
                 Point2f32::new(2.0, 0.0),
                 Point2f32::new(2.0, 4.0),
                 Point2f32::new(0.0, 4.0),
-            ],
+            ])
+            .into_iter()
+            .map(to_f64)
+            .collect(),
             phase: ConstructionPhase::Extension1,
         }];
         let mut ber = Ber::default();
@@ -3787,11 +3819,14 @@ mod tests {
     fn ensure_constructions_is_idempotent_and_grows_storeys() {
         let mut ber = Ber::default();
         let regions = vec![PhaseRegion {
-            polygon: vec![
+            polygon: (vec![
                 Point2f32::new(0.0, 0.0),
                 Point2f32::new(1.0, 0.0),
                 Point2f32::new(1.0, 1.0),
-            ],
+            ])
+            .into_iter()
+            .map(to_f64)
+            .collect(),
             phase: ConstructionPhase::Extension1,
         }];
         ensure_storey_constructions(&mut ber, 1, &regions);

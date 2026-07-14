@@ -364,12 +364,22 @@ impl FloorRegions {
             let inside = outline_poly.intersection(&to_poly(ring));
             let piece = inside.difference(&claimed);
             for poly in &piece.0 {
+                // Thickness-aware guard: a phase ring a hair off the outline
+                // edge would otherwise shave a long-thin strip that clears
+                // the area floor (field report 797a7ff5). Root fix keeps the
+                // rings f64-coincident; this is defence in depth.
+                if plan_piece_is_degenerate(poly) {
+                    continue;
+                }
                 regions.push(mk(poly, *cid));
             }
             claimed = claimed.union(&piece);
         }
         let remainder = outline_poly.difference(&claimed);
         for poly in &remainder.0 {
+            if plan_piece_is_degenerate(poly) {
+                continue;
+            }
             regions.push(mk(poly, remainder_construction_id));
         }
         Self { regions }
