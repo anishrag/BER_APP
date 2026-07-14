@@ -1549,9 +1549,12 @@ impl StoreyDoc {
 /// prompt. (See [`resolve_ridge_slope_side`].)
 pub enum RidgeSlopeSide {
     /// One area to slope with no real alternative (a SINGLE-claimant ridge):
-    /// the interior point to stamp as BOTH apexes' side hint (`None` for an
-    /// outline ridge with no usable drawn side — the apexes are stored without
-    /// a hint, as a plain mono-pitch).
+    /// the interior point to stamp as BOTH apexes' side hint — normally a
+    /// point inside the MIDPOINT's own area, so an end snapped exactly ON an
+    /// internal step/divider boundary still resolves to the ridge's section
+    /// (86c6d9b3 confinement). `None` only when the midpoint claims nothing
+    /// and no drawn side is usable — the apexes are then stored without a
+    /// hint, as a plain mono-pitch.
     Resolved(Option<(f32, f32)>),
     /// A JUNCTION ridge (≥ 2 claiming areas) resolved WITHOUT asking — exactly
     /// one neighbour was slope-able. The payload names both sides so the shell
@@ -1628,7 +1631,8 @@ fn area_side_label(axis: ParameterAxis, coord_m: f32, inside: (f32, f32)) -> Str
 ///
 /// The ridge's region is claimed by its midpoint ([`CeilingRegions::claim_regions`]):
 /// - claimed by ONE area (a strict-interior GABLE ridge) → [`RidgeSlopeSide::Resolved`]
-///   with the drawn side's hint (or `None` — both halves slope);
+///   with THAT area's interior point as the hint (see the variant doc — it
+///   confines boundary-snapped ends to the ridge's own section);
 /// - claimed by ≥ 2 (a junction ridge on an internal boundary): the ridge slopes
 ///   ONE neighbour and steps the other. It can only slope a neighbour whose flat
 ///   height DIFFERS from `z_m` — a ridge at height == a region's own base is a
@@ -1666,13 +1670,6 @@ pub fn resolve_ridge_slope_side(
         ParameterAxis::Y => (mid.x as f32, dc),
     });
     let claims = storey.ceilings.claim_regions(mid);
-    let drawn_inside = |candidates: &[usize]| -> Option<usize> {
-        let (hx, hy) = drawn_side?;
-        let hp = Point2f64::new(hx as f64, hy as f64);
-        let r = storey.ceilings.region_strictly_containing(hp)?;
-        let ri = storey.ceilings.regions.iter().position(|x| x.id == r.id)?;
-        candidates.contains(&ri).then_some(ri)
-    };
 
     // Junction ridge (≥ 2 claimants): choose among the neighbours the ridge can
     // ACTUALLY slope — those whose flat height differs from z_m. A ridge at
@@ -1728,10 +1725,19 @@ pub fn resolve_ridge_slope_side(
         );
     }
 
-    // Strict-interior ridge (single claimant): a full gable — the drawn side's
-    // hint if any (harmless on an outline wall), else no hint (both halves slope).
-    let chosen = drawn_inside(&claims)
-        .map(|ri| area_inside_point(&storey.ceilings.regions[ri], mid))
+    // Strict-interior ridge (single claimant): the ridge belongs to its
+    // MIDPOINT's area — stamp that area's interior point as the side hint.
+    // The hint is inert for interior/outline ends (single-claim apexes skip
+    // it), but an end snapped exactly ON an internal step/divider boundary
+    // (a wall-to-wall gable within a DIVIDED section — 86c6d9b3
+    // confinement) multi-claims at resolve, and the hint keeps it in the
+    // ridge's own section instead of first-claim handing it to the
+    // neighbour (which would fan an area the ridge never touched). Falls
+    // back to the drawn side when the midpoint claims nothing (validation
+    // prevents that; belt and braces).
+    let chosen = claims
+        .first()
+        .map(|&ri| area_inside_point(&storey.ceilings.regions[ri], mid))
         .or(drawn_side);
     RidgeSlopeSide::Resolved(chosen)
 }

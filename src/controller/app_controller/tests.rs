@@ -5937,7 +5937,7 @@ fn existing_step_tap_selects_edits_and_deletes() {
 /// ABSOLUTE ENTRY (field report e8fec0b8): typing the target height 2.7 on a
 /// 2.4 m area is exactly the relative +0.3 — the delta is computed at
 /// assign time against the resolved height (steps stay stored RELATIVE, so
-/// the divider absorption and every reload fixpoint are untouched).
+/// delta-0 dividers and every reload fixpoint are untouched).
 #[test]
 fn absolute_height_entry_matches_relative_delta() {
     let mut rel = ceiling_ready_controller();
@@ -20346,17 +20346,288 @@ fn neighbour_ceiling_tool_paints_and_clears_a_continuation() {
     assert!(!c.ceiling_continuation_picking_target());
 }
 
-/// TEST2 ON-DEVICE REGRESSION, the stale-divider variant: a delta-0 session
-/// DIVIDER over the stem (invisible in the UI — the delete feed filters
-/// dividers) splits the T before the ridge; the same-height absorption in
-/// the solve must still deliver two planes covering the whole T through the
-/// REAL flow.
+// ─── Field report 86c6d9b3: divider section is "the whole region" ──────────
+
+/// The 86c6d9b3 dump geometry through the real load path: a rectangular
+/// footprint with a 1×1 bump at the bottom (x ∈ [2.91, 3.91],
+/// y ∈ [6.215, 7.215]), default ceiling 2.0, and a DELIBERATE delta-0
+/// divider fencing off the main 5×5 section (x ∈ [0.91, 5.91],
+/// y ∈ [1.215, 6.215]) from the bump.
+fn divided_86c6d9b3_controller() -> AppController {
+    let p = |x: f32, y: f32| Point2f32::new(x, y);
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    let _ = c.create_ber(
+        "T".into(),
+        chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+    );
+    c.document.floor_plan = FloorPlan::from_points_to_orthogonal(
+        &[
+            p(0.9098763, 1.2152616),
+            p(5.9098763, 1.2152616),
+            p(5.9098763, 6.2152615),
+            p(3.9098763, 6.2152615),
+            p(3.9098763, 7.2152615),
+            p(2.9098763, 7.2152615),
+            p(2.9098763, 6.2152615),
+            p(0.9098763, 6.2152615),
+            p(0.91, 1.216),
+        ],
+        0.1,
+        true,
+    )
+    .unwrap();
+    c.document.dimensioning.scale_set = true;
+    c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
+    c.commit_to_ber().unwrap();
+    c.set_default_ceiling_height(2.0).expect("height applies");
+    {
+        let storey = &mut c.current_record.as_mut().unwrap().data.storeys[0];
+        storey.ceiling_steps = vec![(
+            vec![
+                domain::points::Point2f64::new(0.90987628698349, 6.215261459350586),
+                domain::points::Point2f64::new(0.90987628698349, 1.2152615785598755),
+                domain::points::Point2f64::new(5.909876346588135, 1.2152615785598755),
+                domain::points::Point2f64::new(5.909876346588135, 6.215261459350586),
+            ],
+            0.0,
+        )];
+    }
+    c.load_ceiling_step_regions_for(0);
+    c.recompose_ceilings(0);
+    c.materialize();
+    c.set_roof_point_mode(true);
+    assert!(c.ceiling_point_mode(), "roof point mode enters");
+    c
+}
+
+/// A wall-to-wall gable WITHIN a divided section whose start end snaps
+/// exactly ON the delta-0 divider: the end apex multi-claims both sections
+/// at resolve, and the side hint (stamped from the ridge's own MIDPOINT
+/// area — `resolve_ridge_slope_side`) keeps it in the ridge's section. The
+/// neighbour stays flat; one two-plane gable, one group.
+///
+/// REGRESSION: without the hint, first-claim handed the on-divider apex to
+/// the LOWER-INDEXED neighbour — the left section got fanned by a ridge
+/// drawn entirely inside the right one (the divider violated again), and
+/// the ridge split into two independent fan groups.
 #[test]
-fn t_plan_gable_absorbs_a_stale_invisible_divider() {
+fn gable_end_on_the_divider_stays_in_its_own_section() {
+    // Two same-height sections: divider at x = 3.41 splits the 5×5 rect.
+    let p = |x: f32, y: f32| Point2f32::new(x, y);
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    let _ = c.create_ber(
+        "T".into(),
+        chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+    );
+    c.document.floor_plan = FloorPlan::from_points_to_orthogonal(
+        &[
+            p(0.91, 1.22),
+            p(5.91, 1.22),
+            p(5.91, 6.22),
+            p(0.91, 6.22),
+            p(0.92, 1.23),
+        ],
+        0.1,
+        true,
+    )
+    .unwrap();
+    c.document.dimensioning.scale_set = true;
+    c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
+    c.commit_to_ber().unwrap();
+    c.set_default_ceiling_height(2.0).unwrap();
+    {
+        let storey = &mut c.current_record.as_mut().unwrap().data.storeys[0];
+        storey.ceiling_steps = vec![(
+            vec![
+                domain::points::Point2f64::new(0.91, 1.22),
+                domain::points::Point2f64::new(3.41, 1.22),
+                domain::points::Point2f64::new(3.41, 6.22),
+                domain::points::Point2f64::new(0.91, 6.22),
+            ],
+            0.0,
+        )];
+    }
+    c.load_ceiling_step_regions_for(0);
+    c.recompose_ceilings(0);
+    c.materialize();
+    c.set_roof_point_mode(true);
+    // E-W gable inside the RIGHT section (the higher region index — the
+    // first-claim trap), start overshooting the divider, end past the east
+    // wall: both ends snap (x = 3.41 / 5.91), the cross question opens.
+    c.apply_roof_ridge_stroke_event(&[(3.5, 3.72), (4.6, 3.71), (5.8, 3.72)]);
+    let mut guard = 0;
+    while !c.ceiling_ridge_height_pending() && guard < 6 {
+        assert!(c.ceiling_ridge_pending(), "ridge flow died early");
+        c.skip_position_dimension().unwrap();
+        guard += 1;
+    }
+    c.assign_roof_ridge_height(3.0).unwrap();
+
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert_eq!(
+        storey.ceiling_apex_hints.len(),
+        2,
+        "both apexes carry the section hint"
+    );
+    // One two-apex group — a single gable, not two fans.
+    let groups = storey.ceiling_apex_groups();
+    assert_eq!(groups.len(), 1, "one roof group");
+    assert_eq!(groups[0].apex_idxs.len(), 2, "carrying both apexes");
+    // Two planes, confined to the right section.
+    let sloped: Vec<_> = storey
+        .ceilings
+        .regions
+        .iter()
+        .filter(|r| r.flat_z().is_none())
+        .collect();
+    assert_eq!(sloped.len(), 2, "two gable planes");
+    for f in &sloped {
+        for v in &f.polygon.exterior {
+            assert!(
+                v.x >= 3.41 - 1e-6,
+                "sloped vertex crossed the divider into the left section: {v:?}"
+            );
+        }
+    }
+    // The left section keeps its flat base ceiling.
+    let left = storey
+        .ceilings
+        .regions
+        .iter()
+        .find(|r| r.polygon.exterior.iter().any(|v| v.x < 3.0))
+        .expect("the left section survives");
+    assert!(
+        left.flat_z().is_some_and(|z| (z - 2.0).abs() < 1e-6),
+        "the left section stays flat at base"
+    );
+}
+
+/// THE 86c6d9b3 REGRESSION, end to end: a ridge drawn INSIDE the divided
+/// main section solves a hip roof CONFINED to that section — "the whole
+/// idea of making the ceiling step region was so that anything within it
+/// can consider that region as the whole region". Before the absorption
+/// removal the solve flooded over the delta-0 divider and fanned the
+/// ENTIRE storey, junction filler points included (the assessor fought it
+/// with two unfan taps).
+///
+/// Asserts the three field complaints: the roof stays inside the section,
+/// the neighbouring bump keeps its flat base ceiling, and the junction
+/// FILLER vertices (ring points that exist only because the bump touches
+/// the section — collinear on the shared edge) never fan and never show
+/// markers. His two stored workaround unfan taps at those filler points
+/// are INERT: they match no fan corner of the confined solve, change no
+/// geometry, and surface no marker.
+#[test]
+fn divided_section_ridge_solves_a_hip_confined_to_its_section() {
+    let mut c = divided_86c6d9b3_controller();
+    // The dump's E-W ridge inside the main section: interior ends (no
+    // snaps), so the Length + both position questions open; accept the
+    // drawn values throughout, then the dump's height 3.0.
+    c.apply_roof_ridge_stroke_event(&[(2.235, 3.715), (3.4, 3.716), (4.585, 3.715)]);
+    if c.ceiling_ridge_length_pending() {
+        c.skip_roof_ridge_length().unwrap();
+    }
+    let mut guard = 0;
+    while !c.ceiling_ridge_height_pending() && guard < 6 {
+        assert!(c.ceiling_ridge_pending(), "ridge flow died early");
+        c.skip_position_dimension().unwrap();
+        guard += 1;
+    }
+    c.assign_roof_ridge_height(3.0).unwrap();
+
+    let assert_confined = |c: &AppController| {
+        let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+        // Every sloped face stays within the divided section.
+        let sloped: Vec<_> = storey
+            .ceilings
+            .regions
+            .iter()
+            .filter(|r| r.flat_z().is_none())
+            .collect();
+        assert!(!sloped.is_empty(), "the ridge shaped the section");
+        for f in &sloped {
+            for v in &f.polygon.exterior {
+                assert!(
+                    (0.9098..=5.9099).contains(&v.x) && (1.2152..=6.2153).contains(&v.y),
+                    "sloped vertex escaped the divided section: {v:?}"
+                );
+            }
+        }
+        let sloped_area: f64 = sloped
+            .iter()
+            .map(|r| {
+                let ring: Vec<(f64, f64)> = r.polygon.exterior.iter().map(|v| (v.x, v.y)).collect();
+                let n = ring.len();
+                (0..n)
+                    .map(|i| {
+                        let (p, q) = (ring[i], ring[(i + 1) % n]);
+                        p.0 * q.1 - q.0 * p.1
+                    })
+                    .sum::<f64>()
+                    .abs()
+                    / 2.0
+            })
+            .sum();
+        assert!(
+            (sloped_area - 25.0).abs() < 0.05,
+            "the hip covers exactly the 5×5 section (got {sloped_area})"
+        );
+        // The bump keeps its flat base ceiling.
+        let bump = storey
+            .ceilings
+            .regions
+            .iter()
+            .find(|r| r.polygon.exterior.iter().any(|v| v.y > 6.5))
+            .expect("the bump region survives");
+        assert!(
+            bump.flat_z().is_some_and(|z| (z - 2.0).abs() < 1e-6),
+            "the bump keeps its flat 2.0 ceiling"
+        );
+        // The roof group's merged ring is the CLEAN 4-corner section rect:
+        // the junction filler points (2.91, 6.215) / (3.91, 6.215) are
+        // collinear on the shared edge and never become fan corners.
+        let groups = storey.ceiling_apex_groups();
+        assert_eq!(groups.len(), 1, "one roof group");
+        assert_eq!(groups[0].merged_rings.len(), 1);
+        assert_eq!(
+            groups[0].merged_rings[0].len(),
+            4,
+            "filler vertices are stripped from the fan ring: {:?}",
+            groups[0].merged_rings[0]
+        );
+        // No fan marker at the filler points (none at all for a 4-corner hip).
+        for (pos, _, _) in c.ceiling_fan_marker_views() {
+            assert!(
+                (pos.1 - 6.2152615).abs() > 1e-3,
+                "no marker on the junction line: {pos:?}"
+            );
+        }
+    };
+    assert_confined(&c);
+
+    // The field workaround taps: two stored unfan entries at the junction
+    // filler points. With confinement they are INERT — same solve, no
+    // markers, nothing to fight.
+    c.current_record.as_mut().unwrap().data.storeys[0].ceiling_unfanned =
+        vec![(3.9098763, 6.2152615), (2.9098763, 6.2152615)];
+    c.recompose_ceilings(0);
+    c.materialize();
+    assert_confined(&c);
+}
+
+/// A delta-0 DIVIDER strictly CONFINES the solve through the REAL flow
+/// (field report 86c6d9b3): the divider splits the T into rect + stem, and
+/// the wall-to-wall ridge drawn over the RECT gables the rect ALONE — the
+/// stem stays flat at base on its own side of the fence. (Reverses
+/// 38931b8's same-height absorption, which flooded the gable over the
+/// divider back when a stale one was invisible; dividers are visible and
+/// deletable in the step-editing UI now, so removing a stale one is the
+/// assessor's call, not the solve's.)
+#[test]
+fn t_plan_divider_confines_the_gable_to_the_rect() {
     let mut c = dimensioned_t_plan_controller();
     c.set_default_ceiling_height(2.0).unwrap();
-    // The stale divider: a delta-0 step area over the stem, as canonicalize
-    // leaves it in the session list.
+    // The divider: a delta-0 step area over the stem.
     c.ceiling_step_regions.insert(
         0,
         vec![document::CeilingStepRegion {
@@ -20377,7 +20648,7 @@ fn t_plan_gable_absorbs_a_stale_invisible_divider() {
             .regions
             .len(),
         2,
-        "the divider split the T (looks like one flat ceiling)"
+        "the divider split the T"
     );
     c.set_roof_point_mode(true);
     c.apply_roof_ridge_stroke_event(&[(1.0, 4.95), (7.6, 4.95)]);
@@ -20389,17 +20660,33 @@ fn t_plan_gable_absorbs_a_stale_invisible_divider() {
     }
     c.assign_roof_ridge_height(3.0).unwrap();
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
-    assert_eq!(
-        storey.ceilings.regions.len(),
-        2,
-        "two planes over the WHOLE T despite the divider: {:?}",
-        storey
-            .ceilings
-            .regions
-            .iter()
-            .map(|r| &r.polygon)
-            .collect::<Vec<_>>()
+    // Two gable planes over the rect + the untouched flat stem.
+    let sloped: Vec<_> = storey
+        .ceilings
+        .regions
+        .iter()
+        .filter(|r| r.flat_z().is_none())
+        .collect();
+    assert_eq!(sloped.len(), 2, "two planes over the rect alone");
+    for f in &sloped {
+        for v in &f.polygon.exterior {
+            assert!(
+                v.y <= 7.45 + 1e-3,
+                "sloped vertex crossed the divider: {v:?}"
+            );
+        }
+    }
+    let stem = storey
+        .ceilings
+        .regions
+        .iter()
+        .find(|r| r.flat_z().is_some())
+        .expect("the stem stays flat");
+    assert!(
+        (stem.flat_z().unwrap() - 2.0).abs() < 1e-6,
+        "the stem keeps its base height"
     );
+    // The roof group's merged ring stops at the divider (~30 m², not 34).
     let groups = storey.ceiling_apex_groups();
     let ring_area: f64 = groups[0]
         .merged_rings
@@ -20417,8 +20704,8 @@ fn t_plan_gable_absorbs_a_stale_invisible_divider() {
         })
         .sum();
     assert!(
-        (ring_area - 34.0).abs() < 0.2,
-        "the stem stays in the roof group (≈34 m², got {ring_area})"
+        (ring_area - 30.0).abs() < 0.2,
+        "the roof group stops at the divider (≈30 m², got {ring_area})"
     );
 }
 

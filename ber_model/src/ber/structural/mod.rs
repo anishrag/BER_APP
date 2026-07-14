@@ -2537,17 +2537,22 @@ mod tests {
         );
     }
 
-    /// THE test2 ON-DEVICE REGRESSION: a stale delta-0 step DIVIDER (it
-    /// survives canonicalize and is filtered out of the delete feed, so the
-    /// assessor can neither see nor remove it) had split the T into
-    /// rect + stem BEFORE the apexes — the ridge then claimed only the rect
-    /// and the stem silently dropped out of the roof (the field dump's
-    /// 5-region / rect-only merged ring). The same-height ABSORPTION now
-    /// fuses the pieces back before shaping: two planes over the whole T.
+    /// A delta-0 step DIVIDER strictly CONFINES the solve (field report
+    /// 86c6d9b3 — the assessor's model: "anything within the step region
+    /// considers that region the whole region"): the divider splits the T
+    /// into rect + stem, and a wall-to-wall ridge over the RECT gables the
+    /// rect ALONE — two planes totalling the rect's 30 m², the stem
+    /// untouched flat at base.
+    ///
+    /// This REVERSES 38931b8's same-height absorption, which flooded the
+    /// gable over the divider to rescue the then-INVISIBLE stale-divider
+    /// case (test2). Dividers are visible, tap-editable and deletable in
+    /// the step-editing UI now, so a stale one is the assessor's to remove
+    /// — the solve never second-guesses a fence.
     #[test]
-    fn stale_divider_split_t_still_solves_the_full_gable() {
+    fn divider_confines_the_gable_to_its_own_section() {
         let cid = ItemId::default();
-        // The device's exact plan (f32-offset coordinates from the dump).
+        // The test2 device plan (f32-offset coordinates from that dump).
         let ring = vec![
             Point2f64::new(1.2961, 2.4527),
             Point2f64::new(1.2961, 7.4527),
@@ -2575,16 +2580,39 @@ mod tests {
             },
         ];
         let split = CeilingRegions::default_for_footprint(vec![ring], 2.0, cid)
-            .with_z_deltas(&[(stem, 0.0)]); // the invisible divider
+            .with_z_deltas(&[(stem, 0.0)]); // the divider
         assert_eq!(split.regions.len(), 2, "the divider split the T");
         let out = split.with_apexes(&apexes);
-        assert_eq!(
-            out.regions.len(),
-            2,
-            "the absorption re-fuses the pieces: two planes over the whole T"
+        let sloped: Vec<&CeilingRegion> = out
+            .regions
+            .iter()
+            .filter(|r| r.flat_z().is_none())
+            .collect();
+        assert_eq!(sloped.len(), 2, "two gable planes over the rect alone");
+        let sloped_area: f64 = sloped.iter().copied().map(plan_area).sum();
+        assert!(
+            (sloped_area - 30.0).abs() < 1e-6,
+            "the gable covers exactly the rect section (got {sloped_area})"
         );
-        let total: f64 = out.regions.iter().map(plan_area).sum();
-        assert!((total - 34.0).abs() < 1e-6, "rect + stem all covered");
+        // Nothing crosses the divider: every sloped vertex stays on the
+        // rect's side of y = 7.4527.
+        for f in &sloped {
+            for v in &f.polygon.exterior {
+                assert!(
+                    v.y <= 7.4527 + 1e-9,
+                    "sloped vertex crossed the divider: {v:?}"
+                );
+            }
+        }
+        // The stem survives untouched: flat at base, its own 4 m².
+        let stem_r = out
+            .regions
+            .iter()
+            .find(|r| r.flat_z().is_some())
+            .expect("the stem stays flat");
+        assert!((stem_r.flat_z().unwrap() - 2.0).abs() < 1e-9);
+        assert!((plan_area(stem_r) - 4.0).abs() < 1e-6);
+        // One group; its merged ring is the rect, not the T.
         let groups = out.apex_groups(&apexes);
         assert_eq!(groups.len(), 1);
         let ring_area: f64 = groups[0]
@@ -2603,32 +2631,9 @@ mod tests {
             })
             .sum();
         assert!(
-            (ring_area - 34.0).abs() < 1e-6,
-            "the group's merged ring keeps the stem (got {ring_area})"
+            (ring_area - 30.0).abs() < 1e-6,
+            "the group's merged ring stops at the divider (got {ring_area})"
         );
-        // The stem embeds below base on the south plane.
-        let south = out
-            .regions
-            .iter()
-            .find(|r| {
-                r.polygon
-                    .exterior
-                    .iter()
-                    .any(|v| (v.y - 9.4527).abs() <= 1e-9)
-            })
-            .expect("the south plane spans the stem");
-        for v in south
-            .polygon
-            .exterior
-            .iter()
-            .filter(|v| (v.y - 9.4527).abs() <= 1e-9)
-        {
-            assert!(
-                v.z < 2.0 - 0.5,
-                "stem wall embeds well below base, got {}",
-                v.z
-            );
-        }
     }
 
     /// A ridge with INTERIOR endpoints keeps the hip solve — no gable

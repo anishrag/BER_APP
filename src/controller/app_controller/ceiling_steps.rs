@@ -866,8 +866,8 @@ impl AppController {
     /// Assign the step by ABSOLUTE target height instead of a relative
     /// delta — the amount prompt's "At height" button: the assessor types
     /// the ceiling height the area should END UP at. Steps are stored
-    /// RELATIVE (the model's `with_z_deltas` composes deltas, the delta-0
-    /// divider absorption and every reload fixpoint ride on that), so the
+    /// RELATIVE (the model's `with_z_deltas` composes deltas, delta-0
+    /// dividers and every reload fixpoint ride on that), so the
     /// delta is computed HERE, at assign time, against the RESOLVED height
     /// over the target area ([`ceiling_step_current_height`]) — and, when
     /// EDITING an existing step, corrected by its own current delta so the
