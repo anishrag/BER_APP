@@ -675,6 +675,7 @@ impl AppController {
         }
         self.continuation_tool = tool;
         self.pending_ceiling_continuation = tool.map(|_| PendingCeilingContinuation::PickTarget);
+        self.ceiling_continuation_notice = None;
         self.reset_ceiling_confirm = false;
         self.pending_roof_point = None;
         self.pending_roof_ridge = None;
@@ -703,11 +704,20 @@ impl AppController {
     /// Step the in-flight pick back to PickTarget (the stage Cancel — the
     /// tool itself stays on; toggling the tool off is the full exit).
     pub fn cancel_ceiling_continuation(&mut self) {
+        self.ceiling_continuation_notice = None;
         if self.continuation_tool.is_some() {
             self.pending_ceiling_continuation = Some(PendingCeilingContinuation::PickTarget);
         } else {
             self.pending_ceiling_continuation = None;
         }
+    }
+
+    /// The inline message for the CONTINUE-ceiling tools — why the last pick
+    /// tap was refused, or what to do next. NO refused tap is silent (the
+    /// deb23cbf live failure: taps that "did nothing"). `None` while the
+    /// picks are proceeding normally.
+    pub fn ceiling_continuation_notice(&self) -> Option<&str> {
+        self.ceiling_continuation_notice.as_deref()
     }
 
     /// A canvas tap while a CONTINUE-ceiling tool is on (routed from
@@ -732,6 +742,9 @@ impl AppController {
         };
         let tool = self.continuation_tool;
         let idx = self.current_storey_idx.unwrap_or(0);
+        // Every tap re-decides the inline message: cleared here, set again
+        // below on ANY refusal (no silent taps — the deb23cbf live failure).
+        self.ceiling_continuation_notice = None;
         // The picks resolve against the RESOLVED ceilings.
         self.materialize();
         let p = Point2f64::new(world_x, world_y);
@@ -747,6 +760,8 @@ impl AppController {
             PendingCeilingContinuation::PickTarget => {
                 let Some(target_region) = region_of(storey, p) else {
                     log::debug!("continuation target tap hit no ceiling region — still picking");
+                    self.ceiling_continuation_notice =
+                        Some("Tap inside a ceiling area — that tap didn't land in one.".into());
                     return;
                 };
                 let already = storey.ceiling_continuations.iter().any(|c| {
@@ -792,6 +807,9 @@ impl AppController {
                                     Some(PendingCeilingContinuation::PickSource { target: p });
                                 if let Err(e) = self.ceiling_continuation_from_storey(above) {
                                     log::warn!("ceiling continuation: {e}");
+                                    // The auto-commit's rejection surfaces
+                                    // inline — never a log-only drop.
+                                    self.ceiling_continuation_notice = Some(e);
                                 }
                             }
                             (false, false) => {
@@ -799,6 +817,25 @@ impl AppController {
                                     "no neighbouring storey has a ceiling region BESIDE that \
                                      area to continue from — still picking"
                                 );
+                                // Say WHY: no neighbour storeys at all, or
+                                // neighbours whose ceilings only sit
+                                // directly over/under the tapped area.
+                                let record = self.current_record.as_ref().expect("checked above");
+                                let exists = |i: i64| {
+                                    usize::try_from(i)
+                                        .ok()
+                                        .and_then(|i| record.data.storeys.get(i))
+                                        .is_some()
+                                };
+                                let msg = if !exists(idx as i64 + 1) && !exists(idx as i64 - 1) {
+                                    "There is no storey above or below this one to \
+                                     continue a ceiling from."
+                                } else {
+                                    "The neighbouring storey's ceiling sits directly \
+                                     over/under that area — a ceiling continues from a \
+                                     region BESIDE it, and there is none."
+                                };
+                                self.ceiling_continuation_notice = Some(msg.into());
                             }
                         }
                     }
@@ -812,14 +849,27 @@ impl AppController {
                 if tool == Some(ContinuationTool::Storey) {
                     // The storey tool's source is a BUTTON choice, not a tap.
                     log::debug!("pick the storey above/below (buttons), not a canvas tap");
+                    self.ceiling_continuation_notice = Some(
+                        "Pick the storey to continue from with the buttons in the box.".into(),
+                    );
                     return;
                 }
                 let (Some(sr), Some(tr)) = (region_of(storey, p), region_of(storey, target)) else {
                     log::debug!("continuation source tap hit no ceiling region — still picking");
+                    self.ceiling_continuation_notice = Some(
+                        "Tap inside a ceiling area to continue from — that tap didn't land \
+                         in one."
+                            .into(),
+                    );
                     return;
                 };
                 if sr == tr {
                     log::debug!("continuation source is the target's own region — tap a neighbour");
+                    self.ceiling_continuation_notice = Some(
+                        "That's the area being changed — tap a NEIGHBOURING ceiling area \
+                         to continue from."
+                            .into(),
+                    );
                     return;
                 }
                 let record = self.current_record.as_mut().expect("checked above");
@@ -833,6 +883,7 @@ impl AppController {
     /// edit tail, then back to PickTarget while the tool stays on
     /// (paint-style).
     fn restart_continuation_pick(&mut self, idx: usize) {
+        self.ceiling_continuation_notice = None;
         self.ceiling_edit_tail(idx);
         self.pending_ceiling_continuation = self
             .continuation_tool

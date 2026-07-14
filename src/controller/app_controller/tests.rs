@@ -20400,6 +20400,64 @@ fn divided_86c6d9b3_controller() -> AppController {
     c
 }
 
+/// NO REFUSED PICK TAP IS SILENT (the deb23cbf live failure: taps that
+/// "did nothing"): every refusal of a CONTINUE-ceiling tap surfaces an
+/// inline notice through the dispatch entry (`ceiling_point_tap`, the
+/// exact call the SketchEvent arm makes) — a miss says "tap inside a
+/// ceiling area", a target with no lateral source on any neighbour storey
+/// says why, a storey-less drawing names that, and a successful pick
+/// clears the message.
+#[test]
+fn refused_continuation_taps_surface_a_notice() {
+    let mut c = deb23cbf_controller();
+    c.set_storey_continuation_mode(true);
+    assert!(c.ceiling_continuation_notice().is_none(), "clean start");
+    // A tap outside every ceiling region.
+    c.ceiling_point_tap(0.2f32, 0.2f32);
+    let n = c.ceiling_continuation_notice().expect("miss is surfaced");
+    assert!(n.contains("Tap inside a ceiling area"), "got: {n}");
+    assert!(c.ceiling_continuation_picking_target(), "still picking");
+    // The covered region: both neighbours refuse (above sits directly
+    // over it; there is no storey below) — surfaced, not log-only.
+    c.ceiling_point_tap(4.0f32, 3.3f32);
+    let n = c.ceiling_continuation_notice().expect("refusal surfaced");
+    assert!(n.contains("BESIDE"), "names the lateral rule: {n}");
+    assert!(
+        c.current_record.as_ref().unwrap().data.storeys[0]
+            .ceiling_continuations
+            .is_empty(),
+        "nothing stored"
+    );
+    // The working pick clears the message.
+    c.ceiling_point_tap(4.0f32, 5.8f32);
+    assert!(
+        c.ceiling_continuation_notice().is_none(),
+        "success clears the notice"
+    );
+    assert_eq!(
+        c.current_record.as_ref().unwrap().data.storeys[0]
+            .ceiling_continuations
+            .len(),
+        1,
+        "the strip continuation stored"
+    );
+    // Toggling the tool off clears any leftover message.
+    c.ceiling_point_tap(0.2f32, 0.2f32);
+    assert!(c.ceiling_continuation_notice().is_some());
+    c.set_storey_continuation_mode(false);
+    assert!(c.ceiling_continuation_notice().is_none());
+
+    // A single-storey drawing: the refusal names the missing neighbours.
+    let mut solo = divided_86c6d9b3_controller();
+    solo.set_roof_point_mode(false);
+    solo.set_storey_continuation_mode(true);
+    solo.ceiling_point_tap(3.0f32, 3.0f32);
+    let n = solo
+        .ceiling_continuation_notice()
+        .expect("storey-less refusal surfaced");
+    assert!(n.contains("no storey above or below"), "got: {n}");
+}
+
 // ─── Field report deb23cbf: "Ceiling from storey" over an uncovered strip ───
 
 /// The deb23cbf dump geometry: storey 0 is the full rect

@@ -671,6 +671,14 @@ pub struct AppController {
     /// the next ridge action / cancel / mode exit / storey switch / record
     /// load. Read via `roof_ridge_notice()`. See `ceiling_ridges.rs`.
     roof_ridge_notice: Option<String>,
+    /// Transient inline message for the CONTINUE-ceiling tools: why the last
+    /// pick tap was REFUSED (missed every region, no lateral source on the
+    /// neighbour storey, source == target …) or what to do next. NO refused
+    /// tap may be silent (deb23cbf live failure — taps that "did nothing").
+    /// Set by `ceiling_continuation_tap` / the from-storey auto-commit;
+    /// cleared on the next tap, a successful commit, tool toggle, and
+    /// cancel. Read via `ceiling_continuation_notice()`.
+    ceiling_continuation_notice: Option<String>,
 }
 
 impl AppController {
@@ -807,6 +815,7 @@ impl AppController {
             copy_height_pick: None,
             copy_height_error: None,
             roof_ridge_notice: None,
+            ceiling_continuation_notice: None,
         }
     }
 }

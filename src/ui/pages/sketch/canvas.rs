@@ -3175,19 +3175,17 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     // in-mode don't spawn phantom points (the ceiling-step gating). A
     // pending cut-pick owns the tap instead. Once a stage is pending —
     // a point's OR a ridge's (stroke = ridge shares the mode) — taps do
-    // nothing (the prompts are toolbar/panel-driven).
-    if ((view.ceiling_point_mode
-        && !view.ceiling_point_pending
-        && !view.ceiling_ridge_pending
-        && !view.ceiling_rect_pending)
-        || view.neighbour_continuation_mode
-        || view.storey_continuation_mode)
-        && matches!(edit_tool, EditTools::DrawPerpWalls)
-        && !copy_pick
-        && !cut_pending
-        && !phase_cut_pending
-        && !step_cut_pending
-    {
+    // nothing (the prompts are toolbar/panel-driven). The CONTINUE-ceiling
+    // tools own the tap under ANY edit tool — see `ceiling_tap_gate`.
+    if ceiling_tap_gate(
+        view.ceiling_point_mode
+            && !view.ceiling_point_pending
+            && !view.ceiling_ridge_pending
+            && !view.ceiling_rect_pending,
+        view.neighbour_continuation_mode || view.storey_continuation_mode,
+        edit_tool,
+        copy_pick || cut_pending || phase_cut_pending || step_cut_pending,
+    ) {
         if response.clicked_by(egui::PointerButton::Primary) {
             if let Some(pos) = response.interact_pointer_pos() {
                 // Fan-marker hit-test FIRST, in SCREEN space (a constant
@@ -6227,9 +6225,71 @@ fn partition_inset(
     );
 }
 
+/// Whether a primary 2D-canvas tap belongs to the ceiling-shape /
+/// CONTINUE-ceiling tap path (fan markers + `CeilingPointTap`).
+///
+/// - `point_pick_armed`: roof-point mode with no point/ridge/rect stage
+///   pending — this arm ALSO requires the DRAW tool, so Move/Trim clicks
+///   in-mode don't spawn phantom apexes (the ceiling-step gating).
+/// - `continuation_tool_on`: a CONTINUE-ceiling tool (Neighbour / From
+///   storey) is toggled on — its tap is a REGION PICK, not a drawing
+///   gesture, so it owns the tap under ANY edit tool. Gating it on the
+///   draw tool was the deb23cbf live failure: entering the tool from
+///   Move/Trim (or anything that re-picked the edit tool after the
+///   toggle) silently swallowed every pick tap.
+/// - `other_pick_pending`: a copy-height / cut / phase-cut / step-cut pick
+///   owns the tap instead — those stay ahead of this path.
+fn ceiling_tap_gate(
+    point_pick_armed: bool,
+    continuation_tool_on: bool,
+    edit_tool: EditTools,
+    other_pick_pending: bool,
+) -> bool {
+    ((point_pick_armed && matches!(edit_tool, EditTools::DrawPerpWalls)) || continuation_tool_on)
+        && !other_pick_pending
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// THE deb23cbf LIVE-FAILURE REGRESSION (`ceiling_tap_gate`): with a
+    /// CONTINUE-ceiling tool on, the pick tap fires under EVERY edit tool —
+    /// the old gate required the draw tool, so a Move/Trim edit-tool state
+    /// silently swallowed the tap ("tapping the region does NOTHING"). The
+    /// roof-point arm keeps its draw-tool requirement, and a pending
+    /// copy/cut pick still outranks both.
+    #[test]
+    fn continuation_tap_fires_under_any_edit_tool() {
+        for tool in [EditTools::DrawPerpWalls, EditTools::Move, EditTools::Trim] {
+            assert!(
+                ceiling_tap_gate(false, true, tool, false),
+                "continuation pick owns the tap under {tool:?}"
+            );
+        }
+        // Roof-point taps stay draw-tool-only (no phantom apexes from Move).
+        assert!(ceiling_tap_gate(
+            true,
+            false,
+            EditTools::DrawPerpWalls,
+            false
+        ));
+        assert!(!ceiling_tap_gate(true, false, EditTools::Move, false));
+        // A pending cut/copy pick outranks the whole path.
+        assert!(!ceiling_tap_gate(
+            false,
+            true,
+            EditTools::DrawPerpWalls,
+            true
+        ));
+        // Nothing armed → no tap ownership.
+        assert!(!ceiling_tap_gate(
+            false,
+            false,
+            EditTools::DrawPerpWalls,
+            false
+        ));
+    }
 
     fn seed(i: usize, screen: egui::Pos2) -> MarginSeed {
         MarginSeed {

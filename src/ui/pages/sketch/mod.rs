@@ -1270,6 +1270,11 @@ pub struct SketchView<'a> {
     /// silent decision is visible; cleared by the controller on the next
     /// ridge action.
     pub roof_ridge_notice: Option<&'a str>,
+    /// Inline message for the CONTINUE-ceiling tools: why the last pick tap
+    /// was refused (missed every region, no lateral source, …) or what to do
+    /// next — no refused tap is silent. Cleared by the controller on the
+    /// next tap / commit / toggle.
+    pub ceiling_continuation_notice: Option<&'a str>,
     /// Default ceiling heights: the last error from the Heights field's Set
     /// (shown inline next to it), the current scope's value when it has one
     /// (the field's "2.40 m" display), and whether the scope's heights are

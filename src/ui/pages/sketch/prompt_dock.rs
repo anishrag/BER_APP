@@ -520,6 +520,13 @@ pub(super) fn render_controls<F: FnMut(UiEvent)>(
                     on_event(UiEvent::Sketch(SketchEvent::CancelCeilingContinuation));
                 }
             }
+            // CONTINUE-ceiling inline message: why the last pick tap was
+            // refused (or what to do next) — no refused tap is silent.
+            if view.neighbour_continuation_mode || view.storey_continuation_mode {
+                if let Some(msg) = view.ceiling_continuation_notice {
+                    ui.colored_label(egui::Color32::from_rgb(200, 60, 60), msg);
+                }
+            }
             // Roof: the which-area-slopes choice is the only in-box decision; the
             // position-stage Cancel is top-right, heights/lengths in the number
             // box, and apex deletes in the Delete panel.

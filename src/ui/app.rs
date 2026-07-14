@@ -1178,6 +1178,11 @@ impl eframe::App for BerApp {
                                 .borrow()
                                 .roof_ridge_notice()
                                 .map(str::to_owned);
+                            let ceiling_continuation_notice = self
+                                .app_controller
+                                .borrow()
+                                .ceiling_continuation_notice()
+                                .map(str::to_owned);
                             let new_storey_error = self.sketch_state.new_storey_error.clone();
                             let floor_thickness_error =
                                 self.sketch_state.floor_thickness_error.clone();
@@ -1624,6 +1629,7 @@ impl eframe::App for BerApp {
                                     .ceiling_ridge_length_input,
                                 roof_error: roof_error.as_deref(),
                                 roof_ridge_notice: roof_ridge_notice.as_deref(),
+                                ceiling_continuation_notice: ceiling_continuation_notice.as_deref(),
                                 ceiling_height_error: ceiling_height_error.as_deref(),
                                 default_ceiling_height,
                                 ceiling_heights_set,
