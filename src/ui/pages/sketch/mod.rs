@@ -361,12 +361,9 @@ pub enum SketchEvent {
     SetStoreyContinuationMode(bool),
     /// Step the in-flight continue-from pick back to its target stage.
     CancelCeilingContinuation,
-    /// Commit the pending continue-from pick against the storey above
-    /// (`up = true`) or below — the source region is auto-resolved under the
-    /// target point on that storey.
-    CeilingContinuationFromStorey {
-        up: bool,
-    },
+    /// Pick one of the labelled cross-storey source candidates (the
+    /// from-storey `ChooseSource` buttons) by index.
+    ChooseCeilingContinuationSource(usize),
     /// A roof-RIDGE stroke (world coords) drawn in roof-point mode — fitted
     /// to an axis-aligned segment placing TWO apexes at once (stroke = ridge,
     /// tap = point: the ceiling-step stroke/tap routing pattern).
@@ -1243,6 +1240,16 @@ pub struct SketchView<'a> {
     pub storey_continuation_mode: bool,
     pub ceiling_continuation_picking_target: bool,
     pub ceiling_continuation_picking_source: bool,
+    /// Labelled cross-storey source choices when the from-storey pick is at
+    /// its `ChooseSource` stage (several lateral candidates) — one button
+    /// each, routed to `ChooseCeilingContinuationSource(i)`.
+    pub ceiling_continuation_source_options: Vec<String>,
+    /// SUCCESS confirmation for a just-applied continuation (green line).
+    pub ceiling_continuation_confirm: Option<&'a str>,
+    /// Plan rings (world m) of this storey's CONTINUED target regions —
+    /// highlighted while a CONTINUE-ceiling tool is open so an applied
+    /// continuation stays visible.
+    pub ceiling_continued_region_rings: &'a [Vec<(f64, f64)>],
     pub ceiling_rect_views: &'a [([(f64, f64); 4], String)],
     pub pending_roof_rect_outline: Option<[(f64, f64); 4]>,
     pub ceiling_rect_position_pending: bool,

@@ -1328,16 +1328,39 @@ impl CeilingRegions {
     /// (claiming it) is NEVER a candidate. The pick stores the anchor as
     /// the continuation SOURCE so every recompose finds the same face.
     pub fn nearest_lateral_anchor(&self, p: Point2f64) -> Option<Point2f64> {
-        // Nearest point on a NON-CLAIMING region's ring: per-segment
-        // projection, global min.
-        let mut best: Option<(f64, Point2f64, usize)> = None;
-        for (ri, r) in self.regions.iter().enumerate() {
-            let ext = &r.polygon.exterior;
-            if ext.len() < 3 || r.plan_contains_within(p, APEX_BOUNDARY_EPS_M) {
-                continue;
-            }
-            let n = ext.len();
-            for i in 0..n {
+        let &ri = self.lateral_source_candidates(p).first()?;
+        self.region_lateral_anchor(ri, p)
+    }
+
+    /// The indices of every region that could be a LATERAL source for `p` —
+    /// each usable (≥ 3 vertex) region that does NOT claim `p` itself
+    /// ([`nearest_lateral_anchor`](Self::nearest_lateral_anchor) rationale) —
+    /// ordered NEAREST first (min ring distance to `p`; index-ascending on
+    /// ties, deterministic). Empty when every region claims `p` or none are
+    /// usable. The from-storey / neighbour continuation offers ONE candidate
+    /// as the fast path and asks among SEVERAL (field report deb23cbf follow
+    /// up: the user must choose which neighbour to continue from, not get a
+    /// silent nearest-pick).
+    pub fn lateral_source_candidates(&self, p: Point2f64) -> Vec<usize> {
+        let mut scored: Vec<(f64, usize)> = self
+            .regions
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| {
+                r.polygon.exterior.len() >= 3 && !r.plan_contains_within(p, APEX_BOUNDARY_EPS_M)
+            })
+            .map(|(ri, r)| (Self::ring_distance2(r, p), ri))
+            .collect();
+        scored.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        scored.into_iter().map(|(_, ri)| ri).collect()
+    }
+
+    /// The min squared plan distance from `p` to region `r`'s ring.
+    fn ring_distance2(r: &CeilingRegion, p: Point2f64) -> f64 {
+        let ext = &r.polygon.exterior;
+        let n = ext.len();
+        (0..n)
+            .map(|i| {
                 let (a, b) = (&ext[i], &ext[(i + 1) % n]);
                 let (ex, ey) = (b.x - a.x, b.y - a.y);
                 let len2 = ex * ex + ey * ey;
@@ -1346,19 +1369,49 @@ impl CeilingRegions {
                 } else {
                     (((p.x - a.x) * ex + (p.y - a.y) * ey) / len2).clamp(0.0, 1.0)
                 };
-                let q = Point2f64::new(a.x + ex * t, a.y + ey * t);
-                let d2 = (q.x - p.x).powi(2) + (q.y - p.y).powi(2);
-                if best.as_ref().map_or(true, |(bd, _, _)| d2 < *bd) {
-                    best = Some((d2, q, ri));
-                }
+                let (qx, qy) = (a.x + ex * t, a.y + ey * t);
+                (qx - p.x).powi(2) + (qy - p.y).powi(2)
+            })
+            .fold(f64::INFINITY, f64::min)
+    }
+
+    /// A STABLE plan anchor inside region `ri` nearest to `p`: the nearest
+    /// point on that region's ring nudged ~1 mm toward its interior (its
+    /// centroid) — far enough inside to survive the f32 quantization the
+    /// durable stores apply and the ~1e-7 m boolean ring shifts between
+    /// re-derives, near enough to stay in the region's nearest FACE (a nudge
+    /// that leaves a non-convex ring falls back to the on-ring point, which
+    /// the boundary band still claims). `None` for a missing / plan-
+    /// degenerate region. The continuation pick stores this as the SOURCE so
+    /// every recompose finds the same face.
+    pub fn region_lateral_anchor(&self, ri: usize, p: Point2f64) -> Option<Point2f64> {
+        let region = self.regions.get(ri)?;
+        let ext = &region.polygon.exterior;
+        if ext.len() < 3 {
+            return None;
+        }
+        // Nearest point on this region's ring: per-segment projection.
+        let n = ext.len();
+        let mut best: Option<(f64, Point2f64)> = None;
+        for i in 0..n {
+            let (a, b) = (&ext[i], &ext[(i + 1) % n]);
+            let (ex, ey) = (b.x - a.x, b.y - a.y);
+            let len2 = ex * ex + ey * ey;
+            let t = if len2 <= 1e-18 {
+                0.0
+            } else {
+                (((p.x - a.x) * ex + (p.y - a.y) * ey) / len2).clamp(0.0, 1.0)
+            };
+            let q = Point2f64::new(a.x + ex * t, a.y + ey * t);
+            let d2 = (q.x - p.x).powi(2) + (q.y - p.y).powi(2);
+            if best.as_ref().map_or(true, |(bd, _)| d2 < *bd) {
+                best = Some((d2, q));
             }
         }
-        let (_, q, ri) = best?;
-        let region = &self.regions[ri];
-        let ext = &region.polygon.exterior;
-        let n = ext.len() as f64;
-        let cx = ext.iter().map(|v| v.x).sum::<f64>() / n;
-        let cy = ext.iter().map(|v| v.y).sum::<f64>() / n;
+        let (_, q) = best?;
+        let nf = ext.len() as f64;
+        let cx = ext.iter().map(|v| v.x).sum::<f64>() / nf;
+        let cy = ext.iter().map(|v| v.y).sum::<f64>() / nf;
         let (dx, dy) = (cx - q.x, cy - q.y);
         let d = (dx * dx + dy * dy).sqrt();
         if d <= 1e-9 {
@@ -1485,6 +1538,23 @@ impl CeilingRegion {
         use geo::Area;
         let ring: Vec<(f64, f64)> = self.polygon.exterior.iter().map(|v| (v.x, v.y)).collect();
         Polygon::new(LineString::from(ring), vec![]).unsigned_area()
+    }
+
+    /// The region's `(min z, max z)` over its exterior vertices — the height
+    /// spread of the shaped plane, for a human confirmation of what a
+    /// ceiling continuation produced ("4.25 m → 2.75 m", or equal ends for a
+    /// flat plane). `None` for a plan-degenerate region (< 3 vertices).
+    pub fn z_range(&self) -> Option<(f64, f64)> {
+        if self.polygon.exterior.len() < 3 {
+            return None;
+        }
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        for v in &self.polygon.exterior {
+            lo = lo.min(v.z);
+            hi = hi.max(v.z);
+        }
+        Some((lo, hi))
     }
 
     /// The region's single height when it is FLAT (every vertex z within

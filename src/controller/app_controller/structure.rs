@@ -2228,7 +2228,7 @@ impl AppController {
 
     /// Display name of storey `i` ("Ground Floor" / "Storey 2" fallback), for
     /// prompt text that must identify a storey in the all-storeys view.
-    fn storey_name(&self, i: usize) -> Option<String> {
+    pub(super) fn storey_name(&self, i: usize) -> Option<String> {
         let s = self.current_record.as_ref()?.data.storeys.get(i)?;
         Some(if s.name.is_empty() {
             format!("Storey {}", s.storey_number + 1)

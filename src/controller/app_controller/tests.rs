@@ -20327,12 +20327,17 @@ fn neighbour_ceiling_tool_paints_and_clears_a_continuation() {
 
     c.set_neighbour_continuation_mode(true);
     assert!(c.ceiling_continuation_picking_target());
+    // Tapping the stem: the rect is the ONLY other ceiling area, so it is
+    // the single lateral candidate and auto-applies (the fast path) — no
+    // source tap needed.
     c.ceiling_point_tap(4.3, 8.45); // target: the stem
-    assert!(c.ceiling_continuation_picking_source());
-    c.ceiling_point_tap(4.3, 4.95); // source: the rect
     assert!(
         (stem_z(&c) - 2.0).abs() < 1e-9,
         "the stem now continues the rect's plane"
+    );
+    assert!(
+        c.ceiling_continuation_confirm().is_some(),
+        "the auto-apply confirms — not a silent no-op"
     );
     assert!(
         c.ceiling_continuation_picking_target(),
@@ -20456,6 +20461,269 @@ fn refused_continuation_taps_surface_a_notice() {
         .ceiling_continuation_notice()
         .expect("storey-less refusal surfaced");
     assert!(n.contains("no storey above or below"), "got: {n}");
+}
+
+// ─── deb23cbf follow-up: reverse (-1) direction + multi-source choice ───────
+
+/// A ground storey [0,6]x[0,4] whose LEFT half [0,3] is a raised flat area
+/// (a tall void beside the setback upper storey), and an upper storey
+/// [3,6]x[0,4] (slab 0.25 → datum 2.25) sitting over the RIGHT half. The
+/// upper storey's ceiling can be continued from the ground void BESIDE and
+/// below it. `left_delta` sets the void's height above the 2.0 default; a
+/// SECOND raised strip is added when `two_lefts` (for the multi-candidate
+/// case). Returns the controller on the UPPER storey with the from-storey
+/// tool armed.
+fn reverse_continuation_controller(left_delta: f64, two_lefts: bool) -> AppController {
+    let p = |x: f32, y: f32| Point2f32::new(x, y);
+    let d = |x0: f64, y0: f64, x1: f64, y1: f64| {
+        vec![
+            domain::points::Point2f64::new(x0, y0),
+            domain::points::Point2f64::new(x1, y0),
+            domain::points::Point2f64::new(x1, y1),
+            domain::points::Point2f64::new(x0, y1),
+        ]
+    };
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    let _ = c.create_ber(
+        "T".into(),
+        chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+    );
+    // Storey 0 (ground).
+    c.document.floor_plan = FloorPlan::from_points_to_orthogonal(
+        &[
+            p(0.0, 0.0),
+            p(6.0, 0.0),
+            p(6.0, 4.0),
+            p(0.0, 4.0),
+            p(0.01, 0.01),
+        ],
+        0.1,
+        true,
+    )
+    .unwrap();
+    c.document.dimensioning.scale_set = true;
+    c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
+    c.commit_to_ber().unwrap();
+    c.set_default_ceiling_height(2.0).unwrap();
+    {
+        let st = &mut c.current_record.as_mut().unwrap().data.storeys[0];
+        st.ceiling_steps = if two_lefts {
+            vec![
+                (d(0.0, 0.0, 1.5, 4.0), left_delta),
+                (d(1.5, 0.0, 3.0, 4.0), left_delta + 0.5),
+            ]
+        } else {
+            vec![(d(0.0, 0.0, 3.0, 4.0), left_delta)]
+        };
+    }
+    c.load_ceiling_step_regions_for(0);
+    c.recompose_ceilings(0);
+    c.materialize();
+    // Storey 1 (upper, setback over the RIGHT half), slab 0.25.
+    c.add_storey().unwrap();
+    c.document.floor_plan = FloorPlan::from_points_to_orthogonal(
+        &[
+            p(3.0, 0.0),
+            p(6.0, 0.0),
+            p(6.0, 4.0),
+            p(3.0, 4.0),
+            p(3.01, 0.01),
+        ],
+        0.1,
+        true,
+    )
+    .unwrap();
+    c.document.dimensioning.scale_set = true;
+    c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
+    c.commit_to_ber().unwrap();
+    c.set_default_ceiling_height(2.0).unwrap();
+    c.current_record.as_mut().unwrap().data.storeys[1].floor_thickness_m = Some(0.25);
+    c.recompose_ceilings(1);
+    c.materialize();
+    c.set_current_storey(Some(1)).unwrap();
+    c.set_storey_continuation_mode(true);
+    c
+}
+
+/// The NEIGHBOUR tool with SEVERAL same-storey candidates keeps the
+/// tap-the-source stage (a single candidate auto-applies; two or more must
+/// be disambiguated by tapping). A 9×3 rect split into three flat regions:
+/// tapping the middle leaves two candidates → PickSource; tapping one
+/// applies it, with feedback.
+#[test]
+fn neighbour_tool_with_several_candidates_taps_the_source() {
+    let p = |x: f32, y: f32| Point2f32::new(x, y);
+    let d = |x0: f64, x1: f64| {
+        vec![
+            domain::points::Point2f64::new(x0, 0.0),
+            domain::points::Point2f64::new(x1, 0.0),
+            domain::points::Point2f64::new(x1, 3.0),
+            domain::points::Point2f64::new(x0, 3.0),
+        ]
+    };
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    let _ = c.create_ber(
+        "T".into(),
+        chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+    );
+    c.document.floor_plan = FloorPlan::from_points_to_orthogonal(
+        &[
+            p(0.0, 0.0),
+            p(9.0, 0.0),
+            p(9.0, 3.0),
+            p(0.0, 3.0),
+            p(0.01, 0.01),
+        ],
+        0.1,
+        true,
+    )
+    .unwrap();
+    c.document.dimensioning.scale_set = true;
+    c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
+    c.commit_to_ber().unwrap();
+    c.set_default_ceiling_height(2.0).unwrap();
+    c.current_record.as_mut().unwrap().data.storeys[0].ceiling_steps =
+        vec![(d(0.0, 3.0), 0.3), (d(6.0, 9.0), 0.5)]; // left 2.3, mid 2.0, right 2.5
+    c.load_ceiling_step_regions_for(0);
+    c.recompose_ceilings(0);
+    c.materialize();
+    c.set_neighbour_continuation_mode(true);
+    c.ceiling_point_tap(4.5, 1.5); // target: the middle region — two neighbours
+    assert!(
+        c.ceiling_continuation_picking_source(),
+        "several candidates → tap which source"
+    );
+    assert!(
+        c.current_record.as_ref().unwrap().data.storeys[0]
+            .ceiling_continuations
+            .is_empty(),
+        "nothing applied until the source is tapped"
+    );
+    c.ceiling_point_tap(7.5, 1.5); // source: the right (2.5 m) region
+    let st = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert_eq!(
+        st.ceiling_continuations.len(),
+        1,
+        "the tapped source applied"
+    );
+    assert_eq!(st.ceiling_continuations[0].source_storey_offset, 0);
+    let tr = *st
+        .ceilings
+        .claim_regions(domain::points::Point2f64::new(4.5, 1.5))
+        .first()
+        .unwrap();
+    assert!(
+        st.ceilings.regions[tr]
+            .flat_z()
+            .is_some_and(|z| (z - 2.5).abs() < 1e-6),
+        "the middle now continues the right region's 2.5 m plane"
+    );
+    assert!(c.ceiling_continuation_confirm().is_some(), "feedback shown");
+}
+
+/// THE REVERSE (offset -1) DIRECTION end to end through the REAL tap flow
+/// (the layer a method-only test would miss — the deb23cbf lesson): on the
+/// UPPER storey, "Ceiling from storey" over its region resolves the single
+/// lateral candidate on the storey BELOW (the raised void beside it),
+/// auto-applies it, and converts through the datums (source 4.5 m,
+/// storey-0-local → 4.5 − 2.25 = 2.25 m storey-1-local). Feedback confirms.
+#[test]
+fn reverse_from_storey_below_applies_and_converts_datums() {
+    let mut c = reverse_continuation_controller(2.5, false); // void at 4.5 m
+    assert_eq!(
+        c.current_record
+            .as_ref()
+            .unwrap()
+            .data
+            .storey_floor_datums(),
+        vec![0.0, 2.25],
+        "ground 0, upper 2.0 + 0.25 slab"
+    );
+    // Single lateral candidate below → auto-applies from the target tap.
+    c.ceiling_point_tap(4.5, 2.0);
+    let st = &c.current_record.as_ref().unwrap().data.storeys[1];
+    assert_eq!(st.ceiling_continuations.len(), 1, "the reverse link stored");
+    let link = &st.ceiling_continuations[0];
+    assert_eq!(
+        link.source_storey_offset, -1,
+        "sourced from the storey BELOW"
+    );
+    assert!(
+        (link.source.0 as f64 - 3.0).abs() < 1e-2,
+        "source anchored just inside the void at the shared edge: {:?}",
+        link.source
+    );
+    // The upper region takes the void plane converted to its own datum.
+    let tr = st
+        .ceilings
+        .claim_regions(domain::points::Point2f64::new(4.5, 2.0))
+        .first()
+        .copied()
+        .expect("target region");
+    let (lo, hi) = st.ceilings.regions[tr].z_range().unwrap();
+    assert!(
+        (lo - 2.25).abs() < 1e-3 && (hi - 2.25).abs() < 1e-3,
+        "4.5 m ground void → 2.25 m upper-local (−2.25 datum): got {lo}..{hi}"
+    );
+    let confirm = c
+        .ceiling_continuation_confirm()
+        .expect("success confirmation shown");
+    assert!(
+        confirm.contains("Storey 1") && confirm.contains("2.25 m"),
+        "confirmation names the source storey and height: {confirm}"
+    );
+}
+
+/// SEVERAL lateral candidates → the user CHOOSES, not a silent nearest-pick
+/// (deb23cbf follow-up). Two raised voids beside the upper storey give two
+/// labelled from-storey buttons; picking the taller one (4.5 m) applies it
+/// (→ 2.25 m upper-local), not the nearer 4.0 m one.
+#[test]
+fn several_lateral_sources_offer_a_labelled_choice() {
+    let mut c = reverse_continuation_controller(2.0, true); // voids at 4.0 and 4.5
+    c.ceiling_point_tap(4.5, 2.0);
+    // No auto-apply: the choice stage is up with one button per candidate.
+    assert!(
+        c.current_record.as_ref().unwrap().data.storeys[1]
+            .ceiling_continuations
+            .is_empty(),
+        "several candidates → nothing auto-applied"
+    );
+    let options = c.ceiling_continuation_source_options();
+    assert_eq!(options.len(), 2, "two labelled candidates: {options:?}");
+    assert!(
+        options.iter().all(|o| o.contains("Storey 1")),
+        "labelled by storey (+ area position): {options:?}"
+    );
+    // The taller void is the 4.5 m one (mid strip [1.5,3]); pick whichever
+    // option applies it and confirm the 2.25 m result.
+    let mut applied = None;
+    for i in 0..options.len() {
+        let mut probe = reverse_continuation_controller(2.0, true);
+        probe.ceiling_point_tap(4.5, 2.0);
+        probe.choose_ceiling_continuation_source(i);
+        let st = &probe.current_record.as_ref().unwrap().data.storeys[1];
+        let tr = st
+            .ceilings
+            .claim_regions(domain::points::Point2f64::new(4.5, 2.0))
+            .first()
+            .copied()
+            .unwrap();
+        let (lo, _) = st.ceilings.regions[tr].z_range().unwrap();
+        if (lo - 2.25).abs() < 1e-3 {
+            applied = Some(i);
+        }
+    }
+    let i = applied.expect("one option yields the 4.5 m void → 2.25 m");
+    c.choose_ceiling_continuation_source(i);
+    let st = &c.current_record.as_ref().unwrap().data.storeys[1];
+    assert_eq!(
+        st.ceiling_continuations.len(),
+        1,
+        "the chosen source applied"
+    );
+    assert_eq!(st.ceiling_continuations[0].source_storey_offset, -1);
+    assert!(c.ceiling_continuation_confirm().is_some(), "feedback shown");
 }
 
 // ─── Field report deb23cbf: "Ceiling from storey" over an uncovered strip ───
@@ -20634,45 +20902,53 @@ fn uncovered_strip_continues_the_storey_above_plane() {
     );
     // Paint-style: the pick restarts at the target stage.
     assert!(c.ceiling_continuation_picking_target());
+    // The single-neighbour auto-apply is NOT a silent no-op — a success
+    // confirmation names the source storey and the resulting slope range,
+    // and the continued region is highlighted while the tool stays open.
+    let confirm = c
+        .ceiling_continuation_confirm()
+        .expect("success confirmation shown");
+    assert!(
+        confirm.contains("from Storey 2")
+            && confirm.contains("4.25 m")
+            && confirm.contains("2.75 m"),
+        "confirmation: {confirm}"
+    );
+    assert_eq!(
+        c.ceiling_continued_region_rings().len(),
+        1,
+        "the continued strip is outlined while the tool is open"
+    );
 }
 
 /// The COVERED case is the ERROR case (the user's semantics correction): a
 /// region DIRECTLY above the target is never a valid source — a plane
 /// continued laterally is physical; copied straight down through the slab
 /// onto the same footprint is not. Storey 1's single mono-pitch face sits
-/// directly over the tapped region and BESIDE nothing, so the PickTarget
-/// gate doesn't offer the storey at all (nothing stored, still picking),
-/// and the direct commit path rejects with the directly-over message.
+/// directly over the tapped region and BESIDE nothing, so the tap stores
+/// nothing, stays on the target pick, and surfaces the directly-over
+/// refusal inline (no silent tap).
 #[test]
 fn covered_region_from_storey_is_rejected_as_directly_over() {
     let mut c = deb23cbf_controller();
     c.set_storey_continuation_mode(true);
     c.ceiling_point_tap(4.0, 3.3); // inside the region under storey 1
-    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
-    assert!(
-        storey.ceiling_continuations.is_empty(),
-        "no lateral source on either neighbour — nothing stored"
-    );
-    assert!(
-        c.ceiling_continuation_picking_target(),
-        "the gate keeps the target pick open (the storey is not offerable)"
-    );
-    // The commit path itself (the above/below button, reachable when BOTH
-    // neighbours qualify) rejects the directly-over source with the
-    // user-facing rule.
-    c.pending_ceiling_continuation = Some(PendingCeilingContinuation::PickSource {
-        target: domain::points::Point2f64::new(4.0, 3.3),
-    });
-    let err = c.ceiling_continuation_from_storey(true).unwrap_err();
-    assert!(
-        err.contains("directly over") && err.contains("beside"),
-        "got: {err}"
-    );
     assert!(
         c.current_record.as_ref().unwrap().data.storeys[0]
             .ceiling_continuations
             .is_empty(),
-        "the rejection stores nothing"
+        "no lateral source on either neighbour — nothing stored"
+    );
+    assert!(
+        c.ceiling_continuation_picking_target(),
+        "the pick stays open (no source to offer)"
+    );
+    let n = c
+        .ceiling_continuation_notice()
+        .expect("the refusal is surfaced, not silent");
+    assert!(
+        n.contains("directly over/under") && n.contains("BESIDE"),
+        "got: {n}"
     );
 }
 

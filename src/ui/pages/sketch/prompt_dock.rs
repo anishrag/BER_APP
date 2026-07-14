@@ -483,34 +483,22 @@ pub(super) fn render_controls<F: FnMut(UiEvent)>(
             }
             // CONTINUE-ceiling tools: the pick stages' controls (the picks
             // themselves are canvas taps — the stage instruction is in the
-            // bottom bar). The storey tool's SOURCE choice is the two
-            // buttons here (shown only when BOTH neighbouring storeys
-            // exist — a single neighbour applies without asking); Cancel
-            // steps the pick back to its target stage.
-            if view.storey_continuation_mode && view.ceiling_continuation_picking_source {
-                if ui
-                    .button("From storey above")
-                    .hint(
-                        "Continue the ceiling plane of the storey ABOVE (over the \
-                         same spot) down into this area",
-                    )
-                    .clicked()
-                {
-                    on_event(UiEvent::Sketch(
-                        SketchEvent::CeilingContinuationFromStorey { up: true },
-                    ));
-                }
-                if ui
-                    .button("From storey below")
-                    .hint(
-                        "Continue the ceiling plane of the storey BELOW (over the \
-                         same spot) up into this area",
-                    )
-                    .clicked()
-                {
-                    on_event(UiEvent::Sketch(
-                        SketchEvent::CeilingContinuationFromStorey { up: false },
-                    ));
+            // bottom bar). The from-storey tool's SOURCE choice is one
+            // button per labelled candidate (shown only when SEVERAL exist
+            // — a single candidate applies without asking); the neighbour
+            // tool taps the source region. Cancel steps the pick back.
+            if view.storey_continuation_mode && !view.ceiling_continuation_source_options.is_empty()
+            {
+                for (i, label) in view.ceiling_continuation_source_options.iter().enumerate() {
+                    if ui
+                        .button(format!("From {label}"))
+                        .hint("Continue this area's ceiling from that region's plane")
+                        .clicked()
+                    {
+                        on_event(UiEvent::Sketch(
+                            SketchEvent::ChooseCeilingContinuationSource(i),
+                        ));
+                    }
                 }
                 if ui.button("Cancel").clicked() {
                     on_event(UiEvent::Sketch(SketchEvent::CancelCeilingContinuation));
@@ -520,9 +508,13 @@ pub(super) fn render_controls<F: FnMut(UiEvent)>(
                     on_event(UiEvent::Sketch(SketchEvent::CancelCeilingContinuation));
                 }
             }
-            // CONTINUE-ceiling inline message: why the last pick tap was
-            // refused (or what to do next) — no refused tap is silent.
+            // CONTINUE-ceiling feedback: the SUCCESS confirmation (green —
+            // an applied continuation is not a no-op) OR the refusal notice
+            // (red — no refused tap is silent). Only one is set at a time.
             if view.neighbour_continuation_mode || view.storey_continuation_mode {
+                if let Some(msg) = view.ceiling_continuation_confirm {
+                    ui.colored_label(egui::Color32::from_rgb(60, 160, 90), msg);
+                }
                 if let Some(msg) = view.ceiling_continuation_notice {
                     ui.colored_label(egui::Color32::from_rgb(200, 60, 60), msg);
                 }

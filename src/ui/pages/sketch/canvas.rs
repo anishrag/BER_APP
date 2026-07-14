@@ -2457,6 +2457,22 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             }
         }
 
+        // CONTINUE-ceiling: outline the target regions already continued
+        // (teal), so an applied continuation stays visible while the tool is
+        // open (deb23cbf feedback — the h= corner labels alone read as a
+        // no-op). The controller feeds this empty unless a tool is on.
+        if !objects_phase && !view.ceiling_continued_region_rings.is_empty() {
+            render::render_continued_regions(
+                &painter,
+                rect,
+                ber,
+                current_storey_idx,
+                mode,
+                vp,
+                view.ceiling_continued_region_rings,
+            );
+        }
+
         // Roof apexes: committed high points ("▲ 4.20 m" markers) plus the
         // pending tapped point as a hollow dot, in a distinct rose-magenta.
         // Suppressed in the Objects phase (ceiling points aren't relevant there).

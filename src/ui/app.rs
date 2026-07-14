@@ -1183,6 +1183,19 @@ impl eframe::App for BerApp {
                                 .borrow()
                                 .ceiling_continuation_notice()
                                 .map(str::to_owned);
+                            let ceiling_continuation_confirm = self
+                                .app_controller
+                                .borrow()
+                                .ceiling_continuation_confirm()
+                                .map(str::to_owned);
+                            let ceiling_continuation_source_options = self
+                                .app_controller
+                                .borrow()
+                                .ceiling_continuation_source_options();
+                            let ceiling_continued_region_rings = self
+                                .app_controller
+                                .borrow()
+                                .ceiling_continued_region_rings();
                             let new_storey_error = self.sketch_state.new_storey_error.clone();
                             let floor_thickness_error =
                                 self.sketch_state.floor_thickness_error.clone();
@@ -1614,6 +1627,10 @@ impl eframe::App for BerApp {
                                 storey_continuation_mode,
                                 ceiling_continuation_picking_target,
                                 ceiling_continuation_picking_source,
+                                ceiling_continuation_source_options,
+                                ceiling_continuation_confirm: ceiling_continuation_confirm
+                                    .as_deref(),
+                                ceiling_continued_region_rings: &ceiling_continued_region_rings,
                                 ceiling_rect_views: &ceiling_rect_views,
                                 pending_roof_rect_outline,
                                 ceiling_rect_position_pending,
@@ -2151,19 +2168,10 @@ impl eframe::App for BerApp {
                                     SketchEvent::CancelCeilingContinuation => {
                                         controller.borrow_mut().cancel_ceiling_continuation();
                                     }
-                                    SketchEvent::CeilingContinuationFromStorey { up } => {
-                                        match controller
+                                    SketchEvent::ChooseCeilingContinuationSource(i) => {
+                                        controller
                                             .borrow_mut()
-                                            .ceiling_continuation_from_storey(up)
-                                        {
-                                            Ok(()) => {
-                                                self.sketch_state.roof_error = None;
-                                            }
-                                            Err(e) => {
-                                                log::error!("ceiling continuation: {}", e);
-                                                self.sketch_state.roof_error = Some(e);
-                                            }
-                                        }
+                                            .choose_ceiling_continuation_source(i);
                                     }
                                     SketchEvent::AssignCeilingApexHeight(z_m) => {
                                         match controller.borrow_mut().assign_roof_apex(z_m) {

@@ -15,7 +15,7 @@
 //! equals the post-reload reconstruction — the apex-over-step reload fixpoint.
 //! Outside undo — phases/steps/ceiling-steps parity.
 use super::*;
-use ber_model::ber::structural::CeilingApex;
+use ber_model::ber::structural::{CeilingApex, CeilingRegions};
 use document::LinePositionPrompt;
 
 /// The elective wall snap a pending ceiling point is carrying on ONE axis: the
@@ -73,18 +73,41 @@ pub(super) enum ContinuationTool {
     Storey,
 }
 
+/// One labelled cross-storey source a from-storey continuation could take —
+/// a lateral (plan-neighbouring) region on the ±1 storey. Presented as a
+/// button when the target has SEVERAL candidates (field report deb23cbf
+/// follow-up: the user chooses which neighbour to continue from, not a
+/// silent nearest-pick). `offset` is the ±1 storey; `anchor` the stable
+/// stored source point; `label` the button text ("From Storey 1 (north
+/// area)").
+#[derive(Debug, Clone)]
+pub(super) struct ContinuationSourceOption {
+    pub offset: i8,
+    pub anchor: Point2f64,
+    pub label: String,
+}
+
 /// The in-flight CONTINUE-from pick, advanced tap by tap while a
 /// [`ContinuationTool`] is on: `PickTarget` (tap the region whose surface
 /// changes; tapping an already-continued region CLEARS its links instead) →
-/// `PickSource` (tap the neighbouring region, or the From-above/below
-/// buttons) → commit → back to `PickTarget` (paint-style — the assessor may
-/// continue several areas — until the tool toggles off). Session-only,
+/// either `PickSource` (the Neighbour tool with several same-storey
+/// candidates: tap which one) or `ChooseSource` (the From-storey tool with
+/// several cross-storey candidates: pick a labelled button) → commit → back
+/// to `PickTarget` (paint-style — the assessor may continue several areas —
+/// until the tool toggles off). A SINGLE candidate skips the choice and
+/// commits straight from `PickTarget` (the fast path). Session-only,
 /// outside undo; cleared on storey switch and mode exit. The DURABLE record
 /// is `Storey::ceiling_continuations`.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(super) enum PendingCeilingContinuation {
     PickTarget,
-    PickSource { target: Point2f64 },
+    PickSource {
+        target: Point2f64,
+    },
+    ChooseSource {
+        target: Point2f64,
+        options: Vec<ContinuationSourceOption>,
+    },
 }
 
 impl AppController {
@@ -631,13 +654,74 @@ impl AppController {
         )
     }
 
-    /// True while the CONTINUE-from pick is waiting for the SOURCE tap (or
-    /// one of the From-storey buttons).
+    /// True while the CONTINUE-from pick is waiting for the SOURCE — a
+    /// neighbour-region tap (`PickSource`) or a labelled cross-storey button
+    /// (`ChooseSource`).
     pub fn ceiling_continuation_picking_source(&self) -> bool {
         matches!(
             self.pending_ceiling_continuation,
             Some(PendingCeilingContinuation::PickSource { .. })
+                | Some(PendingCeilingContinuation::ChooseSource { .. })
         )
+    }
+
+    /// The labelled cross-storey source choices when the from-storey pick is
+    /// at its `ChooseSource` stage (else empty) — the UI renders one button
+    /// per label, routed to
+    /// [`choose_ceiling_continuation_source`](Self::choose_ceiling_continuation_source).
+    pub fn ceiling_continuation_source_options(&self) -> Vec<String> {
+        match &self.pending_ceiling_continuation {
+            Some(PendingCeilingContinuation::ChooseSource { options, .. }) => {
+                options.iter().map(|o| o.label.clone()).collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// The SUCCESS confirmation for the last applied continuation (naming the
+    /// storeys and the resulting height range) — `None` while none is
+    /// showing. See `ceiling_continuation_confirm`.
+    pub fn ceiling_continuation_confirm(&self) -> Option<&str> {
+        self.ceiling_continuation_confirm.as_deref()
+    }
+
+    /// The plan rings (world metres) of THIS storey's regions that are
+    /// TARGETS of a committed ceiling continuation — the persistent "this
+    /// area was continued" outline the canvas highlights while a
+    /// CONTINUE-ceiling tool is open, so an applied continuation stays
+    /// visible (not just tiny corner labels). Empty when no tool is on, no
+    /// storey, or nothing is continued.
+    pub fn ceiling_continued_region_rings(&self) -> Vec<Vec<(f64, f64)>> {
+        if self.continuation_tool.is_none() {
+            return Vec::new();
+        }
+        let idx = self.current_storey_idx.unwrap_or(0);
+        let Some(storey) = self
+            .current_record
+            .as_ref()
+            .and_then(|r| r.data.storeys.get(idx))
+        else {
+            return Vec::new();
+        };
+        let mut seen: Vec<usize> = Vec::new();
+        let mut rings: Vec<Vec<(f64, f64)>> = Vec::new();
+        for c in &storey.ceiling_continuations {
+            let tp = Point2f64::new(c.target.0 as f64, c.target.1 as f64);
+            if let Some(&ri) = storey.ceilings.claim_regions(tp).first() {
+                if !seen.contains(&ri) {
+                    seen.push(ri);
+                    rings.push(
+                        storey.ceilings.regions[ri]
+                            .polygon
+                            .exterior
+                            .iter()
+                            .map(|v| (v.x, v.y))
+                            .collect(),
+                    );
+                }
+            }
+        }
+        rings
     }
 
     /// True while the "Neighbour ceiling" tool is toggled on.
@@ -676,6 +760,7 @@ impl AppController {
         self.continuation_tool = tool;
         self.pending_ceiling_continuation = tool.map(|_| PendingCeilingContinuation::PickTarget);
         self.ceiling_continuation_notice = None;
+        self.ceiling_continuation_confirm = None;
         self.reset_ceiling_confirm = false;
         self.pending_roof_point = None;
         self.pending_roof_ridge = None;
@@ -705,6 +790,7 @@ impl AppController {
     /// tool itself stays on; toggling the tool off is the full exit).
     pub fn cancel_ceiling_continuation(&mut self) {
         self.ceiling_continuation_notice = None;
+        self.ceiling_continuation_confirm = None;
         if self.continuation_tool.is_some() {
             self.pending_ceiling_continuation = Some(PendingCeilingContinuation::PickTarget);
         } else {
@@ -726,25 +812,33 @@ impl AppController {
     /// - `PickTarget`: the tapped ceiling region becomes the TARGET — unless
     ///   it already has continuation(s), in which case the tap CLEARS them
     ///   (re-picking a continued region undoes it) and the loop restarts.
-    ///   The "Ceiling from storey" tool then commits WITHOUT asking when
-    ///   only ONE neighbouring storey has a region BESIDE the point (the
-    ///   lateral-source rule — a region directly over/under it never
-    ///   qualifies), and opens the above/below choice when both do;
-    /// - `PickSource` ("Neighbour ceiling"): the tapped region becomes the
-    ///   SOURCE — its plane continues over the target. Tapping the target's
-    ///   own region again is a logged no-op (pick a NEIGHBOUR).
+    ///   With a target chosen, the SOURCE is resolved by the tool:
+    ///   - "Ceiling from storey": the lateral candidate regions across the
+    ///     ±1 storeys ([`continuation_source_options`](Self::continuation_source_options)).
+    ///     Exactly one → apply straight away (the fast path, with a success
+    ///     confirmation); several → the `ChooseSource` stage (labelled
+    ///     buttons); none → an inline refusal (why).
+    ///   - "Neighbour ceiling": the lateral candidate regions on THIS
+    ///     storey. Exactly one → apply; several → the `PickSource` tap
+    ///     stage; none → an inline refusal.
+    /// - `PickSource` ("Neighbour ceiling", several candidates): the tapped
+    ///   region becomes the SOURCE. Tapping the target's own region is a
+    ///   surfaced no-op (pick a NEIGHBOUR).
+    /// - `ChooseSource` ("Ceiling from storey", several candidates): a
+    ///   canvas tap does nothing but points at the buttons.
     ///
     /// Every commit restarts at PickTarget — paint-style, until the tool is
-    /// toggled off.
+    /// toggled off. No refused tap is silent (the deb23cbf live failure).
     pub fn ceiling_continuation_tap(&mut self, world_x: f64, world_y: f64) {
-        let Some(stage) = self.pending_ceiling_continuation else {
+        let Some(stage) = self.pending_ceiling_continuation.clone() else {
             return;
         };
         let tool = self.continuation_tool;
         let idx = self.current_storey_idx.unwrap_or(0);
-        // Every tap re-decides the inline message: cleared here, set again
-        // below on ANY refusal (no silent taps — the deb23cbf live failure).
+        // Every tap is a fresh action: the prior confirmation and inline
+        // notice are cleared, re-set below on a commit / any refusal.
         self.ceiling_continuation_notice = None;
+        self.ceiling_continuation_confirm = None;
         // The picks resolve against the RESOLVED ceilings.
         self.materialize();
         let p = Point2f64::new(world_x, world_y);
@@ -779,81 +873,69 @@ impl AppController {
                 }
                 match tool {
                     Some(ContinuationTool::Storey) => {
-                        // Which neighbouring storeys have a usable source?
-                        // The source must be a plan-NEIGHBOURING region on
-                        // the ±1 storey (deb23cbf + its semantics
-                        // correction): a plane continued LATERALLY is
-                        // physical; one copied straight down/up through the
-                        // slab onto its own footprint is not. So a storey
-                        // whose ceiling merely sits over the target does
-                        // NOT qualify — only one with a region BESIDE the
-                        // point does.
-                        let record = self.current_record.as_ref().expect("checked above");
-                        let has = |i: i64| {
-                            usize::try_from(i)
-                                .ok()
-                                .and_then(|i| record.data.storeys.get(i))
-                                .is_some_and(|s| s.ceilings.nearest_lateral_anchor(p).is_some())
-                        };
-                        let (above, below) = (has(idx as i64 + 1), has(idx as i64 - 1));
-                        match (above, below) {
-                            (true, true) => {
-                                // Both exist — ask via the above/below buttons.
-                                self.pending_ceiling_continuation =
-                                    Some(PendingCeilingContinuation::PickSource { target: p });
+                        // The lateral candidate sources across the ±1 storeys
+                        // (a region directly over/under the target never
+                        // qualifies — deb23cbf: a plane continues sideways,
+                        // not through the slab onto its own footprint).
+                        let options = self.continuation_source_options(p, idx);
+                        match options.len() {
+                            0 => {
+                                self.ceiling_continuation_notice = Some(self.no_source_notice(idx))
                             }
-                            (true, false) | (false, true) => {
-                                self.pending_ceiling_continuation =
-                                    Some(PendingCeilingContinuation::PickSource { target: p });
-                                if let Err(e) = self.ceiling_continuation_from_storey(above) {
-                                    log::warn!("ceiling continuation: {e}");
-                                    // The auto-commit's rejection surfaces
-                                    // inline — never a log-only drop.
-                                    self.ceiling_continuation_notice = Some(e);
-                                }
-                            }
-                            (false, false) => {
-                                log::warn!(
-                                    "no neighbouring storey has a ceiling region BESIDE that \
-                                     area to continue from — still picking"
+                            1 => {
+                                let o = &options[0];
+                                self.commit_ceiling_continuation(
+                                    idx,
+                                    p,
+                                    o.anchor,
+                                    o.offset,
+                                    o.label.clone(),
                                 );
-                                // Say WHY: no neighbour storeys at all, or
-                                // neighbours whose ceilings only sit
-                                // directly over/under the tapped area.
-                                let record = self.current_record.as_ref().expect("checked above");
-                                let exists = |i: i64| {
-                                    usize::try_from(i)
-                                        .ok()
-                                        .and_then(|i| record.data.storeys.get(i))
-                                        .is_some()
-                                };
-                                let msg = if !exists(idx as i64 + 1) && !exists(idx as i64 - 1) {
-                                    "There is no storey above or below this one to \
-                                     continue a ceiling from."
-                                } else {
-                                    "The neighbouring storey's ceiling sits directly \
-                                     over/under that area — a ceiling continues from a \
-                                     region BESIDE it, and there is none."
-                                };
-                                self.ceiling_continuation_notice = Some(msg.into());
+                            }
+                            _ => {
+                                // Several — the user chooses which (buttons).
+                                self.pending_ceiling_continuation =
+                                    Some(PendingCeilingContinuation::ChooseSource {
+                                        target: p,
+                                        options,
+                                    });
                             }
                         }
                     }
                     _ => {
-                        self.pending_ceiling_continuation =
-                            Some(PendingCeilingContinuation::PickSource { target: p });
+                        // Neighbour: the lateral candidates on THIS storey.
+                        let cands = storey.ceilings.lateral_source_candidates(p);
+                        match cands.len() {
+                            0 => {
+                                self.ceiling_continuation_notice = Some(
+                                    "No neighbouring ceiling area to continue from — this is \
+                                     the only ceiling area on the storey."
+                                        .into(),
+                                );
+                            }
+                            1 => {
+                                let anchor = storey.ceilings.region_lateral_anchor(cands[0], p);
+                                if let Some(anchor) = anchor {
+                                    self.commit_ceiling_continuation(
+                                        idx,
+                                        p,
+                                        anchor,
+                                        0,
+                                        "a neighbouring area".into(),
+                                    );
+                                }
+                            }
+                            _ => {
+                                // Several — tap which neighbour to continue from.
+                                self.pending_ceiling_continuation =
+                                    Some(PendingCeilingContinuation::PickSource { target: p });
+                            }
+                        }
                     }
                 }
             }
             PendingCeilingContinuation::PickSource { target } => {
-                if tool == Some(ContinuationTool::Storey) {
-                    // The storey tool's source is a BUTTON choice, not a tap.
-                    log::debug!("pick the storey above/below (buttons), not a canvas tap");
-                    self.ceiling_continuation_notice = Some(
-                        "Pick the storey to continue from with the buttons in the box.".into(),
-                    );
-                    return;
-                }
+                // Neighbour tool, several candidates: the source is a tap.
                 let (Some(sr), Some(tr)) = (region_of(storey, p), region_of(storey, target)) else {
                     log::debug!("continuation source tap hit no ceiling region — still picking");
                     self.ceiling_continuation_notice = Some(
@@ -872,79 +954,212 @@ impl AppController {
                     );
                     return;
                 }
-                let record = self.current_record.as_mut().expect("checked above");
-                record.data.add_ceiling_continuation(idx, target, p, 0);
-                self.restart_continuation_pick(idx);
+                self.commit_ceiling_continuation(idx, target, p, 0, "a neighbouring area".into());
             }
+            PendingCeilingContinuation::ChooseSource { .. } => {
+                // From-storey tool, several candidates: the source is a
+                // BUTTON choice, not a canvas tap.
+                self.ceiling_continuation_notice =
+                    Some("Pick the storey to continue from with the buttons in the box.".into());
+            }
+        }
+    }
+
+    /// The labelled LATERAL source candidates for a from-storey continuation
+    /// of `target` (current storey `idx`): every lateral region
+    /// ([`CeilingRegions::lateral_source_candidates`]) on the ±1 storeys,
+    /// each with the stable stored anchor
+    /// ([`CeilingRegions::region_lateral_anchor`]) and a button label — the
+    /// storey name, plus a plan-position hint ("north area") only when that
+    /// storey offers more than one, so the labels stay distinct. Ordered
+    /// storey-above then storey-below, nearest region first within each.
+    ///
+    /// [`CeilingRegions::lateral_source_candidates`]:
+    /// ber_model::ber::structural::CeilingRegions::lateral_source_candidates
+    /// [`CeilingRegions::region_lateral_anchor`]:
+    /// ber_model::ber::structural::CeilingRegions::region_lateral_anchor
+    fn continuation_source_options(
+        &self,
+        target: Point2f64,
+        idx: usize,
+    ) -> Vec<ContinuationSourceOption> {
+        let Some(record) = self.current_record.as_ref() else {
+            return Vec::new();
+        };
+        let mut out: Vec<ContinuationSourceOption> = Vec::new();
+        for offset in [1i8, -1] {
+            let src_idx = idx as i64 + offset as i64;
+            let Some(su) = usize::try_from(src_idx).ok() else {
+                continue;
+            };
+            let Some(src) = record.data.storeys.get(su) else {
+                continue;
+            };
+            let sname = self
+                .storey_name(su)
+                .unwrap_or_else(|| format!("Storey {}", su + 1));
+            let cands = src.ceilings.lateral_source_candidates(target);
+            let multi = cands.len() > 1;
+            for ri in cands {
+                let Some(anchor) = src.ceilings.region_lateral_anchor(ri, target) else {
+                    continue;
+                };
+                let label = if multi {
+                    format!("{sname} ({} area)", region_position_hint(&src.ceilings, ri))
+                } else {
+                    sname.clone()
+                };
+                out.push(ContinuationSourceOption {
+                    offset,
+                    anchor,
+                    label,
+                });
+            }
+        }
+        out
+    }
+
+    /// The inline refusal for a from-storey target with NO lateral source:
+    /// names whether there simply is no ±1 storey, or whether the
+    /// neighbours' ceilings only sit directly over/under the target (no
+    /// region beside it to continue from).
+    fn no_source_notice(&self, idx: usize) -> String {
+        let exists = |i: i64| {
+            self.current_record
+                .as_ref()
+                .and_then(|r| usize::try_from(i).ok().and_then(|i| r.data.storeys.get(i)))
+                .is_some()
+        };
+        if !exists(idx as i64 + 1) && !exists(idx as i64 - 1) {
+            "There is no storey above or below this one to continue a ceiling from.".into()
+        } else {
+            "The neighbouring storey's ceiling sits directly over/under that area — a \
+             ceiling continues from a region BESIDE it, and there is none."
+                .into()
+        }
+    }
+
+    /// Pick one of the labelled from-storey source candidates (the
+    /// `ChooseSource` buttons) and apply it. No-op unless that stage is up
+    /// or the index is out of range.
+    pub fn choose_ceiling_continuation_source(&mut self, option_idx: usize) {
+        let Some(PendingCeilingContinuation::ChooseSource { target, options }) =
+            self.pending_ceiling_continuation.clone()
+        else {
+            return;
+        };
+        let idx = self.current_storey_idx.unwrap_or(0);
+        let Some(o) = options.get(option_idx) else {
+            return;
+        };
+        self.commit_ceiling_continuation(idx, target, o.anchor, o.offset, o.label.clone());
+    }
+
+    /// Store a continuation link (target region ← `source` on the storey at
+    /// `offset`), re-derive, restart the pick, and set the SUCCESS
+    /// confirmation — the resolved height range over the target, so a
+    /// single-neighbour auto-apply is visibly not a no-op (deb23cbf
+    /// feedback gap). `source_desc` names the source in the confirmation
+    /// ("Storey 1 (north area)" / "a neighbouring area").
+    fn commit_ceiling_continuation(
+        &mut self,
+        idx: usize,
+        target: Point2f64,
+        source: Point2f64,
+        offset: i8,
+        source_desc: String,
+    ) {
+        if let Some(record) = self.current_record.as_mut() {
+            record
+                .data
+                .add_ceiling_continuation(idx, target, source, offset);
+        }
+        // Re-derive so the resolved z range is current, then confirm.
+        self.restart_continuation_pick(idx);
+        self.ceiling_continuation_confirm =
+            Some(self.continuation_confirm_message(idx, target, &source_desc));
+    }
+
+    /// The success-confirmation string for a just-applied continuation:
+    /// "Continued <this storey> from <source> — <hi> m → <lo> m" (or
+    /// "flat at <z> m") using the target region's RESOLVED height range.
+    fn continuation_confirm_message(
+        &self,
+        idx: usize,
+        target: Point2f64,
+        source_desc: &str,
+    ) -> String {
+        let this = self
+            .storey_name(idx)
+            .unwrap_or_else(|| "this storey".to_string());
+        let range = self
+            .current_record
+            .as_ref()
+            .and_then(|r| r.data.storeys.get(idx))
+            .and_then(|s| {
+                s.ceilings
+                    .claim_regions(target)
+                    .first()
+                    .and_then(|&ri| s.ceilings.regions[ri].z_range())
+            });
+        match range {
+            Some((lo, hi)) if hi - lo > 1e-3 => {
+                format!("Continued {this} from {source_desc} — {hi:.2} m → {lo:.2} m.")
+            }
+            Some((z, _)) => format!("Continued {this} from {source_desc} — flat at {z:.2} m."),
+            None => format!("Continued {this} from {source_desc}."),
         }
     }
 
     /// The post-commit tail of a continuation edit: the standard ceiling
     /// edit tail, then back to PickTarget while the tool stays on
-    /// (paint-style).
+    /// (paint-style). Clears the transient notice + confirmation (a fresh
+    /// commit re-sets the confirmation right after).
     fn restart_continuation_pick(&mut self, idx: usize) {
         self.ceiling_continuation_notice = None;
+        self.ceiling_continuation_confirm = None;
         self.ceiling_edit_tail(idx);
         self.pending_ceiling_continuation = self
             .continuation_tool
             .map(|_| PendingCeilingContinuation::PickTarget);
     }
+}
 
-    /// Commit the pending CONTINUE-from pick against the storey ABOVE
-    /// (`up = true`) or BELOW: the source region is auto-resolved on that
-    /// storey (no cross-storey tapping) as the nearest region BESIDE the
-    /// target point ([`CeilingRegions::nearest_lateral_anchor`] — the
-    /// stored source anchor is that region's nearest ring point nudged
-    /// inside, so every recompose finds the same face). A region sitting
-    /// DIRECTLY over/under the target is NEVER the source (the semantics
-    /// correction on deb23cbf): a plane continued laterally is physical;
-    /// one copied straight through the slab onto its own footprint is not.
-    /// The plane converts through the floor datums at recompose. `Err`
-    /// (user-facing) when the storey doesn't exist, has no ceiling at all,
-    /// or only sits directly over the target (the pick then stays open).
-    /// On success the loop restarts at PickTarget.
-    ///
-    /// [`CeilingRegions::nearest_lateral_anchor`]:
-    /// ber_model::ber::structural::CeilingRegions::nearest_lateral_anchor
-    pub fn ceiling_continuation_from_storey(&mut self, up: bool) -> Result<(), String> {
-        let Some(PendingCeilingContinuation::PickSource { target }) =
-            self.pending_ceiling_continuation
-        else {
-            return Ok(()); // no source stage open — no-op
-        };
-        let idx = self.current_storey_idx.unwrap_or(0);
-        let offset: i8 = if up { 1 } else { -1 };
-        let which = if up { "above" } else { "below" };
-        let src_idx = idx as i64 + offset as i64;
-        let record = self
-            .current_record
-            .as_mut()
-            .ok_or("no storey to continue a ceiling on")?;
-        let src = usize::try_from(src_idx)
-            .ok()
-            .and_then(|i| record.data.storeys.get(i))
-            .ok_or_else(|| format!("There is no storey {which} this one."))?;
-        let source = src.ceilings.nearest_lateral_anchor(target).ok_or_else(|| {
-            if src.ceilings.claim_regions(target).is_empty() {
-                format!(
-                    "The storey {which} has no ceiling to continue — set its ceiling height first."
-                )
-            } else {
-                let sits = if up {
-                    "directly over"
-                } else {
-                    "directly under"
-                };
-                format!(
-                    "The storey {which} sits {sits} this area — a ceiling continues from a \
-                     region beside it, not from its own footprint."
-                )
-            }
-        })?;
-        record
-            .data
-            .add_ceiling_continuation(idx, target, source, offset);
-        self.restart_continuation_pick(idx);
-        Ok(())
+/// A coarse plan-position word for region `ri` within its storey's ceiling —
+/// its centroid against the bounding box of all the storey's ceiling
+/// regions. Plan y grows DOWNWARD (screen convention: smaller y is "north").
+/// Used only to disambiguate several source-region buttons on one storey.
+fn region_position_hint(regions: &CeilingRegions, ri: usize) -> String {
+    let mut min_x = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut min_y = f64::INFINITY;
+    let mut max_y = f64::NEG_INFINITY;
+    for r in &regions.regions {
+        for v in &r.polygon.exterior {
+            min_x = min_x.min(v.x);
+            max_x = max_x.max(v.x);
+            min_y = min_y.min(v.y);
+            max_y = max_y.max(v.y);
+        }
     }
+    let c = regions.regions[ri].centroid();
+    let (w, h) = ((max_x - min_x).max(1e-9), (max_y - min_y).max(1e-9));
+    let nx = (c.x - (min_x + max_x) / 2.0) / (w / 2.0);
+    let ny = (c.y - (min_y + max_y) / 2.0) / (h / 2.0);
+    const T: f64 = 0.25;
+    if nx.abs() < T && ny.abs() < T {
+        return "central".to_string();
+    }
+    if ny.abs() >= nx.abs() {
+        if ny < 0.0 {
+            "north"
+        } else {
+            "south"
+        }
+    } else if nx < 0.0 {
+        "west"
+    } else {
+        "east"
+    }
+    .to_string()
 }

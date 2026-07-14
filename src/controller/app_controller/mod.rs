@@ -679,6 +679,13 @@ pub struct AppController {
     /// cleared on the next tap, a successful commit, tool toggle, and
     /// cancel. Read via `ceiling_continuation_notice()`.
     ceiling_continuation_notice: Option<String>,
+    /// Transient SUCCESS confirmation for the CONTINUE-ceiling tools —
+    /// naming what a just-applied continuation produced ("Continued Storey 1
+    /// area from Storey 2 — 4.25 m → 2.75 m"), so a single-neighbour
+    /// auto-apply doesn't read as a no-op (the deb23cbf feedback gap).
+    /// Set on a successful commit; cleared on the next tap, a refusal, tool
+    /// toggle, and cancel. Read via `ceiling_continuation_confirm()`.
+    ceiling_continuation_confirm: Option<String>,
 }
 
 impl AppController {
@@ -816,6 +823,7 @@ impl AppController {
             copy_height_error: None,
             roof_ridge_notice: None,
             ceiling_continuation_notice: None,
+            ceiling_continuation_confirm: None,
         }
     }
 }

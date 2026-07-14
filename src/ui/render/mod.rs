@@ -726,6 +726,41 @@ pub fn render_roof_ridge_line(
 /// apex points of each two-apex group, labelled at the midpoint
 /// ("⌃ 4.20 m", or "4.20→4.50 m" for a sloping ridge). The apex dots
 /// themselves come from [`render_roof_apexes`].
+/// The "this area was continued" outline: each CONTINUED target region's
+/// plan ring, drawn as a closed dashed teal polygon while a
+/// CONTINUE-ceiling tool is open — so an applied continuation stays
+/// visible (not just tiny corner labels — field report deb23cbf feedback).
+pub fn render_continued_regions(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    ber: Option<&Ber>,
+    current_storey_idx: Option<usize>,
+    sketch_mode: SketchMode,
+    view: ViewParams,
+    rings: &[Vec<(f64, f64)>],
+) {
+    if rings.is_empty() {
+        return;
+    }
+    let Some((_storey, t)) = storey_transform(rect, ber, current_storey_idx, sketch_mode, view)
+    else {
+        return;
+    };
+    const TEAL: egui::Color32 = egui::Color32::from_rgb(60, 175, 160);
+    for ring in rings {
+        if ring.len() < 2 {
+            continue;
+        }
+        let pts: Vec<egui::Pos2> = ring.iter().map(|(x, y)| t.apply(*x, *y)).collect();
+        let n = pts.len();
+        for i in 0..n {
+            let a = pts[i];
+            let b = pts[(i + 1) % n];
+            painter.line_segment([a, b], egui::Stroke::new(2.5, TEAL));
+        }
+    }
+}
+
 pub fn render_roof_ridges(
     painter: &egui::Painter,
     rect: egui::Rect,
