@@ -461,7 +461,14 @@ fn floor_plan_ring(r: &FloorRegion) -> Vec<Point2f64> {
 fn coalesce_inter_storey_ceiling_cuts(ceilings: CeilingRegions) -> CeilingRegions {
     use geo::bool_ops::BooleanOps;
     use geo::Area;
-    const Z_EPS_M: f64 = 1e-6;
+    // NOISE ABSORBER: fuses a BURIED piece with the EXPOSED remainder it was
+    // split FROM by the inter-storey stamp — the two carry the SAME flat z by
+    // construction (they were one region), so the compare is between
+    // exactly-equal values. 1e-4 swallows any rounding while staying ~100×
+    // below the smallest REAL ceiling step (steps are cm-scale; a near-zero
+    // delta is snapped to an exact same-height divider), so no real step is
+    // fused away.
+    const Z_EPS_M: f64 = 1e-4;
 
     let mut regions = ceilings.regions;
     // Repeatedly fuse a buried piece with the coplanar-flat exposed remainder

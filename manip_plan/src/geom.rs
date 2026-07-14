@@ -457,7 +457,14 @@ pub fn interior_split_edge(
         rx1 = rx1.max(x);
         ry1 = ry1.max(y);
     }
-    const TOL: f64 = 1e-6;
+    // NOISE ABSORBER for the flush-with-outline test: a divider region spans
+    // the outline wall to wall on one axis, so that extent EQUALS the outline
+    // extent by construction — but the ring is f32-stored, so the residual is
+    // ~f32 grid (~1e-6 at 10 m coords), i.e. 1e-6 sat right on the noise
+    // floor. 1e-4 clears it with margin and stays far below the divider's real
+    // inset on the CUT axis (cm+), so the chosen cut axis/position is
+    // unchanged.
+    const TOL: f64 = 1e-4;
     if (rx1 - rx0) + TOL < (ox1 - ox0) {
         // Vertical cut — the full-height edge at rx0 or rx1 not flush with the
         // outline's X extent.

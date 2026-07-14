@@ -136,7 +136,11 @@ fn unfan_targets(
     unfanned: &[Point2f64],
     apexes: &[&CeilingApex],
 ) -> Option<Vec<bool>> {
-    const EPS_M: f64 = 1e-6;
+    // NOISE ABSORBER: matches a ring vertex to an apex CORNER copied verbatim
+    // into the fan triangle (exact f64 copy). 1e-4 aligns with the codebase's
+    // apex-corner convention ([`APEX_BOUNDARY_EPS_M`]/[`UNFAN_MATCH_EPS_M`]) —
+    // real ring corners are never that close to an apex.
+    const EPS_M: f64 = 1e-4;
     if unfanned.is_empty() || ext.len() < 3 {
         return None;
     }
@@ -551,7 +555,10 @@ fn embed_gable_sides(
     a: &CeilingApex,
     b: &CeilingApex,
 ) -> Vec<Point3f64> {
-    const EPS_M: f64 = 1e-6;
+    // NOISE ABSORBER: `is_hub` matches a ring vertex to the gable apexes a/b
+    // (their plan points are copied into the ring). 1e-4 per the apex-corner
+    // convention ([`APEX_BOUNDARY_EPS_M`]) — never fuses distinct corners.
+    const EPS_M: f64 = 1e-4;
     let a3 = Point3f64::new(a.point.x, a.point.y, a.z_m);
     let b3 = Point3f64::new(b.point.x, b.point.y, b.z_m);
     let n = ext.len();
@@ -586,13 +593,16 @@ fn embed_gable_sides(
 }
 
 /// D2 step 0 — PRE-LIFT: any ring vertex plan-matching one of `apexes`
-/// (within 1e-6 m, the `fan_base_z` predicate) takes that apex's z.
+/// (within 1e-4 m, the `fan_base_z` predicate) takes that apex's z.
 /// Load-bearing for the re-apply-to-self identity: a fan/ridge triangle fed
 /// back through `with_apexes` carries the apexes as ring CORNERS, and the
 /// emitted hub/transition triangles keep the (lifted) boundary z — without
 /// the lift a re-emitted corner could revert to a stale height.
 fn pre_lift(mut ext: Vec<Point3f64>, apexes: &[&CeilingApex]) -> Vec<Point3f64> {
-    const EPS_M: f64 = 1e-6;
+    // NOISE ABSORBER: matches a ring vertex to an apex plan-corner (an exact
+    // copy when the triangle is re-fed through `with_apexes`). 1e-4 per the
+    // apex-corner convention — real corners are never that close to an apex.
+    const EPS_M: f64 = 1e-4;
     for v in &mut ext {
         if let Some(a) = apexes
             .iter()
@@ -878,7 +888,11 @@ const RECT_MIN_SIDE_M: f64 = 0.01;
 ///
 /// [`with_apexes`]: CeilingRegions::with_apexes
 pub fn apexes_form_rect(apexes: &[&CeilingApex]) -> Option<(Point2f64, Point2f64)> {
-    const Z_EPS: f64 = 1e-6;
+    // NOISE ABSORBER: the four apexes of a flat-topped hip come from the
+    // rect flow, all set to ONE typed height, so their z's are exactly equal
+    // (one f32-widened value). 1e-4 swallows any rounding while staying far
+    // below a real height difference (apex heights are typed on the cm grid).
+    const Z_EPS: f64 = 1e-4;
     if apexes.len() != 4 {
         return None;
     }
@@ -1090,8 +1104,19 @@ pub(crate) fn rect_ridge_faces(
     out
 }
 
-/// Vertex / plane tolerance for the coplanar face merge, in metres.
-const MERGE_EPS_M: f64 = 1e-6;
+/// Vertex / plane tolerance for the coplanar face merge, in metres — a pure
+/// NOISE ABSORBER: the faces it fuses are fan/ridge triangles the SAME solve
+/// built over the SAME apex/base points, so a shared edge's vertices are
+/// bit-identical copies and a genuinely-coplanar pair deviates only by f64
+/// Newell-fit rounding (~1e-13). 1e-4 (0.1 mm) sits comfortably above that
+/// and above the f32 building-scale grid (~1e-6 at 10 m coords), while
+/// staying far below any real FOLD: two faces that should stay separate meet
+/// at a slope, and the shallowest slope the model can create is an apex
+/// [`MIN_APEX_DELTA_M`] (1 cm) above its base — a plane deviation of order
+/// cm across the face, ~100× above 1e-4, so no real fold can be fused.
+///
+/// [`MIN_APEX_DELTA_M`]: (document::ceiling_point) the 1 cm minimum apex rise.
+const MERGE_EPS_M: f64 = 1e-4;
 
 /// Two 3D vertices equal within [`MERGE_EPS_M`] on every coordinate.
 fn merge_pts_eq(u: &Point3f64, v: &Point3f64) -> bool {

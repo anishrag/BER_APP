@@ -112,7 +112,7 @@ pub const APEX_BOUNDARY_EPS_M: f64 = 1e-4;
 ///
 /// Built by [`CeilingRegions::apex_groups`]: an apex and a region are
 /// incident when the region carries a vertex plan-matching the apex point
-/// (within 1e-6 m — the [`fan_base_z`] predicate; apex coordinates are
+/// (within 1e-4 m — the [`fan_base_z`] predicate; apex coordinates are
 /// copied verbatim into fan/ridge triangles, no boolean ops touch them), and
 /// the incidence is closed TRANSITIVELY — a ridge's transition triangles
 /// carry BOTH endpoints, linking apex A to apex B through them.
@@ -539,7 +539,7 @@ impl CeilingRegions {
     ///   up front).
     ///
     /// Both branches PRE-LIFT first (D2 step 0): ring vertices plan-matching
-    /// an applied apex (1e-6 m) take that apex's z — load-bearing for the
+    /// an applied apex (1e-4 m) take that apex's z — load-bearing for the
     /// re-apply-to-self identity. Sub-mm² (plan) sliver triangles are
     /// dropped ([`SLIVER_AREA_M2`]) — exactly the degenerate pieces incident
     /// to an apex that is already a corner. Triangles are SIMPLE by
@@ -772,7 +772,7 @@ impl CeilingRegions {
 
     /// Group `apexes` with the regions they shape — THE grouping authority
     /// (see [`CeilingApexGroup`]). Incidence is quantized plan-corner identity
-    /// (a region vertex within 1e-6 m of the apex point — the
+    /// (a region vertex within 1e-4 m of the apex point — the
     /// [`fan_base_z`] predicate), closed transitively over shared regions
     /// (a ridge's transition triangles carry both endpoints, linking A to
     /// B). Apexes incident to no region join no group (e.g. mid-edit, or a
@@ -819,7 +819,12 @@ impl CeilingRegions {
     ) -> Vec<CeilingApexGroup> {
         use geo::bool_ops::BooleanOps;
         use geo::Area;
-        const EPS_M: f64 = 1e-6;
+        // NOISE ABSORBER: matches a region ring vertex to an apex CORNER
+        // (copied verbatim into the fan/ridge faces). 1e-4 per the codebase's
+        // apex-corner convention ([`APEX_BOUNDARY_EPS_M`]) — real ring corners
+        // sit cm+ from any apex, so grouping/shaping classification is
+        // unchanged.
+        const EPS_M: f64 = 1e-4;
         if apexes.is_empty() {
             return Vec::new();
         }
@@ -1614,7 +1619,12 @@ impl CeilingRegion {
         apexes: &[CeilingApex],
         unfanned: &[Point2f64],
     ) -> Option<f64> {
-        const EPS_M: f64 = 1e-6;
+        // NOISE ABSORBER: excludes ring vertices that ARE an apex corner
+        // (exact copy) from the flat-base vote. 1e-4 per the apex-corner
+        // convention — matches the sibling [`UNFAN_MATCH_EPS_M`]=1e-4 used for
+        // the unfanned set in the same filter, and a real base corner never
+        // sits that close to an apex.
+        const EPS_M: f64 = 1e-4;
         if self.polygon.exterior.len() < 3 {
             return None;
         }

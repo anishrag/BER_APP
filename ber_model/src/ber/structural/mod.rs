@@ -3596,6 +3596,71 @@ mod tests {
         vs
     }
 
+    /// TOLERANCE-RELAXATION GUARD (geometry noise-absorbers lifted 1e-6 →
+    /// 1e-4): the geometry each relaxed constant governs is unchanged, and
+    /// the new value stays safely inside its band — a future over-relaxation
+    /// (toward a real feature scale) would trip these.
+    ///
+    /// - `MERGE_EPS_M` (coplanar face merge): a wall-to-wall gable still fuses
+    ///   its hub/transition triangles into EXACTLY two clean sloped planes,
+    ///   and the two planes are NOT coplanar-collapsed into one — the fold is
+    ///   preserved (the smallest real fold, a 1 cm apex rise, deviates ~cm ≫
+    ///   1e-4).
+    /// - `apexes_form_rect` Z_EPS (flat-top recognizer): four apexes at one
+    ///   height — even off by f64 noise (1e-10) — read as a flat rect, while a
+    ///   real 1 cm height difference is rejected.
+    #[test]
+    fn relaxed_tolerances_keep_gable_and_rect_classification() {
+        let cid = ItemId::default();
+        // Gable: ridge (0,1)-(4,1) wall to wall over a 4×2 rectangle.
+        let ring = square(0.0, 0.0, 4.0, 2.0);
+        let gable = vec![
+            CeilingApex {
+                point: Point2f64::new(0.0, 1.0),
+                z_m: 3.0,
+            },
+            CeilingApex {
+                point: Point2f64::new(4.0, 1.0),
+                z_m: 3.0,
+            },
+        ];
+        let out = CeilingRegions::default_for_footprint(vec![ring], 2.0, cid).with_apexes(&gable);
+        let sloped: Vec<&CeilingRegion> = out
+            .regions
+            .iter()
+            .filter(|r| r.flat_z().is_none())
+            .collect();
+        assert_eq!(
+            sloped.len(),
+            2,
+            "the merge fuses each side into ONE plane — two clean planes, fold preserved"
+        );
+        for f in &sloped {
+            let zs: Vec<f64> = f.polygon.exterior.iter().map(|v| v.z).collect();
+            assert!(
+                zs.iter().any(|z| (z - 3.0).abs() < 1e-6)
+                    && zs.iter().any(|z| (z - 2.0).abs() < 1e-6),
+                "each plane spans ridge 3.0 → eave 2.0 (not collapsed flat): {zs:?}"
+            );
+        }
+
+        // Flat-top recognizer band: exact + noise accepted, 1 cm rejected.
+        let base = pavilion_apexes(); // all z = 4.0
+        assert!(apexes_form_rect(&base.iter().collect::<Vec<_>>()).is_some());
+        let mut noise = base.clone();
+        noise[2].z_m += 1e-10; // f64 rounding scale
+        assert!(
+            apexes_form_rect(&noise.iter().collect::<Vec<_>>()).is_some(),
+            "noise-level z spread is still a flat rect"
+        );
+        let mut step = base.clone();
+        step[2].z_m += 1e-2; // a real 1 cm difference
+        assert!(
+            apexes_form_rect(&step.iter().collect::<Vec<_>>()).is_none(),
+            "a real 1 cm height difference is NOT a flat rect"
+        );
+    }
+
     /// `apexes_form_rect`: one apex per corner of {x0,x1}×{y0,y1} with a
     /// shared z is a rect, in any order; unequal z, a duplicated corner, a
     /// degenerate side, and a wrong count are not.
