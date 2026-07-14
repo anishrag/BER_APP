@@ -3140,6 +3140,35 @@ mod tests {
         assert!(regions.claim_regions(Point2f64::new(5.0, 9.0)).is_empty());
     }
 
+    /// THE SYMMETRIC BAND (field report cd36f510): a point within the
+    /// [`APEX_BOUNDARY_EPS_M`] band of a shared boundary claims EVERY region
+    /// touching it — even when float noise puts it strictly INSIDE one of
+    /// them. The trigger was a junction ridge end recomputed as `lo + len`
+    /// in f32, landing ~5e-7 m past the corner where two raised strips meet
+    /// a third region: strictly inside the third, yet a rightful claim of
+    /// all three.
+    #[test]
+    fn claim_band_is_symmetric_across_a_junction_corner() {
+        let cid = ItemId::default();
+        let mut r =
+            CeilingRegions::default_for_footprint(vec![square(0.0, 0.0, 4.0, 1.0)], 2.9, cid);
+        for (ring, z) in [
+            (square(0.0, -1.0, 4.0, 0.0), 2.5),
+            (square(4.0, -1.0, 8.0, 1.0), 2.4),
+        ] {
+            r.regions
+                .extend(CeilingRegions::default_for_footprint(vec![ring], z, cid).regions);
+        }
+        // ε past the strips' shared corner (4, 0), strictly inside region 2.
+        let p = Point2f64::new(4.0 + 5e-7, 0.0);
+        assert_eq!(r.claim_regions(p), vec![0, 1, 2], "all three claim");
+        // ε inside region 0 near the internal junction y = 0: both strips.
+        let p = Point2f64::new(2.0, 5e-7);
+        assert_eq!(r.claim_regions(p), vec![0, 1], "both strips claim");
+        // Strictly inside and beyond the band: that region alone.
+        assert_eq!(r.claim_regions(Point2f64::new(2.0, 0.5)), vec![0]);
+    }
+
     /// MULTI-CLAIM DETERMINISM (the legacy / hand-edited shared-boundary
     /// case validation now prevents creating): an apex on the boundary
     /// SHARED by two regions claims both, in ascending region order, and
@@ -3767,119 +3796,6 @@ mod tests {
                 .any(|r| r.flat_z().is_some_and(|z| (z - 4.0).abs() < 1e-9)
                     && r.polygon.exterior.len() == 4),
             "no pavilion top — the rect branch did not fire"
-        );
-    }
-
-    /// THE CROSS-STEP RIDGE FUSE (field report cd36f510, dump geometry): two
-    /// raised strips at DIFFERENT heights (2.95 / 2.572, split by a ceiling
-    /// step at y = 0.0929) plus three default-height regions; a vertical
-    /// ridge spans BOTH strips, one apex in each. Without the fuse each strip
-    /// would fan its own apex; with it the strips fuse into one region and
-    /// the gable machinery solves TWO planes over the union — ridge at 3.4,
-    /// eaves at the anchor corner's height (2.572; the 2.95 corners embed on
-    /// the side planes). The default-height regions are untouched.
-    #[test]
-    fn ridge_across_two_raised_strips_fuses_them_into_one_gable() {
-        let cid = ItemId::default();
-        let mut c = CeilingRegions::default_for_footprint(
-            vec![square(1.3659, 0.0929, 7.3669, 1.4619)],
-            2.95,
-            cid,
-        );
-        for (ring, z) in [
-            (square(1.3659, -1.3851, 7.3669, 0.0929), 2.572),
-            (square(7.3669, 1.4619, 9.875, 9.234), 2.409),
-            (square(1.3659, 1.4619, 7.3669, 9.401), 2.409),
-            (square(7.3669, -1.3851, 9.875, 1.4619), 2.409),
-        ] {
-            c.regions
-                .extend(CeilingRegions::default_for_footprint(vec![ring], z, cid).regions);
-        }
-        let apexes = [
-            CeilingApex {
-                point: Point2f64::new(4.37, -1.3851),
-                z_m: 3.4,
-            },
-            CeilingApex {
-                point: Point2f64::new(4.37, 1.4619),
-                z_m: 3.4,
-            },
-        ];
-        let shaped = c.with_apexes(&apexes);
-        let sloped: Vec<&CeilingRegion> = shaped
-            .regions
-            .iter()
-            .filter(|r| r.flat_z().is_none())
-            .collect();
-        assert_eq!(sloped.len(), 2, "two gable side planes over the fused pair");
-        for face in &sloped {
-            let zs: Vec<f64> = face.polygon.exterior.iter().map(|v| v.z).collect();
-            assert!(
-                zs.iter().any(|z| (z - 3.4).abs() < 1e-9),
-                "each plane reaches the ridge: {zs:?}"
-            );
-            assert!(
-                zs.iter()
-                    .all(|z| (z - 3.4).abs() < 1e-9 || (z - 2.572).abs() < 1e-9),
-                "eaves at the anchor height — the 2.95 corners embed: {zs:?}"
-            );
-        }
-        // The three default-height regions pass through untouched.
-        let flat_default = shaped
-            .regions
-            .iter()
-            .filter(|r| r.flat_z().is_some_and(|z| (z - 2.409).abs() < 1e-9))
-            .count();
-        assert_eq!(flat_default, 3, "neighbours at the default height survive");
-        // Neither strip survives at its own flat height — both were fused.
-        assert!(
-            !shaped.regions.iter().any(|r| r
-                .flat_z()
-                .is_some_and(|z| (z - 2.95).abs() < 1e-9 || (z - 2.572).abs() < 1e-9)),
-            "the raised strips are consumed by the gable"
-        );
-        // One two-apex group — THE grouping authority sees a single ridge.
-        let groups = shaped.apex_groups(&apexes);
-        assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].apex_idxs.len(), 2);
-    }
-
-    /// The fuse leaves a ridge WITHIN one strip alone, and never crosses a
-    /// SLOPED region: the same layout with the ridge wall-to-wall inside the
-    /// lower strip keeps the other strip's flat height.
-    #[test]
-    fn ridge_within_one_strip_does_not_fuse_its_neighbour() {
-        let cid = ItemId::default();
-        let mut c = CeilingRegions::default_for_footprint(
-            vec![square(1.3659, 0.0929, 7.3669, 1.4619)],
-            2.95,
-            cid,
-        );
-        c.regions.extend(
-            CeilingRegions::default_for_footprint(
-                vec![square(1.3659, -1.3851, 7.3669, 0.0929)],
-                2.572,
-                cid,
-            )
-            .regions,
-        );
-        let apexes = [
-            CeilingApex {
-                point: Point2f64::new(1.3659, -0.65),
-                z_m: 3.4,
-            },
-            CeilingApex {
-                point: Point2f64::new(7.3669, -0.65),
-                z_m: 3.4,
-            },
-        ];
-        let shaped = c.with_apexes(&apexes);
-        assert!(
-            shaped
-                .regions
-                .iter()
-                .any(|r| r.flat_z().is_some_and(|z| (z - 2.95).abs() < 1e-9)),
-            "the untouched strip keeps its flat height"
         );
     }
 

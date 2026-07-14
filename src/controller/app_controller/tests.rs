@@ -20711,12 +20711,16 @@ fn partitioned_wall_exposed_piece_merges_into_same_phase_group() {
     );
 }
 
-// ─── Field report cd36f510: ridge between two raised areas ──────────────────
+// ─── Field report cd36f510: ridge ALONG the junction of two raised areas ────
 
-/// The cd36f510 dump reconstructed through the real load path: the dump's
-/// outline, default height 2.409, and the two DURABLE ceiling steps (the two
-/// raised strips: y ∈ [0.093, 1.462] at 2.95 and y ∈ [−1.385, 0.093] at
-/// 2.572, both x ∈ [1.366, 7.367]) restored exactly as a reload does.
+/// The cd36f510 dump reconstructed through the real load path, at the DUMP'S
+/// EXACT (f32-widened) coordinates: the outline, default height 2.409, and
+/// the two DURABLE ceiling steps — the raised strips y ∈ [0.0929, 1.4619] at
+/// 2.95 and y ∈ [−1.3851, 0.0929] at 2.572, both x ∈ [1.3659, 7.3669],
+/// sharing the junction line y = 0.09286213. Exact coordinates matter: the
+/// regression this reproduces was f32 extent arithmetic (`lo + len`) landing
+/// a junction ridge END a few 1e-7 m past the strips' shared corner, inside
+/// the neighbouring default-height region.
 fn cd36f510_controller() -> AppController {
     let p = |x: f32, y: f32| Point2f32::new(x, y);
     let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
@@ -20726,15 +20730,15 @@ fn cd36f510_controller() -> AppController {
     );
     c.document.floor_plan = FloorPlan::from_points_to_orthogonal(
         &[
-            p(1.366, -1.385),
-            p(1.366, 9.401),
-            p(5.701, 9.401),
-            p(5.701, 10.496),
-            p(7.367, 10.496),
-            p(7.367, 9.234),
-            p(9.875, 9.234),
-            p(9.875, -1.385),
-            p(1.4, -1.38),
+            p(1.3658779, -1.3851376),
+            p(1.3658779, 9.400862),
+            p(5.700878, 9.400862),
+            p(5.700878, 10.495862),
+            p(7.366878, 10.495862),
+            p(7.366878, 9.233862),
+            p(9.874878, 9.233862),
+            p(9.874878, -1.3851376),
+            p(1.4, -1.385),
         ],
         0.1,
         true,
@@ -20752,11 +20756,16 @@ fn cd36f510_controller() -> AppController {
             domain::points::Point2f64::new(x0, y1),
         ]
     };
+    let (x0, x1) = (1.3658778667449951, 7.366878032684326);
+    let junction = 0.09286212921142578;
     {
         let storey = &mut c.current_record.as_mut().unwrap().data.storeys[0];
         storey.ceiling_steps = vec![
-            (d(1.3659, 0.0929, 7.3669, 1.4619), 0.541),
-            (d(1.3659, -1.3851, 7.3669, 0.0929), 0.163),
+            (d(x0, junction, x1, 1.4618620872497559), 0.5410001277923584),
+            (
+                d(x0, -1.3851375579833984, x1, junction),
+                0.16300010681152344,
+            ),
         ];
     }
     c.load_ceiling_step_regions_for(0);
@@ -20766,74 +20775,72 @@ fn cd36f510_controller() -> AppController {
     assert!(c.ceiling_point_mode(), "roof point mode enters");
     c
 }
-/// THE cd36f510 REGRESSION, end to end through the real controller path: a
-/// ridge stroke drawn ACROSS the two raised strips (one end in each — "a
-/// ridge between the two areas that I raised") fits, takes the cross
-/// position, accepts the height, and solves ONE two-plane gable over the
-/// fused pair. Before the flat-chain acceptance + solve fuse this was
-/// rejected at the position stage ("that length would push the ridge out of
-/// its ceiling area — 1.48 m wall to wall") because each strip alone was
-/// asked to contain the whole ridge.
+
+/// THE cd36f510 FLOW, height MEETING one side: an E-W ridge stroke drawn
+/// ALONG the junction between the two raised strips snaps onto the junction
+/// line (cross) and onto the outline wall / strip boundary (both ends) — all
+/// three DOFs resolve from the stroke, the finalize placement check passes
+/// (the ridge is a legal mono-pitch junction claimed by BOTH strips), and
+/// the Height stage opens. A height of 2.95 — the RAISED strip's own
+/// ceiling — can only slope the LOWER strip, so the model auto-resolves to
+/// it and the shell surfaces the silent decision as the ridge notice.
+///
+/// REGRESSION (the field bug): the finalize used to reject this stroke with
+/// "Both ends of the ridge must sit in the same ceiling area" — the extent's
+/// far end, recomputed as `lo + len` in f32, landed ~5e-7 m past the strips'
+/// shared corner, strictly inside the default-height region beyond it, and
+/// `claim_regions`' strictly-contains short-circuit handed the end to that
+/// region ALONE. The all-snapped path then dropped the stroke (before the
+/// notice fix, silently — "it's not letting me do it").
 #[test]
-fn cd36f510_ridge_across_the_two_raised_strips_solves_one_gable() {
+fn cd36f510_junction_ridge_meeting_one_side_slopes_the_lower_strip() {
     let mut c = cd36f510_controller();
-    // Vertical stroke from inside the lower strip to the upper strip's far
-    // boundary; the extent ends snap to y = -1.3851 (outline) and y = 1.4619
-    // (the strip/default area boundary), the cross (x) stays as drawn.
-    c.apply_roof_ridge_stroke_event(&[(4.37, -1.2), (4.36, 0.1), (4.37, 1.4)]);
+    c.apply_roof_ridge_stroke_event(&[(1.5, 0.10), (4.4, 0.09), (7.2, 0.10)]);
     assert!(
-        c.ceiling_ridge_position_pending(),
-        "both ends snapped, the cross position is the one open question"
+        c.ceiling_ridge_height_pending(),
+        "all-snapped junction stroke reaches the Height stage (notice: {:?})",
+        c.roof_ridge_notice()
     );
-    c.skip_position_dimension()
-        .expect("the drawn cross position is accepted — the finalize check passes via the chain");
-    assert!(c.ceiling_ridge_height_pending(), "height stage opens");
-    c.assign_roof_ridge_height(3.4)
-        .expect("the height applies across the chain");
+    c.assign_roof_ridge_height(2.95)
+        .expect("the junction height applies");
     assert!(
         c.ceiling_ridge_area_options().is_empty(),
-        "no ChooseArea — the ridge is not a junction mono-pitch"
+        "no ChooseArea — only the lower strip is slope-able"
     );
+    let notice = c
+        .roof_ridge_notice()
+        .expect("the auto-resolve is surfaced, not silent");
+    assert!(notice.starts_with("Sloped:"), "got: {notice}");
 
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
     assert_eq!(storey.ceiling_apexes.len(), 2, "both ridge ends committed");
-    for a in &storey.ceiling_apexes {
-        assert!((a.z_m - 3.4).abs() < 1e-6);
-    }
-    let mut ys: Vec<f64> = storey.ceiling_apexes.iter().map(|a| a.point.y).collect();
-    ys.sort_by(f64::total_cmp);
-    assert!(
-        (ys[0] - -1.3851).abs() < 1e-3 && (ys[1] - 1.4619).abs() < 1e-3,
-        "ends on the outline wall and the strip boundary: {ys:?}"
+    assert_eq!(
+        storey.ceiling_apex_groups().len(),
+        1,
+        "one mono-pitch group"
     );
-    // ONE two-apex group — a single ridge, not two independent fans.
-    let groups = storey.ceiling_apex_groups();
-    assert_eq!(groups.len(), 1, "one roof group");
-    assert_eq!(groups[0].apex_idxs.len(), 2, "carrying both apexes");
-    // The solve: two sloped planes over the fused strips (ridge 3.4, eaves
-    // at the anchor corner's 2.572 — the 2.95 corners embed), the
-    // default-height neighbours untouched, and NEITHER strip left flat.
+    // The LOWER strip slopes from its own 2.572 eave up to 2.95 at the
+    // junction; the raised strip keeps its flat 2.95 ceiling; the
+    // default-height remainder is untouched.
     let sloped: Vec<_> = storey
         .ceilings
         .regions
         .iter()
         .filter(|r| r.flat_z().is_none())
         .collect();
-    assert_eq!(sloped.len(), 2, "two gable side planes");
-    for face in &sloped {
-        for v in &face.polygon.exterior {
-            assert!(
-                (v.z - 3.4).abs() < 1e-6 || (v.z - 2.572).abs() < 1e-4,
-                "plane vertices at the ridge or the eave, got z {}",
-                v.z
-            );
-        }
-    }
+    assert_eq!(sloped.len(), 1, "exactly the lower strip slopes");
+    let zs: Vec<f64> = sloped[0].polygon.exterior.iter().map(|v| v.z).collect();
     assert!(
-        !storey.ceilings.regions.iter().any(|r| r
-            .flat_z()
-            .is_some_and(|z| (z - 2.95).abs() < 1e-4 || (z - 2.572).abs() < 1e-4)),
-        "the raised strips are consumed by the gable"
+        zs.iter().any(|z| (z - 2.95).abs() < 1e-4) && zs.iter().any(|z| (z - 2.572).abs() < 1e-4),
+        "slopes 2.572 → 2.95: {zs:?}"
+    );
+    assert!(
+        storey
+            .ceilings
+            .regions
+            .iter()
+            .any(|r| r.flat_z().is_some_and(|z| (z - 2.95).abs() < 1e-4)),
+        "the raised strip keeps its flat ceiling"
     );
     assert!(
         storey
@@ -20845,20 +20852,62 @@ fn cd36f510_ridge_across_the_two_raised_strips_solves_one_gable() {
     );
 }
 
+/// THE cd36f510 FLOW, height meeting NEITHER side: the same on-junction
+/// stroke with a height above both strips is a genuine two-way choice — the
+/// ChooseArea prompt opens naming both sides, and the chosen side slopes up
+/// to the ridge while the other keeps its ceiling.
+#[test]
+fn cd36f510_junction_ridge_meeting_neither_side_asks_which_area() {
+    let mut c = cd36f510_controller();
+    c.apply_roof_ridge_stroke_event(&[(1.5, 0.10), (4.4, 0.09), (7.2, 0.10)]);
+    assert!(c.ceiling_ridge_height_pending(), "height stage opens");
+    c.assign_roof_ridge_height(3.4).expect("the height applies");
+    let options = c.ceiling_ridge_area_options();
+    assert_eq!(options.len(), 2, "both sides offered: {options:?}");
+    // "Above the ridge" is the smaller-y side (plan y grows downward): the
+    // 2.572 strip.
+    let above = options
+        .iter()
+        .position(|o| o.contains("Above"))
+        .expect("side labels name above/below");
+    c.choose_roof_ridge_area(above).expect("the choice applies");
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    let sloped: Vec<_> = storey
+        .ceilings
+        .regions
+        .iter()
+        .filter(|r| r.flat_z().is_none())
+        .collect();
+    assert_eq!(sloped.len(), 1, "exactly the chosen strip slopes");
+    let zs: Vec<f64> = sloped[0].polygon.exterior.iter().map(|v| v.z).collect();
+    assert!(
+        zs.iter().any(|z| (z - 3.4).abs() < 1e-4) && zs.iter().any(|z| (z - 2.572).abs() < 1e-4),
+        "the chosen (lower) strip rises 2.572 → 3.4: {zs:?}"
+    );
+    assert!(
+        storey
+            .ceilings
+            .regions
+            .iter()
+            .any(|r| r.flat_z().is_some_and(|z| (z - 2.95).abs() < 1e-4)),
+        "the passed-over strip keeps its flat ceiling"
+    );
+}
+
 /// The all-snapped stroke path used to DROP a rejected ridge silently (a
 /// `log::error` the assessor never sees — cd36f510's "it's not letting me
 /// do it"). Now the rejection surfaces as the ridge notice.
 #[test]
 fn rejected_all_snapped_ridge_stroke_surfaces_a_notice() {
     let mut c = cd36f510_controller();
-    // Solve the cross gable first so the strips are sloped (occupied).
-    c.apply_roof_ridge_stroke_event(&[(4.37, -1.2), (4.36, 0.1), (4.37, 1.4)]);
-    c.skip_position_dimension().unwrap();
-    c.assign_roof_ridge_height(3.4).unwrap();
-    assert!(c.roof_ridge_notice().is_none(), "no notice after success");
-    // A horizontal stroke hugging the bottom outline wall: the cross snaps
-    // to y = -1.3851 and both ends snap (x = 1.3659 / 7.3669) — all-snapped,
-    // so the finalize rejection (the area is sloped now) has no open stage.
+    // Commit the junction ridge first — the lower strip is sloped now.
+    c.apply_roof_ridge_stroke_event(&[(1.5, 0.10), (4.4, 0.09), (7.2, 0.10)]);
+    c.assign_roof_ridge_height(2.95).unwrap();
+    assert!(c.pending_roof_ridge.is_none(), "the ridge committed");
+    // A horizontal stroke hugging the bottom outline wall of the now-SLOPED
+    // strip: the cross snaps to y = -1.3851 and both ends snap
+    // (x = 1.3659 / 7.3669) — all-snapped, so the finalize rejection (the
+    // area already has a high point) has no open stage to land on.
     c.apply_roof_ridge_stroke_event(&[(1.45, -1.30), (4.4, -1.31), (7.3, -1.30)]);
     assert!(
         c.pending_roof_ridge.is_none(),

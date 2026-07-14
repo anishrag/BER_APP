@@ -443,117 +443,7 @@ pub fn validate_roof_ridge(
             Err(e) => last_err = e,
         }
     }
-    // No single area takes it — a ridge across a CHAIN of flat areas (two
-    // raised strips split by a ceiling step) is still valid: the solve fuses
-    // the chain and shapes ONE roof over the union (`fuse_ridge_spanned_regions`).
-    match ridge_fits_flat_chain(storey, qa, qb, Some(z_m)) {
-        Ok(()) => Ok(()),
-        // A PLAUSIBLE chain (all members flat and un-apexed) failed on a
-        // value the user can fix — its message is the specific one.
-        Err(ChainReject::Specific(msg)) => Err(msg),
-        Err(ChainReject::NotAChain) => Err(last_err),
-    }
-}
-
-/// Whether the level ridge `qa→qb` (quantized ends) is acceptable as a
-/// CROSS-STEP CHAIN ridge — the assign-time mirror of the solve's
-/// `fuse_ridge_spanned_regions` (ber_model), which fuses the flat regions a
-/// ridge spans into one and shapes the union; keep the two in step:
-///
-/// - Walked at 64 interior samples, every sample must be claimed by ≥ 1
-///   region ([`claim_regions`] — boundary band included) and every region so
-///   met must be FLAT and UN-APEXED; ≥ 2 distinct regions must be met (one
-///   region is the normal single-area path, not a chain).
-/// - Both ends must be claimed by a chain member (inside or on its edge).
-/// - The chain must union into ONE simple ring
-///   ([`CeilingRegions::plan_union_ring`]) and the ridge must not fold over
-///   it ([`ridge_hub_switches`] ≤ 2).
-/// - With `z_m` given (the Height stage): `|z_m − base|` ≥ 1 cm against
-///   EVERY member's base — a ridge at one strip's own height would leave
-///   that strip unsloped, a silent near-noop.
-///
-/// The verdict distinguishes "this was never a chain" ([`ChainReject::NotAChain`]
-/// — a sample outside every region, a single region, a sloped or apexed
-/// member) from a PLAUSIBLE chain failing on something the user can fix
-/// ([`ChainReject::Specific`] — the height, an end, the foldover): callers
-/// keep their single-area rejection for the former and surface the chain's
-/// own message for the latter.
-///
-/// [`claim_regions`]: ber_model::ber::structural::CeilingRegions::claim_regions
-/// [`CeilingRegions::plan_union_ring`]:
-/// ber_model::ber::structural::CeilingRegions::plan_union_ring
-fn ridge_fits_flat_chain(
-    storey: &Storey,
-    qa: Point2f64,
-    qb: Point2f64,
-    z_m: Option<f64>,
-) -> Result<(), ChainReject> {
-    const SAMPLES: usize = 64;
-    let mut members: Vec<usize> = Vec::new();
-    for s in 0..SAMPLES {
-        let t = (s as f64 + 0.5) / SAMPLES as f64;
-        let p = Point2f64::new(qa.x + (qb.x - qa.x) * t, qa.y + (qb.y - qa.y) * t);
-        let claims = storey.ceilings.claim_regions(p);
-        if claims.is_empty() {
-            return Err(ChainReject::NotAChain);
-        }
-        for c in claims {
-            if !members.contains(&c) {
-                members.push(c);
-            }
-        }
-    }
-    members.sort_unstable();
-    if members.len() < 2 {
-        return Err(ChainReject::NotAChain);
-    }
-    let groups = storey.ceiling_apex_groups();
-    for &m in &members {
-        if groups.iter().any(|g| g.region_idxs.contains(&m)) {
-            return Err(ChainReject::NotAChain);
-        }
-        let Some(base) = storey.ceilings.regions[m].flat_z() else {
-            return Err(ChainReject::NotAChain);
-        };
-        if let Some(z) = z_m {
-            if (z - base).abs() < MIN_APEX_DELTA_M {
-                return Err(ChainReject::Specific(format!(
-                    "{z} m is within a centimetre of a ceiling area's height ({base} m) — \
-                     enter a height that actually slopes it."
-                )));
-            }
-        }
-    }
-    for q in [qa, qb] {
-        let claims = storey.ceilings.claim_regions(q);
-        if claims.is_empty() {
-            return Err(ChainReject::Specific(
-                RIDGE_END_OUTSIDE_CEILING_MSG.to_string(),
-            ));
-        }
-        if !claims.iter().any(|c| members.contains(c)) {
-            return Err(ChainReject::Specific(
-                RIDGE_ENDS_SAME_REGION_MSG.to_string(),
-            ));
-        }
-    }
-    let Some(ring) = storey.ceilings.plan_union_ring(&members) else {
-        return Err(ChainReject::Specific(RIDGE_TOO_IRREGULAR_MSG.to_string()));
-    };
-    if ridge_hub_switches(&ring, qa, qb) > 2 {
-        return Err(ChainReject::Specific(RIDGE_TOO_IRREGULAR_MSG.to_string()));
-    }
-    Ok(())
-}
-
-/// Why [`ridge_fits_flat_chain`] said no — see its verdict doc.
-enum ChainReject {
-    /// The geometry was never a cross-area chain (outside samples, one
-    /// region, sloped/apexed members): the caller's single-area rejection
-    /// stands.
-    NotAChain,
-    /// A plausible chain failed on a fixable value — surface THIS message.
-    Specific(String),
+    Err(last_err)
 }
 
 /// Whether a level ridge `qa→qb` at height `z_m` fits ceiling region `ra`: both
@@ -621,59 +511,28 @@ pub fn validate_roof_ridge_length(
     if !len_m.is_finite() || len_m <= MIN_RIDGE_LENGTH_M {
         return Err(RIDGE_LENGTH_TOO_SHORT_MSG.to_string());
     }
-    // A ridge may legally run across a CHAIN of flat areas (two raised
-    // strips split by a ceiling step — the chain checks / the solve's
-    // fuse), so its bound spans a connected component, not one region.
-    flat_area_length_bound(storey, axis, len_m, true)
-}
-
-/// The optimistic "could ANY area take it" length bound shared by the ridge
-/// and rect Length stages: only flat, un-apexed regions can host new roof
-/// input (the same predicates the finalize checks apply), and the typed
-/// length must fit the plan-bbox extent along the EXTENT axis
-/// (`axis.other()` per the axis convention) of some region — or, with
-/// `chains` (the RIDGE, which may span a flat chain the solve fuses), of
-/// some plan-ADJACENT COMPONENT of those regions
-/// ([`CeilingRegions::plan_adjacent_components`]). The rect keeps the
-/// per-region bound: a flat top must sit within ONE area
-/// ([`validate_roof_rect_placement`]).
-///
-/// [`CeilingRegions::plan_adjacent_components`]:
-/// ber_model::ber::structural::CeilingRegions::plan_adjacent_components
-fn flat_area_length_bound(
-    storey: &Storey,
-    axis: ParameterAxis,
-    len_m: f32,
-    chains: bool,
-) -> Result<(), String> {
+    // Only flat, un-apexed regions can host a new ridge — the same region
+    // predicates the finalize check applies, lifted to the optimistic
+    // "could ANY area take it" form.
     let groups = storey.ceiling_apex_groups();
-    let idxs: Vec<usize> = storey
+    let max_extent = storey
         .ceilings
         .regions
         .iter()
         .enumerate()
         .filter(|(i, r)| r.flat_z().is_some() && !groups.iter().any(|g| g.region_idxs.contains(i)))
-        .map(|(i, _)| i)
-        .collect();
-    let comps: Vec<Vec<usize>> = if chains {
-        storey.ceilings.plan_adjacent_components(&idxs)
-    } else {
-        idxs.into_iter().map(|i| vec![i]).collect()
-    };
-    let max_extent = comps
-        .iter()
-        .map(|comp| {
+        .map(|(_, r)| {
+            // The region's plan-bbox extent along the EXTENT axis (the
+            // ridge runs along `axis.other()` per the axis convention).
             let mut min = f64::INFINITY;
             let mut max = f64::NEG_INFINITY;
-            for &i in comp {
-                for v in &storey.ceilings.regions[i].polygon.exterior {
-                    let c = match axis {
-                        ParameterAxis::X => v.y,
-                        ParameterAxis::Y => v.x,
-                    };
-                    min = min.min(c);
-                    max = max.max(c);
-                }
+            for v in &r.polygon.exterior {
+                let c = match axis {
+                    ParameterAxis::X => v.y,
+                    ParameterAxis::Y => v.x,
+                };
+                min = min.min(c);
+                max = max.max(c);
             }
             max - min
         })
@@ -763,30 +622,7 @@ pub fn validate_roof_ridge_extent(
             Err(e) => last_err = e,
         }
     }
-    // No single area takes the extent — a ridge across a CHAIN of flat areas
-    // (two raised strips split by a ceiling step) is still valid: the solve
-    // fuses the chain and shapes ONE roof over the union
-    // (`fuse_ridge_spanned_regions`). Same quantization as the Height stage.
-    let (a, b) = match axis {
-        ParameterAxis::X => (
-            Point2f64::new(coord_m as f64, lo as f64),
-            Point2f64::new(coord_m as f64, (lo + len_m) as f64),
-        ),
-        ParameterAxis::Y => (
-            Point2f64::new(lo as f64, coord_m as f64),
-            Point2f64::new((lo + len_m) as f64, coord_m as f64),
-        ),
-    };
-    match ridge_fits_flat_chain(
-        storey,
-        CeilingApex::quantize_point(a),
-        CeilingApex::quantize_point(b),
-        None,
-    ) {
-        Ok(()) => Ok(()),
-        Err(ChainReject::Specific(msg)) => Err(msg),
-        Err(ChainReject::NotAChain) => Err(last_err),
-    }
+    Err(last_err)
 }
 
 /// Whether the prospective ridge `(axis, coord_m, lo, len_m)` (midpoint `mid`,
@@ -1386,11 +1222,10 @@ pub fn validate_roof_rect_length(
     if !len.is_finite() || len <= MIN_RIDGE_LENGTH_M {
         return Err(RECT_SIDE_TOO_SHORT_MSG.to_string());
     }
-    // The per-axis bbox bound, shared with the ridge: an extent along `axis`
+    // The per-axis bbox bound, reused from the ridge: an extent along `axis`
     // is a ridge whose CROSS axis is `axis.other()` (the extent runs along
-    // the other axis from the cross). PER REGION, no chain components — a
-    // flat top must sit within one ceiling area.
-    flat_area_length_bound(storey, axis.other(), len, false)
+    // the other axis from the cross).
+    validate_roof_ridge_length(storey, axis.other(), len)
 }
 
 /// Validate the flat top's PLACEMENT against the storey's RESOLVED ceilings —
@@ -2030,7 +1865,6 @@ mod tests {
         );
     }
 
-    /// The hexagon ring behind the fan-marker tests: 6 corners, area 24 m².
     /// The cd36f510 field-report layout: two raised strips at DIFFERENT
     /// heights (2.95 over y ∈ [0.093, 1.462], 2.572 over y ∈ [−1.385, 0.093],
     /// both x ∈ [1.366, 7.367]) plus three default-height (2.409) regions
@@ -2066,81 +1900,103 @@ mod tests {
         }
     }
 
-    /// THE cd36f510 REGRESSION: a ridge spanning BOTH raised strips (one end
-    /// in each, crossing the ceiling step between them) passes the extent
-    /// and height checks via the flat-CHAIN acceptance — no single region
-    /// contains it, but the chain of flat un-apexed regions it crosses does,
-    /// and the solve fuses exactly that chain
-    /// (`fuse_ridge_spanned_regions` in ber_model). Before the chain checks
-    /// both stages rejected it ("out of its ceiling area" / "both ends must
-    /// sit in the same ceiling area").
+    /// THE ONE-REGION RULE over the cd36f510 layout: a ridge spanning BOTH
+    /// raised strips (one end in each, CROSSING the ceiling step between
+    /// them) is rejected — a ridge must sit on one plane or on the
+    /// line/boundary of a plane, never across two. (The fuse feature that
+    /// briefly accepted this was reverted by explicit direction; the field
+    /// report's real stroke ran ALONG the junction, not across it — see the
+    /// on-junction tests below.)
     #[test]
-    fn ridge_across_two_raised_strips_passes_the_chain_checks() {
+    fn ridge_across_two_raised_strips_is_rejected() {
         let storey = cd36f510_storey();
         // Vertical ridge at x = 4.37 from the outline wall (y = −1.3851) to
         // the strip boundary (y = 1.4619): axis = X (cross), extent on Y.
-        assert_eq!(
-            validate_roof_ridge_extent(&storey, ParameterAxis::X, 4.37, -1.3851, 2.847),
-            Ok(())
-        );
-        assert_eq!(
-            validate_roof_ridge(
-                &storey,
-                Point2f64::new(4.37, -1.3851),
-                Point2f64::new(4.37, 1.4619),
-                3.4
-            ),
-            Ok(())
-        );
-        // The Length stage's optimistic bound spans the CONNECTED flat
-        // component, not one region — 2.847 m fits the pair even though each
-        // strip alone runs under 1.5 m.
-        assert_eq!(
-            validate_roof_ridge_length(&storey, ParameterAxis::X, 2.847),
-            Ok(())
-        );
-    }
-
-    /// The chain acceptance does not swallow real rejections: a chain ridge
-    /// at a height within a centimetre of a MEMBER's base is rejected (it
-    /// would leave that strip unsloped), and a ridge poking outside every
-    /// ceiling region stays rejected.
-    #[test]
-    fn chain_ridge_still_rejects_member_base_heights_and_outside_ends() {
-        let storey = cd36f510_storey();
-        let a = Point2f64::new(4.37, -1.3851);
-        let b = Point2f64::new(4.37, 1.4619);
-        // 2.95 is a member strip's own height — near-noop over it.
-        let err = validate_roof_ridge(&storey, a, b, 2.9501).unwrap_err();
-        assert!(err.contains("within a centimetre"), "got: {err}");
-        // An extent overrunning the whole footprint is still out.
-        let err =
-            validate_roof_ridge_extent(&storey, ParameterAxis::X, 4.37, -3.0, 4.5).unwrap_err();
         assert!(
-            err.starts_with(RIDGE_LENGTH_EXCEEDS_AREA_MSG) || err == RIDGE_OUTSIDE_CEILING_MSG,
-            "got: {err}"
+            validate_roof_ridge_extent(&storey, ParameterAxis::X, 4.37, -1.3851, 2.847).is_err()
         );
-    }
-
-    /// A chain member that already carries an apex group blocks the chain —
-    /// the single-region occupied rejection stands.
-    #[test]
-    fn chain_ridge_over_an_apexed_strip_still_rejects() {
-        let mut storey = cd36f510_storey();
-        apply_apexes(&mut storey, vec![apex(4.0, 0.7, 3.2)]); // fan in the 2.95 strip
-        let err = validate_roof_ridge(
+        assert!(validate_roof_ridge(
             &storey,
             Point2f64::new(4.37, -1.3851),
             Point2f64::new(4.37, 1.4619),
-            3.4,
+            3.4
         )
-        .unwrap_err();
-        assert!(
-            err.contains("already has a high point") || err.contains("same ceiling area"),
-            "got: {err}"
-        );
+        .is_err());
     }
 
+    /// A ridge ALONG the junction between the two raised strips (cd36f510,
+    /// the assessor's actual stroke) with a height MEETING the raised
+    /// strip's ceiling: valid at every stage, and the slope side
+    /// auto-resolves to the LOWER strip (the 2.95 side would be a no-op).
+    ///
+    /// REGRESSION: the endpoints here quantize (f32) a few 1e-10 m off the
+    /// junction line, so the ridge midpoint lands strictly inside ONE strip.
+    /// `claim_regions`' old strictly-contains short-circuit then claimed
+    /// that strip ALONE — and when it was the 2.95 one, the meets-its-base
+    /// height was rejected ("within a centimetre of that ceiling area's
+    /// height") instead of sloping the lower strip. The boundary band now
+    /// claims symmetrically, so both strips stay candidates.
+    #[test]
+    fn junction_ridge_height_meeting_one_side_slopes_the_lower_strip() {
+        let storey = cd36f510_storey();
+        // E-W ridge ALONG the junction y = 0.0929, x 1.3659 → 7.3669.
+        let a = Point2f64::new(1.3659, 0.0929);
+        let b = Point2f64::new(7.3669, 0.0929);
+        assert_eq!(
+            validate_roof_ridge_extent(&storey, ParameterAxis::Y, 0.0929, 1.3659, 6.001),
+            Ok(())
+        );
+        assert_eq!(validate_roof_ridge(&storey, a, b, 2.95), Ok(()));
+        match resolve_ridge_slope_side(&storey, a, b, None, ParameterAxis::Y, 0.0929, 2.95) {
+            RidgeSlopeSide::AutoResolved(auto) => {
+                assert!(
+                    auto.sloped_region
+                        .1
+                        .is_some_and(|z| (z - 2.572).abs() < 1e-9),
+                    "the LOWER strip slopes: {:?}",
+                    auto.sloped_region
+                );
+                assert_eq!(auto.passed_over.len(), 1, "the 2.95 strip is passed over");
+                assert!(auto.passed_over[0]
+                    .2
+                    .is_some_and(|z| (z - 2.95).abs() < 1e-9));
+            }
+            RidgeSlopeSide::Resolved(_) => panic!("a junction ridge must not resolve trivially"),
+            RidgeSlopeSide::Ambiguous(_) => panic!("one slope-able side must auto-resolve"),
+        }
+    }
+
+    /// The same junction ridge with a height meeting NEITHER strip: still
+    /// valid, and the slope side is a genuine two-way choice — the model
+    /// returns Ambiguous (the shell's ChooseArea prompt) naming both sides.
+    #[test]
+    fn junction_ridge_height_meeting_neither_side_is_ambiguous() {
+        let storey = cd36f510_storey();
+        let a = Point2f64::new(1.3659, 0.0929);
+        let b = Point2f64::new(7.3669, 0.0929);
+        assert_eq!(validate_roof_ridge(&storey, a, b, 3.4), Ok(()));
+        match resolve_ridge_slope_side(&storey, a, b, None, ParameterAxis::Y, 0.0929, 3.4) {
+            RidgeSlopeSide::Ambiguous(options) => {
+                assert_eq!(options.len(), 2, "both strips offered");
+                assert!(
+                    options.iter().any(|(l, _)| l.contains("Above"))
+                        && options.iter().any(|(l, _)| l.contains("Below")),
+                    "side labels name both sides: {options:?}"
+                );
+            }
+            _ => panic!("a two-way junction choice must be Ambiguous"),
+        }
+        // A ridge strictly INSIDE one strip stays the plain single-area
+        // path — no junction machinery.
+        let a = Point2f64::new(1.5, 0.7);
+        let b = Point2f64::new(7.2, 0.7);
+        assert!(matches!(
+            resolve_ridge_slope_side(&storey, a, b, None, ParameterAxis::Y, 0.7, 3.4),
+            RidgeSlopeSide::Resolved(_)
+        ));
+    }
+
+    /// The hexagon ring behind the fan-marker tests: 6 corners, area 24 m².
     fn hex_ring() -> Vec<Point2f64> {
         vec![
             Point2f64::new(0.0, 0.0),
@@ -2909,9 +2765,9 @@ mod tests {
     /// (one claimant — the wall-to-wall ridge), an end claimed by NOTHING
     /// gets the end-outside message, a ridge whose MIDPOINT sits in no
     /// region (e.g. it runs along a boundary) gets the ridge-outside
-    /// message, ends in two DIFFERENT flat un-apexed regions are legal via
-    /// the flat-CHAIN acceptance (cd36f510 — the solve fuses them), and an
-    /// end on an INTERNAL shared boundary is a legal mono-pitch junction.
+    /// message, ends in two DIFFERENT regions keep the same-region message,
+    /// and an end on an INTERNAL shared boundary is a legal mono-pitch
+    /// junction.
     #[test]
     fn ridge_end_claims_gable_legal_shared_boundary_rejected() {
         let storey = storey_with_flat_roof(2.4);
@@ -2966,19 +2822,18 @@ mod tests {
             )
             .regions,
         );
-        // Midpoint in region 0, far end strictly in region 1: LEGAL since the
-        // flat-CHAIN acceptance (cd36f510) — the ridge spans both flat
-        // un-apexed regions and the solve fuses them into one gable
-        // (`fuse_ridge_spanned_regions`). The same-region rejection now only
-        // fires when the chain itself is unusable (sloped/apexed members,
-        // disjoint union).
-        assert!(validate_roof_ridge(
-            &storey,
-            Point2f64::new(1.0, 2.0),
-            Point2f64::new(6.0, 2.0),
-            4.2
-        )
-        .is_ok());
+        // Midpoint in region 0, far end strictly in region 1: different
+        // regions (the midpoint picks the region, never the ends).
+        assert_eq!(
+            validate_roof_ridge(
+                &storey,
+                Point2f64::new(1.0, 2.0),
+                Point2f64::new(6.0, 2.0),
+                4.2
+            )
+            .unwrap_err(),
+            RIDGE_ENDS_SAME_REGION_MSG
+        );
         // An end ON the INTERNAL boundary shared by the two regions is now
         // LEGAL — a mono-pitch ridge along the junction (the side hint fixes
         // which area slopes at resolve).
