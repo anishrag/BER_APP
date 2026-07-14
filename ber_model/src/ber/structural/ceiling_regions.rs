@@ -1309,6 +1309,71 @@ impl CeilingRegions {
             .collect()
     }
 
+    /// A STABLE plan anchor that resolves ([`claim_regions`]) to the region
+    /// nearest to `p`: `p` itself when some region already claims it, else
+    /// the nearest point on any region's ring nudged ~1 mm toward that
+    /// region's interior (its centroid) — far enough inside to survive the
+    /// f32 quantization the durable stores apply and the ~1e-7 m boolean
+    /// ring shifts between re-derives, near enough to stay in the nearest
+    /// FACE of a solved roof (a nudge that leaves a non-convex ring falls
+    /// back to the on-ring point, which the boundary band still claims).
+    /// `None` when there is no usable (≥ 3 vertex) region at all.
+    ///
+    /// This is the "continue a neighbouring storey's plane over an area it
+    /// doesn't cover" anchor (field report deb23cbf): the plane-extension
+    /// pick stores it as the continuation SOURCE so every recompose finds
+    /// the same source face.
+    ///
+    /// [`claim_regions`]: CeilingRegions::claim_regions
+    pub fn nearest_claim_anchor(&self, p: Point2f64) -> Option<Point2f64> {
+        if !self.claim_regions(p).is_empty() {
+            return Some(p);
+        }
+        // Nearest point on any region ring: per-segment projection, global min.
+        let mut best: Option<(f64, Point2f64, usize)> = None;
+        for (ri, r) in self.regions.iter().enumerate() {
+            let ext = &r.polygon.exterior;
+            if ext.len() < 3 {
+                continue;
+            }
+            let n = ext.len();
+            for i in 0..n {
+                let (a, b) = (&ext[i], &ext[(i + 1) % n]);
+                let (ex, ey) = (b.x - a.x, b.y - a.y);
+                let len2 = ex * ex + ey * ey;
+                let t = if len2 <= 1e-18 {
+                    0.0
+                } else {
+                    (((p.x - a.x) * ex + (p.y - a.y) * ey) / len2).clamp(0.0, 1.0)
+                };
+                let q = Point2f64::new(a.x + ex * t, a.y + ey * t);
+                let d2 = (q.x - p.x).powi(2) + (q.y - p.y).powi(2);
+                if best.as_ref().map_or(true, |(bd, _, _)| d2 < *bd) {
+                    best = Some((d2, q, ri));
+                }
+            }
+        }
+        let (_, q, ri) = best?;
+        let region = &self.regions[ri];
+        let ext = &region.polygon.exterior;
+        let n = ext.len() as f64;
+        let cx = ext.iter().map(|v| v.x).sum::<f64>() / n;
+        let cy = ext.iter().map(|v| v.y).sum::<f64>() / n;
+        let (dx, dy) = (cx - q.x, cy - q.y);
+        let d = (dx * dx + dy * dy).sqrt();
+        if d <= 1e-9 {
+            return Some(q); // degenerate centroid — the ring point itself
+        }
+        const NUDGE_M: f64 = 1e-3;
+        let step = d.min(NUDGE_M);
+        let nudged = Point2f64::new(q.x + dx / d * step, q.y + dy / d * step);
+        if region.plan_contains_within(nudged, APEX_BOUNDARY_EPS_M) {
+            Some(nudged)
+        } else {
+            Some(q)
+        }
+    }
+
     /// Interior CEILING-RISER faces: for every plan edge piece shared by two
     /// regions ([`shared_plan_pieces`] — metric collinearity over boolean-op
     /// output, never exact vertex equality) whose (linear) z profiles differ

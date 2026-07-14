@@ -20400,6 +20400,222 @@ fn divided_86c6d9b3_controller() -> AppController {
     c
 }
 
+// ─── Field report deb23cbf: "Ceiling from storey" over an uncovered strip ───
+
+/// The deb23cbf dump geometry: storey 0 is the full rect
+/// (x ∈ [1.4225, 6.4225], y ∈ [2.3315, 7.3315], ceiling 2.0) with a delta-0
+/// divider fencing the strip y ∈ [4.3315, 7.3315] (region 0 sits under
+/// storey 1; the strip is uncovered). Storey 1 is the smaller rect
+/// y ∈ [2.3315, 4.3315] (slab thickness 0.25 → its floor datum is
+/// 2.0 + 0.25 = 2.25) with a MONO-PITCH ceiling: 3.0 along the north wall
+/// falling to 2.0 at y = 4.3315 (slope −0.5/m). Ends on storey 0 with the
+/// "Ceiling from storey" tool armed.
+fn deb23cbf_controller() -> AppController {
+    let p = |x: f32, y: f32| Point2f32::new(x, y);
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    let _ = c.create_ber(
+        "T".into(),
+        chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+    );
+    c.document.floor_plan = FloorPlan::from_points_to_orthogonal(
+        &[
+            p(1.422521, 2.3314536),
+            p(6.422521, 2.3314536),
+            p(6.422521, 7.3314543),
+            p(1.422521, 7.3314543),
+            p(1.43, 2.34),
+        ],
+        0.1,
+        true,
+    )
+    .unwrap();
+    c.document.dimensioning.scale_set = true;
+    c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
+    c.commit_to_ber().unwrap();
+    c.set_default_ceiling_height(2.0).expect("height applies");
+    {
+        let storey = &mut c.current_record.as_mut().unwrap().data.storeys[0];
+        storey.ceiling_steps = vec![(
+            vec![
+                domain::points::Point2f64::new(1.4225209951400757, 7.331454277038574),
+                domain::points::Point2f64::new(1.4225209951400757, 4.331453323364258),
+                domain::points::Point2f64::new(6.422521114349365, 4.331453323364258),
+                domain::points::Point2f64::new(6.422521114349365, 7.331454277038574),
+            ],
+            0.0,
+        )];
+    }
+    c.load_ceiling_step_regions_for(0);
+    c.recompose_ceilings(0);
+    c.materialize();
+
+    // Storey 1: the smaller rect, slab 0.25, mono-pitch 3.0 → 2.0.
+    c.add_storey().unwrap();
+    c.document.floor_plan = FloorPlan::from_points_to_orthogonal(
+        &[
+            p(1.422521, 2.3314536),
+            p(6.422521, 2.3314536),
+            p(6.422521, 4.3314533),
+            p(1.422521, 4.3314533),
+            p(1.43, 2.34),
+        ],
+        0.1,
+        true,
+    )
+    .unwrap();
+    c.document.dimensioning.scale_set = true;
+    c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
+    c.commit_to_ber().unwrap();
+    c.set_default_ceiling_height(2.0).expect("height applies");
+    c.current_record.as_mut().unwrap().data.storeys[1].floor_thickness_m = Some(0.25);
+    c.set_roof_point_mode(true);
+    // Mono-pitch: a ridge stroke hugging the north outline wall — the cross
+    // snaps to y = 2.3315, both ends snap wall to wall, height 3.0.
+    c.apply_roof_ridge_stroke_event(&[(1.5, 2.37), (4.0, 2.36), (6.35, 2.37)]);
+    assert!(
+        c.ceiling_ridge_height_pending(),
+        "mono-pitch stroke resolves"
+    );
+    c.assign_roof_ridge_height(3.0).unwrap();
+    {
+        let s1 = &c.current_record.as_ref().unwrap().data.storeys[1];
+        assert_eq!(s1.ceilings.regions.len(), 1, "one mono-pitch plane");
+        assert!(s1.ceilings.regions[0].flat_z().is_none(), "it slopes");
+    }
+    c.set_roof_point_mode(false);
+    c.set_current_storey(Some(0)).unwrap();
+    c
+}
+
+/// THE deb23cbf REGRESSION: "Ceiling from storey" on the UNCOVERED strip —
+/// storey 1's ceiling doesn't cover it, so the old source resolution
+/// ("region containing the target point on the ±1 storey") errored with
+/// "no ceiling over that area" and stored nothing. Plane extension is
+/// exactly what the tool is for: the source now falls back to the NEAREST
+/// region on the chosen storey, stored as a stable interior anchor
+/// (`CeilingRegions::nearest_claim_anchor` — the nearest ring point nudged
+/// ~1 mm inside the slope face), and the recompose continues the plane
+/// physically straight through the datums: world z at the shared edge
+/// y = 4.3315 is the storey-1 eave 2.0 + datum 2.25 = 4.25 (storey-0
+/// local), falling at −0.5/m to 2.75 at y = 7.3315 — well above storey 0's
+/// base and its 2.0 default.
+#[test]
+fn uncovered_strip_continues_the_storey_above_plane() {
+    let mut c = deb23cbf_controller();
+    assert_eq!(
+        c.current_record
+            .as_ref()
+            .unwrap()
+            .data
+            .storey_floor_datums(),
+        vec![0.0, 2.25],
+        "the dump's datum stack"
+    );
+    c.set_storey_continuation_mode(true);
+    assert!(c.ceiling_continuation_picking_target());
+    // Tap the uncovered strip: only the storey ABOVE exists → the source
+    // choice auto-commits without the above/below buttons.
+    c.ceiling_point_tap(4.0, 5.8);
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert_eq!(
+        storey.ceiling_continuations.len(),
+        1,
+        "the continuation stored (was []: the old contains-only rule errored)"
+    );
+    let link = &storey.ceiling_continuations[0];
+    assert_eq!(
+        link.source_storey_offset, 1,
+        "sourced from the storey above"
+    );
+    assert!(
+        (link.target.0 - 4.0).abs() < 1e-6 && (link.target.1 - 5.8).abs() < 1e-6,
+        "target is the tap"
+    );
+    // The stored source anchor: the nearest point on storey 1's slope-face
+    // ring ((4.0, 4.3315)) nudged ~1 mm inside — stable across re-derives.
+    assert!(
+        (link.source.0 as f64 - 4.0).abs() < 1e-2
+            && (4.3315 - link.source.1 as f64) > 1e-4
+            && (4.3315 - link.source.1 as f64) < 2e-3,
+        "source anchored just inside the shared edge: {:?}",
+        link.source
+    );
+    // The strip took the CONTINUED slope: 4.25 at the shared edge, 2.75 at
+    // the far wall (−0.5/m through the 2.25 datum shift).
+    let strip = storey
+        .ceilings
+        .regions
+        .iter()
+        .find(|r| r.polygon.exterior.iter().any(|v| v.y > 7.0))
+        .expect("the strip region");
+    assert!(strip.flat_z().is_none(), "the strip slopes now");
+    for v in &strip.polygon.exterior {
+        let expect = if (v.y - 4.331453323364258).abs() < 1e-6 {
+            4.25
+        } else {
+            2.75
+        };
+        assert!(
+            (v.z - expect).abs() < 1e-3,
+            "continued plane at y {}: expected z {expect}, got {}",
+            v.y,
+            v.z
+        );
+    }
+    // The InterStorey part under storey 1 keeps its flat ceiling.
+    let covered = storey
+        .ceilings
+        .regions
+        .iter()
+        .find(|r| r.polygon.exterior.iter().all(|v| v.y < 4.34))
+        .expect("the covered region survives");
+    assert!(
+        covered.flat_z().is_some_and(|z| (z - 2.0).abs() < 1e-6),
+        "the covered region keeps flat 2.0"
+    );
+    // Paint-style: the pick restarts at the target stage.
+    assert!(c.ceiling_continuation_picking_target());
+}
+
+/// The COVERED case keeps its original behaviour: "Ceiling from storey" on
+/// the region UNDER storey 1 resolves the source as the CONTAINING region
+/// first — the stored source is the target point itself, and the region
+/// takes storey 1's plane over its own span (5.25 → 4.25 through the
+/// datums).
+#[test]
+fn covered_region_from_storey_still_uses_the_containing_region() {
+    let mut c = deb23cbf_controller();
+    c.set_storey_continuation_mode(true);
+    c.ceiling_point_tap(4.0, 3.3); // inside the region under storey 1
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert_eq!(storey.ceiling_continuations.len(), 1);
+    let link = &storey.ceiling_continuations[0];
+    assert_eq!(
+        link.source, link.target,
+        "covered target: the containing region wins — source is the tap itself"
+    );
+    assert_eq!(link.source_storey_offset, 1);
+    let region = storey
+        .ceilings
+        .regions
+        .iter()
+        .find(|r| r.polygon.exterior.iter().all(|v| v.y < 4.34))
+        .expect("the continued region");
+    for v in &region.polygon.exterior {
+        let expect = if (v.y - 2.331453561782837).abs() < 1e-6 {
+            5.25
+        } else {
+            4.25
+        };
+        assert!(
+            (v.z - expect).abs() < 1e-3,
+            "storey-1 plane through the datums at y {}: expected {expect}, got {}",
+            v.y,
+            v.z
+        );
+    }
+}
+
 /// A wall-to-wall gable WITHIN a divided section whose start end snaps
 /// exactly ON the delta-0 divider: the end apex multi-claims both sections
 /// at resolve, and the side hint (stamped from the ridge's own MIDPOINT

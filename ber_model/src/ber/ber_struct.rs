@@ -693,7 +693,9 @@ impl Ber {
     /// (see [`CeilingContinuation`]): the region containing `target` will be
     /// re-emitted at every recompose as the plane of the region containing
     /// `source` (on this storey for `offset` 0, the storey above/below for
-    /// ±1 — cross-storey links store `source == target`). Both points are
+    /// ±1 — cross-storey links store `source == target` when the neighbour
+    /// covers the target, else the nearest source region's interior anchor:
+    /// `CeilingRegions::nearest_claim_anchor`). Both points are
     /// QUANTIZED to the f32 grid like an apex. Validation (regions existing,
     /// distinct) happens upstream in the shell's pick flow; a link that goes
     /// stale is skipped at apply. No-op when the storey doesn't exist.

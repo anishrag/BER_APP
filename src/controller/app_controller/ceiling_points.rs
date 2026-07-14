@@ -761,13 +761,17 @@ impl AppController {
                 }
                 match tool {
                     Some(ContinuationTool::Storey) => {
-                        // Which neighbouring storeys have a ceiling here?
+                        // Which neighbouring storeys have a usable ceiling?
+                        // COVERAGE of the target point is not required — a
+                        // plane extends over an area it doesn't cover via
+                        // the nearest-region rule (deb23cbf), so any storey
+                        // with a resolvable source anchor qualifies.
                         let record = self.current_record.as_ref().expect("checked above");
                         let has = |i: i64| {
                             usize::try_from(i)
                                 .ok()
                                 .and_then(|i| record.data.storeys.get(i))
-                                .is_some_and(|s| !s.ceilings.claim_regions(p).is_empty())
+                                .is_some_and(|s| s.ceilings.nearest_claim_anchor(p).is_some())
                         };
                         let (above, below) = (has(idx as i64 + 1), has(idx as i64 - 1));
                         match (above, below) {
@@ -785,7 +789,7 @@ impl AppController {
                             }
                             (false, false) => {
                                 log::warn!(
-                                    "no neighbouring storey has a ceiling over that area — \
+                                    "no neighbouring storey has a ceiling to continue — \
                                      still picking"
                                 );
                             }
@@ -829,12 +833,19 @@ impl AppController {
     }
 
     /// Commit the pending CONTINUE-from pick against the storey ABOVE
-    /// (`up = true`) or BELOW: the source region is auto-resolved as the one
-    /// containing the TARGET point on that storey (no cross-storey tapping),
-    /// and the plane converts through the floor datums at recompose. `Err`
-    /// (user-facing) when the storey doesn't exist or has no ceiling region
-    /// over the target point (the pick then stays open). On success the loop
-    /// restarts at PickTarget.
+    /// (`up = true`) or BELOW: the source region is auto-resolved on that
+    /// storey (no cross-storey tapping) — the region CONTAINING the target
+    /// point when its ceiling covers it, else the NEAREST region
+    /// ([`CeilingRegions::nearest_claim_anchor`] — plane extension over an
+    /// area the neighbour doesn't cover, field report deb23cbf; the stored
+    /// source anchor is that region's nearest ring point nudged inside, so
+    /// every recompose finds the same face). The plane converts through the
+    /// floor datums at recompose. `Err` (user-facing) when the storey
+    /// doesn't exist or has no ceiling at all (the pick then stays open).
+    /// On success the loop restarts at PickTarget.
+    ///
+    /// [`CeilingRegions::nearest_claim_anchor`]:
+    /// ber_model::ber::structural::CeilingRegions::nearest_claim_anchor
     pub fn ceiling_continuation_from_storey(&mut self, up: bool) -> Result<(), String> {
         let Some(PendingCeilingContinuation::PickSource { target }) =
             self.pending_ceiling_continuation
@@ -853,14 +864,12 @@ impl AppController {
             .ok()
             .and_then(|i| record.data.storeys.get(i))
             .ok_or_else(|| format!("There is no storey {which} this one."))?;
-        if src.ceilings.claim_regions(target).first().is_none() {
-            return Err(format!(
-                "The storey {which} has no ceiling over that area — set its ceiling height first."
-            ));
-        }
+        let source = src.ceilings.nearest_claim_anchor(target).ok_or_else(|| {
+            format!("The storey {which} has no ceiling to continue — set its ceiling height first.")
+        })?;
         record
             .data
-            .add_ceiling_continuation(idx, target, target, offset);
+            .add_ceiling_continuation(idx, target, source, offset);
         self.restart_continuation_pick(idx);
         Ok(())
     }

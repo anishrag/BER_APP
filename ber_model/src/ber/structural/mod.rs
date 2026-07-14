@@ -3174,6 +3174,46 @@ mod tests {
         assert_eq!(r.claim_regions(Point2f64::new(2.0, 0.5)), vec![0]);
     }
 
+    /// [`CeilingRegions::nearest_claim_anchor`]: a claimed point anchors as
+    /// itself (the containing region wins — the covered from-storey case);
+    /// an outside point anchors just inside the NEAREST region's ring
+    /// (claimable by exactly that region — the deb23cbf plane-extension
+    /// source); no usable region → `None`.
+    #[test]
+    fn nearest_claim_anchor_contained_then_nearest_nudged() {
+        let cid = ItemId::default();
+        let one = CeilingRegions::default_for_footprint(vec![square(0.0, 0.0, 4.0, 2.0)], 2.4, cid);
+        // Contained: the anchor is the point itself.
+        let p = Point2f64::new(1.0, 1.0);
+        assert_eq!(one.nearest_claim_anchor(p), Some(p));
+        // Outside, past the top edge: the nearest ring point nudged ~1 mm
+        // inside — strictly claimable by the region.
+        let a = one.nearest_claim_anchor(Point2f64::new(2.0, 5.0)).unwrap();
+        assert!(
+            (a.x - 2.0).abs() < 1e-9 && a.y < 2.0 && (2.0 - a.y) < 2e-3,
+            "nudged inside the top edge: {a:?}"
+        );
+        assert_eq!(one.claim_regions(a), vec![0]);
+        // Diagonally past a corner: still anchors into the region.
+        let a = one.nearest_claim_anchor(Point2f64::new(9.0, 9.0)).unwrap();
+        assert_eq!(one.claim_regions(a), vec![0]);
+        // Two regions: the NEAREST one is chosen, and the anchor claims it
+        // alone (not the shared boundary between them).
+        let mut two =
+            CeilingRegions::default_for_footprint(vec![square(0.0, 0.0, 2.0, 2.0)], 2.4, cid);
+        two.regions.extend(
+            CeilingRegions::default_for_footprint(vec![square(2.0, 0.0, 4.0, 2.0)], 2.4, cid)
+                .regions,
+        );
+        let a = two.nearest_claim_anchor(Point2f64::new(5.0, 1.0)).unwrap();
+        assert_eq!(two.claim_regions(a), vec![1], "the nearest region, alone");
+        // No regions at all.
+        let empty = CeilingRegions {
+            regions: Vec::new(),
+        };
+        assert_eq!(empty.nearest_claim_anchor(p), None);
+    }
+
     /// MULTI-CLAIM DETERMINISM (the legacy / hand-edited shared-boundary
     /// case validation now prevents creating): an apex on the boundary
     /// SHARED by two regions claims both, in ascending region order, and
