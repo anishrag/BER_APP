@@ -152,7 +152,7 @@ pub(super) fn panel_title(view: &SketchView<'_>) -> &'static str {
             || view.ceiling_step_orientation_pending
             || view.ceiling_step_side_pending
         {
-            return "Ceiling steps";
+            return "Divide ceiling";
         }
         if !view.ceiling_ridge_area_options.is_empty() {
             return "Ridge";
@@ -342,13 +342,15 @@ pub(super) fn instruction(view: &SketchView<'_>) -> Option<&'static str> {
             return Some("Floor steps — draw the step line across the area.");
         }
         if view.ceiling_step_orientation_pending {
-            return Some("Ceiling step — choose the step line's direction.");
+            return Some("Divide ceiling — choose the dividing line's direction.");
         }
         if view.ceiling_step_side_pending {
-            return Some("Ceiling step — tap the side of the line where the ceiling steps.");
+            return Some("Divide ceiling — tap the section to raise or lower.");
         }
         if view.ceiling_step_mode {
-            return Some("Ceiling steps — draw the step line, then set the level change.");
+            return Some(
+                "Divide the ceiling — draw a line to split it, or tap a section to set its height.",
+            );
         }
         if !view.ceiling_ridge_area_options.is_empty() {
             return Some("Choose which area this ridge should slope.");
@@ -670,7 +672,7 @@ pub(super) fn render_delete_panel<F: FnMut(UiEvent)>(
                             }
                         }
                         if !view.ceiling_step_region_polygons.is_empty() {
-                            section(ui, "Ceiling steps");
+                            section(ui, "Ceiling sections");
                             for (ring, label) in view.ceiling_step_region_polygons.iter() {
                                 ui.horizontal(|ui| {
                                     if ui.button("🗑").clicked() {
@@ -678,7 +680,14 @@ pub(super) fn render_delete_panel<F: FnMut(UiEvent)>(
                                             SketchEvent::DeleteCeilingStepRegion(ring.clone()),
                                         ));
                                     }
-                                    ui.label(label);
+                                    // A same-height split carries an empty
+                                    // label (no canvas badge — report
+                                    // cb7a6b9b); the panel names it plainly.
+                                    ui.label(if label.is_empty() {
+                                        "section boundary"
+                                    } else {
+                                        label
+                                    });
                                 });
                             }
                         }
@@ -975,7 +984,7 @@ fn ceiling_step_toolbar<F: FnMut(UiEvent)>(ui: &mut egui::Ui, on_event: &mut F) 
     // (The "line direction" instruction is in the bottom bar.)
     if ui
         .button("Horizontal")
-        .hint("A horizontal step line through the tapped point")
+        .hint("A horizontal dividing line through the tapped point")
         .clicked()
     {
         on_event(UiEvent::Sketch(SketchEvent::ChooseCeilingStepOrientation {
@@ -984,7 +993,7 @@ fn ceiling_step_toolbar<F: FnMut(UiEvent)>(ui: &mut egui::Ui, on_event: &mut F) 
     }
     if ui
         .button("Vertical")
-        .hint("A vertical step line through the tapped point")
+        .hint("A vertical dividing line through the tapped point")
         .clicked()
     {
         on_event(UiEvent::Sketch(SketchEvent::ChooseCeilingStepOrientation {

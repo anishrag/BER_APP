@@ -280,18 +280,20 @@ impl StoreyDoc {
     }
 
     /// Every wall the assessor can COPY a length from while a dimension
-    /// prompt is open — `(start, end, current length)` in plan coords, the
-    /// tap-to-copy label set. Deliberately GENEROUS (the assessor chains
-    /// expressions from walls measured once, so a missing label is a missing
-    /// input key): once a plan is in metres, EVERY wall carries its current
-    /// drawn length — the settled outline's walls, and the active in-flight
-    /// shape's too — not just user-confirmed ones. Excluded: the prompted
-    /// wall and its length-equivalents (their length IS the unknown being
-    /// asked; the prompt box already shows their current value), and every
-    /// wall of a plan still in pixel space (`!scale_set` — pixel numbers are
-    /// meaningless). Completed living areas are labelled by the living-area
-    /// path (`known_length_wall_segments`), not repeated here. Empty when no
-    /// prompt is open.
+    /// prompt is open — `(start, end, length)` in plan coords, the
+    /// tap-to-copy label set. CONFIRMED-only: a wall qualifies only when its
+    /// length is a genuine KNOWN — every parameter its length depends on has
+    /// been entered/derived in the dimensioning loop
+    /// (`walls_with_known_length`) — never a length that is merely
+    /// geometrically derivable from the resolved ring. A not-yet-set wall
+    /// carries no label, so its placeholder pixel/guess length is never shown
+    /// or copied. Excluded on top of that: the prompted wall and its
+    /// length-equivalents (their length IS the unknown being asked; the
+    /// prompt box already shows their current value). The active living
+    /// area's own known walls are labelled by the living-area path
+    /// (`known_length_wall_segments`), not repeated here. Empty when no
+    /// prompt is open. This set is exactly what the canvas both LABELS and
+    /// offers as copy candidates — the two stay identical by construction.
     pub fn copyable_wall_labels(&self) -> Vec<((f64, f64), (f64, f64), f32)> {
         let Some(prompt) = self.dimensioning.current_prompt.as_ref() else {
             return Vec::new();
@@ -313,14 +315,20 @@ impl StoreyDoc {
             .unwrap_or_default();
 
         let mut out: Vec<((f64, f64), (f64, f64), f32)> = Vec::new();
-        let mut push_plan = |plan: &manip_plan::FloorPlan, exclude_prompt: bool| {
-            for (ri, ring) in plan.polygons().iter().enumerate() {
-                let n = ring.len();
-                if n < 3 {
-                    continue;
-                }
-                for e in 0..n {
+        // Only walls whose length is genuinely SET in `known_params` — the
+        // confirmed dimension-loop lengths, not every determinable wall.
+        let mut push_known =
+            |plan: &manip_plan::FloorPlan, known: &HashSet<_>, exclude_prompt: bool| {
+                let polygons = plan.polygons();
+                for (ri, e) in plan.walls_with_known_length(known) {
                     if exclude_prompt && excluded.contains(&(ri, e)) {
+                        continue;
+                    }
+                    let Some(ring) = polygons.get(ri) else {
+                        continue;
+                    };
+                    let n = ring.len();
+                    if n < 3 {
                         continue;
                     }
                     let (a, b) = (ring[e], ring[(e + 1) % n]);
@@ -330,34 +338,35 @@ impl StoreyDoc {
                     }
                     out.push(((a.x as f64, a.y as f64), (b.x as f64, b.y as f64), len));
                 }
-            }
-        };
+            };
 
         match self.active {
             ActiveShape::Outline => {
-                // The outline IS the live buffer: all its walls minus the
-                // prompt's own.
-                if self.dimensioning.scale_set {
-                    push_plan(&self.floor_plan, true);
-                }
+                // The outline IS the live buffer: its confirmed walls minus
+                // the prompt's own.
+                push_known(&self.floor_plan, &self.dimensioning.known_params, true);
             }
             ActiveShape::PhaseArea | ActiveShape::StepArea => {
-                // The settled outline (every wall — the slot is current, the
-                // live buffer holds the carve)…
-                if self.outline.dimensioning.scale_set {
-                    push_plan(&self.outline.floor_plan, false);
-                }
-                // …plus the in-flight carve's walls minus the prompt's.
-                if self.dimensioning.scale_set {
-                    push_plan(&self.floor_plan, true);
-                }
+                // The settled outline's confirmed walls (the slot is current,
+                // the live buffer holds the carve)…
+                push_known(
+                    &self.outline.floor_plan,
+                    &self.outline.dimensioning.known_params,
+                    false,
+                );
+                // …plus the in-flight carve's confirmed walls minus the
+                // prompt's.
+                push_known(&self.floor_plan, &self.dimensioning.known_params, true);
             }
             ActiveShape::LivingArea(_) => {
                 // The active living area's known walls are already labelled
-                // by the living-area path — add only the settled outline.
-                if self.outline.dimensioning.scale_set {
-                    push_plan(&self.outline.floor_plan, false);
-                }
+                // by the living-area path — add only the settled outline's
+                // confirmed walls.
+                push_known(
+                    &self.outline.floor_plan,
+                    &self.outline.dimensioning.known_params,
+                    false,
+                );
             }
         }
         out

@@ -791,12 +791,12 @@ fn tool_ui<F: FnMut(UiEvent)>(
             if ui
                 .add_enabled(
                     enabled,
-                    egui::Button::selectable(flags.ceiling_step_mode, "⬆ Ceiling steps"),
+                    egui::Button::selectable(flags.ceiling_step_mode, "⬆ Divide ceiling"),
                 )
                 .hint(
-                    "Raise or lower part of the ceiling: draw a straight line \
-                     across the plan and tap the side that steps, or draw a \
-                     closed area (like a floor step), then enter the amount",
+                    "Split the ceiling into sections at different heights: draw a \
+                     straight line across the plan and tap the side to raise or \
+                     lower, or draw a closed area, then enter the height",
                 )
                 .disabled_hint("Set the default ceiling height first (the Heights field above)")
                 .clicked()
@@ -853,7 +853,7 @@ fn tool_ui<F: FnMut(UiEvent)>(
             } else if ui
                 .add_enabled(enabled, egui::Button::new("↺ Reset heights"))
                 .hint(
-                    "Reset this storey's ceiling shape to one flat ceiling at the                      default height (removes steps, ridges, high points, dividers                      and continuations — the default height, floor steps and                      dormers stay). Asks to confirm.",
+                    "Reset this storey's ceiling shape to one flat ceiling at the                      default height (removes ceiling sections, ridges, high                      points and continuations — the default height, floor steps                      and dormers stay). Asks to confirm.",
                 )
                 .disabled_hint("Set the default ceiling height first (the Heights field above)")
                 .clicked()

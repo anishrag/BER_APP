@@ -2339,15 +2339,19 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             );
         }
 
-        // Ceiling-step areas: committed regions (amber, labelled with
-        // the signed delta — hue distinct from the floor steps' teal),
+        // Ceiling-step areas: committed HEIGHT steps (amber, labelled with
+        // the resulting height — hue distinct from the floor steps' teal),
         // the two side half-rects while the side tap is pending, and
-        // the dashed provisional line.
+        // the dashed provisional line. Same-height DIVIDERS carry an EMPTY
+        // label and are SKIPPED here — no amber fill, no text badge (report
+        // cb7a6b9b: a divider is just a boundary, shown as the dashed cut
+        // below); they stay selectable/deletable via their session ring.
         let ceiling_step_tint = egui::Color32::from_rgb(255, 170, 60); // amber
         if !objects_phase {
             let ceiling_step_display: Vec<PhaseDisplayRegion> = view
                 .ceiling_step_region_polygons
                 .iter()
+                .filter(|(_, label)| !label.is_empty())
                 .map(|(ring, label)| PhaseDisplayRegion::from_ring(ring.clone(), label.clone()))
                 .collect();
             render::render_phase_regions(
@@ -2361,7 +2365,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 ceiling_step_tint,
             );
             // Same-height dividers: a faint dashed pass, distinct from the amber
-            // height steps (divider regions are filtered out of the amber feed above).
+            // height steps (divider regions carry an empty label, skipped above).
             render::render_ceiling_dividers(
                 &painter,
                 rect,

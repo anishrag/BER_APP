@@ -392,6 +392,7 @@ fn split_floors_intact(floors: FloorRegions, rings: &[Vec<Point2f64>]) -> FloorR
                 construction_id: region.construction_id,
                 level_m: region.level_m,
                 exposure: region.exposure,
+                height_m: region.height_m,
             };
             for poly in inside.0.iter().chain(outside.0.iter()) {
                 if poly.unsigned_area() >= SLIVER_AREA_M2 {

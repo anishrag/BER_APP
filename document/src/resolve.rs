@@ -400,6 +400,11 @@ pub fn resolve_storey(
         .map(|f| (f, WallExposure::Unset))
         .collect();
     storey.walls = walls.with_risers(risers, wall_cid);
+    // LIVING-AREA HEIGHT SNAP: each living area's floor-to-ceiling height snaps
+    // to the ceiling directly above it (derived every resolve, so it tracks a
+    // ceiling change). Runs here — ceilings AND walls are final, so the
+    // `copy_height_ceiling_at` primitive reads the settled geometry.
+    stamp_living_area_heights(&mut storey);
     // WALL FACE PARTITIONS: a perimeter wall the assessor split along arbitrary
     // (diagonal) in-plane lines resolves to one region per face partition, each
     // carrying its own painted exposure. Runs HERE — after `with_risers` (the
@@ -434,6 +439,53 @@ pub fn resolve_storey(
     // rebuilt from placements (ceiling ids regenerate, so it can't be carried).
     ber_model::ber::openings::rebuild_opes(&mut storey);
     storey
+}
+
+/// Boundary tolerance (metres) for reading the known ceiling height over a
+/// living area. Only affects the ridge/apex/wall proximity checks inside
+/// [`ber_model::ber::structural::Storey::copy_height_ceiling_at`]; a living
+/// area's centroid is strictly interior to the ceiling region above it, so the
+/// flat-ceiling containment test that carries the common case is tolerance-free.
+const LIVING_AREA_SNAP_TOL_M: f64 = 1e-3;
+
+/// The ceiling height (metres above the storey floor datum) a LIVING AREA snaps
+/// to: the KNOWN flat ceiling height directly above the area, evaluated at its
+/// centroid `at` via the same
+/// [`copy_height_ceiling_at`](ber_model::ber::structural::Storey::copy_height_ceiling_at)
+/// "known height" primitive the copy-height and ceiling-step tools use. Falls
+/// back to the storey's default `ceiling_height_m` when the centroid sits under
+/// a sloped / ridged face where no single height is readable; `None` when the
+/// storey has no ceiling height at all — nothing to snap to yet.
+///
+/// NON-UNIFORM ceilings: the snap is a POINT PICK at the area's centroid (its
+/// representative interior point), NOT an area-weighted average — deliberately
+/// mirroring the copy-height tool's tap. A room wholly under one flat ceiling
+/// snaps to exactly that height; a room straddling a ceiling step snaps to the
+/// ceiling over its centroid; a room under a slope falls back to the storey
+/// default. `storey.ceilings` and `storey.walls` must be resolved before this
+/// is called (the resolve pass calls it once both are final).
+pub fn living_area_ceiling_height(storey: &Storey, at: Point2f64, tol: f64) -> Option<f64> {
+    storey
+        .copy_height_ceiling_at(at.x, at.y, tol)
+        .or(storey.ceiling_height_m)
+}
+
+/// Snap every [`Storey::living_areas`](ber_model::ber::structural::Storey)
+/// region's `height_m` to the ceiling above it
+/// ([`living_area_ceiling_height`]). Re-derived on each resolve — a purely
+/// geometric field, never an input — so it always tracks the current ceiling.
+/// No-op when there are no living areas.
+fn stamp_living_area_heights(storey: &mut Storey) {
+    if storey.living_areas.regions.is_empty() {
+        return;
+    }
+    // Take the regions out so the immutable `copy_height_ceiling_at` borrow of
+    // `storey` (inside the helper) doesn't collide with mutating them.
+    let mut regions = std::mem::take(&mut storey.living_areas).regions;
+    for r in &mut regions {
+        r.height_m = living_area_ceiling_height(storey, r.centroid(), LIVING_AREA_SNAP_TOL_M);
+    }
+    storey.living_areas = FloorRegions { regions };
 }
 
 /// Rebuild `storey.walls.regions`, splitting every face-partitioned perimeter
@@ -1436,6 +1488,132 @@ mod tests {
         assert!(storey.ceilings.regions.is_empty());
 
         assert!(storey.living_areas.regions.is_empty());
+    }
+
+    /// A living area under a single FLAT ceiling snaps its `height_m` to that
+    /// ceiling height when the storey resolves.
+    #[test]
+    fn living_area_height_snaps_to_flat_ceiling() {
+        let pts = vec![
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(6.0, 0.0),
+            Point2f32::new(6.0, 6.0),
+            Point2f32::new(0.0, 6.0),
+        ];
+        let plan = FloorPlan::from_clean_ring(&pts).unwrap();
+        let mut doc = StoreyDoc::default();
+        doc.dimensioning.scale_set = true;
+        doc.floor_plan = plan.clone();
+        doc.outline = ShapeSlot {
+            floor_plan: plan,
+            dimensioning: doc.dimensioning.clone(),
+        };
+        // One interior living area: a 2×2 m room centred in the storey.
+        let la = vec![
+            Point2f32::new(2.0, 2.0),
+            Point2f32::new(4.0, 2.0),
+            Point2f32::new(4.0, 4.0),
+            Point2f32::new(2.0, 4.0),
+        ];
+        doc.living_areas.push(ShapeSlot {
+            floor_plan: FloorPlan::from_clean_ring(&la).unwrap(),
+            dimensioning: Default::default(),
+        });
+
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &[]);
+        ber.set_default_ceiling_height(Some(0), 2.55);
+        let storey = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+
+        assert_eq!(storey.living_areas.regions.len(), 1);
+        assert_eq!(
+            storey.living_areas.regions[0].height_m,
+            Some(2.55),
+            "living area snaps to the flat ceiling above it"
+        );
+    }
+
+    /// The snap is a POINT PICK at the area's centroid: over a NON-UNIFORM
+    /// (stepped) ceiling, each area reads the ceiling region directly above its
+    /// centroid — the documented rule for varying ceilings.
+    #[test]
+    fn living_area_height_reads_the_ceiling_over_its_centroid() {
+        use ber_model::ber::common::ItemId;
+        use ber_model::ber::structural::{CeilingExposure, CeilingRegion, CeilingRegions, Opes};
+        let cid = ItemId::default();
+        // Two flat ceiling pieces (a ceiling step): x 0..4 at z = 2.4, x 4..8 at
+        // z = 3.0.
+        let piece = |x0: f64, x1: f64, z: f64| CeilingRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(vec![
+                Point3f64::new(x0, 0.0, z),
+                Point3f64::new(x1, 0.0, z),
+                Point3f64::new(x1, 4.0, z),
+                Point3f64::new(x0, 4.0, z),
+            ]),
+            opes: Opes::default(),
+            construction_id: cid,
+            exposure: CeilingExposure::default(),
+        };
+        let storey = Storey {
+            ceiling_height_m: Some(2.4),
+            ceilings: CeilingRegions {
+                regions: vec![piece(0.0, 4.0, 2.4), piece(4.0, 8.0, 3.0)],
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            living_area_ceiling_height(&storey, Point2f64::new(2.0, 2.0), 1e-3),
+            Some(2.4),
+            "an area over the low step reads 2.4"
+        );
+        assert_eq!(
+            living_area_ceiling_height(&storey, Point2f64::new(6.0, 2.0), 1e-3),
+            Some(3.0),
+            "an area over the high step reads 3.0"
+        );
+    }
+
+    /// Under a SLOPED ceiling face (no single readable height at the centroid),
+    /// the snap falls back to the storey's default ceiling height.
+    #[test]
+    fn living_area_height_falls_back_to_default_under_a_slope() {
+        use ber_model::ber::common::ItemId;
+        use ber_model::ber::structural::{CeilingExposure, CeilingRegion, CeilingRegions, Opes};
+        let cid = ItemId::default();
+        let storey = Storey {
+            ceiling_height_m: Some(2.4),
+            ceilings: CeilingRegions {
+                regions: vec![CeilingRegion {
+                    id: ItemId::default(),
+                    polygon: Polygon3D::new(vec![
+                        Point3f64::new(0.0, 0.0, 2.4),
+                        Point3f64::new(4.0, 0.0, 2.4),
+                        Point3f64::new(4.0, 4.0, 3.1),
+                        Point3f64::new(0.0, 4.0, 3.1),
+                    ]),
+                    opes: Opes::default(),
+                    construction_id: cid,
+                    exposure: CeilingExposure::default(),
+                }],
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            living_area_ceiling_height(&storey, Point2f64::new(2.0, 2.0), 1e-3),
+            Some(2.4),
+            "mid-slope centroid → fall back to the storey default"
+        );
+    }
+
+    /// With no ceiling height entered yet there is nothing to snap to.
+    #[test]
+    fn living_area_height_is_none_without_a_ceiling() {
+        let storey = Storey::default();
+        assert_eq!(
+            living_area_ceiling_height(&storey, Point2f64::new(1.0, 1.0), 1e-3),
+            None
+        );
     }
 
     /// REGRESSION: on a CHECKPOINT reload a phase-split storey's outline is

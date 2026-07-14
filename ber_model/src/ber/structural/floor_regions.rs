@@ -23,6 +23,16 @@ pub struct FloorRegion {
     /// Thermal exposure (boundary condition) set in the Mapping phase.
     #[serde(default)]
     pub exposure: FloorExposure,
+    /// Ceiling height in metres above the storey floor datum for a LIVING-AREA
+    /// region — the snapped floor-to-ceiling height of the room, taken from the
+    /// ceiling above it (see [`document::living_area_ceiling_height`]).
+    /// Populated ONLY on [`Storey::living_areas`](crate::ber::structural::Storey)
+    /// regions; `None` on ordinary floor partition regions, which carry no
+    /// vertical extent (`level_m` is their datum). Re-derived on every resolve
+    /// so it always tracks the ceiling above — hence `skip_serializing_if` keeps
+    /// records with no living-area height byte-identical to the pre-field layout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height_m: Option<f64>,
 }
 
 impl FloorRegion {
@@ -68,6 +78,7 @@ impl FloorRegions {
             construction_id,
             level_m: 0.0,
             exposure: FloorExposure::default(),
+            height_m: None,
         };
 
         Self {
@@ -94,6 +105,7 @@ impl FloorRegions {
                     construction_id,
                     level_m: 0.0,
                     exposure: FloorExposure::default(),
+                    height_m: None,
                 }
             })
             .collect();
@@ -340,6 +352,7 @@ impl FloorRegions {
             construction_id: cid,
             level_m: 0.0,
             exposure: FloorExposure::default(),
+            height_m: None,
         };
         let outline_poly = to_poly(outline);
         let mut regions: Vec<FloorRegion> = Vec::new();
@@ -395,6 +408,7 @@ impl FloorRegions {
                 construction_id: region.construction_id,
                 level_m,
                 exposure: region.exposure,
+                height_m: region.height_m,
             };
             let mut claimed: MultiPolygon<f64> = MultiPolygon::new(vec![]);
             for (ring, level) in areas {
@@ -459,6 +473,7 @@ impl FloorRegions {
                     construction_id: region.construction_id,
                     level_m: region.level_m,
                     exposure: region.exposure,
+                    height_m: region.height_m,
                 };
                 // inside ∪ outside == the whole region, so a region that the cut
                 // misses (or fully covers) emits its whole self re-id'd — never
@@ -538,6 +553,7 @@ impl Default for FloorRegion {
             construction_id: ItemId::default(),
             level_m: 0.0,
             exposure: FloorExposure::default(),
+            height_m: None,
         }
     }
 }

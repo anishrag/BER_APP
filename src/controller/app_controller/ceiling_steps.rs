@@ -788,7 +788,7 @@ impl AppController {
             _ => return Ok(()), // nothing awaiting an amount — no-op
         };
         if !delta_m.is_finite() {
-            return Err("Ceiling step must be a number.".into());
+            return Err("The ceiling height must be a number.".into());
         }
         // Snap a near-zero step to EXACTLY 0.0 — a same-height divider (the
         // type-0 path and the "Keep same height" button converge here, and
@@ -943,15 +943,18 @@ impl AppController {
     }
 
     /// The current storey's committed step regions, as `(ring, label)` in
-    /// world coords, for the UI's amber tint + label. EVERY step shows —
-    /// same-height DIVIDERS included (labelled "divider"): the field report's
-    /// dead-end was an invisible, unselectable, undeletable divider, so
-    /// hiding them is over. Height steps carry the delta AND the resulting
+    /// world coords. EVERY region is listed (index-aligned with the raw
+    /// session list; deletion maps by world ring) so all are selectable and
+    /// deletable — the field report's dead-end was an invisible,
+    /// unremovable divider. But a same-height DIVIDER carries an EMPTY label
+    /// (`Δ 0`): the canvas draws no amber fill or text for it (report
+    /// cb7a6b9b — a divider is just a boundary between two same-height
+    /// sections, shown as the dashed cut
+    /// [`ceiling_divider_lines`](Self::ceiling_divider_lines), not badged as
+    /// a highlighted "divider" section); the delete panel substitutes its
+    /// own row text. Real HEIGHT steps carry the delta AND the resulting
     /// height ("+0.30 m → 2.70 m", against the storey default — overlapping
-    /// steps compose, so treat it as a guide). The dashed divider cut
-    /// ([`ceiling_divider_lines`](Self::ceiling_divider_lines)) still draws
-    /// on top. Index-aligned with the raw session list now that nothing is
-    /// filtered; deletion still maps by world ring.
+    /// steps compose, so treat it as a guide) and keep the amber tint.
     pub fn ceiling_step_region_polygons(&self) -> Vec<(Vec<(f64, f64)>, String)> {
         let idx = self.current_storey_idx.unwrap_or(0);
         let default = self
@@ -982,14 +985,16 @@ impl AppController {
             .unwrap_or_default()
     }
 
-    /// The label for a committed ceiling-step region: "divider" for a
-    /// same-height partition (`|Δ| < 1e-3`), else the signed delta
-    /// ("+0.20 m"). Used by the region list/test surface; the amber feed
+    /// The label for a committed ceiling-step region: EMPTY for a same-height
+    /// partition (`|Δ| < 1e-3` — a divider carries no height text; it shows
+    /// as the dashed boundary only, report cb7a6b9b), else the signed delta
+    /// ("+0.20 m"). The amber feed
     /// ([`ceiling_step_region_polygons`](Self::ceiling_step_region_polygons))
-    /// excludes dividers entirely.
+    /// appends the resulting height to a real step; an empty label there is
+    /// the divider marker the canvas skips and the delete panel re-texts.
     pub fn ceiling_step_region_label(delta_m: f64) -> String {
         if delta_m.abs() < 1e-3 {
-            "divider".to_string()
+            String::new()
         } else {
             format!("{:+.2} m", delta_m)
         }

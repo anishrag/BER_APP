@@ -1245,7 +1245,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             copy_height_action(),
             Action::new(
                 "Keep same height",
-                "Split without a step — both sides stay the same height",
+                "Split without a height change — both sections stay the same height",
                 |_| SketchEvent::KeepCeilingSameHeight,
             )
             .bare()
@@ -1254,8 +1254,8 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         if editing {
             actions.push(
                 Action::new(
-                    "Delete step",
-                    "Remove this step entirely — the area re-joins",
+                    "Remove division",
+                    "Remove this division — the sections re-join",
                     |_| SketchEvent::DeleteSelectedCeilingStep,
                 )
                 .bare()
@@ -1266,9 +1266,9 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             Action::new(
                 "Cancel",
                 if editing {
-                    "Leave this step as it is"
+                    "Leave this section as it is"
                 } else {
-                    "Discard this ceiling step"
+                    "Discard this ceiling division"
                 },
                 |_| SketchEvent::CancelPendingCeilingStep,
             )
@@ -1281,9 +1281,9 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             view.ceiling_step_editing.as_ref(),
             view.ceiling_step_current_height,
         ) {
-            (Some((delta, _)), Some(h)) if delta.abs() < 1e-3 => {
-                Some(format!("Currently: divider (no step) · area at {h:.2} m"))
-            }
+            (Some((delta, _)), Some(h)) if delta.abs() < 1e-3 => Some(format!(
+                "Currently: no step (same height) · area at {h:.2} m"
+            )),
             (Some((delta, _)), Some(h)) => {
                 Some(format!("Currently: {delta:+.2} m · area at {h:.2} m"))
             }
@@ -1294,9 +1294,9 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             ctx,
             rect,
             if editing {
-                "Edit ceiling step (m)"
+                "Edit ceiling section (m)"
             } else {
-                "Ceiling step (m)"
+                "Ceiling section height (m)"
             },
             subtitle.as_deref(),
             "e.g. 0.2",

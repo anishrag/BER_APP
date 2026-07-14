@@ -4222,6 +4222,7 @@ mod tests {
             construction_id: ItemId::default(),
             level_m: 0.0,
             exposure,
+            height_m: None,
         };
         let ceil_sq = |x0: f64| {
             Polygon3D::new(vec![

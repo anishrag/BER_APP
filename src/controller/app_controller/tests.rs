@@ -144,16 +144,19 @@ fn prompted_wall_is_never_a_known_length_copy_source() {
     assert!(!c.walls_with_known_length().is_empty());
 }
 
-/// The field report behind the generous label set (dump 07-13T1633): while a
-/// PHASE CARVE was being dimensioned, only "some" walls were labelled — the
-/// live buffer held the carve's little ring, so `walls_with_known_length`'s
+/// The field report behind the label set (dump 07-13T1633): while a PHASE
+/// CARVE was being dimensioned, only "some" walls were labelled — the live
+/// buffer held the carve's little ring, so `walls_with_known_length`'s
 /// indices landed on the wrong polygon, and the settled outline (including
-/// "the full length on the right side") was offered nowhere. Now: during a
-/// carve's dimension loop, EVERY outline wall is a labelled copy source, the
-/// carve's own walls too (minus the prompted wall + its length-equivalents),
-/// and the region-label indices point at the OUTLINE again.
+/// "the full length on the right side") was offered nowhere. The genuine bug
+/// was the cross-application of indices; the fix keeps `walls_with_known_length`
+/// computed on the OUTLINE slot. Contract is CONFIRMED-only (user correction,
+/// 07-14): every SET outline wall is a labelled copy source — the right side
+/// among them, since it was a real dimension — but the not-yet-set carve
+/// walls carry no label (their length is still a guess). The prompted wall
+/// stays excluded.
 #[test]
-fn carve_dimensioning_offers_every_outline_wall_as_copy_source() {
+fn carve_dimensioning_offers_confirmed_outline_walls_as_copy_source() {
     let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
     c.create_ber(
         "T".into(),
@@ -171,7 +174,7 @@ fn carve_dimensioning_offers_every_outline_wall_as_copy_source() {
     c.document.dimensioning.scale_set = true;
     c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
     c.sync_active();
-    // No labels outside a prompt — the generous set is prompt-scoped.
+    // No labels outside a prompt — the copy set is prompt-scoped.
     assert!(c.copyable_wall_labels().is_empty(), "no prompt, no labels");
 
     let mut phases = ConstructionPhases::default();
@@ -189,15 +192,15 @@ fn carve_dimensioning_offers_every_outline_wall_as_copy_source() {
     assert!(c.dimensioning_active(), "carve prompts to be dimensioned");
 
     let labels = c.copyable_wall_labels();
-    // All FOUR outline walls are copy sources — including the right side's
-    // full length, the one the assessor couldn't select.
+    // All FOUR settled outline walls are copy sources — including the right
+    // side's full length, the one the assessor couldn't select.
     let outline_walls = labels
         .iter()
         .filter(|(_, _, len)| (len - 2.0).abs() < 1e-2)
         .count();
     assert_eq!(
         outline_walls, 4,
-        "every settled outline wall carries a label: {labels:?}"
+        "every CONFIRMED outline wall carries a label: {labels:?}"
     );
     assert!(
         labels.iter().any(|(a, b, len)| (a.0 - 2.0).abs() < 1e-3
@@ -205,16 +208,14 @@ fn carve_dimensioning_offers_every_outline_wall_as_copy_source() {
             && (len - 2.0).abs() < 1e-2),
         "the right side (x = 2) is offered at its full length: {labels:?}"
     );
-    // The carve contributes its walls too (generous: current drawn lengths,
-    // not just confirmed ones) — minus the prompted wall and its
-    // length-equivalent, so exactly the OTHER pair (~0.9 m) remains.
-    let carve_walls = labels
-        .iter()
-        .filter(|(_, _, len)| (len - 0.9).abs() < 0.15)
-        .count();
+    // Confirmed-only: the carve's walls are NOT yet set (a free interior carve
+    // shares none with the outline, so nothing is known on it), so its
+    // placeholder ~0.9 m lengths are never shown or copyable — exactly the
+    // four outline walls remain, nothing else.
     assert_eq!(
-        carve_walls, 2,
-        "the carve's non-prompted pair is copyable: {labels:?}"
+        labels.len(),
+        4,
+        "only the confirmed outline walls — no unset/derived lengths: {labels:?}"
     );
     // …and the prompted wall itself is never a source (no self-insert).
     let prompt = c.current_dimension_prompt().expect("prompt open");
@@ -234,18 +235,19 @@ fn carve_dimensioning_offers_every_outline_wall_as_copy_source() {
     );
     // The confirmed-label indices point at the OUTLINE regions again — while
     // the carve is active they used to index its little ring instead (the
-    // "random labels" bug).
+    // "random labels" bug — kept fixed).
     let known = c.walls_with_known_length();
     assert_eq!(known.len(), 4, "all outline edges known: {known:?}");
     assert!(known.iter().all(|(r, _)| *r == 0));
 }
 
-/// Generosity on the OUTLINE's own loop: before the scale is set nothing is
-/// labelled (pixel numbers are meaningless); from the first applied
-/// dimension on, every wall carries its current metric length except the
-/// prompted wall and its length-equivalents.
+/// The OUTLINE's own loop, confirmed-only (user correction, 07-14): before the
+/// scale is set nothing is labelled (pixel numbers are meaningless); after the
+/// first applied dimension, only the CONFIRMED walls carry a label — the
+/// just-set axis's pair — while the not-yet-asked axis (the prompted wall +
+/// its equivalent) stays unlabelled until it's entered.
 #[test]
-fn outline_mid_loop_labels_every_wall_once_scale_is_set() {
+fn outline_mid_loop_labels_only_confirmed_walls() {
     let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
     let square = vec![
         Point2f32::new(0.0, 0.0),
@@ -268,11 +270,12 @@ fn outline_mid_loop_labels_every_wall_once_scale_is_set() {
     assert_eq!(
         labels.len(),
         2,
-        "four walls minus the prompted one and its equivalent: {labels:?}"
+        "only the just-confirmed axis's pair is labelled; the unset axis \
+         (prompted wall + equivalent) is hidden: {labels:?}"
     );
     assert!(
         labels.iter().all(|(_, _, len)| (len - 4.0).abs() < 1e-2),
-        "labels show the current metric lengths: {labels:?}"
+        "labels show the confirmed metric length: {labels:?}"
     );
 }
 
@@ -5998,10 +6001,10 @@ fn absolute_edit_prefills_resolved_height_and_lands_exactly() {
     );
 }
 
-/// A-T8 (re-pinned for the step-editing overhaul): a divider's label reads
-/// "divider" and it now APPEARS in the amber feed — visible, selectable and
-/// deletable like any step (the field report's dead-end was an invisible
-/// divider). `ceiling_divider_lines` still emits its dashed cut segment.
+/// A-T8 (re-pinned, report cb7a6b9b): a divider carries an EMPTY label — no
+/// "divider" word, no amber badge — but still APPEARS in the feed (so it
+/// stays selectable and deletable; the field report's dead-end was an
+/// invisible divider). Its presentation is the dashed cut segment only.
 #[test]
 fn divider_label_feed_and_cut_segment() {
     let mut c = ceiling_ready_controller();
@@ -6010,16 +6013,17 @@ fn divider_label_feed_and_cut_segment() {
     c.materialize();
     c.reconstruct_ceiling_step_regions_for(0);
 
-    // Label.
-    assert_eq!(AppController::ceiling_step_region_label(0.0), "divider");
+    // Label: a divider has no text; a real step keeps its signed delta.
+    assert_eq!(AppController::ceiling_step_region_label(0.0), "");
     assert_eq!(AppController::ceiling_step_region_label(0.2), "+0.20 m");
 
-    // The amber feed now INCLUDES the dividers, labelled as such.
+    // The feed still INCLUDES the dividers (selectable/deletable), but with
+    // an empty label — the canvas skips the amber fill/text for them.
     let feed = c.ceiling_step_region_polygons();
-    assert!(!feed.is_empty(), "dividers show in the step feed");
+    assert!(!feed.is_empty(), "dividers still listed in the step feed");
     assert!(
-        feed.iter().all(|(_, label)| label == "divider"),
-        "both halves label as dividers: {feed:?}"
+        feed.iter().all(|(_, label)| label.is_empty()),
+        "both halves are unlabelled dividers: {feed:?}"
     );
 
     // The faint dashed cut: one segment per divider, on the split axis (X = 4).
@@ -6052,10 +6056,11 @@ fn deleting_from_the_filtered_feed_removes_the_right_region() {
     c.ceiling_step_regions.entry(0).or_default().push(divider);
     c.ceiling_step_regions.entry(0).or_default().push(step);
 
-    // The feed lists BOTH, in raw order — the step with its resulting height.
+    // The feed lists BOTH, in raw order — the divider unlabelled (no amber
+    // badge), the step with its resulting height.
     let feed = c.ceiling_step_region_polygons();
-    assert_eq!(feed.len(), 2, "divider AND step both visible");
-    assert_eq!(feed[0].1, "divider");
+    assert_eq!(feed.len(), 2, "divider AND step both listed");
+    assert_eq!(feed[0].1, "", "the divider carries no label");
     assert_eq!(feed[1].1, "+0.30 m → 2.70 m");
     let feed = vec![feed[1].clone()];
 
