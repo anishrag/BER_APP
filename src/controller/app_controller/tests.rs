@@ -20491,10 +20491,11 @@ fn deb23cbf_controller() -> AppController {
 /// storey 1's ceiling doesn't cover it, so the old source resolution
 /// ("region containing the target point on the ±1 storey") errored with
 /// "no ceiling over that area" and stored nothing. Plane extension is
-/// exactly what the tool is for: the source now falls back to the NEAREST
-/// region on the chosen storey, stored as a stable interior anchor
-/// (`CeilingRegions::nearest_claim_anchor` — the nearest ring point nudged
-/// ~1 mm inside the slope face), and the recompose continues the plane
+/// exactly what the tool is for: the source resolves to the nearest
+/// LATERAL region on the chosen storey, stored as a stable interior anchor
+/// (`CeilingRegions::nearest_lateral_anchor` — the nearest ring point
+/// nudged ~1 mm inside the slope face), and the recompose continues the
+/// plane
 /// physically straight through the datums: world z at the shared edge
 /// y = 4.3315 is the storey-1 eave 2.0 + datum 2.25 = 4.25 (storey-0
 /// local), falling at −0.5/m to 2.75 at y = 7.3315 — well above storey 0's
@@ -20577,43 +20578,44 @@ fn uncovered_strip_continues_the_storey_above_plane() {
     assert!(c.ceiling_continuation_picking_target());
 }
 
-/// The COVERED case keeps its original behaviour: "Ceiling from storey" on
-/// the region UNDER storey 1 resolves the source as the CONTAINING region
-/// first — the stored source is the target point itself, and the region
-/// takes storey 1's plane over its own span (5.25 → 4.25 through the
-/// datums).
+/// The COVERED case is the ERROR case (the user's semantics correction): a
+/// region DIRECTLY above the target is never a valid source — a plane
+/// continued laterally is physical; copied straight down through the slab
+/// onto the same footprint is not. Storey 1's single mono-pitch face sits
+/// directly over the tapped region and BESIDE nothing, so the PickTarget
+/// gate doesn't offer the storey at all (nothing stored, still picking),
+/// and the direct commit path rejects with the directly-over message.
 #[test]
-fn covered_region_from_storey_still_uses_the_containing_region() {
+fn covered_region_from_storey_is_rejected_as_directly_over() {
     let mut c = deb23cbf_controller();
     c.set_storey_continuation_mode(true);
     c.ceiling_point_tap(4.0, 3.3); // inside the region under storey 1
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
-    assert_eq!(storey.ceiling_continuations.len(), 1);
-    let link = &storey.ceiling_continuations[0];
-    assert_eq!(
-        link.source, link.target,
-        "covered target: the containing region wins — source is the tap itself"
+    assert!(
+        storey.ceiling_continuations.is_empty(),
+        "no lateral source on either neighbour — nothing stored"
     );
-    assert_eq!(link.source_storey_offset, 1);
-    let region = storey
-        .ceilings
-        .regions
-        .iter()
-        .find(|r| r.polygon.exterior.iter().all(|v| v.y < 4.34))
-        .expect("the continued region");
-    for v in &region.polygon.exterior {
-        let expect = if (v.y - 2.331453561782837).abs() < 1e-6 {
-            5.25
-        } else {
-            4.25
-        };
-        assert!(
-            (v.z - expect).abs() < 1e-3,
-            "storey-1 plane through the datums at y {}: expected {expect}, got {}",
-            v.y,
-            v.z
-        );
-    }
+    assert!(
+        c.ceiling_continuation_picking_target(),
+        "the gate keeps the target pick open (the storey is not offerable)"
+    );
+    // The commit path itself (the above/below button, reachable when BOTH
+    // neighbours qualify) rejects the directly-over source with the
+    // user-facing rule.
+    c.pending_ceiling_continuation = Some(PendingCeilingContinuation::PickSource {
+        target: domain::points::Point2f64::new(4.0, 3.3),
+    });
+    let err = c.ceiling_continuation_from_storey(true).unwrap_err();
+    assert!(
+        err.contains("directly over") && err.contains("beside"),
+        "got: {err}"
+    );
+    assert!(
+        c.current_record.as_ref().unwrap().data.storeys[0]
+            .ceiling_continuations
+            .is_empty(),
+        "the rejection stores nothing"
+    );
 }
 
 /// A wall-to-wall gable WITHIN a divided section whose start end snaps

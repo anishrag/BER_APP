@@ -1309,31 +1309,31 @@ impl CeilingRegions {
             .collect()
     }
 
-    /// A STABLE plan anchor that resolves ([`claim_regions`]) to the region
-    /// nearest to `p`: `p` itself when some region already claims it, else
-    /// the nearest point on any region's ring nudged ~1 mm toward that
-    /// region's interior (its centroid) — far enough inside to survive the
-    /// f32 quantization the durable stores apply and the ~1e-7 m boolean
-    /// ring shifts between re-derives, near enough to stay in the nearest
-    /// FACE of a solved roof (a nudge that leaves a non-convex ring falls
-    /// back to the on-ring point, which the boundary band still claims).
-    /// `None` when there is no usable (≥ 3 vertex) region at all.
+    /// A STABLE plan anchor inside the region nearest to `p` AMONG the
+    /// regions that do NOT claim `p` themselves: the nearest point on such
+    /// a region's ring nudged ~1 mm toward its interior (its centroid) —
+    /// far enough inside to survive the f32 quantization the durable stores
+    /// apply and the ~1e-7 m boolean ring shifts between re-derives, near
+    /// enough to stay in the nearest FACE of a solved roof (a nudge that
+    /// leaves a non-convex ring falls back to the on-ring point, which the
+    /// boundary band still claims). `None` when every usable (≥ 3 vertex)
+    /// region claims `p` — or there are none at all.
     ///
-    /// This is the "continue a neighbouring storey's plane over an area it
-    /// doesn't cover" anchor (field report deb23cbf): the plane-extension
-    /// pick stores it as the continuation SOURCE so every recompose finds
-    /// the same source face.
-    ///
-    /// [`claim_regions`]: CeilingRegions::claim_regions
-    pub fn nearest_claim_anchor(&self, p: Point2f64) -> Option<Point2f64> {
-        if !self.claim_regions(p).is_empty() {
-            return Some(p);
-        }
-        // Nearest point on any region ring: per-segment projection, global min.
+    /// This is the "continue a plane from BESIDE the point" anchor of the
+    /// from-storey ceiling continuation (field report deb23cbf + its
+    /// semantics correction): the source must be a plan-NEIGHBOURING region
+    /// on the ±1 storey. A plane continued LATERALLY over the target is
+    /// physical; one copied straight down/up through the slab onto its own
+    /// footprint is not — so a region sitting directly over/under `p`
+    /// (claiming it) is NEVER a candidate. The pick stores the anchor as
+    /// the continuation SOURCE so every recompose finds the same face.
+    pub fn nearest_lateral_anchor(&self, p: Point2f64) -> Option<Point2f64> {
+        // Nearest point on a NON-CLAIMING region's ring: per-segment
+        // projection, global min.
         let mut best: Option<(f64, Point2f64, usize)> = None;
         for (ri, r) in self.regions.iter().enumerate() {
             let ext = &r.polygon.exterior;
-            if ext.len() < 3 {
+            if ext.len() < 3 || r.plan_contains_within(p, APEX_BOUNDARY_EPS_M) {
                 continue;
             }
             let n = ext.len();

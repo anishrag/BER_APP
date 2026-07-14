@@ -657,7 +657,9 @@ impl AppController {
     }
 
     /// Toggle the "Ceiling from storey" tool (continue a ceiling area's
-    /// surface from the storey above/below's plane over the same spot).
+    /// surface from a plane BESIDE it on the storey above/below — never
+    /// from a region sitting directly over/under it: a plane continues
+    /// laterally, not through the slab onto its own footprint).
     pub fn set_storey_continuation_mode(&mut self, on: bool) {
         self.set_continuation_tool(on.then_some(ContinuationTool::Storey));
     }
@@ -715,8 +717,9 @@ impl AppController {
     ///   it already has continuation(s), in which case the tap CLEARS them
     ///   (re-picking a continued region undoes it) and the loop restarts.
     ///   The "Ceiling from storey" tool then commits WITHOUT asking when
-    ///   only ONE neighbouring storey has a ceiling there, and opens the
-    ///   above/below choice when both do;
+    ///   only ONE neighbouring storey has a region BESIDE the point (the
+    ///   lateral-source rule — a region directly over/under it never
+    ///   qualifies), and opens the above/below choice when both do;
     /// - `PickSource` ("Neighbour ceiling"): the tapped region becomes the
     ///   SOURCE — its plane continues over the target. Tapping the target's
     ///   own region again is a logged no-op (pick a NEIGHBOUR).
@@ -761,17 +764,21 @@ impl AppController {
                 }
                 match tool {
                     Some(ContinuationTool::Storey) => {
-                        // Which neighbouring storeys have a usable ceiling?
-                        // COVERAGE of the target point is not required — a
-                        // plane extends over an area it doesn't cover via
-                        // the nearest-region rule (deb23cbf), so any storey
-                        // with a resolvable source anchor qualifies.
+                        // Which neighbouring storeys have a usable source?
+                        // The source must be a plan-NEIGHBOURING region on
+                        // the ±1 storey (deb23cbf + its semantics
+                        // correction): a plane continued LATERALLY is
+                        // physical; one copied straight down/up through the
+                        // slab onto its own footprint is not. So a storey
+                        // whose ceiling merely sits over the target does
+                        // NOT qualify — only one with a region BESIDE the
+                        // point does.
                         let record = self.current_record.as_ref().expect("checked above");
                         let has = |i: i64| {
                             usize::try_from(i)
                                 .ok()
                                 .and_then(|i| record.data.storeys.get(i))
-                                .is_some_and(|s| s.ceilings.nearest_claim_anchor(p).is_some())
+                                .is_some_and(|s| s.ceilings.nearest_lateral_anchor(p).is_some())
                         };
                         let (above, below) = (has(idx as i64 + 1), has(idx as i64 - 1));
                         match (above, below) {
@@ -789,8 +796,8 @@ impl AppController {
                             }
                             (false, false) => {
                                 log::warn!(
-                                    "no neighbouring storey has a ceiling to continue — \
-                                     still picking"
+                                    "no neighbouring storey has a ceiling region BESIDE that \
+                                     area to continue from — still picking"
                                 );
                             }
                         }
@@ -834,18 +841,20 @@ impl AppController {
 
     /// Commit the pending CONTINUE-from pick against the storey ABOVE
     /// (`up = true`) or BELOW: the source region is auto-resolved on that
-    /// storey (no cross-storey tapping) — the region CONTAINING the target
-    /// point when its ceiling covers it, else the NEAREST region
-    /// ([`CeilingRegions::nearest_claim_anchor`] — plane extension over an
-    /// area the neighbour doesn't cover, field report deb23cbf; the stored
-    /// source anchor is that region's nearest ring point nudged inside, so
-    /// every recompose finds the same face). The plane converts through the
-    /// floor datums at recompose. `Err` (user-facing) when the storey
-    /// doesn't exist or has no ceiling at all (the pick then stays open).
+    /// storey (no cross-storey tapping) as the nearest region BESIDE the
+    /// target point ([`CeilingRegions::nearest_lateral_anchor`] — the
+    /// stored source anchor is that region's nearest ring point nudged
+    /// inside, so every recompose finds the same face). A region sitting
+    /// DIRECTLY over/under the target is NEVER the source (the semantics
+    /// correction on deb23cbf): a plane continued laterally is physical;
+    /// one copied straight through the slab onto its own footprint is not.
+    /// The plane converts through the floor datums at recompose. `Err`
+    /// (user-facing) when the storey doesn't exist, has no ceiling at all,
+    /// or only sits directly over the target (the pick then stays open).
     /// On success the loop restarts at PickTarget.
     ///
-    /// [`CeilingRegions::nearest_claim_anchor`]:
-    /// ber_model::ber::structural::CeilingRegions::nearest_claim_anchor
+    /// [`CeilingRegions::nearest_lateral_anchor`]:
+    /// ber_model::ber::structural::CeilingRegions::nearest_lateral_anchor
     pub fn ceiling_continuation_from_storey(&mut self, up: bool) -> Result<(), String> {
         let Some(PendingCeilingContinuation::PickSource { target }) =
             self.pending_ceiling_continuation
@@ -864,8 +873,22 @@ impl AppController {
             .ok()
             .and_then(|i| record.data.storeys.get(i))
             .ok_or_else(|| format!("There is no storey {which} this one."))?;
-        let source = src.ceilings.nearest_claim_anchor(target).ok_or_else(|| {
-            format!("The storey {which} has no ceiling to continue — set its ceiling height first.")
+        let source = src.ceilings.nearest_lateral_anchor(target).ok_or_else(|| {
+            if src.ceilings.claim_regions(target).is_empty() {
+                format!(
+                    "The storey {which} has no ceiling to continue — set its ceiling height first."
+                )
+            } else {
+                let sits = if up {
+                    "directly over"
+                } else {
+                    "directly under"
+                };
+                format!(
+                    "The storey {which} sits {sits} this area — a ceiling continues from a \
+                     region beside it, not from its own footprint."
+                )
+            }
         })?;
         record
             .data
