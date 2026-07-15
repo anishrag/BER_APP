@@ -1577,6 +1577,18 @@ impl CeilingRegion {
     /// The region's single height when it is FLAT (every vertex z within
     /// 1e-6 m), `None` for sloped/degenerate regions. Used to reconstruct
     /// session step areas and label heights in 2D.
+    /// MEAN height of the (planar) region over its plan footprint — the z of
+    /// its plane at the plan centroid, so a sloped ceiling contributes its
+    /// true average. Falls back to the z-range midpoint for a vertical or
+    /// degenerate plane. `None` only when the ring is degenerate. Feeds the
+    /// area-weighted average storey height for DEAP's dimensions.
+    pub fn mean_height(&self) -> Option<f64> {
+        let c = self.centroid();
+        self.polygon
+            .plane_z(c.x, c.y)
+            .or_else(|| self.z_range().map(|(lo, hi)| (lo + hi) / 2.0))
+    }
+
     pub fn flat_z(&self) -> Option<f64> {
         if self.polygon.exterior.len() < 3 {
             return None;
