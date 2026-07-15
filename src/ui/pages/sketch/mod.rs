@@ -1457,7 +1457,12 @@ pub struct SketchView<'a> {
     /// Phase-4 per-side sheltering, for the sheltered-sides step.
     pub sheltering: ber_model::ber::final_details::ShelteringBySide,
     /// Phase-4 dwelling orientation (degrees from north) for the north-align step.
+    /// Populated in EVERY phase (not just Final) so the plan can carry its
+    /// north indicator once alignment is confirmed.
     pub orientation_deg: f32,
+    /// Whether the Phase-4 north alignment has been confirmed — gates the
+    /// persistent north indicator on the plan.
+    pub north_aligned: bool,
     /// Pre-populated north-up site image path (`file://`), if any.
     pub site_satellite_image: Option<String>,
     /// The north-align satellite image + its current transform over the plan

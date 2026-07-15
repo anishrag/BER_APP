@@ -1341,6 +1341,7 @@ impl eframe::App for BerApp {
                                 final_details,
                                 sheltering,
                                 orientation_deg,
+                                north_aligned,
                                 site_satellite_image,
                                 north_image,
                                 final_mode,
@@ -1357,16 +1358,21 @@ impl eframe::App for BerApp {
                                         c.final_details(),
                                         c.sheltering(),
                                         c.orientation_deg(),
+                                        c.north_aligned(),
                                         c.site_satellite_image_path(),
                                         north,
                                         c.final_mode(),
                                         c.final_complete(),
                                     )
                                 } else {
+                                    // Orientation + aligned flag travel to every
+                                    // phase: the plan shows its north indicator
+                                    // from the moment alignment is confirmed.
                                     (
                                         Default::default(),
                                         Default::default(),
-                                        0.0,
+                                        c.orientation_deg(),
+                                        c.north_aligned(),
                                         None,
                                         None,
                                         crate::controller::app_controller::FinalMode::Form,
@@ -1738,6 +1744,7 @@ impl eframe::App for BerApp {
                                 final_details,
                                 sheltering,
                                 orientation_deg,
+                                north_aligned,
                                 site_satellite_image,
                                 north_image,
                                 final_mode,

@@ -1546,6 +1546,27 @@ fn structure_edit_windows_ui<F: FnMut(UiEvent)>(
 /// Where the connector line leaves a box: the point on `rect`'s boundary
 /// along the ray from its centre toward `target` (the rect's centre when the
 /// direction degenerates).
+/// Small compass note in a rect's bottom-right corner: the plan's aligned
+/// north (drawn once Phase-4 north alignment is confirmed). Same convention
+/// as the Align-step arrow: at 0° north is screen-up; `orientation_deg`
+/// rotates it clockwise (the amount the north-up satellite image was turned
+/// to fit the plan).
+fn north_indicator(ui: &egui::Ui, rect: egui::Rect, orientation_deg: f32) {
+    let painter = ui.painter_at(rect);
+    let o = rect.right_bottom() + egui::vec2(-36.0, -44.0);
+    let dir = egui::Vec2::angled((orientation_deg - 90.0).to_radians());
+    let red = egui::Color32::from_rgb(230, 80, 80);
+    painter.circle_filled(o, 17.0, egui::Color32::from_black_alpha(90));
+    painter.arrow(o - dir * 10.0, dir * 20.0, egui::Stroke::new(2.5, red));
+    painter.text(
+        o + dir * 26.0,
+        egui::Align2::CENTER_CENTER,
+        "N",
+        egui::FontId::proportional(12.0),
+        red,
+    );
+}
+
 fn rect_edge_toward(rect: egui::Rect, target: egui::Pos2) -> egui::Pos2 {
     let c = rect.center();
     let (dx, dy) = (target.x - c.x, target.y - c.y);
@@ -4246,6 +4267,12 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             }
         }
     }
+
+    // The plan's aligned north, once Phase-4 alignment has been confirmed.
+    // Plan view only — the 3D view has its own camera orientation.
+    if view.north_aligned && matches!(view.mode, SketchMode::Storey2D) {
+        north_indicator(ui, rect, view.orientation_deg);
+    }
 }
 
 /// The floating 2D/3D toggle, anchored to the canvas's top-right corner. Plain
@@ -5439,6 +5466,11 @@ fn final_overlay<F: FnMut(UiEvent)>(
             }
         }
         FinalMode::Form => {}
+    }
+    // Once alignment is confirmed, the reduced plan carries the north note in
+    // the Form/Sheltered steps too (Align draws its own live arrow above).
+    if view.north_aligned && view.final_mode != FinalMode::Align {
+        north_indicator(ui, plan_rect, view.orientation_deg);
     }
 
     // ── Details side ──
