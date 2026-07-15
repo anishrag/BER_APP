@@ -77,6 +77,14 @@ impl<'a> BerRepository<'a> {
                 pushed_hash   TEXT NOT NULL,
                 pushed_photos TEXT NOT NULL DEFAULT '[]'
             );
+
+            -- From-scratch BERs awaiting cloud-job registration: enqueued at
+            -- create time, drained by the push worker (POST /surveyor/jobs on
+            -- the first presign 404, then dequeued). Pre-existing scratch BERs
+            -- are deliberately NOT here — they stay local-only.
+            CREATE TABLE IF NOT EXISTS job_registration_queue (
+                ber_id TEXT PRIMARY KEY REFERENCES ber(id) ON DELETE CASCADE
+            );
             ",
         )?;
         Ok(())
@@ -154,22 +162,53 @@ impl<'a> BerRepository<'a> {
             .optional()
     }
 
-    /// Every BER row as (id, raw data_json) — the cloud push works on the
+    /// Every BER row as (id, name, raw data_json) — the cloud push works on the
     /// stored text directly (it's what gets PUT to S3, and hashing it detects
-    /// dirtiness without a parse). Unparseable ids are skipped like `list`.
-    pub fn list_raw(&self) -> Result<Vec<(ItemId, String)>> {
-        let mut stmt = self.conn.prepare("SELECT id, data_json FROM ber")?;
+    /// dirtiness without a parse); the name labels tablet-registered jobs.
+    /// Unparseable ids are skipped like `list`.
+    pub fn list_raw(&self) -> Result<Vec<(ItemId, String, String)>> {
+        let mut stmt = self.conn.prepare("SELECT id, name, data_json FROM ber")?;
         let mut out = Vec::new();
         let mut rows = stmt.query([])?;
         while let Some(row) = rows.next()? {
             let id_str: String = row.get(0)?;
-            let json: String = row.get(1)?;
+            let name: String = row.get(1)?;
+            let json: String = row.get(2)?;
             match id_str.parse() {
-                Ok(id) => out.push((id, json)),
+                Ok(id) => out.push((id, name, json)),
                 Err(_) => log::warn!("[list_raw] skipping BER with unparseable id {id_str:?}"),
             }
         }
         Ok(out)
+    }
+
+    /// Queue a from-scratch BER for cloud-job registration (drained by the
+    /// push worker). Idempotent.
+    pub fn enqueue_job_registration(&self, ber_id: &ItemId) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO job_registration_queue (ber_id) VALUES (?1)",
+            params![ber_id.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// Whether this BER is still awaiting cloud-job registration.
+    pub fn job_registration_queued(&self, ber_id: &ItemId) -> Result<bool> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM job_registration_queue WHERE ber_id = ?1",
+            params![ber_id.to_string()],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Registration succeeded — stop offering this BER to POST /surveyor/jobs.
+    pub fn dequeue_job_registration(&self, ber_id: &ItemId) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM job_registration_queue WHERE ber_id = ?1",
+            params![ber_id.to_string()],
+        )?;
+        Ok(())
     }
 
     /// The push bookkeeping for one BER: (hash of the data_json last uploaded,

@@ -57,6 +57,15 @@ struct PresignPhoto {
     content_type: &'static str,
 }
 
+#[derive(Serialize)]
+struct CreateJobRequest<'a> {
+    #[serde(rename = "jobId")]
+    job_id: &'a str,
+    name: &'a str,
+    address: &'a str,
+    eircode: &'a str,
+}
+
 #[derive(Deserialize)]
 struct PresignResponse {
     #[serde(rename = "dataUrl")]
@@ -115,6 +124,16 @@ impl PushClient {
             Err(ureq::Error::Status(404, _)) => Err(PushError::NoJob),
             Err(e) => Err(PushError::Other(e.into())),
         }
+    }
+
+    /// Register a cloud job for a from-scratch BER (idempotent server-side —
+    /// re-registering an existing job is a 200).
+    fn create_job(&self, req: &CreateJobRequest<'_>) -> anyhow::Result<()> {
+        self.agent
+            .post(&self.url("/surveyor/jobs"))
+            .set("x-surveyor-key", &self.cfg.api_key)
+            .send_json(req)?;
+        Ok(())
     }
 
     /// PUT bytes to a presigned S3 URL. No key header (auth is in the query
@@ -216,6 +235,27 @@ fn push_one(
     }
 }
 
+/// Register a cloud job for a queued from-scratch BER, labeled with what the
+/// office can recognise it by (the tablet-side name + whatever address/eircode
+/// the assessor entered on Key Details).
+fn register_job(
+    client: &PushClient,
+    id: &ItemId,
+    name: &str,
+    data_json: &str,
+) -> Result<(), PushError> {
+    let ber: Ber = serde_json::from_str(data_json)
+        .map_err(|e| PushError::Other(anyhow::anyhow!("unparseable data_json: {e}")))?;
+    client
+        .create_job(&CreateJobRequest {
+            job_id: &id.to_string(),
+            name,
+            address: &ber.address,
+            eircode: &ber.eircode,
+        })
+        .map_err(PushError::Other)
+}
+
 /// Observable outcome of the most recent push pass (read by the UI).
 #[derive(Debug, Clone, Default)]
 pub struct PushStatus {
@@ -250,7 +290,7 @@ fn run_pass(
         }
     };
 
-    for (id, data_json) in rows {
+    for (id, name, data_json) in rows {
         let hash = content_hash(&data_json);
         let (pushed_hash, photo_ids) = match repo.push_state(&id) {
             Ok(state) => state.unwrap_or_default(),
@@ -281,8 +321,38 @@ fn run_pass(
                 no_job.remove(&id.to_string());
             }
             Err(PushError::NoJob) => {
-                log::info!("push: {} has no cloud job (scratch BER?) — set aside", id.0);
-                no_job.insert(id.to_string(), hash);
+                // A from-scratch BER queued for registration gets its cloud
+                // job created on the spot, then pushes in the same pass.
+                // Everything else (pre-registration scratch BERs) is set
+                // aside until its content changes again.
+                let queued = repo.job_registration_queued(&id).unwrap_or(false);
+                if !queued {
+                    log::info!("push: {} has no cloud job (scratch BER?) — set aside", id.0);
+                    no_job.insert(id.to_string(), hash);
+                    continue;
+                }
+                match register_job(client, &id, &name, &data_json)
+                    .and_then(|()| push_one(client, &repo, &id, &data_json, &hash, HashSet::new()))
+                {
+                    Ok(()) => {
+                        let _ = repo.dequeue_job_registration(&id);
+                        pushed_now += 1;
+                        no_job.remove(&id.to_string());
+                        log::info!("push: registered cloud job for {} and pushed", id.0);
+                    }
+                    Err(PushError::NoJob) => {
+                        // Registration claimed success but presign still 404s —
+                        // shouldn't happen; leave queued and surface it.
+                        log::warn!("push: {} still has no job after registration", id.0);
+                        last_error = Some("registration did not take".into());
+                        still_pending += 1;
+                    }
+                    Err(PushError::Other(e)) => {
+                        log::warn!("push: registering {} failed: {e}", id.0);
+                        last_error = Some(e.to_string());
+                        still_pending += 1;
+                    }
+                }
             }
             Err(PushError::Other(e)) => {
                 log::warn!("push: {} failed: {e}", id.0);

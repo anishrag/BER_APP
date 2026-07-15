@@ -29,9 +29,14 @@ impl AppController {
             data: ber.clone(),
         };
 
-        BerRepository::new(&self.conn)
-            .upsert(&record)
-            .expect("upsert failed");
+        let repo = BerRepository::new(&self.conn);
+        repo.upsert(&record).expect("upsert failed");
+        // From-scratch BER: no intake job exists for it, so queue it for
+        // cloud-job registration — the push worker POSTs /surveyor/jobs when
+        // connectivity allows, and the survey then uploads like any pulled job.
+        if let Err(e) = repo.enqueue_job_registration(&record.id) {
+            log::warn!("could not queue {} for job registration: {e}", record.id.0);
+        }
         self.current_record = Some(record);
         // A freshly created BER starts on its first storey (which `commit_to_ber`
         // lazily appends on the first stroke).
