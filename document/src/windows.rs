@@ -109,6 +109,7 @@ mod tests {
             multi_storey,
             shape: ber_model::ber::fenestration::WindowShape::Rectangular,
             overshading: Default::default(),
+            num_opes: None,
         }
     }
 

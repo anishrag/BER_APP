@@ -72,6 +72,12 @@ pub struct WindowType {
     /// (uncertified) on records written before the field existed.
     #[serde(default)]
     pub certified: bool,
+    /// Whether this window type's opening sections are DRAUGHT-STRIPPED (the
+    /// Structure-phase checkbox; feeds DEAP's ventilation openings count).
+    /// `None` on records from before the field existed — the office resolves
+    /// those downstream (BER_deap query / year inference).
+    #[serde(default)]
+    pub draught_stripped: Option<bool>,
     pub specifics: WindowNameSpecifics,
     pub photos: Vec<Photo>,
     pub notes: Option<String>,
@@ -198,6 +204,11 @@ pub struct Window {
     /// `Average` on records written before the field existed.
     #[serde(default)]
     pub overshading: Overshading,
+    /// How many OPENING sections (opes) this window unit has — asked at
+    /// placement; feeds DEAP's ventilation openings count. `None` on records
+    /// from before the field existed (downstream assumes 1).
+    #[serde(default)]
+    pub num_opes: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

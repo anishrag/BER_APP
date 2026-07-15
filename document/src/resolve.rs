@@ -1725,6 +1725,7 @@ mod tests {
                 multi_storey: false,
                 shape: ber_model::ber::fenestration::WindowShape::Rectangular,
                 overshading: Default::default(),
+                num_opes: None,
             });
         }
         ber.storeys[0] = resolve_storey(&doc, &ber, 0, &phase, &[], &[]);
@@ -2807,6 +2808,7 @@ mod tests {
             multi_storey: false,
             shape: ber_model::ber::fenestration::WindowShape::Rectangular,
             overshading: Default::default(),
+            num_opes: None,
         });
         // Split the bottom wall at x = 2.
         ber.storeys[0].wall_splits = vec![[Point2f64::new(2.0, -1.0), Point2f64::new(2.0, 1.0)]];
@@ -4929,6 +4931,7 @@ mod tests {
             multi_storey: false,
             shape: ber_model::ber::fenestration::WindowShape::Rectangular,
             overshading: Default::default(),
+            num_opes: None,
         });
         let widx = ber.storeys[0]
             .walls
@@ -5005,6 +5008,7 @@ mod tests {
             multi_storey: false,
             shape: ber_model::ber::fenestration::WindowShape::Rectangular,
             overshading: Default::default(),
+            num_opes: None,
         });
 
         // Resolve once to SEED the parametric anchor from the (still live) wall.
@@ -5545,6 +5549,7 @@ mod tests {
             multi_storey: false,
             shape: ber_model::ber::fenestration::WindowShape::Rectangular,
             overshading: Default::default(),
+            num_opes: None,
         });
         ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
         let mid1 = window_host_mid(&ber.storeys[0], 0);
@@ -5692,6 +5697,7 @@ mod tests {
             multi_storey: false,
             shape: ber_model::ber::fenestration::WindowShape::Rectangular,
             overshading: Overshading::Average,
+            num_opes: None,
         });
 
         let previous = storey.walls.clone();
@@ -5819,6 +5825,7 @@ mod tests {
             multi_storey: false,
             shape: ber_model::ber::fenestration::WindowShape::Rectangular,
             overshading: Overshading::Average,
+            num_opes: None,
         });
 
         let previous = storey.walls.clone();
@@ -5919,6 +5926,7 @@ mod tests {
             multi_storey: false,
             shape: ber_model::ber::fenestration::WindowShape::Rectangular,
             overshading: Overshading::Average,
+            num_opes: None,
         };
         // A sits on the buried run (world centre 1.0) — it must slide right,
         // landing exactly on B (already on the exposed piece, world centre

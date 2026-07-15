@@ -383,6 +383,7 @@ impl Ber {
         frame: Frame,
         year: Year,
         certified: bool,
+        draught_stripped: bool,
         gap: Vec<u32>,
         name: Option<String>,
     ) -> ItemId {
@@ -392,6 +393,7 @@ impl Ber {
                 && t.frame == frame
                 && t.year == year
                 && t.certified == certified
+                && t.draught_stripped == Some(draught_stripped)
                 && t.gap == gap
                 && t.specifics == specifics
         }) {
@@ -405,6 +407,7 @@ impl Ber {
             gap,
             frame,
             certified,
+            draught_stripped: Some(draught_stripped),
             specifics,
             photos: vec![],
             notes: None,

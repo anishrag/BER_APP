@@ -356,6 +356,7 @@ pub fn add_shaped_wall_window(
         multi_storey: false,
         shape,
         overshading: Overshading::Average,
+        num_opes: None,
     });
     link_window(storey, wall_id, id);
     // Windows may STACK: if the requested row is horizontally full, place above /
@@ -450,6 +451,7 @@ pub fn add_roof_window(
         shape: WindowShape::Rectangular,
         // Rooflights face the sky: obstacles rarely overshade them.
         overshading: Overshading::VeryLittle,
+        num_opes: None,
     });
     Ok(id)
 }
@@ -499,6 +501,7 @@ pub fn add_full_width_window(
         multi_storey: false,
         shape: WindowShape::Rectangular,
         overshading: Overshading::Average,
+        num_opes: None,
     });
     link_window(storey, wall_id, id);
     Ok(id)
@@ -653,6 +656,7 @@ pub fn add_multi_storey_window(
         multi_storey: true,
         shape: WindowShape::Rectangular,
         overshading: Overshading::Average,
+        num_opes: None,
     });
     link_window(storey, wall_id, id);
     redistribute_or_rollback(storey, wall_id, &[OpeningRef::Window(id)])?;
@@ -907,6 +911,7 @@ fn push_door_sidelights_members(
                 multi_storey: false,
                 shape,
                 overshading: Overshading::Average,
+                num_opes: None,
             });
             link_window(storey, wall_id, id);
             added.push(OpeningRef::Window(id));
@@ -1371,10 +1376,15 @@ pub fn set_window_attributes(
     window_id: ItemId,
     window_type_id: ItemId,
     overshading: Overshading,
+    num_opes: Option<u32>,
 ) {
     if let Some(w) = storey.windows.iter_mut().find(|w| w.id == window_id) {
         w.window_type_id = window_type_id;
         w.overshading = overshading;
+        // `None` means the edit box left opes untouched — keep the old answer.
+        if num_opes.is_some() {
+            w.num_opes = num_opes;
+        }
     }
 }
 
@@ -2137,6 +2147,7 @@ mod tests {
             multi_storey: false,
             shape: WindowShape::Rectangular,
             overshading: Overshading::Average,
+            num_opes: None,
         }
     }
 
@@ -2970,6 +2981,7 @@ mod tests {
             multi_storey: false,
             shape: WindowShape::Rectangular,
             overshading: Overshading::Average,
+            num_opes: None,
         });
         assert_eq!(
             roof_window_at(&s, 2.3, 2.3),
@@ -3093,7 +3105,7 @@ mod tests {
         let (mut s, wid) = storey_with_wall(4.0);
         let id = add_wall_window(&mut s, wid, 2.0, 1.0, 1.2, 1.0, ItemId::default()).unwrap();
         let new_type = ItemId::default();
-        set_window_attributes(&mut s, id, new_type, Overshading::Heavy);
+        set_window_attributes(&mut s, id, new_type, Overshading::Heavy, Some(2));
         let w = s.windows.iter().find(|w| w.id == id).unwrap();
         assert_eq!(w.window_type_id, new_type);
         assert_eq!(w.overshading, Overshading::Heavy);

@@ -182,6 +182,7 @@ pub struct OpeningEditPrefill {
     pub height_m: f32,
     pub window_type_id: ItemId,
     pub overshading: Overshading,
+    pub num_opes: Option<u32>,
 }
 
 /// What kind of opening a view rectangle is (for colour/label in plan + elevation).
@@ -237,6 +238,8 @@ pub enum WindowTypeChoice {
         frame: Frame,
         year: u32,
         certified: bool,
+        /// The new type's draught-stripped checkbox (Some — the box always answers).
+        draught_stripped: bool,
         /// Pane gap(s) in mm (one for double, two for triple). Part of identity.
         gap: Vec<u32>,
         /// Optional model name — distinguishes two otherwise-identical types.
@@ -254,6 +257,9 @@ impl Default for WindowTypeChoice {
             frame: Frame::WoodUPVC,
             year: 0,
             certified: false,
+            // Most catalogued types are modern gasketed units — default ON;
+            // the assessor unticks for old un-stripped sashes.
+            draught_stripped: true,
             gap: Vec::new(),
             name: None,
         }
@@ -269,6 +275,7 @@ pub struct ExistingWindowType {
     pub frame: Frame,
     pub year: u32,
     pub certified: bool,
+    pub draught_stripped: Option<bool>,
     pub gap: Vec<u32>,
     pub name: Option<String>,
     /// Human label, e.g. `"North bay — Double · Wood/UPVC · 16mm · 2010 · Cert"`.
@@ -562,6 +569,7 @@ impl AppController {
                     frame: t.frame.clone(),
                     year: t.year,
                     certified: t.certified,
+                    draught_stripped: t.draught_stripped,
                     gap: t.gap.clone(),
                     name: name.clone(),
                     label: window_type_label(
@@ -616,9 +624,10 @@ impl AppController {
         let Some(record) = self.current_record.as_mut() else {
             return Ok(());
         };
-        let type_id = record
-            .data
-            .ensure_window_type(glazing, frame, year, false, Vec::new(), None);
+        let type_id =
+            record
+                .data
+                .ensure_window_type(glazing, frame, year, false, true, Vec::new(), None);
         let storey = &mut record.data.storeys[idx];
         let result = openings::add_full_wall_window(storey, wall_id, height_m, type_id);
         self.finish_opening(result.map(|_| ()), undo_snap, pending)
@@ -796,6 +805,7 @@ impl AppController {
                 width_m: w.width_m,
                 height_m: w.height_m,
                 window_type_id: w.window_type_id,
+                num_opes: w.num_opes,
                 overshading: w.overshading,
             }),
         })
@@ -850,6 +860,7 @@ impl AppController {
         complex_window: Option<ComplexWindowPlacement>,
         window_type: WindowTypeChoice,
         overshading: Overshading,
+        num_opes: Option<u32>,
         photos: Vec<(std::path::PathBuf, PhotoQuality)>,
     ) -> Result<(), String> {
         /// Sill the placement defaults to; the assessor drags it in the 2D view.
@@ -1097,6 +1108,7 @@ impl AppController {
         if result.is_ok() {
             for w in record.data.storeys[idx].windows[windows_before..].iter_mut() {
                 w.overshading = overshading;
+                w.num_opes = num_opes;
             }
             // Photos belong to the GROUP (window type), shared by all its
             // windows — append to the resolved type (none for a plain Door).
@@ -1135,6 +1147,7 @@ impl AppController {
         &mut self,
         window_type: WindowTypeChoice,
         overshading: Overshading,
+        num_opes: Option<u32>,
         photos: Vec<(std::path::PathBuf, PhotoQuality)>,
     ) -> Result<(), String> {
         let Some(pending) = self.pending_opening.take() else {
@@ -1177,6 +1190,7 @@ impl AppController {
             Ok(_) => {
                 for w in record.data.storeys[idx].windows[windows_before..].iter_mut() {
                     w.overshading = overshading;
+                    w.num_opes = num_opes;
                 }
                 // Photos belong to the GROUP (window type), shared by its windows.
                 if !stored_photos.is_empty() {
@@ -1231,9 +1245,10 @@ impl AppController {
         let Some(record) = self.current_record.as_mut() else {
             return Ok(());
         };
-        let type_id = record
-            .data
-            .ensure_window_type(glazing, frame, year, false, Vec::new(), None);
+        let type_id =
+            record
+                .data
+                .ensure_window_type(glazing, frame, year, false, true, Vec::new(), None);
         let storey = &mut record.data.storeys[idx];
         let result = match target {
             PendingOpeningTarget::Wall {
@@ -1329,7 +1344,7 @@ impl AppController {
         let window_type_id =
             record
                 .data
-                .ensure_window_type(glazing, frame, year, false, Vec::new(), None);
+                .ensure_window_type(glazing, frame, year, false, true, Vec::new(), None);
         let storey = &mut record.data.storeys[idx];
         let result = openings::compose_door_sidelights(
             storey,
@@ -1571,6 +1586,7 @@ impl AppController {
         full_height: bool,
         window_type: WindowTypeChoice,
         overshading: Overshading,
+        num_opes: Option<u32>,
         photos: Vec<(std::path::PathBuf, PhotoQuality)>,
     ) -> Result<(), String> {
         let Some(wid) = self.elevation_edit else {
@@ -1625,7 +1641,13 @@ impl AppController {
         }
         // Retype: resolve the type AFTER the resize so a refused edit mints none.
         let type_id = resolve_window_type(&mut record.data, window_type);
-        openings::set_window_attributes(&mut record.data.storeys[idx], wid, type_id, overshading);
+        openings::set_window_attributes(
+            &mut record.data.storeys[idx],
+            wid,
+            type_id,
+            overshading,
+            num_opes,
+        );
         // Photos belong to the GROUP (window type), shared by all its windows.
         if !stored_photos.is_empty() {
             if let Some(t) = record
@@ -1832,17 +1854,24 @@ fn resolve_window_type(data: &mut Ber, choice: WindowTypeChoice) -> ItemId {
     match choice {
         WindowTypeChoice::Existing(id) if data.window_types.iter().any(|t| t.id == id) => id,
         // Stale id (type since deleted) → fall back to the default new type.
-        WindowTypeChoice::Existing(_) => {
-            data.ensure_window_type(Glazing::Double, Frame::WoodUPVC, 0, false, Vec::new(), None)
-        }
+        WindowTypeChoice::Existing(_) => data.ensure_window_type(
+            Glazing::Double,
+            Frame::WoodUPVC,
+            0,
+            false,
+            true,
+            Vec::new(),
+            None,
+        ),
         WindowTypeChoice::New {
             glazing,
             frame,
             year,
             certified,
+            draught_stripped,
             gap,
             name,
-        } => data.ensure_window_type(glazing, frame, year, certified, gap, name),
+        } => data.ensure_window_type(glazing, frame, year, certified, draught_stripped, gap, name),
     }
 }
 

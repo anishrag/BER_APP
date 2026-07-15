@@ -240,6 +240,10 @@ pub struct SketchState {
     pub wt_frame: ber_model::ber::fenestration::Frame,
     pub wt_year_input: String,
     pub wt_certified: bool,
+    /// New-window-type draught-stripped checkbox (default ON — modern units).
+    pub wt_draught_stripped: bool,
+    /// Per-window "number of opening sections" typed in the placement box.
+    pub opening_num_opes: String,
     /// Pane gap(s) in mm for a new window type (comma/space separated for the two
     /// gaps of triple glazing); and an optional model name distinguishing two
     /// otherwise-identical types.
@@ -1722,6 +1726,8 @@ impl eframe::App for BerApp {
                                 wt_frame: &mut self.sketch_state.wt_frame,
                                 wt_year_input: &mut self.sketch_state.wt_year_input,
                                 wt_certified: &mut self.sketch_state.wt_certified,
+                                wt_draught_stripped: &mut self.sketch_state.wt_draught_stripped,
+                                opening_num_opes: &mut self.sketch_state.opening_num_opes,
                                 wt_gap_input: &mut self.sketch_state.wt_gap_input,
                                 wt_name_input: &mut self.sketch_state.wt_name_input,
                                 overshading: &mut self.sketch_state.overshading,
@@ -2474,6 +2480,7 @@ impl eframe::App for BerApp {
                                         complex_window,
                                         window_type,
                                         overshading,
+                                        num_opes,
                                         photos,
                                     } => {
                                         let _ = controller.borrow_mut().place_opening(
@@ -2485,17 +2492,20 @@ impl eframe::App for BerApp {
                                             complex_window,
                                             window_type,
                                             overshading,
+                                            num_opes,
                                             photos,
                                         );
                                     }
                                     SketchEvent::FillOpeningSurface {
                                         window_type,
                                         overshading,
+                                        num_opes,
                                         photos,
                                     } => {
                                         let _ = controller.borrow_mut().fill_opening_surface(
                                             window_type,
                                             overshading,
+                                            num_opes,
                                             photos,
                                         );
                                     }
@@ -2528,6 +2538,7 @@ impl eframe::App for BerApp {
                                         full_height,
                                         window_type,
                                         overshading,
+                                        num_opes,
                                         photos,
                                     } => {
                                         let _ = controller.borrow_mut().apply_opening_edit(
@@ -2537,6 +2548,7 @@ impl eframe::App for BerApp {
                                             full_height,
                                             window_type,
                                             overshading,
+                                            num_opes,
                                             photos,
                                         );
                                     }

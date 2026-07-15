@@ -12098,6 +12098,7 @@ fn full_span_checkbox_composes_a_full_width_doorset() {
         None,
         WindowTypeChoice::default(),
         ber_model::ber::fenestration::Overshading::Average,
+        None,
         Vec::new(),
     )
     .expect("full-width doorset places");
@@ -12175,6 +12176,7 @@ fn multi_field_window_places_with_default_sill() {
         None,
         WindowTypeChoice::default(),
         ber_model::ber::fenestration::Overshading::Average,
+        None,
         Vec::new(),
     )
     .expect("window places");
@@ -12244,6 +12246,7 @@ fn full_span_checkboxes_place_a_full_wall_door() {
         None,
         WindowTypeChoice::default(),
         ber_model::ber::fenestration::Overshading::Average,
+        None,
         Vec::new(),
     )
     .expect("full-wall door places");
@@ -12297,6 +12300,7 @@ fn exact_wall_width_door_without_the_tick_is_refused() {
         None,
         WindowTypeChoice::default(),
         ber_model::ber::fenestration::Overshading::Average,
+        None,
         Vec::new(),
     );
     assert!(r.is_err(), "no auto-detect: the margin path refuses");
@@ -12331,6 +12335,7 @@ fn window_type_picker_reuses_existing_and_adds_only_when_different() {
             None,
             choice,
             Overshading::Average,
+            None,
             Vec::new(),
         )
         .expect("window places");
@@ -12345,6 +12350,7 @@ fn window_type_picker_reuses_existing_and_adds_only_when_different() {
             frame: Frame::WoodUPVC,
             year: 2010,
             certified: false,
+            draught_stripped: true,
             gap: Vec::new(),
             name: None,
         },
@@ -12363,6 +12369,7 @@ fn window_type_picker_reuses_existing_and_adds_only_when_different() {
             frame: Frame::WoodUPVC,
             year: 2010,
             certified: false,
+            draught_stripped: true,
             gap: Vec::new(),
             name: None,
         },
@@ -12382,6 +12389,7 @@ fn window_type_picker_reuses_existing_and_adds_only_when_different() {
             frame: Frame::WoodUPVC,
             year: 2010,
             certified: true,
+            draught_stripped: true,
             gap: Vec::new(),
             name: None,
         },
@@ -12400,6 +12408,7 @@ fn window_type_picker_reuses_existing_and_adds_only_when_different() {
             frame: Frame::WoodUPVC,
             year: 2010,
             certified: false,
+            draught_stripped: true,
             gap: Vec::new(),
             name: Some("Model B".to_string()),
         },
@@ -12418,6 +12427,7 @@ fn window_type_picker_reuses_existing_and_adds_only_when_different() {
             frame: Frame::WoodUPVC,
             year: 2010,
             certified: false,
+            draught_stripped: true,
             gap: vec![16],
             name: None,
         },
@@ -12467,6 +12477,7 @@ fn overshading_is_applied_per_window_at_placement() {
             None,
             WindowTypeChoice::default(),
             overshading,
+            None,
             Vec::new(),
         )
         .expect("window places");
@@ -12517,10 +12528,12 @@ fn window_photo_is_attached_at_placement() {
             frame: ber_model::ber::fenestration::Frame::WoodUPVC,
             year: 0,
             certified: false,
+            draught_stripped: true,
             gap: Vec::new(),
             name: Some("Model A".to_string()),
         },
         Overshading::Average,
+        None,
         vec![(src, PhotoQuality::Full)],
     )
     .expect("window places");
@@ -12574,10 +12587,12 @@ fn failed_placement_discards_copied_photos() {
             frame: Frame::WoodUPVC,
             year: 0,
             certified: false,
+            draught_stripped: true,
             gap: Vec::new(),
             name: Some("Model A".to_string()),
         },
         Overshading::Average,
+        None,
         vec![(src, PhotoQuality::Full)],
     );
     assert!(r.is_err(), "oversized window fails to place");
@@ -12709,6 +12724,7 @@ fn place_door_sidelights_overall_mode() {
         None,
         WindowTypeChoice::default(),
         Overshading::Average,
+        None,
         Vec::new(),
     )
     .expect("assembly places");
@@ -12775,6 +12791,7 @@ fn place_complex_window_shapes() {
         }),
         WindowTypeChoice::default(),
         Overshading::Average,
+        None,
         Vec::new(),
     )
     .expect("circular window places");
@@ -12792,6 +12809,7 @@ fn place_complex_window_shapes() {
         }),
         WindowTypeChoice::default(),
         Overshading::Average,
+        None,
         Vec::new(),
     )
     .expect("rounded-top window places");
@@ -16571,6 +16589,7 @@ fn structure_review_items_cover_groups_and_cursor_wraps() {
         Frame::WoodUPVC,
         0,
         false,
+        true,
         Vec::new(),
         Some("Model A".to_string()),
     );
@@ -19280,6 +19299,7 @@ fn window_on_derivation_split_wall_stays_linked_and_survives_reload() {
         Frame::WoodUPVC,
         0,
         false,
+        true,
         Vec::new(),
         None,
     );
@@ -19418,6 +19438,7 @@ fn mis_hosted_ope_on_the_band_self_heals_onto_the_exposed_remainder() {
         Frame::WoodUPVC,
         0,
         false,
+        true,
         Vec::new(),
         None,
     );
@@ -19550,6 +19571,7 @@ fn window_placed_before_a_burying_section_moves_up_off_the_band() {
         Frame::WoodUPVC,
         0,
         false,
+        true,
         Vec::new(),
         None,
     );
@@ -19689,6 +19711,7 @@ fn window_placed_before_a_step_down_overhang_moves_down_off_the_band() {
         Frame::WoodUPVC,
         0,
         false,
+        true,
         Vec::new(),
         None,
     );

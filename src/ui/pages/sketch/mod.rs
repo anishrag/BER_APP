@@ -533,6 +533,8 @@ pub enum SketchEvent {
         window_type: WindowTypeChoice,
         /// Per-window overshading (DEAP solar-gain input), defaulting to Average.
         overshading: Overshading,
+        /// Number of OPENING sections (opes) in this window, typed in the box.
+        num_opes: Option<u32>,
         /// Source paths of photos picked in the box (each with the capture
         /// tier its button asked for — see the TEMPORARY dual hi/lo buttons,
         /// `photo_button_pair`), attached to the window(s) this placement
@@ -548,6 +550,8 @@ pub enum SketchEvent {
         window_type: WindowTypeChoice,
         /// Per-window overshading (see [`Self::PlaceOpening`]).
         overshading: Overshading,
+        /// Number of OPENING sections (opes) in this window, typed in the box.
+        num_opes: Option<u32>,
         /// Photos to attach to the window-wall (see [`Self::PlaceOpening`]).
         photos: Vec<(std::path::PathBuf, crate::ui::widgets::PhotoQuality)>,
     },
@@ -586,6 +590,8 @@ pub enum SketchEvent {
         window_type: WindowTypeChoice,
         /// Per-window overshading (see [`Self::PlaceOpening`]).
         overshading: Overshading,
+        /// Number of OPENING sections (opes) in this window, typed in the box.
+        num_opes: Option<u32>,
         /// Photos picked in the box, attached to the (possibly new) window
         /// type's group (see [`Self::PlaceOpening`]).
         photos: Vec<(std::path::PathBuf, crate::ui::widgets::PhotoQuality)>,
@@ -1402,6 +1408,10 @@ pub struct SketchView<'a> {
     /// Per-window overshading selected in the placement box. See
     /// [`crate::ui::app::SketchState`].
     pub overshading: &'a mut Overshading,
+    /// Per-window "number of opening sections" typed in the placement box.
+    pub opening_num_opes: &'a mut String,
+    /// The new-window-type draught-stripped checkbox (default ON).
+    pub wt_draught_stripped: &'a mut bool,
     /// Photos picked in the placement box for the window being placed, each
     /// with the capture tier its button asked for (TEMPORARY dual hi/lo
     /// buttons). See [`crate::ui::app::SketchState`].

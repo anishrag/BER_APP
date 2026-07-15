@@ -175,6 +175,18 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             ctx.data_mut(|d| d.insert_temp(ov_id, prompt.default_overshading));
             *view.overshading = prompt.default_overshading;
         }
+        // One-time defaults for the state that outlives placements: opes start
+        // at 1 (the common single-sash case) and a NEW type starts draught-
+        // stripped (modern gasketed units — untick for old sashes). Seeded once
+        // per app run so the assessor's own picks persist thereafter.
+        let seeded_id = Id::new("ber_opening_defaults_seeded");
+        if !ctx.data(|d| d.get_temp::<bool>(seeded_id).unwrap_or(false)) {
+            ctx.data_mut(|d| d.insert_temp(seeded_id, true));
+            *view.wt_draught_stripped = true;
+            if view.opening_num_opes.trim().is_empty() {
+                *view.opening_num_opes = "1".to_string();
+            }
+        }
         // A fresh host pick (new seq) starts the box on its first field, so the
         // keypad/laser don't keep editing whichever field the last placement left
         // focused.
@@ -210,6 +222,10 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 *view.opening_height_input = fmt(edit.height_m);
                 *view.wt_existing_id = Some(edit.window_type_id);
                 *view.overshading = edit.overshading;
+                *view.opening_num_opes = edit
+                    .num_opes
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "1".to_string());
             }
         }
         // The toggles are captured into the Place event by value (the checkboxes
@@ -286,6 +302,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         // captured by value into the action events.
         let window_type = current_window_type(view);
         let overshading = *view.overshading;
+        let num_opes = view.opening_num_opes.trim().parse::<u32>().ok();
         // Photos picked so far for this placement, captured by value into the
         // events (the photo button below adds to the list for a later frame).
         let photos = view.pending_window_photos.clone();
@@ -309,6 +326,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                         full_height,
                         window_type: apply_window_type.clone(),
                         overshading,
+                        num_opes,
                         photos: apply_photos.clone(),
                     }
                 },
@@ -368,6 +386,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     complex_window,
                     window_type: place_window_type.clone(),
                     overshading,
+                    num_opes,
                     photos: place_photos.clone(),
                 }
             })
@@ -383,6 +402,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     move |_| SketchEvent::FillOpeningSurface {
                         window_type: fill_window_type.clone(),
                         overshading,
+                        num_opes,
                         photos: fill_photos.clone(),
                     },
                 )
@@ -633,11 +653,19 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 &mut *view.wt_glazing,
                 &mut *view.wt_frame,
                 &mut *view.wt_certified,
+                &mut *view.wt_draught_stripped,
                 &mut *view.wt_name_input,
             );
             // Overshading is per-WINDOW (not per type), so it shows for every
             // window placement regardless of the type choice above.
             overshading_picker(ui, &mut *view.overshading);
+            // How many opening sections this window has (DEAP's ventilation
+            // openings count). Persists across placements like the type.
+            ui.horizontal(|ui| {
+                ui.label("opes")
+                    .hint("Number of opening sections in this window");
+                text_input(ui, view.opening_num_opes, KEY, "1");
+            });
             // Photos belong to the GROUP (window type). At least one is REQUIRED
             // when defining a new group; for an existing group adding more is
             // optional (it already has its own).
@@ -1423,6 +1451,7 @@ fn current_window_type(view: &SketchView<'_>) -> WindowTypeChoice {
             frame: view.wt_frame.clone(),
             year: view.wt_year_input.trim().parse().unwrap_or(0),
             certified: *view.wt_certified,
+            draught_stripped: *view.wt_draught_stripped,
             gap: parse_gaps(view.wt_gap_input),
             name: {
                 let n = view.wt_name_input.trim();
@@ -1532,6 +1561,7 @@ fn window_type_picker(
     glazing: &mut Glazing,
     frame: &mut Frame,
     certified: &mut bool,
+    draught_stripped: &mut bool,
     name: &mut String,
 ) {
     ui.separator();
@@ -1579,7 +1609,10 @@ fn window_type_picker(
         });
         // Year + gap are entered up top as box fields (driven by the box's own
         // keypad); only the certification toggle + the type NAME stay here.
-        ui.checkbox(certified, "certified");
+        ui.horizontal(|ui| {
+            ui.checkbox(certified, "certified");
+            ui.checkbox(draught_stripped, "draught stripped");
+        });
         ui.horizontal(|ui| {
             ui.label("name");
             text_input(ui, name, KEY * 3.0, "model (required)");
