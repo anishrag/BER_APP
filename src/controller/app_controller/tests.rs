@@ -3226,7 +3226,7 @@ fn unknown_year_persists_through_reload() {
     c.exit_ber().unwrap();
 
     c.open_ber(&ber.id).unwrap();
-    let (_, _, phases, _) = c.current_key_details().unwrap();
+    let (_, _, _, _, phases, _) = c.current_key_details().unwrap();
     assert!(phases.is_defined(&ConstructionPhase::Extension1));
     assert!(phases.year_is_unknown(&ConstructionPhase::Extension1));
     assert_eq!(phases.year_of(&ConstructionPhase::Extension1), None);
@@ -10494,7 +10494,7 @@ fn rename_and_date_persist_through_reload() {
     assert!(c.current_key_details().is_none(), "exit clears the record");
 
     c.open_ber(&ber.id).unwrap();
-    let (name, date, phases, _) = c.current_key_details().unwrap();
+    let (name, _, _, date, phases, _) = c.current_key_details().unwrap();
     assert_eq!(name, "12 Main Street");
     assert_eq!(date, NaiveDate::from_ymd_opt(2026, 6, 5).unwrap());
     assert_eq!(phases.year_of(&ConstructionPhase::Original), Some(1985));

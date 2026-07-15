@@ -45,6 +45,12 @@ pub fn bootstrap(paths: &Paths) -> Rc<RefCell<AppController>> {
     ) {
         controller.attach_sync(sync);
     }
+    // Background cloud push: uploads local BERs (data + photos) back to the
+    // intake backend whenever they change — the office side (BER_deap) reads
+    // what it pushes. Same config gate as the pull sync.
+    if let Some(push) = engine::PushWorker::spawn(paths.db_file(), paths.sync_config_file()) {
+        controller.attach_push(push);
+    }
     // Background bug-report uploader: drains the local capture queue to the
     // intake backend when WiFi allows. Reuses the same sync config; when
     // unconfigured, reports still queue locally and upload on a later run.

@@ -225,6 +225,45 @@ impl Ber {
         found
     }
 
+    /// EVERY photo the assessor attached, wherever it lives in the model — the
+    /// same sites [`set_photo_paths`](Self::set_photo_paths) visits (external
+    /// photos, window types, wall/floor/ceiling constructions, doors, and
+    /// Objects-phase building objects). NOT the site satellite image: that's
+    /// populated externally and already lives in the cloud. The cloud push uses
+    /// this to know what to upload.
+    pub fn all_photos(&self) -> Vec<&Photo> {
+        let mut out: Vec<&Photo> = Vec::new();
+        out.extend(self.photos.iter());
+        out.extend(self.window_types.iter().flat_map(|t| t.photos.iter()));
+        out.extend(
+            self.wall_constructions
+                .iter()
+                .flat_map(|c| c.base.photos.iter()),
+        );
+        out.extend(
+            self.floor_constructions
+                .iter()
+                .flat_map(|c| c.base.photos.iter()),
+        );
+        out.extend(
+            self.ceiling_constructions
+                .iter()
+                .flat_map(|c| c.base.photos.iter()),
+        );
+        out.extend(
+            self.storeys
+                .iter()
+                .flat_map(|s| s.doors.iter())
+                .flat_map(|d| d.photos.iter()),
+        );
+        out.extend(
+            self.object_rooms_iter()
+                .flat_map(|room| room.objects.iter())
+                .flat_map(|o| o.photos.iter()),
+        );
+        out
+    }
+
     /// EVERY object room in the dwelling: each storey's plan/surface pins plus
     /// the house-level attic bucket. The house-wide object queries (recorded
     /// kinds, review totals, category presence) walk this so the attic counts

@@ -9,8 +9,9 @@
 //! HTTP client is blocking `ureq` (the app is threads-not-async), and lives in
 //! `src/engine/` as the I/O boundary — nothing above it touches the network.
 //!
-//! The push-back path (upload the finished BER to S3, mark `assessed`) lands in
-//! a follow-up; this increment is the pull/import half.
+//! The push-back half lives in [`super::push`]: a sibling worker that uploads
+//! each BER's data + photos to S3 whenever they change (marking `assessed`
+//! via `/ber/complete` is still to come).
 
 use std::io::Read;
 use std::path::{Path, PathBuf};

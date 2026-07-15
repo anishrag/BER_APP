@@ -4,10 +4,12 @@ pub mod bug_report;
 pub mod checkpoint;
 pub mod dataloader;
 pub mod persistence;
+pub mod push;
 pub mod sync;
 
 pub use bug_report::{BugReportMeta, BugReportUploader, BugUploadStatus};
 pub use persistence::{DocSnapshot, PersistenceWriter, SaveBundle};
+pub use push::{PushStatus, PushWorker};
 pub use sync::{SyncStatus, SyncWorker};
 
 use std::path::Path;

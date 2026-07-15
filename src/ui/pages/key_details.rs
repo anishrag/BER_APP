@@ -19,6 +19,12 @@ const EXTENSION_PHASES: [ConstructionPhase; 4] = [
 #[derive(Debug)]
 pub enum KeyDetailsEvent {
     Rename(String),
+    /// Property address — normally seeded from the intake booking form; editable
+    /// here so a from-scratch BER can carry it too (the cloud push and the DEAP
+    /// export both want it).
+    SetAddress(String),
+    /// Eircode — same story as the address.
+    SetEircode(String),
     SetDateAssessed(NaiveDate),
     SetConstructionPhases(ConstructionPhases),
     /// Client-provided intake answers (heating, window/door years, insulation,
@@ -41,6 +47,10 @@ pub fn parse_year(s: &str) -> Option<u32> {
 #[derive(Default)]
 pub struct KeyDetailsState {
     pub name: String,
+    /// Property address + eircode (on `Ber` itself, not `IntakeDetails`) —
+    /// seeded by the booking-form sync, editable here for from-scratch BERs.
+    pub address: String,
+    pub eircode: String,
     pub date_assessed: Option<NaiveDate>,
     /// Year the house was built (→ `ConstructionPhase::Original`).
     pub construction_year: String,
@@ -121,6 +131,8 @@ impl KeyDetailsState {
     /// an extension row (nickname + year).
     pub fn from_record(
         name: String,
+        address: String,
+        eircode: String,
         date_assessed: NaiveDate,
         phases: &ConstructionPhases,
         intake: &IntakeDetails,
@@ -149,6 +161,8 @@ impl KeyDetailsState {
             .collect();
         Self {
             name,
+            address,
+            eircode,
             date_assessed: Some(date_assessed),
             construction_year,
             extensions,
@@ -241,6 +255,22 @@ impl KeyDetailsPage {
                 if text_input(ui, &mut state.name, f32::INFINITY, "").changed {
                     on_event(UiEvent::KeyDetails(KeyDetailsEvent::Rename(
                         state.name.clone(),
+                    )));
+                }
+                ui.end_row();
+
+                ui.label("Address:");
+                if text_input(ui, &mut state.address, f32::INFINITY, "").changed {
+                    on_event(UiEvent::KeyDetails(KeyDetailsEvent::SetAddress(
+                        state.address.clone(),
+                    )));
+                }
+                ui.end_row();
+
+                ui.label("Eircode:");
+                if text_input(ui, &mut state.eircode, 160.0, "e.g. A98 X7Y2").changed {
+                    on_event(UiEvent::KeyDetails(KeyDetailsEvent::SetEircode(
+                        state.eircode.clone(),
                     )));
                 }
                 ui.end_row();
@@ -540,6 +570,8 @@ mod tests {
 
         let state = KeyDetailsState::from_record(
             "test".to_string(),
+            String::new(),
+            String::new(),
             NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
             &phases,
             &IntakeDetails::default(),
@@ -579,6 +611,8 @@ mod tests {
 
         let state = KeyDetailsState::from_record(
             "test".to_string(),
+            String::new(),
+            String::new(),
             NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
             &phases,
             &IntakeDetails::default(),

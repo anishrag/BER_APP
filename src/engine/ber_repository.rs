@@ -66,6 +66,17 @@ impl<'a> BerRepository<'a> {
                 bridged      INTEGER NOT NULL,
                 UNIQUE(name, thickness_mm, lambda, bridged)
             );
+
+            -- Cloud-push bookkeeping (see engine::push). One row per BER that
+            -- has been uploaded at least once: the hash of the data_json last
+            -- PUT to S3 (hash mismatch = dirty, push again) and the ids of the
+            -- photos already uploaded (photos are immutable once attached, so
+            -- each uploads once). Disposable: losing it just re-pushes.
+            CREATE TABLE IF NOT EXISTS push_state (
+                ber_id        TEXT PRIMARY KEY REFERENCES ber(id) ON DELETE CASCADE,
+                pushed_hash   TEXT NOT NULL,
+                pushed_photos TEXT NOT NULL DEFAULT '[]'
+            );
             ",
         )?;
         Ok(())
@@ -141,6 +152,66 @@ impl<'a> BerRepository<'a> {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()
+    }
+
+    /// Every BER row as (id, raw data_json) — the cloud push works on the
+    /// stored text directly (it's what gets PUT to S3, and hashing it detects
+    /// dirtiness without a parse). Unparseable ids are skipped like `list`.
+    pub fn list_raw(&self) -> Result<Vec<(ItemId, String)>> {
+        let mut stmt = self.conn.prepare("SELECT id, data_json FROM ber")?;
+        let mut out = Vec::new();
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let id_str: String = row.get(0)?;
+            let json: String = row.get(1)?;
+            match id_str.parse() {
+                Ok(id) => out.push((id, json)),
+                Err(_) => log::warn!("[list_raw] skipping BER with unparseable id {id_str:?}"),
+            }
+        }
+        Ok(out)
+    }
+
+    /// The push bookkeeping for one BER: (hash of the data_json last uploaded,
+    /// ids of the photos already uploaded). `None` if never pushed.
+    pub fn push_state(&self, ber_id: &ItemId) -> Result<Option<(String, Vec<String>)>> {
+        self.conn
+            .query_row(
+                "SELECT pushed_hash, pushed_photos FROM push_state WHERE ber_id = ?1",
+                params![ber_id.to_string()],
+                |row| {
+                    let hash: String = row.get(0)?;
+                    let photos_json: String = row.get(1)?;
+                    Ok((hash, photos_json))
+                },
+            )
+            .optional()
+            .map(|opt| {
+                opt.map(|(hash, photos_json)| {
+                    (hash, serde_json::from_str(&photos_json).unwrap_or_default())
+                })
+            })
+    }
+
+    /// Record a successful push: the uploaded data_json's hash + the full set
+    /// of photo ids now known to be in the cloud.
+    pub fn set_push_state(
+        &self,
+        ber_id: &ItemId,
+        pushed_hash: &str,
+        pushed_photos: &[String],
+    ) -> Result<()> {
+        let photos_json = serde_json::to_string(pushed_photos)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        self.conn.execute(
+            "INSERT INTO push_state (ber_id, pushed_hash, pushed_photos)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(ber_id) DO UPDATE SET
+                pushed_hash = excluded.pushed_hash,
+                pushed_photos = excluded.pushed_photos",
+            params![ber_id.to_string(), pushed_hash, photos_json],
+        )?;
+        Ok(())
     }
 
     /// List BERs as lightweight summaries (extracting address and eircode from

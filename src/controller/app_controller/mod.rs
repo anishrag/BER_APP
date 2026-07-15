@@ -479,6 +479,10 @@ pub struct AppController {
     /// Optional background cloud-sync worker (attached by the real app when
     /// sync config is present; absent → the app runs fully offline).
     sync: Option<crate::engine::SyncWorker>,
+    /// Optional background cloud-push worker (same config gate as `sync`).
+    /// Poked after every save so local changes reach the backend "whenever it
+    /// can"; absent → BERs stay local until sync is configured.
+    push: Option<crate::engine::PushWorker>,
     /// Where captured bug reports are staged/queued before upload. Set from
     /// `Paths` in `bootstrap`; a relative default keeps tests working.
     bug_reports_dir: std::path::PathBuf,
@@ -781,6 +785,7 @@ impl AppController {
             derived_revision: 0,
             writer: None,
             sync: None,
+            push: None,
             last_snap_action: None,
             edit_drag_prompt: None,
             vertex_drop_prompt: None,

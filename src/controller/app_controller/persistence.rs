@@ -97,6 +97,26 @@ impl AppController {
         let _ = self.persist();
     }
 
+    /// Set the loaded BER's property address. No-op when no BER is loaded.
+    /// Persists (same write-through pattern as `set_construction_phases`).
+    /// Normally seeded from the intake booking form; this is the manual path
+    /// for from-scratch BERs.
+    pub fn set_address(&mut self, address: String) {
+        if let Some(record) = self.current_record.as_mut() {
+            record.data.address = address;
+        }
+        let _ = self.persist();
+    }
+
+    /// Set the loaded BER's eircode. No-op when no BER is loaded. Persists
+    /// (same write-through pattern as `set_construction_phases`).
+    pub fn set_eircode(&mut self, eircode: String) {
+        if let Some(record) = self.current_record.as_mut() {
+            record.data.eircode = eircode;
+        }
+        let _ = self.persist();
+    }
+
     /// Set the loaded BER's assessment date. No-op when no BER is loaded.
     /// Persists (same write-through pattern as `set_construction_phases`).
     pub fn set_date_assessed(&mut self, date_assessed: NaiveDate) {
@@ -126,10 +146,19 @@ impl AppController {
     /// loaded.
     pub fn current_key_details(
         &self,
-    ) -> Option<(String, NaiveDate, ConstructionPhases, IntakeDetails)> {
+    ) -> Option<(
+        String,
+        String,
+        String,
+        NaiveDate,
+        ConstructionPhases,
+        IntakeDetails,
+    )> {
         self.current_record.as_ref().map(|r| {
             (
                 r.name.clone(),
+                r.data.address.clone(),
+                r.data.eircode.clone(),
                 r.date_assessed,
                 r.data.construction_phases.clone(),
                 r.data.intake.clone(),
@@ -918,6 +947,7 @@ impl AppController {
             repo.save_snapshot(&s.ber_id, s.version, s.storey_idx, &s.json)
                 .map_err(|e| format!("snapshot save failed: {}", e))?;
         }
+        self.trigger_push();
         Ok(())
     }
 
@@ -984,6 +1014,19 @@ impl AppController {
         }
     }
 
+    /// Attach the background cloud-push worker (real app only; needs config).
+    pub fn attach_push(&mut self, push: crate::engine::PushWorker) {
+        self.push = Some(push);
+    }
+
+    /// Poke the push worker after a save so the change reaches the cloud
+    /// "whenever it can" (debounced worker-side). No-op when unconfigured.
+    fn trigger_push(&self) {
+        if let Some(push) = &self.push {
+            push.trigger();
+        }
+    }
+
     /// Latest cloud-sync outcome for the UI, or `None` when sync is off.
     pub fn sync_status(&self) -> Option<crate::engine::SyncStatus> {
         self.sync.as_ref().map(|s| s.status())
@@ -1013,6 +1056,9 @@ impl AppController {
                 snapshot: self.build_snapshot(),
             };
             self.writer.as_ref().unwrap().save(bundle);
+            // The push worker's debounce outlasts the writer's coalescing
+            // window, so by the time it reads the DB this save has landed.
+            self.trigger_push();
         }
         // Optimistic: the latest is queued. A boundary `flush_if_dirty` (open/exit)
         // re-checks against `revision`, so within-window edits aren't lost.

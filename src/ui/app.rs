@@ -596,8 +596,8 @@ impl BerApp {
     /// checkpoint) so the form always mirrors the record.
     fn populate_key_details(&mut self) {
         self.key_details_state = match self.app_controller.borrow().current_key_details() {
-            Some((name, date, phases, intake)) => {
-                KeyDetailsState::from_record(name, date, &phases, &intake)
+            Some((name, address, eircode, date, phases, intake)) => {
+                KeyDetailsState::from_record(name, address, eircode, date, &phases, &intake)
             }
             None => KeyDetailsState::default(),
         };
@@ -818,6 +818,8 @@ impl eframe::App for BerApp {
                                     let mut c = controller.borrow_mut();
                                     match e {
                                         KeyDetailsEvent::Rename(name) => c.rename_ber(name),
+                                        KeyDetailsEvent::SetAddress(a) => c.set_address(a),
+                                        KeyDetailsEvent::SetEircode(e) => c.set_eircode(e),
                                         KeyDetailsEvent::SetDateAssessed(d) => {
                                             c.set_date_assessed(d)
                                         }
