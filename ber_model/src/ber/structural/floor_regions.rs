@@ -56,6 +56,65 @@ impl FloorRegion {
             .collect();
         ring_centroid(&ring)
     }
+
+    /// Per-segment overlap length of this region's boundary with the given
+    /// plan segments (e.g. exposed-wall base edges) — `out[k]` is how much of
+    /// `segs[k]` lies ALONG the region's exterior ring. The DEAP
+    /// exposed-perimeter share of one floor element is the sum over the
+    /// dwelling's exposed/semi-exposed walls.
+    ///
+    /// Tolerant of derivation noise: a segment counts against a ring edge when
+    /// both its endpoints are within [`BOUNDARY_TOL_M`] of the edge's infinite
+    /// line (regions and walls derive from the same outline, so genuine
+    /// matches are far inside this and genuine offsets — e.g. an internal wall
+    /// a room away — are far outside it). Overlap is measured in 1D along the
+    /// edge, so a wall merely COLLINEAR with an edge but elsewhere on the plan
+    /// contributes nothing, and partial overlaps count partially. Each
+    /// segment's total is capped at its own length, so consecutive collinear
+    /// ring edges can't double-count a wall.
+    pub fn boundary_overlaps(&self, segs: &[(Point2f64, Point2f64)]) -> Vec<f64> {
+        /// Plan-distance tolerance for "this wall lies on this boundary".
+        const BOUNDARY_TOL_M: f64 = 0.01;
+
+        let ring: Vec<Point2f64> = self
+            .polygon
+            .exterior()
+            .coords()
+            .map(|c| Point2f64::new(c.x, c.y))
+            .collect();
+
+        segs.iter()
+            .map(|(a, b)| {
+                let seg_len = ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt();
+                if seg_len < BOUNDARY_TOL_M {
+                    return 0.0;
+                }
+                let mut total = 0.0;
+                for edge in ring.windows(2) {
+                    let (p, q) = (edge[0], edge[1]);
+                    let (ex, ey) = (q.x - p.x, q.y - p.y);
+                    let edge_len = (ex * ex + ey * ey).sqrt();
+                    if edge_len < BOUNDARY_TOL_M {
+                        continue;
+                    }
+                    let (ux, uy) = (ex / edge_len, ey / edge_len);
+                    // Perpendicular distance of both segment endpoints to the
+                    // edge's infinite line — collinearity within tolerance.
+                    let d_a = ((a.x - p.x) * uy - (a.y - p.y) * ux).abs();
+                    let d_b = ((b.x - p.x) * uy - (b.y - p.y) * ux).abs();
+                    if d_a > BOUNDARY_TOL_M || d_b > BOUNDARY_TOL_M {
+                        continue;
+                    }
+                    // 1D overlap of the segment's projection with the edge.
+                    let t_a = (a.x - p.x) * ux + (a.y - p.y) * uy;
+                    let t_b = (b.x - p.x) * ux + (b.y - p.y) * uy;
+                    let (lo, hi) = (t_a.min(t_b), t_a.max(t_b));
+                    total += (hi.min(edge_len) - lo.max(0.0)).max(0.0);
+                }
+                total.min(seg_len)
+            })
+            .collect()
+    }
 }
 
 /// A planar region of the floor
@@ -565,5 +624,52 @@ impl Default for FloorRegion {
             exposure: FloorExposure::default(),
             height_m: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod boundary_overlap_tests {
+    use super::*;
+    use geo::{Coord, LineString};
+
+    fn region(ring: &[(f64, f64)]) -> FloorRegion {
+        let coords: Vec<Coord<f64>> = ring.iter().map(|&(x, y)| Coord { x, y }).collect();
+        FloorRegion {
+            polygon: Polygon::new(LineString::from(coords), vec![]),
+            ..Default::default()
+        }
+    }
+    fn seg(a: (f64, f64), b: (f64, f64)) -> (Point2f64, Point2f64) {
+        (Point2f64::new(a.0, a.1), Point2f64::new(b.0, b.1))
+    }
+
+    /// A 10×6 rectangle: full-edge, partial, noisy-but-on, offset-off,
+    /// collinear-but-elsewhere, and spanning-two-edges cases.
+    #[test]
+    fn overlaps_are_tolerant_and_bounded() {
+        let r = region(&[(0., 0.), (10., 0.), (10., 6.), (0., 6.)]);
+        let out = r.boundary_overlaps(&[
+            seg((0., 0.), (10., 0.)),       // exactly the bottom edge
+            seg((2., 0.), (7., 0.)),        // part of the bottom edge
+            seg((0., 0.004), (10., 0.004)), // 4 mm derivation noise: counts
+            seg((0., 0.5), (10., 0.5)),     // half a metre inside: doesn't
+            seg((12., 0.), (15., 0.)),      // collinear but past the corner
+            seg((10., -2.), (10., 3.)),     // spans past the corner: clipped
+        ]);
+        let exp = [10.0, 5.0, 10.0, 0.0, 0.0, 3.0];
+        for (i, (got, want)) in out.iter().zip(exp).enumerate() {
+            assert!(
+                (got - want).abs() < 1e-6,
+                "case {i}: got {got}, want {want}"
+            );
+        }
+    }
+
+    /// Consecutive collinear ring vertices must not double-count a wall.
+    #[test]
+    fn collinear_ring_edges_do_not_double_count() {
+        let r = region(&[(0., 0.), (5., 0.), (10., 0.), (10., 6.), (0., 6.)]);
+        let out = r.boundary_overlaps(&[seg((0., 0.), (10., 0.))]);
+        assert!((out[0] - 10.0).abs() < 1e-6, "got {}", out[0]);
     }
 }
