@@ -57,6 +57,29 @@ impl Polygon3D {
         Some((unit_normal, d / norm_length))
     }
 
+    /// TRUE (in-plane) area of the planar polygon, via Newell's formula —
+    /// half the magnitude of the summed edge cross products. Works for any
+    /// plane orientation: a vertical wall face gives its face area, a sloped
+    /// roof region its sloped (not plan-projected) area. Degenerate rings
+    /// (< 3 vertices) are 0.
+    pub fn area(&self) -> f64 {
+        if self.exterior.len() < 3 {
+            return 0.0;
+        }
+        let (mut sx, mut sy, mut sz) = (0.0f64, 0.0f64, 0.0f64);
+        for (a, b) in self
+            .exterior
+            .iter()
+            .zip(self.exterior.iter().cycle().skip(1))
+            .take(self.exterior.len())
+        {
+            sx += a.y * b.z - a.z * b.y;
+            sy += a.z * b.x - a.x * b.z;
+            sz += a.x * b.y - a.y * b.x;
+        }
+        0.5 * (sx * sx + sy * sy + sz * sz).sqrt()
+    }
+
     /// The z of this polygon's plane at plan point `(x, y)` — for lifting a
     /// roof window's plan rectangle onto a (possibly sloped) ceiling region. A
     /// flat region returns its constant z. `None` if degenerate or the plane is
@@ -122,5 +145,49 @@ impl From<Polygon3D> for Polygon<f64> {
             .map(|v| Coord { x: v.x, y: v.y })
             .collect();
         Polygon::new(LineString::from(coords_2d), vec![])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn p(x: f64, y: f64, z: f64) -> Point3f64 {
+        Point3f64::new(x, y, z)
+    }
+
+    /// Newell area: exact on a flat rectangle, a vertical wall face, and a
+    /// 45°-sloped roof plane (where the plan projection would under-read).
+    #[test]
+    fn area_is_true_in_plane_area() {
+        let flat = Polygon3D::new(vec![
+            p(0., 0., 0.),
+            p(4., 0., 0.),
+            p(4., 3., 0.),
+            p(0., 3., 0.),
+        ]);
+        assert!((flat.area() - 12.0).abs() < 1e-9);
+
+        let wall = Polygon3D::new(vec![
+            p(0., 0., 0.),
+            p(5., 0., 0.),
+            p(5., 0., 2.4),
+            p(0., 0., 2.4),
+        ]);
+        assert!((wall.area() - 12.0).abs() < 1e-9);
+
+        // 4m (plan) × 3m run rising 3m: slope length 3√2, area 12√2.
+        let sloped = Polygon3D::new(vec![
+            p(0., 0., 0.),
+            p(4., 0., 0.),
+            p(4., 3., 3.),
+            p(0., 3., 3.),
+        ]);
+        assert!((sloped.area() - 12.0 * 2.0_f64.sqrt()).abs() < 1e-9);
+
+        assert_eq!(
+            Polygon3D::new(vec![p(0., 0., 0.), p(1., 0., 0.)]).area(),
+            0.0
+        );
     }
 }
