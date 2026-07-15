@@ -535,6 +535,10 @@ pub enum SketchEvent {
         overshading: Overshading,
         /// Number of OPENING sections (opes) in this window, typed in the box.
         num_opes: Option<u32>,
+        /// Door placements: whether the door is draught-stripped (a door
+        /// counts as one opening in DEAP's ventilation count). Ignored for
+        /// windows.
+        door_draught_stripped: bool,
         /// Source paths of photos picked in the box (each with the capture
         /// tier its button asked for — see the TEMPORARY dual hi/lo buttons,
         /// `photo_button_pair`), attached to the window(s) this placement
@@ -1410,6 +1414,8 @@ pub struct SketchView<'a> {
     pub overshading: &'a mut Overshading,
     /// Per-window "number of opening sections" typed in the placement box.
     pub opening_num_opes: &'a mut String,
+    /// The door placement's draught-stripped checkbox (default ON).
+    pub door_draught_stripped: &'a mut bool,
     /// The new-window-type draught-stripped checkbox (default ON).
     pub wt_draught_stripped: &'a mut bool,
     /// Photos picked in the placement box for the window being placed, each

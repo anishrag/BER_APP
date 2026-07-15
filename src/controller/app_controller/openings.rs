@@ -861,6 +861,7 @@ impl AppController {
         window_type: WindowTypeChoice,
         overshading: Overshading,
         num_opes: Option<u32>,
+        door_draught_stripped: bool,
         photos: Vec<(std::path::PathBuf, PhotoQuality)>,
     ) -> Result<(), String> {
         /// Sill the placement defaults to; the assessor drags it in the 2D view.
@@ -897,6 +898,7 @@ impl AppController {
         // Per-window overshading is applied after the add to whatever window(s)
         // this placement appends (one window, or several for door+sidelights).
         let windows_before = record.data.storeys[idx].windows.len();
+        let doors_before = record.data.storeys[idx].doors.len();
         let storey = &mut record.data.storeys[idx];
         let result: Result<(), OpeningError> = match (pending.tool, target) {
             (
@@ -1109,6 +1111,9 @@ impl AppController {
             for w in record.data.storeys[idx].windows[windows_before..].iter_mut() {
                 w.overshading = overshading;
                 w.num_opes = num_opes;
+            }
+            for d in record.data.storeys[idx].doors[doors_before..].iter_mut() {
+                d.draught_stripped = Some(door_draught_stripped);
             }
             // Photos belong to the GROUP (window type), shared by all its
             // windows — append to the resolved type (none for a plain Door).

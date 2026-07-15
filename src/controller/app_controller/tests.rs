@@ -12099,6 +12099,7 @@ fn full_span_checkbox_composes_a_full_width_doorset() {
         WindowTypeChoice::default(),
         ber_model::ber::fenestration::Overshading::Average,
         None,
+        true,
         Vec::new(),
     )
     .expect("full-width doorset places");
@@ -12177,6 +12178,7 @@ fn multi_field_window_places_with_default_sill() {
         WindowTypeChoice::default(),
         ber_model::ber::fenestration::Overshading::Average,
         None,
+        true,
         Vec::new(),
     )
     .expect("window places");
@@ -12247,6 +12249,7 @@ fn full_span_checkboxes_place_a_full_wall_door() {
         WindowTypeChoice::default(),
         ber_model::ber::fenestration::Overshading::Average,
         None,
+        true,
         Vec::new(),
     )
     .expect("full-wall door places");
@@ -12301,6 +12304,7 @@ fn exact_wall_width_door_without_the_tick_is_refused() {
         WindowTypeChoice::default(),
         ber_model::ber::fenestration::Overshading::Average,
         None,
+        true,
         Vec::new(),
     );
     assert!(r.is_err(), "no auto-detect: the margin path refuses");
@@ -12336,6 +12340,7 @@ fn window_type_picker_reuses_existing_and_adds_only_when_different() {
             choice,
             Overshading::Average,
             None,
+            true,
             Vec::new(),
         )
         .expect("window places");
@@ -12478,6 +12483,7 @@ fn overshading_is_applied_per_window_at_placement() {
             WindowTypeChoice::default(),
             overshading,
             None,
+            true,
             Vec::new(),
         )
         .expect("window places");
@@ -12534,6 +12540,7 @@ fn window_photo_is_attached_at_placement() {
         },
         Overshading::Average,
         None,
+        true,
         vec![(src, PhotoQuality::Full)],
     )
     .expect("window places");
@@ -12593,6 +12600,7 @@ fn failed_placement_discards_copied_photos() {
         },
         Overshading::Average,
         None,
+        true,
         vec![(src, PhotoQuality::Full)],
     );
     assert!(r.is_err(), "oversized window fails to place");
@@ -12725,6 +12733,7 @@ fn place_door_sidelights_overall_mode() {
         WindowTypeChoice::default(),
         Overshading::Average,
         None,
+        true,
         Vec::new(),
     )
     .expect("assembly places");
@@ -12792,6 +12801,7 @@ fn place_complex_window_shapes() {
         WindowTypeChoice::default(),
         Overshading::Average,
         None,
+        true,
         Vec::new(),
     )
     .expect("circular window places");
@@ -12810,6 +12820,7 @@ fn place_complex_window_shapes() {
         WindowTypeChoice::default(),
         Overshading::Average,
         None,
+        true,
         Vec::new(),
     )
     .expect("rounded-top window places");

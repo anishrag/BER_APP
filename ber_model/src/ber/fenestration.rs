@@ -233,6 +233,12 @@ pub struct Door {
     /// transom `Window`s carry the same id.
     #[serde(default)]
     pub assembly_id: Option<ItemId>,
+    /// Whether the door is DRAUGHT-STRIPPED (the placement-box checkbox; a
+    /// door counts as one opening in DEAP's ventilation count). `None` on
+    /// records from before the field — resolved downstream (door-year
+    /// inference / query).
+    #[serde(default)]
+    pub draught_stripped: Option<bool>,
 }
 
 /// The non-rectangular shapes the Complex-window tool offers as picker options

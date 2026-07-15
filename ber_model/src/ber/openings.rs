@@ -404,6 +404,7 @@ pub fn add_wall_door(
         }),
         wall_anchor: None,
         assembly_id: None,
+        draught_stripped: None,
     });
     link_door(storey, wall_id, id);
     redistribute_or_rollback(storey, wall_id, &[OpeningRef::Door(id)])?;
@@ -613,6 +614,7 @@ pub fn add_full_wall_door(
         }),
         wall_anchor: None,
         assembly_id: None,
+        draught_stripped: None,
     });
     link_door(storey, wall_id, id);
     Ok(id)
@@ -982,6 +984,7 @@ fn push_door_sidelights_members(
         }),
         wall_anchor: None,
         assembly_id: Some(assembly_id),
+        draught_stripped: None,
     });
     link_door(storey, wall_id, door_id);
     added.push(OpeningRef::Door(door_id));
@@ -2578,6 +2581,7 @@ mod tests {
                 placement: None, // legacy
                 wall_anchor: None,
                 assembly_id: None,
+                draught_stripped: None,
             }],
             ..Storey::default()
         };

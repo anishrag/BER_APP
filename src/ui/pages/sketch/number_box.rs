@@ -183,6 +183,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         if !ctx.data(|d| d.get_temp::<bool>(seeded_id).unwrap_or(false)) {
             ctx.data_mut(|d| d.insert_temp(seeded_id, true));
             *view.wt_draught_stripped = true;
+            *view.door_draught_stripped = true;
             if view.opening_num_opes.trim().is_empty() {
                 *view.opening_num_opes = "1".to_string();
             }
@@ -303,6 +304,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         let window_type = current_window_type(view);
         let overshading = *view.overshading;
         let num_opes = view.opening_num_opes.trim().parse::<u32>().ok();
+        let door_draught_stripped = *view.door_draught_stripped;
         // Photos picked so far for this placement, captured by value into the
         // events (the photo button below adds to the list for a later frame).
         let photos = view.pending_window_photos.clone();
@@ -387,6 +389,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     window_type: place_window_type.clone(),
                     overshading,
                     num_opes,
+                    door_draught_stripped,
                     photos: place_photos.clone(),
                 }
             })
@@ -666,6 +669,12 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     .hint("Number of opening sections in this window");
                 text_input(ui, view.opening_num_opes, KEY, "1");
             });
+            // Doors count as one opening each; stripped or not is per door.
+            // A plain solid Door is the one tool with no window-type picker;
+            // door+sidelights announces itself via its mode switch.
+            if prompt.door_sidelights.is_some() || !prompt.offer_window_type {
+                ui.checkbox(view.door_draught_stripped, "door draught stripped");
+            }
             // Photos belong to the GROUP (window type). At least one is REQUIRED
             // when defining a new group; for an existing group adding more is
             // optional (it already has its own).
