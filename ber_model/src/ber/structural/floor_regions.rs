@@ -327,6 +327,49 @@ impl FloorRegions {
     /// vertices are stripped so each ring edge is a maximal straight run (a
     /// region sub-edge lying along it then tests as contained). Empty when there
     /// are no ≥3-vertex regions.
+    /// The PURELY GEOMETRIC division of the storey's floor for the height
+    /// calculation: regions grouped by level (1 mm tolerance), each group
+    /// unioned, and every connected piece of a union is one zone. Largest
+    /// zone first — its plane is the natural 0 point for the storey-height
+    /// working. Empty when there are no ≥3-vertex regions.
+    pub fn level_zones(&self) -> Vec<FloorLevelZone> {
+        use geo::bool_ops::BooleanOps;
+        use geo::{Area, Centroid, InteriorPoint};
+        let mut groups: Vec<(f64, MultiPolygon<f64>)> = Vec::new();
+        for r in &self.regions {
+            if r.polygon.exterior().0.len() < 4 {
+                continue;
+            }
+            match groups
+                .iter_mut()
+                .find(|(l, _)| (*l - r.level_m).abs() < 1e-3)
+            {
+                Some((_, mp)) => *mp = mp.union(&r.polygon),
+                None => groups.push((r.level_m, MultiPolygon::new(vec![r.polygon.clone()]))),
+            }
+        }
+        let mut zones: Vec<FloorLevelZone> = groups
+            .into_iter()
+            .flat_map(|(level_m, mp)| {
+                mp.0.into_iter().filter_map(move |polygon| {
+                    let area_m2 = polygon.unsigned_area();
+                    if area_m2 < 1e-4 {
+                        return None; // boolean-op sliver
+                    }
+                    let a = polygon.interior_point().or_else(|| polygon.centroid())?;
+                    Some(FloorLevelZone {
+                        anchor: Point2f64::new(a.x(), a.y()),
+                        polygon,
+                        level_m,
+                        area_m2,
+                    })
+                })
+            })
+            .collect();
+        zones.sort_by(|a, b| b.area_m2.total_cmp(&a.area_m2));
+        zones
+    }
+
     pub fn boundary_rings(&self) -> Vec<Vec<Point2f64>> {
         use geo::bool_ops::BooleanOps;
         let mut acc: Option<MultiPolygon<f64>> = None;
@@ -672,4 +715,15 @@ mod boundary_overlap_tests {
         let out = r.boundary_overlaps(&[seg((0., 0.), (10., 0.))]);
         assert!((out[0] - 10.0).abs() < 1e-6, "got {}", out[0]);
     }
+}
+
+/// One contiguous same-level floor zone — see [`FloorRegions::level_zones`].
+#[derive(Clone, Debug)]
+pub struct FloorLevelZone {
+    pub polygon: Polygon<f64>,
+    /// Level relative to the storey's floor datum (m).
+    pub level_m: f64,
+    pub area_m2: f64,
+    /// A point inside the zone — the label / datum-marker anchor.
+    pub anchor: Point2f64,
 }

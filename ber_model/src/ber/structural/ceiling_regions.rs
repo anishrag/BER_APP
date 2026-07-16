@@ -150,6 +150,103 @@ pub struct CeilingRegions {
 }
 
 impl CeilingRegions {
+    /// The PURELY GEOMETRIC division of the storey's ceiling for the height
+    /// calculation: regions grouped by PLANE (unit normal + offset, both to
+    /// ~mm), each group's plan footprints unioned, every connected piece one
+    /// zone. The plane is evaluated at each piece's interior point for its
+    /// true area-mean height (exact for a plane); `z_range` comes from the
+    /// plane over the piece's plan vertices. Largest zone first.
+    pub fn plane_zones(&self) -> Vec<CeilingPlaneZone> {
+        use geo::bool_ops::BooleanOps;
+        use geo::{Area, Centroid, InteriorPoint};
+        // (nx, ny, nz, d) rounded key → (plane, union)
+        struct Group {
+            key: (i64, i64, i64, i64),
+            n: (f64, f64, f64),
+            d: f64,
+            mp: MultiPolygon<f64>,
+        }
+        let mut groups: Vec<Group> = Vec::new();
+        for r in &self.regions {
+            let ext = &r.polygon.exterior;
+            if ext.len() < 3 {
+                continue;
+            }
+            // Newell normal, normalised, z-positive.
+            let mut n = (0.0_f64, 0.0_f64, 0.0_f64);
+            for i in 0..ext.len() {
+                let (a, b) = (ext[i], ext[(i + 1) % ext.len()]);
+                n.0 += (a.y - b.y) * (a.z + b.z);
+                n.1 += (a.z - b.z) * (a.x + b.x);
+                n.2 += (a.x - b.x) * (a.y + b.y);
+            }
+            let len = (n.0 * n.0 + n.1 * n.1 + n.2 * n.2).sqrt();
+            if len < 1e-9 || n.2.abs() / len < 1e-6 {
+                continue; // degenerate or vertical — no plan contribution
+            }
+            let mut n = (n.0 / len, n.1 / len, n.2 / len);
+            if n.2 < 0.0 {
+                n = (-n.0, -n.1, -n.2);
+            }
+            let d = ext
+                .iter()
+                .map(|p| n.0 * p.x + n.1 * p.y + n.2 * p.z)
+                .sum::<f64>()
+                / ext.len() as f64;
+            let key = (
+                (n.0 * 1e3).round() as i64,
+                (n.1 * 1e3).round() as i64,
+                (n.2 * 1e3).round() as i64,
+                (d * 1e3).round() as i64,
+            );
+            let ring: Vec<(f64, f64)> = ext.iter().map(|v| (v.x, v.y)).collect();
+            let poly = Polygon::new(LineString::from(ring), vec![]);
+            match groups.iter_mut().find(|g| g.key == key) {
+                Some(g) => g.mp = g.mp.union(&poly),
+                None => groups.push(Group {
+                    key,
+                    n,
+                    d,
+                    mp: MultiPolygon::new(vec![poly]),
+                }),
+            }
+        }
+        let mut zones: Vec<CeilingPlaneZone> = Vec::new();
+        for g in groups {
+            let plane_z = |x: f64, y: f64| (g.d - g.n.0 * x - g.n.1 * y) / g.n.2;
+            let flat = g.n.0.abs() < 1e-6 && g.n.1.abs() < 1e-6;
+            for polygon in g.mp.0 {
+                let area_m2 = polygon.unsigned_area();
+                if area_m2 < 1e-4 {
+                    continue; // boolean-op sliver
+                }
+                let Some(a) = polygon.interior_point().or_else(|| polygon.centroid()) else {
+                    continue;
+                };
+                // Mean over the AREA of a plane = its value at the area
+                // centroid; the interior point is only the label anchor.
+                let c = polygon.centroid().unwrap_or(a);
+                let mean_height_m = plane_z(c.x(), c.y());
+                let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+                for v in polygon.exterior().coords() {
+                    let z = plane_z(v.x, v.y);
+                    lo = lo.min(z);
+                    hi = hi.max(z);
+                }
+                zones.push(CeilingPlaneZone {
+                    anchor: Point2f64::new(a.x(), a.y()),
+                    flat_z: flat.then_some(mean_height_m),
+                    z_range: (lo, hi),
+                    mean_height_m,
+                    area_m2,
+                    polygon,
+                });
+            }
+        }
+        zones.sort_by(|a, b| b.area_m2.total_cmp(&a.area_m2));
+        zones
+    }
+
     /// Create a `CeilingRegions` with a single region referencing `construction_id`.
     pub fn new(vertices: Vec<Point3f64>, construction_id: ItemId) -> Self {
         Self {
@@ -1805,4 +1902,21 @@ impl CeilingRegion {
         let pin = Point2f64::new(p.x + nx * eps, p.y + ny * eps);
         self.plan_span_through(pin, dir)
     }
+}
+
+/// One contiguous COPLANAR ceiling zone — see [`CeilingRegions::plane_zones`].
+#[derive(Clone, Debug)]
+pub struct CeilingPlaneZone {
+    /// Plan footprint of the zone.
+    pub polygon: Polygon<f64>,
+    /// Area-mean height of the plane over this footprint (m above the storey
+    /// floor datum).
+    pub mean_height_m: f64,
+    /// The single height when the plane is horizontal.
+    pub flat_z: Option<f64>,
+    /// (lowest, highest) of the plane over the footprint.
+    pub z_range: (f64, f64),
+    pub area_m2: f64,
+    /// A point inside the zone — the label anchor.
+    pub anchor: Point2f64,
 }
