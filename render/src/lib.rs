@@ -11,6 +11,7 @@
 
 pub mod elevation;
 pub mod full_house_3d;
+pub mod storey_2d;
 pub mod storey_3d;
 
 use ber_model::ber::ber_struct::Ber;
@@ -265,6 +266,78 @@ pub fn fill_polygon(painter: &egui::Painter, pts: &[egui::Pos2], color: egui::Co
         }
         painter.add(egui::Shape::mesh(mesh));
     }
+}
+
+/// Draw a dashed line between two screen points. ~6px dash, ~4px gap.
+pub fn draw_dashed_segment(
+    painter: &egui::Painter,
+    from: egui::Pos2,
+    to: egui::Pos2,
+    stroke: egui::Stroke,
+) {
+    let dx = to.x - from.x;
+    let dy = to.y - from.y;
+    let length = (dx * dx + dy * dy).sqrt();
+    if length < 1.0 {
+        return;
+    }
+    let dash = 6.0_f32;
+    let gap = 4.0_f32;
+    let cycle = dash + gap;
+    let n_cycles = (length / cycle).ceil() as usize;
+    let ux = dx / length;
+    let uy = dy / length;
+    for i in 0..n_cycles {
+        let t0 = (i as f32 * cycle).min(length);
+        let t1 = (t0 + dash).min(length);
+        if t1 <= t0 {
+            break;
+        }
+        let p0 = egui::pos2(from.x + ux * t0, from.y + uy * t0);
+        let p1 = egui::pos2(from.x + ux * t1, from.y + uy * t1);
+        painter.line_segment([p0, p1], stroke);
+    }
+}
+
+pub fn union_bbox(
+    a: Option<((f64, f64), (f64, f64))>,
+    b: Option<((f64, f64), (f64, f64))>,
+) -> Option<((f64, f64), (f64, f64))> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some((
+            (a.0 .0.min(b.0 .0), a.0 .1.min(b.0 .1)),
+            (a.1 .0.max(b.1 .0), a.1 .1.max(b.1 .1)),
+        )),
+        (Some(x), None) | (None, Some(x)) => Some(x),
+        (None, None) => None,
+    }
+}
+
+/// Move each screen-space ring vertex `px` toward the ring's centroid — an
+/// approximate inward inset so a selection outline sits just INSIDE a region's
+/// edges instead of coinciding with (and disappearing into) the surface outline.
+pub fn inset_ring(pts: &[egui::Pos2], px: f32) -> Vec<egui::Pos2> {
+    let n = pts.len();
+    if n < 3 {
+        return pts.to_vec();
+    }
+    let (mut cx, mut cy) = (0.0f32, 0.0f32);
+    for p in pts {
+        cx += p.x;
+        cy += p.y;
+    }
+    let c = egui::pos2(cx / n as f32, cy / n as f32);
+    pts.iter()
+        .map(|p| {
+            let d = egui::vec2(c.x - p.x, c.y - p.y);
+            let len = d.length();
+            if len < 1.0 {
+                *p
+            } else {
+                *p + d * (px / len)
+            }
+        })
+        .collect()
 }
 
 /// The fit transform `full_house_3d::render` draws with: every storey's

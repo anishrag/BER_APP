@@ -13,12 +13,12 @@ use ber_model::ber::fenestration::{Door, OpeningPlacement, Window};
 use ber_model::ber::structural::{CeilingRegion, FloorRegion, Storey};
 use domain::points::Point2f64;
 use domain::sketch::DisplayMode;
-use eframe::egui;
 use geo::Coord;
 use manip_plan::CollinearitySuggestion;
 
-use super::{color_for, draw_dashed_segment, fit_transform, style, Transform2d, ViewParams};
-use crate::controller::app_controller::PhaseDisplayRegion;
+use domain::view::PhaseDisplayRegion;
+
+use crate::{color_for, draw_dashed_segment, fit_transform, style, Transform2d, ViewParams};
 
 /// Render the storey. If `highlight` is set, the two edges named in the
 /// suggestion are drawn on top in a contrasting style so the user can see
@@ -77,7 +77,7 @@ pub fn render(
         None => {
             let storey_bb = bounding_box(storey);
             let watermark_bb = watermark_ring.and_then(ring_bbox);
-            super::union_bbox(storey_bb, watermark_bb)
+            crate::union_bbox(storey_bb, watermark_bb)
         }
     };
     let Some((min_xy, max_xy)) = bb else {
@@ -290,7 +290,7 @@ fn draw_highlight_edge(
     painter.line_segment([pa, pb], stroke);
 }
 
-pub(crate) fn ring_bbox(ring: &[(f64, f64)]) -> Option<((f64, f64), (f64, f64))> {
+pub fn ring_bbox(ring: &[(f64, f64)]) -> Option<((f64, f64), (f64, f64))> {
     let mut it = ring.iter();
     let first = *it.next()?;
     let (mut min_x, mut min_y) = first;
@@ -360,7 +360,7 @@ fn draw_phase_watermark_rings(
     }
 }
 
-pub(crate) fn bounding_box(storey: &Storey) -> Option<((f64, f64), (f64, f64))> {
+pub fn bounding_box(storey: &Storey) -> Option<((f64, f64), (f64, f64))> {
     let mut iter = storey
         .floors
         .regions

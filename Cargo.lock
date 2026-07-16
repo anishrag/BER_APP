@@ -631,6 +631,8 @@ dependencies = [
  "domain",
  "earcutr 0.5.0",
  "egui",
+ "geo",
+ "manip_plan",
 ]
 
 [[package]]

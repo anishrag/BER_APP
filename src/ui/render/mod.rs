@@ -26,7 +26,6 @@ pub mod all_storeys_2d;
 pub mod all_storeys_ceilings;
 pub mod all_storeys_floors;
 pub mod pick_3d;
-pub mod storey_2d;
 pub mod structure_fan;
 
 // The drawing core — the 3D house/elevation renderers plus the projection,
@@ -34,8 +33,9 @@ pub mod structure_fan;
 // crate so BER_deap's report generator drives the SAME code headlessly.
 // Re-exported here so in-app callers keep their `render::*` paths.
 pub use ber_render::{
-    auto_fit_scale, color_for, elevation, fill_polygon, fit_transform, full_house_3d, project_3d,
-    storey_3d, style, Transform2d, ViewParams,
+    auto_fit_scale, color_for, draw_dashed_segment, elevation, fill_polygon, fit_transform,
+    full_house_3d, inset_ring, project_3d, storey_2d, storey_3d, style, union_bbox, Transform2d,
+    ViewParams,
 };
 
 use std::collections::HashSet;
@@ -311,36 +311,6 @@ pub fn render_dimension_prompt(
 /// Find the floor ring that contains both endpoints of the dimension wall.
 /// Returns the ring's vertices as `(x, y)` tuples, without the closing
 /// duplicate that `geo::LineString` keeps at the end.
-/// Draw a dashed line between two screen points. ~6px dash, ~4px gap.
-pub(crate) fn draw_dashed_segment(
-    painter: &egui::Painter,
-    from: egui::Pos2,
-    to: egui::Pos2,
-    stroke: egui::Stroke,
-) {
-    let dx = to.x - from.x;
-    let dy = to.y - from.y;
-    let length = (dx * dx + dy * dy).sqrt();
-    if length < 1.0 {
-        return;
-    }
-    let dash = 6.0_f32;
-    let gap = 4.0_f32;
-    let cycle = dash + gap;
-    let n_cycles = (length / cycle).ceil() as usize;
-    let ux = dx / length;
-    let uy = dy / length;
-    for i in 0..n_cycles {
-        let t0 = (i as f32 * cycle).min(length);
-        let t1 = (t0 + dash).min(length);
-        if t1 <= t0 {
-            break;
-        }
-        let p0 = egui::pos2(from.x + ux * t0, from.y + uy * t0);
-        let p1 = egui::pos2(from.x + ux * t1, from.y + uy * t1);
-        painter.line_segment([p0, p1], stroke);
-    }
-}
 
 /// Highlight a wall that's length-equivalent to the primary dimension-prompt
 /// wall — a red line drawn directly on the wall, no arrowheads, no label.
@@ -1083,33 +1053,6 @@ pub fn render_phase_regions(
     }
 }
 
-/// Move each screen-space ring vertex `px` toward the ring's centroid — an
-/// approximate inward inset so a selection outline sits just INSIDE a region's
-/// edges instead of coinciding with (and disappearing into) the surface outline.
-pub(crate) fn inset_ring(pts: &[egui::Pos2], px: f32) -> Vec<egui::Pos2> {
-    let n = pts.len();
-    if n < 3 {
-        return pts.to_vec();
-    }
-    let (mut cx, mut cy) = (0.0f32, 0.0f32);
-    for p in pts {
-        cx += p.x;
-        cy += p.y;
-    }
-    let c = egui::pos2(cx / n as f32, cy / n as f32);
-    pts.iter()
-        .map(|p| {
-            let d = egui::vec2(c.x - p.x, c.y - p.y);
-            let len = d.length();
-            if len < 1.0 {
-                *p
-            } else {
-                *p + d * (px / len)
-            }
-        })
-        .collect()
-}
-
 /// Draw a bright gold DASHED outline (inset just inside each ring) around the
 /// given world-space `rings` — the pre-edit "selected area" marquee for carve
 /// selections, painted on top so it reads clearly even where a ring's edges run
@@ -1551,19 +1494,6 @@ fn previous_outline_ring(storey: &ber_model::ber::structural::Storey) -> Option<
 }
 
 /// Union of two optional bounding boxes (min/max corner pairs).
-pub(crate) fn union_bbox(
-    a: Option<((f64, f64), (f64, f64))>,
-    b: Option<((f64, f64), (f64, f64))>,
-) -> Option<((f64, f64), (f64, f64))> {
-    match (a, b) {
-        (Some(a), Some(b)) => Some((
-            (a.0 .0.min(b.0 .0), a.0 .1.min(b.0 .1)),
-            (a.1 .0.max(b.1 .0), a.1 .1.max(b.1 .1)),
-        )),
-        (Some(x), None) | (None, Some(x)) => Some(x),
-        (None, None) => None,
-    }
-}
 
 /// The bounding box used to auto-fit storey `idx` on the canvas: the storey's
 /// own floor bbox unioned with the previous-storey watermark (drawn only while
