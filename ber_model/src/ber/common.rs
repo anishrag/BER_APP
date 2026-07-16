@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::ops::Deref;
 
 use uuid::Uuid;
@@ -112,7 +112,7 @@ pub struct Photo {
     pub side: Option<ExternalSide>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Default, PartialOrd, Ord)]
 pub enum ConstructionPhase {
     /// Untagged base fabric: skipped implicit default, never year-dated, never
     /// offered in the phase picker. The starting state of a region until the
@@ -152,18 +152,18 @@ pub struct ConstructionPhases {
     /// designated the phase but marked its year UNKNOWN (to be filled in
     /// later). Old records — whose values were plain years — deserialize as
     /// `Some(year)` (serde reads a bare number into `Option` as `Some`).
-    pub years: HashMap<ConstructionPhase, Option<Year>>,
+    pub years: BTreeMap<ConstructionPhase, Option<Year>>,
     /// User-given nicknames per phase (e.g. "Back extension", "over garage") —
     /// what the UI shows instead of "Extension 1". Optional per phase.
     #[serde(default)]
-    pub nicknames: HashMap<ConstructionPhase, String>,
+    pub nicknames: BTreeMap<ConstructionPhase, String>,
 }
 
 impl ConstructionPhases {
-    pub fn new(years: HashMap<ConstructionPhase, Option<Year>>) -> Self {
+    pub fn new(years: BTreeMap<ConstructionPhase, Option<Year>>) -> Self {
         Self {
             years,
-            nicknames: HashMap::new(),
+            nicknames: BTreeMap::new(),
         }
     }
 
