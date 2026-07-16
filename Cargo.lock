@@ -578,6 +578,7 @@ dependencies = [
  "android_logger",
  "anyhow",
  "ber_model",
+ "ber_render",
  "btleplug",
  "chrono",
  "document",
@@ -620,6 +621,16 @@ dependencies = [
  "serde",
  "serde_json",
  "uuid",
+]
+
+[[package]]
+name = "ber_render"
+version = "0.0.1"
+dependencies = [
+ "ber_model",
+ "domain",
+ "earcutr 0.5.0",
+ "egui",
 ]
 
 [[package]]

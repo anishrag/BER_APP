@@ -35,9 +35,8 @@ use ber_model::ber::structural::{
     CeilingExposure, CeilingRegion, FloorExposure, FloorRegion, Storey, WallExposure, WallRegion,
 };
 use domain::sketch::DisplayMode;
-use eframe::egui;
 
-use super::{color_for, fill_polygon, fit_transform, style, Transform2d, ViewParams};
+use crate::{color_for, fill_polygon, fit_transform, style, Transform2d, ViewParams};
 
 #[allow(clippy::too_many_arguments)]
 pub fn render(
@@ -120,7 +119,7 @@ fn min_floor_level(storey: &Storey) -> f64 {
 /// reviews/paints exposure there, so every surface draws (InterStorey walls
 /// as ghosts).
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn render_at_z_offset(
+pub fn render_at_z_offset(
     painter: &egui::Painter,
     t: &Transform2d,
     storey: &Storey,
@@ -251,7 +250,7 @@ pub(crate) fn render_at_z_offset(
 /// every roof vertex at its own z — so lowered floors, raised ceilings, and
 /// any orbit angle never clip. `None` when there's no geometry or no ceiling
 /// height to extrude to.
-pub(crate) fn projected_bb_for_storey(
+pub fn projected_bb_for_storey(
     storey: &Storey,
     z_offset: f64,
     view: ViewParams,

@@ -32,6 +32,7 @@ document = { path = "document" }
 domain = { path = "domain" }
 manip_plan = { path = "manip_plan", features = ["serde"] }
 sketch = { path = "sketch" }
+ber_render = { path = "render" }
 egui = "0.33.3"
 strum = "0.27.2"
 strum_macros = "0.27.2"
@@ -92,7 +93,7 @@ jni = "0.21"
 ndk-context = "0.1"
 
 [workspace]
-members = ["ber_model", "document", "sketch", "domain", "manip_plan"]
+members = ["ber_model", "document", "sketch", "domain", "manip_plan", "render"]
 
 [workspace.dependencies]
 # float_roundtrip: the BER blob round-trips f64 geometry through JSON — without

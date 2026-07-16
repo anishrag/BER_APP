@@ -6,13 +6,13 @@ description: Crate-level dependency boundaries enforced by .claude/scripts/check
 
 These are hard rules. The boundary script at `.claude/scripts/check-boundaries.sh` runs on every Edit/Write and on Stop, and exits 2 (blocking) when a rule is violated. Treat the rule file as the up-front context so you don't trip the linter in the first place.
 
-## UI confined to `src/ui/**`
+## UI confined to `src/ui/**` and `render/**`
 
-**Rule:** `egui`, `eframe`, `egui_extras`, `egui_datepicker`, `egui_field_editor` may not be imported outside `src/ui/`.
+**Rule:** `egui`, `eframe`, `egui_extras`, `egui_datepicker`, `egui_field_editor` may not be imported outside `src/ui/` and `render/`. Within `render/` only `egui` itself is legitimate (its Cargo.toml declares no eframe) — it must stay window-stack-free.
 
-**Why:** Earlier in this project's life the UI toolkit changed (slint → egui), and we want the option open. By keeping every other crate UI-agnostic, swapping the UI layer later (e.g. to Slint for iOS, or to a native Android shell calling Rust as a library) is a contained rewrite of `src/ui/` rather than a full project rewrite. Today that confinement is intact and worth preserving.
+**Why:** Earlier in this project's life the UI toolkit changed (slint → egui), and we want the option open. By keeping every other crate UI-agnostic, swapping the UI layer later (e.g. to Slint for iOS, or to a native Android shell calling Rust as a library) is a contained rewrite of `src/ui/` + `render/` rather than a full project rewrite. `render/` (the `ber_render` crate) is the shared drawing core — the 3D house / elevation renderers and their projection + fit math — packaged as a library so BER_deap's report generator drives the SAME tested drawing code headlessly and serializes the epaint shapes to SVG. It is UI code by nature; it lives outside `src/ui/` only so another repo can link it.
 
-**How to apply:** Render code, egui types, and widget handling stay in `src/ui/`. The controller (`src/controller/`) and engine (`src/engine/`) communicate with UI only via owned data and the `UiEvent` enum. Workspace crates (`ber_model`, `domain`, `sketch`, `manip_plan`, `document`) never see an egui type.
+**How to apply:** Render code, egui types, and widget handling stay in `src/ui/` (interactive) or `render/` (pure painting shared with BER_deap — takes `&egui::Painter`, never `&mut egui::Ui`/`Response`, no interaction, no textures). The controller (`src/controller/`) and engine (`src/engine/`) communicate with UI only via owned data and the `UiEvent` enum; they may not import `ber_render` either — shared values both need (e.g. the default orbit angles) live in `domain`. Workspace data crates (`ber_model`, `domain`, `sketch`, `manip_plan`, `document`) never see an egui type.
 
 ## `document/` is the editing model — UI-free and DB-free
 

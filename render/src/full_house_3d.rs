@@ -14,9 +14,8 @@ use std::collections::HashSet;
 use ber_model::ber::ber_struct::Ber;
 use ber_model::ber::common::ItemId;
 use domain::sketch::DisplayMode;
-use eframe::egui;
 
-use super::{fit_transform, storey_3d, style, ViewParams};
+use crate::{fit_transform, storey_3d, style, ViewParams};
 
 pub fn render(
     painter: &egui::Painter,

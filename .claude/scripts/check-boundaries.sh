@@ -23,8 +23,10 @@ check_file() {
   # File must exist on disk (skip deleted)
   [[ -f "$f" ]] || return 0
 
-  # Rule 1: egui/eframe only in src/ui/**
-  if ! starts_with "$f" "src/ui/"; then
+  # Rule 1: egui/eframe only in src/ui/** and render/** (ber_render is the
+  # shared drawing core — egui-based UI code packaged as a library so BER_deap
+  # renders with the same code; eframe stays out of it via its Cargo.toml).
+  if ! starts_with "$f" "src/ui/" && ! starts_with "$f" "render/"; then
     local hit
     hit=$(grep -nE '^\s*use\s+(egui|eframe|egui_extras|egui_datepicker|egui_field_editor)(\s|::|;|$)' "$f" 2>/dev/null || true)
     if [[ -n "$hit" ]]; then

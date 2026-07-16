@@ -1,0 +1,16 @@
+[package]
+name = "ber_render"
+version = "0.0.1"
+edition = "2021"
+
+# The shared drawing core: the 3D house / elevation renderers and their
+# projection + fit-transform math, extracted from src/ui/render so BER_deap
+# (the PC report generator) can drive the SAME tested code headlessly and
+# serialize the resulting epaint shapes to SVG. Depends on egui (NOT eframe)
+# so consumers don't pull in a windowing stack.
+
+[dependencies]
+egui = "0.33.3"
+earcutr = "0.5.0"
+ber_model = { path = "../ber_model" }
+domain = { path = "../domain" }
