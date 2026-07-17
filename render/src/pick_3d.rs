@@ -110,9 +110,18 @@ fn collect_hits(
     current_storey_idx: Option<usize>,
     view: ViewParams,
     screen: egui::Pos2,
+    slop_px: f32,
 ) -> Vec<(f64, bool, SurfaceHit)> {
     let Some(t) = transform_3d(rect, ber, current_storey_idx, view) else {
         return Vec::new();
+    };
+    // Click slop in projected-world units: lets a cursor land on thin or
+    // nearly edge-on faces (interior risers) whose projected polygon is a
+    // sliver. 0 = exact containment (the tablet's tap).
+    let slop_world = if slop_px > 0.0 {
+        slop_px as f64 / t.scale().max(1e-9)
+    } else {
+        0.0
     };
     let cursor = t.inverse(screen.x, screen.y);
 
@@ -158,7 +167,9 @@ fn collect_hits(
             .iter()
             .map(|&(x, y, z)| super::project_3d(x, y, z, view.yaw_deg, view.pitch_deg))
             .collect();
-        if !ring_contains(&projected, cursor) {
+        if !ring_contains(&projected, cursor)
+            && (slop_world <= 0.0 || ring_distance(&projected, cursor) > slop_world)
+        {
             return;
         }
         // Ray ∩ plane; smaller s = closer to the viewer (h = −s along the ray).
@@ -329,7 +340,7 @@ pub fn pick_surface_3d(
     view: ViewParams,
     screen: egui::Pos2,
 ) -> Option<SurfaceHit> {
-    collect_hits(rect, ber, current_storey_idx, view, screen)
+    collect_hits(rect, ber, current_storey_idx, view, screen, 0.0)
         .into_iter()
         .filter(|(_, facing, _)| *facing)
         .min_by(|(a, ..), (b, ..)| a.total_cmp(b))
@@ -347,7 +358,9 @@ pub fn pick_surfaces_3d(
     view: ViewParams,
     screen: egui::Pos2,
 ) -> Vec<SurfaceHit> {
-    let mut hits = collect_hits(rect, ber, current_storey_idx, view, screen);
+    // A few pixels of slop so thin / edge-on faces (interior risers) are
+    // clickable — the exact-containment tap stays pick_surface_3d's.
+    let mut hits = collect_hits(rect, ber, current_storey_idx, view, screen, 6.0);
     hits.sort_by(|(a, ..), (b, ..)| a.total_cmp(b));
     hits.into_iter().map(|(_, _, hit)| hit).collect()
 }
@@ -406,6 +419,25 @@ fn upward_normal(polygon: &Polygon3D) -> Option<[f64; 3]> {
 /// if a point nudged along it from the face's plan midpoint lands inside one
 /// of the storey's floor rings. A wall whose both sides are outside every
 /// floor ring (detached edge) keeps the un-flipped normal.
+/// Distance from `p` to the closed ring's nearest edge (projected 2D).
+fn ring_distance(ring: &[(f64, f64)], p: (f64, f64)) -> f64 {
+    let n = ring.len();
+    let mut best = f64::MAX;
+    for i in 0..n {
+        let (a, b) = (ring[i], ring[(i + 1) % n]);
+        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+        let len2 = dx * dx + dy * dy;
+        let t = if len2 > 1e-18 {
+            (((p.0 - a.0) * dx + (p.1 - a.1) * dy) / len2).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let (qx, qy) = (a.0 + t * dx, a.1 + t * dy);
+        best = best.min((p.0 - qx).hypot(p.1 - qy));
+    }
+    best
+}
+
 fn outward_wall_normal(polygon: &Polygon3D, storey: &Storey) -> Option<[f64; 3]> {
     let (n, _) = polygon.get_normal_and_distance_to_origin()?;
     let len_h = n.x.hypot(n.y);
