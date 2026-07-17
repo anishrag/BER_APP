@@ -34,16 +34,20 @@ impl Polygon3D {
         if self.exterior.len() < 3 {
             return None;
         }
-        let p0 = &self.exterior[0];
-        let p1 = &self.exterior[1];
-        let p2 = &self.exterior[2];
-        let u = Vector3f64::new(p1.x - p0.x, p1.y - p0.y, p1.z - p0.z);
-        let v = Vector3f64::new(p2.x - p0.x, p2.y - p0.y, p2.z - p0.z);
-        let normal = Vector3f64::new(
-            u.y * v.z - u.z * v.y,
-            u.z * v.x - u.x * v.z,
-            u.x * v.y - u.y * v.x,
-        );
+        // NEWELL'S METHOD over the whole ring — a naive first-three-vertices
+        // cross product fails whenever the leading vertices are collinear
+        // (e.g. a wall whose eave line carries three aligned points), which
+        // made such faces vanish from every plane-based consumer (3D
+        // picking included). Newell only degenerates for genuinely zero-area
+        // rings. Orientation follows the ring winding, same as before.
+        let mut normal = Vector3f64::new(0.0, 0.0, 0.0);
+        for i in 0..self.exterior.len() {
+            let a = &self.exterior[i];
+            let b = &self.exterior[(i + 1) % self.exterior.len()];
+            normal.x += (a.y - b.y) * (a.z + b.z);
+            normal.y += (a.z - b.z) * (a.x + b.x);
+            normal.z += (a.x - b.x) * (a.y + b.y);
+        }
         let norm_length = (normal.x.powi(2) + normal.y.powi(2) + normal.z.powi(2)).sqrt();
         if norm_length < 1e-10 {
             return None;
@@ -53,8 +57,12 @@ impl Polygon3D {
             normal.y / norm_length,
             normal.z / norm_length,
         );
+        // Signed plane distance to the origin, with the UNIT normal (the old
+        // extra ÷ norm_length was a latent bug — every caller ignored the
+        // distance, so nothing depended on the wrong scale).
+        let p0 = &self.exterior[0];
         let d = -(unit_normal.x * p0.x + unit_normal.y * p0.y + unit_normal.z * p0.z);
-        Some((unit_normal, d / norm_length))
+        Some((unit_normal, d))
     }
 
     /// TRUE (in-plane) area of the planar polygon, via Newell's formula —
