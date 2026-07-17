@@ -101,14 +101,19 @@ pub fn transform_3d(
 /// Pick the closest viewer-facing surface under `screen` in the 3D view drawn
 /// at (`rect`, `current_storey_idx`, `view`). See the module docs for the
 /// candidate set and the pitch convention.
-pub fn pick_surface_3d(
+/// Every surface whose projected polygon contains the cursor, with its view
+/// depth and whether it FACES the viewer — the shared core behind the
+/// pickers.
+fn collect_hits(
     rect: egui::Rect,
     ber: &Ber,
     current_storey_idx: Option<usize>,
     view: ViewParams,
     screen: egui::Pos2,
-) -> Option<SurfaceHit> {
-    let t = transform_3d(rect, ber, current_storey_idx, view)?;
+) -> Vec<(f64, bool, SurfaceHit)> {
+    let Some(t) = transform_3d(rect, ber, current_storey_idx, view) else {
+        return Vec::new();
+    };
     let cursor = t.inverse(screen.x, screen.y);
 
     let yaw = (view.yaw_deg as f64).to_radians();
@@ -131,7 +136,7 @@ pub fn pick_surface_3d(
         -w0 * pitch.cos(),
     ];
 
-    let mut best: Option<(f64, SurfaceHit)> = None;
+    let mut hits: Vec<(f64, bool, SurfaceHit)> = Vec::new();
     let mut consider = |storey_idx: usize,
                         datum: f64,
                         surface: PickedSurface,
@@ -141,11 +146,13 @@ pub fn pick_surface_3d(
         if ring.len() < 3 {
             return;
         }
-        // Front-facing only: the outward normal must point toward the viewer.
+        // BOTH facings are collected (a caller may pick through the model);
+        // only view-parallel planes have no ray intersection.
         let ndotd = dot(normal, dir);
-        if ndotd >= -1e-9 {
+        if ndotd.abs() <= 1e-9 {
             return;
         }
+        let facing = ndotd < 0.0;
         // Containment: the cursor inside the surface's projected polygon.
         let projected: Vec<(f64, f64)> = ring
             .iter()
@@ -160,23 +167,22 @@ pub fn pick_surface_3d(
             normal,
             [p0.0 - ray_p0[0], p0.1 - ray_p0[1], p0.2 - ray_p0[2]],
         ) / ndotd;
-        if best.as_ref().is_none_or(|(bs, _)| s < *bs) {
-            let hit_point = (
-                ray_p0[0] + s * dir[0],
-                ray_p0[1] + s * dir[1],
-                ray_p0[2] + s * dir[2],
-            );
-            best = Some((
-                s,
-                SurfaceHit {
-                    storey_idx,
-                    surface,
-                    world_point: hit_point,
-                    storey_local_z: hit_point.2 - datum,
-                    pitch_deg,
-                },
-            ));
-        }
+        let hit_point = (
+            ray_p0[0] + s * dir[0],
+            ray_p0[1] + s * dir[1],
+            ray_p0[2] + s * dir[2],
+        );
+        hits.push((
+            s,
+            facing,
+            SurfaceHit {
+                storey_idx,
+                surface,
+                world_point: hit_point,
+                storey_local_z: hit_point.2 - datum,
+                pitch_deg,
+            },
+        ));
     };
 
     // Per-storey regions. In the full-house stack the derived InterStorey
@@ -184,7 +190,12 @@ pub fn pick_surface_3d(
     // offering them as pick targets there.
     let (storeys, datums, stack): (Vec<(usize, &Storey)>, Vec<f64>, bool) = match current_storey_idx
     {
-        Some(i) => (vec![(i, ber.storeys.get(i)?)], vec![0.0], false),
+        Some(i) => {
+            let Some(st) = ber.storeys.get(i) else {
+                return Vec::new();
+            };
+            (vec![(i, st)], vec![0.0], false)
+        }
         None => (
             ber.storeys.iter().enumerate().collect(),
             ber.storey_floor_datums(),
@@ -306,7 +317,39 @@ pub fn pick_surface_3d(
         }
     }
 
-    best.map(|(_, hit)| hit)
+    hits
+}
+
+/// The nearest FRONT-FACING surface under the cursor (the tablet's tap
+/// semantics) — see [`collect_hits`].
+pub fn pick_surface_3d(
+    rect: egui::Rect,
+    ber: &Ber,
+    current_storey_idx: Option<usize>,
+    view: ViewParams,
+    screen: egui::Pos2,
+) -> Option<SurfaceHit> {
+    collect_hits(rect, ber, current_storey_idx, view, screen)
+        .into_iter()
+        .filter(|(_, facing, _)| *facing)
+        .min_by(|(a, ..), (b, ..)| a.total_cmp(b))
+        .map(|(_, _, hit)| hit)
+}
+
+/// EVERY surface under the cursor, nearest first, both facings — callers
+/// that filter by group/kind pick through the stack (a wall stays pickable
+/// from behind, and a background surface of the wanted group is reachable
+/// under a foreground one).
+pub fn pick_surfaces_3d(
+    rect: egui::Rect,
+    ber: &Ber,
+    current_storey_idx: Option<usize>,
+    view: ViewParams,
+    screen: egui::Pos2,
+) -> Vec<SurfaceHit> {
+    let mut hits = collect_hits(rect, ber, current_storey_idx, view, screen);
+    hits.sort_by(|(a, ..), (b, ..)| a.total_cmp(b));
+    hits.into_iter().map(|(_, _, hit)| hit).collect()
 }
 
 fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
