@@ -25,7 +25,6 @@
 pub mod all_storeys_2d;
 pub mod all_storeys_ceilings;
 pub mod all_storeys_floors;
-pub mod pick_3d;
 pub mod structure_fan;
 
 // The drawing core — the 3D house/elevation renderers plus the projection,
@@ -34,8 +33,8 @@ pub mod structure_fan;
 // Re-exported here so in-app callers keep their `render::*` paths.
 pub use ber_render::{
     auto_fit_scale, color_for, draw_dashed_segment, elevation, fill_polygon, fit_transform,
-    full_house_3d, inset_ring, project_3d, storey_2d, storey_3d, style, union_bbox, Transform2d,
-    ViewParams,
+    full_house_3d, inset_ring, pick_3d, project_3d, storey_2d, storey_3d, style, union_bbox,
+    Transform2d, ViewParams,
 };
 
 use std::collections::HashSet;

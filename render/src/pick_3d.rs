@@ -35,9 +35,8 @@
 use ber_model::ber::ber_struct::Ber;
 use ber_model::ber::common::ItemId;
 use ber_model::ber::structural::{CeilingExposure, FloorExposure, Polygon3D, Storey, WallExposure};
-use eframe::egui;
 
-use super::{fit_transform, storey_3d, union_bbox, Transform2d, ViewParams};
+use crate::{fit_transform, storey_3d, union_bbox, Transform2d, ViewParams};
 
 /// A surface plane's tilt must exceed this (degrees) to count as SLOPED —
 /// below it a ceiling is "flat" (no pitch reported).
@@ -74,7 +73,7 @@ pub struct SurfaceHit {
 /// `view`) is drawn with — the exact fit `storey_3d::render` /
 /// `full_house_3d::render` computes. `None` when that view can't render (no
 /// geometry, or a storey without its default ceiling height).
-pub(crate) fn transform_3d(
+pub fn transform_3d(
     rect: egui::Rect,
     ber: &Ber,
     current_storey_idx: Option<usize>,

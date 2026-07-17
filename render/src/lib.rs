@@ -11,6 +11,7 @@
 
 pub mod elevation;
 pub mod full_house_3d;
+pub mod pick_3d;
 pub mod storey_2d;
 pub mod storey_3d;
 
