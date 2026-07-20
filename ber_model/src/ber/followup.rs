@@ -66,6 +66,24 @@ pub const ALL_POINTS: [FollowUpPointId; 10] = [
 ];
 
 impl FollowUpPointId {
+    /// Stable slug (matches the serde rename) — the checklist item id sent to
+    /// the backend so a ticked item is identifiable across the app + add-on.
+    pub fn slug(self) -> &'static str {
+        use FollowUpPointId::*;
+        match self {
+            HouseBuildDate => "house_build_date",
+            ExtensionBuildDate => "extension_build_date",
+            BuilderUpgradeLetter => "builder_upgrade_letter",
+            WorksEvidenceNoBuilder => "works_evidence_no_builder",
+            CertifierNewbuildLetter => "certifier_newbuild_letter",
+            WindowDop => "window_dop",
+            DoorDop => "door_dop",
+            SolarDocs => "solar_docs",
+            HeatPumpData => "heat_pump_data",
+            AirtightnessAndAcd => "airtightness_and_acd",
+        }
+    }
+
     /// Short label for the checkbox.
     pub fn label(self) -> &'static str {
         use FollowUpPointId::*;
@@ -406,6 +424,24 @@ impl FollowUpRequest {
     /// Whether the request email has already been sent (button spent).
     pub fn is_sent(&self) -> bool {
         self.sent_at.is_some()
+    }
+
+    /// The requested items as `(item_id, label)`, in draft order — selected
+    /// built-in points (by slug) then ticked custom points (by their id). Sent
+    /// to the backend so the office checklist mirrors exactly what was asked.
+    pub fn checklist_items(&self) -> Vec<(String, String)> {
+        let mut items: Vec<(String, String)> = ALL_POINTS
+            .into_iter()
+            .filter(|p| self.selected.contains(p))
+            .map(|p| (p.slug().to_string(), p.label().to_string()))
+            .collect();
+        items.extend(
+            self.custom
+                .iter()
+                .filter(|c| c.checked)
+                .map(|c| (c.id.to_string(), c.label.clone())),
+        );
+        items
     }
 }
 

@@ -232,6 +232,7 @@ impl AppController {
         let job_id_str = job_id.to_string();
         let subject = followup::subject(ber);
         let body = ber.followup.body.clone();
+        let items = ber.followup.checklist_items();
         let config_file = self.sync_config_file.clone();
 
         let state = Arc::new(Mutex::new(FollowUpSendState::Sending));
@@ -243,8 +244,13 @@ impl AppController {
         self.followup_send_error = None;
 
         std::thread::spawn(move || {
-            let result =
-                crate::engine::send_details_request(&config_file, &job_id_str, &subject, &body);
+            let result = crate::engine::send_details_request(
+                &config_file,
+                &job_id_str,
+                &subject,
+                &body,
+                &items,
+            );
             let mut guard = state.lock().unwrap();
             *guard = match result {
                 Ok(crate::engine::SendOutcome::Sent) => FollowUpSendState::Done,

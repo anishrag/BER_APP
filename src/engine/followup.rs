@@ -23,19 +23,30 @@ pub enum SendOutcome {
 }
 
 #[derive(Serialize)]
+struct ChecklistItemWire<'a> {
+    #[serde(rename = "itemId")]
+    item_id: &'a str,
+    label: &'a str,
+}
+
+#[derive(Serialize)]
 struct RequestBody<'a> {
     subject: &'a str,
     body: &'a str,
+    /// The requested items, so the backend seeds the office follow-up checklist.
+    items: Vec<ChecklistItemWire<'a>>,
 }
 
 /// POST the composed follow-up email to
 /// `/surveyor/jobs/{job_id}/ber/request-details`. Loads the same cloud config
-/// (`sync.json` / `$BER_SYNC_*`) as the sync/push workers.
+/// (`sync.json` / `$BER_SYNC_*`) as the sync/push workers. `items` are the
+/// requested checklist entries `(item_id, label)`.
 pub fn send_details_request(
     config_file: &Path,
     job_id: &str,
     subject: &str,
     body: &str,
+    items: &[(String, String)],
 ) -> anyhow::Result<SendOutcome> {
     let cfg = SyncConfig::load(config_file)
         .ok_or_else(|| anyhow::anyhow!("cloud sync not configured"))?;
@@ -48,11 +59,18 @@ pub fn send_details_request(
         cfg.base_url.trim_end_matches('/'),
         job_id
     );
+    let items: Vec<ChecklistItemWire> = items
+        .iter()
+        .map(|(id, label)| ChecklistItemWire { item_id: id, label })
+        .collect();
     match agent
         .post(&url)
         .set("x-surveyor-key", &cfg.api_key)
-        .send_json(&RequestBody { subject, body })
-    {
+        .send_json(&RequestBody {
+            subject,
+            body,
+            items,
+        }) {
         Ok(_) => Ok(SendOutcome::Sent),
         Err(ureq::Error::Status(404, _)) => Ok(SendOutcome::NoJob),
         Err(e) => Err(e.into()),
