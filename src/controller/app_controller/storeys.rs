@@ -301,6 +301,7 @@ impl AppController {
         // argument) — plus the last ridge's auto-resolve notice (it names the
         // OUTGOING storey's areas).
         self.pending_roof_point = None;
+        self.pending_centre_between = None;
         self.pending_roof_ridge = None;
         self.roof_ridge_notice = None;
         self.pending_roof_rect = None;
@@ -311,6 +312,7 @@ impl AppController {
         self.edit_drag_prompt = None;
         self.vertex_drop_prompt = None;
         self.living_area_mode = false;
+        self.porch_mode = false;
         self.exposure_mode = false;
         self.phase_mode = false;
         self.step_mode = false;
@@ -442,6 +444,7 @@ impl AppController {
         self.pending_ceiling_step = None;
         self.ceiling_step_mode = false;
         self.pending_roof_point = None;
+        self.pending_centre_between = None;
         self.pending_roof_ridge = None;
         self.roof_ridge_notice = None;
         self.pending_roof_rect = None;
@@ -450,6 +453,7 @@ impl AppController {
         self.ceiling_point_mode = false;
         self.exit_openings_mode();
         self.living_area_mode = false;
+        self.porch_mode = false;
         self.exposure_mode = false;
         // Phase mode is a sub-area tool like the two above; leaving it on across a
         // storey switch routed the new storey's OUTLINE stroke into the phase
@@ -969,6 +973,18 @@ impl AppController {
         // inter-storey pass it composes with.
         ber_model::ber::structural::derive_roof_voids(&mut record.data);
         for idx in 0..n {
+            // RE-STAMP RISERS: `derive_inter_storey` / `derive_roof_voids` above
+            // re-derive and re-split the wall regions, resetting each riser to
+            // its derived default (the per-storey resolve's `stamp_riser_exposure`
+            // ran BEFORE these). Re-apply the durable riser overrides here so an
+            // assessor-set non-junction riser is the LAST word on its exposure —
+            // the wall analogue of the pre-derive floor/ceiling re-stamp above.
+            // A now-`InterStorey` (buried) riser is skipped inside the stamp, so
+            // the junction classification stands.
+            document::stamp_riser_exposure(
+                &self.document.storeys[idx],
+                &mut record.data.storeys[idx],
+            );
             document::relink_openings_after_derive(
                 &self.document.storeys[idx],
                 &mut record.data.storeys[idx],

@@ -602,27 +602,7 @@ pub(crate) fn group_editor_ui<F: FnMut(UiEvent)>(
                 ceiling_default_dropdown_ui(ui, group_index, g, enabled, on_event)
             }
             SurfaceKind::Walls => wall_default_dropdown_ui(ui, group_index, g, enabled, on_event),
-            SurfaceKind::Floors => {
-                let (sel, label) = default_button_label(&g.makeup);
-                if ui
-                    .add_enabled(
-                        enabled,
-                        egui::Button::selectable(
-                            sel,
-                            egui::RichText::new(label).size(EDITOR_FONT + 3.0),
-                        ),
-                    )
-                    .on_hover_text("Default")
-                    .clicked()
-                {
-                    on_event(UiEvent::Sketch(SketchEvent::SetStructureGroupAttrs {
-                        group: group_index,
-                        ty: g.ty,
-                        makeup: ConstructionMakeup::Default,
-                        phase: g.phase.clone(),
-                    }));
-                }
-            }
+            SurfaceKind::Floors => floor_default_dropdown_ui(ui, group_index, g, enabled, on_event),
         }
         unknown_specify_buttons_ui(ui, group_index, g, enabled, on_event);
     });
@@ -738,12 +718,18 @@ fn default_button_label(makeup: &ConstructionMakeup) -> (bool, String) {
             extra_insulation_mm,
             plasterboard: false,
         } => (true, format!("✔ +{extra_insulation_mm}")),
+        ConstructionMakeup::SomeInsulation => (true, "✔ some".to_string()),
         other => match other.plasterboard_insulation_mm() {
             Some(mm) => (true, format!("✔ pb+{mm}")),
             None => (false, "✔".to_string()),
         },
     }
 }
+
+/// The label the dropdowns use for the "some insulation" pick — evidence of
+/// insulation exists but the thickness can't be measured (partial credit;
+/// needs the evidence photo).
+const SOME_INSULATION_LABEL: &str = "some ins. (can't measure)";
 
 /// The WALLS build-up row's combined "✓ Default" control: a selectable icon
 /// button that opens the dry-lining dropdown — "default" (the plain era
@@ -815,6 +801,64 @@ fn wall_default_dropdown_ui<F: FnMut(UiEvent)>(
                 pick(mk.clone());
             }
         }
+        if ui
+            .selectable_label(
+                g.makeup == ConstructionMakeup::SomeInsulation,
+                egui::RichText::new(SOME_INSULATION_LABEL).size(EDITOR_FONT),
+            )
+            .clicked()
+        {
+            pick(ConstructionMakeup::SomeInsulation);
+        }
+    });
+}
+
+/// The FLOORS build-up row's combined "✓ Default" control: like the wall
+/// dropdown but with only two entries — "default" (the plain era default)
+/// and "some insulation" (evidence exists, thickness unmeasurable — partial
+/// credit, photo-gated). Floors have no dry-lining table.
+fn floor_default_dropdown_ui<F: FnMut(UiEvent)>(
+    ui: &mut egui::Ui,
+    group_index: usize,
+    g: &EditGroup,
+    enabled: bool,
+    on_event: &mut F,
+) {
+    let (sel, label) = default_button_label(&g.makeup);
+    let resp = ui
+        .add_enabled(
+            enabled,
+            // Sized like its ? / ℹ siblings — this is an ICON button.
+            egui::Button::selectable(sel, egui::RichText::new(label).size(EDITOR_FONT + 3.0)),
+        )
+        .on_hover_text("Default construction — tap for options");
+    let mut pick = |makeup: ConstructionMakeup| {
+        on_event(UiEvent::Sketch(SketchEvent::SetStructureGroupAttrs {
+            group: group_index,
+            ty: g.ty,
+            makeup,
+            phase: g.phase.clone(),
+        }));
+    };
+    egui::Popup::menu(&resp).show(|ui| {
+        if ui
+            .selectable_label(
+                g.makeup == ConstructionMakeup::Default,
+                egui::RichText::new("default").size(EDITOR_FONT),
+            )
+            .clicked()
+        {
+            pick(ConstructionMakeup::Default);
+        }
+        if ui
+            .selectable_label(
+                g.makeup == ConstructionMakeup::SomeInsulation,
+                egui::RichText::new(SOME_INSULATION_LABEL).size(EDITOR_FONT),
+            )
+            .clicked()
+        {
+            pick(ConstructionMakeup::SomeInsulation);
+        }
     });
 }
 
@@ -852,6 +896,7 @@ fn ceiling_default_dropdown_ui<F: FnMut(UiEvent)>(
         (ConstructionMakeup::Default, Some(CeilingInsulation::Unknown)) => {
             (true, "✔ unk".to_string())
         }
+        (ConstructionMakeup::SomeInsulation, _) => (true, "✔ some".to_string()),
         _ => (false, "✔".to_string()),
     };
     let resp = ui
@@ -888,6 +933,27 @@ fn ceiling_default_dropdown_ui<F: FnMut(UiEvent)>(
                     Some(CeilingInsulation::ThicknessMm(*mm as f32)),
                 );
             }
+        }
+        // "Some insulation": evidence exists but the thickness can't be
+        // measured — a MAKE-UP state (not an insulation spec), so it clears
+        // any stale spec; the build-up photo gate carries the evidence.
+        if ui
+            .selectable_label(
+                g.makeup == ConstructionMakeup::SomeInsulation,
+                egui::RichText::new(SOME_INSULATION_LABEL).size(EDITOR_FONT),
+            )
+            .clicked()
+        {
+            on_event(UiEvent::Sketch(SketchEvent::SetStructureGroupAttrs {
+                group: group_index,
+                ty: g.ty,
+                makeup: ConstructionMakeup::SomeInsulation,
+                phase: g.phase.clone(),
+            }));
+            on_event(UiEvent::Sketch(SketchEvent::SetStructureGroupInsulation {
+                group: group_index,
+                insulation: None,
+            }));
         }
     });
 }

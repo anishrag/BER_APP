@@ -190,7 +190,9 @@ impl AppController {
         // within `close_gap_m` AND enclosing real area — a SHORT ridge
         // stroke whose ends merely fall within the gap stays a line.
         if manip_plan::stroke_is_closed(&pts, self.tuning.subarea.close_gap_m) {
-            self.apply_roof_rect_stroke(&pts);
+            // The flat top EDGE-snaps its sides onto the containing ceiling
+            // region's walls (the pavilion analogue of the dormer's side snap).
+            self.apply_pavilion_rect_stroke(&pts, world_points);
             return;
         }
         // Paste-ready stroke dump (matches the ceiling-step / area dumps).

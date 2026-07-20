@@ -174,11 +174,23 @@ impl ShelteringBySide {
             Back => self.back = c,
         }
     }
-    /// Every side has been classified (none left `Unset`).
-    pub fn all_set(&self) -> bool {
+    /// The sides still awaiting a sheltering classification (left
+    /// [`ShelterCategory::Unset`]), in [`super::common::ExternalSide::ALL`]
+    /// order — the detailed core behind [`all_set`](Self::all_set), naming
+    /// WHICH sides block the checklist row.
+    pub fn unset_sides(&self) -> Vec<super::common::ExternalSide> {
         super::common::ExternalSide::ALL
             .iter()
-            .all(|&s| self.get(s) != ShelterCategory::Unset)
+            .copied()
+            .filter(|&s| self.get(s) == ShelterCategory::Unset)
+            .collect()
+    }
+
+    /// Every side has been classified (none left `Unset`). Thin wrapper over
+    /// [`unset_sides`](Self::unset_sides) — one source of truth, so the bool
+    /// and the named sides can never disagree.
+    pub fn all_set(&self) -> bool {
+        self.unset_sides().is_empty()
     }
     /// DEAP's sheltered-sides count: sheltered = 1, half = 0.5, else 0.
     pub fn sheltered_count(&self) -> f32 {
@@ -276,5 +288,31 @@ mod tests {
             WallFinish::InsulatedPlasterboard.label(),
             "Insulated plasterboard"
         );
+    }
+
+    /// `unset_sides` is the detailed core behind `all_set`: all four sides in
+    /// ALL order on a fresh record, shrinking (in order) as sides are
+    /// classified, empty exactly when `all_set` flips true.
+    #[test]
+    fn unset_sides_is_the_core_behind_all_set() {
+        use crate::ber::common::ExternalSide;
+
+        let mut s = ShelteringBySide::default();
+        assert_eq!(s.unset_sides(), ExternalSide::ALL.to_vec());
+        assert!(!s.all_set());
+
+        s.set(ExternalSide::Right, ShelterCategory::Sheltered);
+        s.set(ExternalSide::Back, ShelterCategory::HalfSheltered);
+        assert_eq!(
+            s.unset_sides(),
+            vec![ExternalSide::Front, ExternalSide::Left],
+            "remaining sides, in ALL order"
+        );
+        assert!(!s.all_set());
+
+        s.set(ExternalSide::Front, ShelterCategory::Unsheltered);
+        s.set(ExternalSide::Left, ShelterCategory::Sheltered);
+        assert!(s.unset_sides().is_empty());
+        assert!(s.all_set(), "bool wrapper agrees with the empty core");
     }
 }

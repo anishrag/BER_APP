@@ -544,6 +544,51 @@ pub fn dist_to_ring(ring: &[Point2f32], p: Point2f32) -> f32 {
     find_nearest(ring, p, 0.0).1
 }
 
+/// Snap a tapped `p` onto the nearest boundary FEATURE across every ring in
+/// `rings` — a ring VERTEX within `vertex_tol`, or (failing any vertex in
+/// reach) the nearest PERPENDICULAR edge foot within `edge_tol` (the foot
+/// landing strictly WITHIN a wall, [`find_edge_snap`]). Returns the snapped
+/// coordinate, or `p` unchanged when nothing is in reach.
+///
+/// A vertex always beats an edge (a corner is the stronger target the assessor
+/// usually aims for); across rings the nearest wins. Unlike [`snap_to_corner`]
+/// this spans SEVERAL rings and records NO elective-snap decision — a two-tap
+/// centre-between pick is a one-shot coordinate query, not part of the
+/// snap-tag replay machinery. `rings` with fewer than two points are skipped.
+pub fn snap_point_across_rings(
+    rings: &[&[Point2f32]],
+    p: Point2f32,
+    vertex_tol: f32,
+    edge_tol: f32,
+) -> Point2f32 {
+    // Prefer the nearest VERTEX in reach across all rings.
+    let mut best_vertex: Option<(f32, Point2f32)> = None;
+    for ring in rings {
+        for &v in *ring {
+            let d = geom::segment_len(p, v);
+            if d <= vertex_tol && best_vertex.is_none_or(|(bd, _)| d < bd) {
+                best_vertex = Some((d, v));
+            }
+        }
+    }
+    if let Some((_, v)) = best_vertex {
+        return v;
+    }
+    // Else the nearest PERPENDICULAR edge foot in reach.
+    let mut best_edge: Option<(f32, Point2f32)> = None;
+    for ring in rings {
+        if ring.len() < 2 {
+            continue;
+        }
+        if let Some((edge, t, dist)) = find_edge_snap(ring, p, edge_tol) {
+            if best_edge.is_none_or(|(bd, _)| dist < bd) {
+                best_edge = Some((dist, OnRing::Edge { edge, t }.point(ring)));
+            }
+        }
+    }
+    best_edge.map_or(p, |(_, q)| q)
+}
+
 /// Apply a stroke's pre-computed per-point snap targets, recording ONE elective
 /// decision per FEATURE: ALL points whose group key `K` compares equal share
 /// one decision, regardless of adjacency — a wobbling raw stroke drifting in
@@ -1521,6 +1566,33 @@ mod tests {
         // Interior point: nearest wall, not a vertex.
         assert!((dist_to_ring(&ring, p(5.0, 2.0)) - 2.0).abs() < 1e-4);
         assert_eq!(dist_to_ring(&[p(0.0, 0.0)], p(1.0, 1.0)), f32::INFINITY);
+    }
+
+    #[test]
+    fn snap_point_across_rings_prefers_vertex_then_edge_then_leaves() {
+        let p = |x, y| Point2f32::new(x, y);
+        let a = unit_square(); // corners at (0,0),(10,0),(10,10),(0,10)
+        let b = vec![p(20.0, 0.0), p(30.0, 0.0), p(30.0, 10.0), p(20.0, 10.0)];
+        let rings = [a.as_slice(), b.as_slice()];
+        let _ = take_snap_decisions();
+        // Near a corner of ring b → snaps to that vertex (vertex beats edge).
+        assert_eq!(
+            snap_point_across_rings(&rings, p(20.05, 0.04), 0.2, 0.2),
+            p(20.0, 0.0)
+        );
+        // Off a wall of ring a, far from any corner → perpendicular edge foot.
+        let q = snap_point_across_rings(&rings, p(5.0, 0.06), 0.2, 0.2);
+        assert!(
+            (q.x - 5.0).abs() < 1e-4 && q.y.abs() < 1e-4,
+            "foot on y=0: {q:?}"
+        );
+        // Nothing in reach → unchanged.
+        assert_eq!(
+            snap_point_across_rings(&rings, p(15.0, 5.0), 0.2, 0.2),
+            p(15.0, 5.0)
+        );
+        // Never records an elective decision.
+        assert!(take_snap_decisions().is_empty());
     }
 
     #[test]

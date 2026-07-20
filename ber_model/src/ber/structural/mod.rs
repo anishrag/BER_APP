@@ -105,6 +105,163 @@ mod tests {
         );
     }
 
+    // ── CeilingRegions::has_unjustified_flat_seams (field report eddc2f3f) ──
+
+    /// The OUTLINE-EDIT SCAR fingerprint: two flat regions at the same height
+    /// sharing a seam, one side `Unset` — flagged when NO durable input
+    /// justifies the seam, and cleared by every legitimate cause: a structure
+    /// split ring covering it, a z-jump (ceiling step) across it, or an
+    /// `InterStorey` region on either side (the cross-storey derivation owns
+    /// those splits).
+    #[test]
+    fn unjustified_flat_seam_detection() {
+        let mk = |ring: Vec<Point2f64>, z: f64, exposure: CeilingExposure| CeilingRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(
+                ring.into_iter()
+                    .map(|p| Point3f64::new(p.x, p.y, z))
+                    .collect(),
+            ),
+            opes: Opes::default(),
+            construction_id: ItemId::default(),
+            exposure,
+        };
+        // A 4×4 ceiling split down x=2 into two flat Unset halves — the scar.
+        let scarred = CeilingRegions {
+            regions: vec![
+                mk(square(0.0, 0.0, 2.0, 4.0), 2.4, CeilingExposure::Unset),
+                mk(
+                    square(2.0, 0.0, 4.0, 4.0),
+                    2.4,
+                    CeilingExposure::ExposedRoof,
+                ),
+            ],
+        };
+        assert!(
+            scarred.has_unjustified_flat_seams(&[]),
+            "an unjustified flat seam with an Unset side is a scar"
+        );
+        // The SAME seam justified by a structure split ring → clean.
+        assert!(
+            !scarred.has_unjustified_flat_seams(&[square(0.0, 0.0, 2.0, 4.0)]),
+            "a seam on a durable split ring is deliberate"
+        );
+        // A z-JUMP across the seam (a ceiling step) → not coplanar → clean.
+        let stepped = CeilingRegions {
+            regions: vec![
+                mk(square(0.0, 0.0, 2.0, 4.0), 2.4, CeilingExposure::Unset),
+                mk(square(2.0, 0.0, 4.0, 4.0), 2.7, CeilingExposure::Unset),
+            ],
+        };
+        assert!(
+            !stepped.has_unjustified_flat_seams(&[]),
+            "a step boundary is a real height change, not a scar"
+        );
+        // An InterStorey side → the derivation owns the split → clean.
+        let inter = CeilingRegions {
+            regions: vec![
+                mk(square(0.0, 0.0, 2.0, 4.0), 2.4, CeilingExposure::Unset),
+                mk(
+                    square(2.0, 0.0, 4.0, 4.0),
+                    2.4,
+                    CeilingExposure::InterStorey,
+                ),
+            ],
+        };
+        assert!(
+            !inter.has_unjustified_flat_seams(&[]),
+            "the inter-storey derivation's splits are derivation-owned"
+        );
+        // Both sides painted (nothing Unset) → the assessor attributed both →
+        // clean (attribution implies the split was wanted).
+        let painted = CeilingRegions {
+            regions: vec![
+                mk(
+                    square(0.0, 0.0, 2.0, 4.0),
+                    2.4,
+                    CeilingExposure::ExposedRoof,
+                ),
+                mk(square(2.0, 0.0, 4.0, 4.0), 2.4, CeilingExposure::Party),
+            ],
+        };
+        assert!(!painted.has_unjustified_flat_seams(&[]));
+        // Disjoint regions (no shared seam) → clean.
+        let apart = CeilingRegions {
+            regions: vec![
+                mk(square(0.0, 0.0, 1.0, 1.0), 2.4, CeilingExposure::Unset),
+                mk(square(3.0, 3.0, 4.0, 4.0), 2.4, CeilingExposure::Unset),
+            ],
+        };
+        assert!(!apart.has_unjustified_flat_seams(&[]));
+        // INTER-STOREY BRIDGE CUT (inset upper footprint): the derivation
+        // leaves an `InterStorey` hole piece plus two `Unset` remainder pieces
+        // whose shared x=5 seams END on the hole's ring (`split_to_simple`'s
+        // bridge cut through the hole) — derivation-owned, NOT a scar.
+        let ring = |pts: &[(f64, f64)]| -> Vec<Point2f64> {
+            pts.iter().map(|&(x, y)| Point2f64::new(x, y)).collect()
+        };
+        let inset = CeilingRegions {
+            regions: vec![
+                mk(
+                    square(3.0, 3.0, 7.0, 7.0),
+                    2.4,
+                    CeilingExposure::InterStorey,
+                ),
+                mk(
+                    ring(&[
+                        (0.0, 10.0),
+                        (0.0, 0.0),
+                        (5.0, 0.0),
+                        (5.0, 3.0),
+                        (3.0, 3.0),
+                        (3.0, 7.0),
+                        (5.0, 7.0),
+                        (5.0, 10.0),
+                    ]),
+                    2.4,
+                    CeilingExposure::Unset,
+                ),
+                mk(
+                    ring(&[
+                        (5.0, 3.0),
+                        (5.0, 0.0),
+                        (10.0, 0.0),
+                        (10.0, 10.0),
+                        (5.0, 10.0),
+                        (5.0, 7.0),
+                        (7.0, 7.0),
+                        (7.0, 3.0),
+                    ]),
+                    2.4,
+                    CeilingExposure::Unset,
+                ),
+            ],
+        };
+        assert!(
+            !inset.has_unjustified_flat_seams(&[]),
+            "the inset-upper bridge seams (ending on the InterStorey ring) are not scars"
+        );
+    }
+
+    /// `refit_to_footprint` runs the THICKNESS-AWARE guard on its pieces
+    /// (797a7ff5's `plan_piece_is_degenerate`, not the area floor alone): a
+    /// footprint edge a hair inside the stored ring must not emit the sub-mm
+    /// strip between them as a phantom fill region.
+    #[test]
+    fn refit_drops_degenerate_strip_fills() {
+        let cid = ItemId::default();
+        let stored =
+            CeilingRegions::default_for_footprint(vec![square(0.0, 0.0, 4.0, 4.0)], 2.4, cid);
+        // Footprint grown by 0.4 mm on the right: the fill strip is 4 m × 0.4 mm.
+        let grown = vec![square(0.0, 0.0, 4.0 + 4e-4, 4.0)];
+        let refit = stored.refit_to_footprint(&grown, 2.4, cid);
+        assert_eq!(
+            refit.regions.len(),
+            1,
+            "the sub-mm fill strip is boolean debris, not a region"
+        );
+    }
+
     // ── CeilingRegion::plan_span_through ────────────────────────────────────
 
     /// A flat region over `ring` at z = 2.4 (the span is plan-only; z is
@@ -4885,6 +5042,229 @@ mod tests {
         assert!(
             (bases[1] - 2.4).abs() < 1e-6,
             "upper storey offset by storey-0 height"
+        );
+    }
+
+    /// Build a Back (−Y) elevation fixture with TWO facing walls at different
+    /// depths: a NEARER front wall spanning x [0, 6] at z [0, `front_top`], and
+    /// a REAR wall (deeper into the plan at y = 3) spanning x [`rx0`, `rx1`] at
+    /// z [0, `rear_top`]. A third wall at y = 10 pulls the centroid ABOVE both so
+    /// both back walls' outward normals resolve to −Y (Back). Viewer stands
+    /// outside Back, so the y = 0 wall (greater depth along +n) is NEARER and
+    /// stands in front of the y = 3 rear wall.
+    fn two_back_walls(front_top: f64, rear_top: f64, rx0: f64, rx1: f64) -> Ber {
+        let wall = |a: (f64, f64), b: (f64, f64), h: f64| WallRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(vec![
+                Point3f64::new(a.0, a.1, 0.0),
+                Point3f64::new(b.0, b.1, 0.0),
+                Point3f64::new(b.0, b.1, h),
+                Point3f64::new(a.0, a.1, h),
+            ]),
+            exposure: WallExposure::Exposed,
+            opes: Opes::default(),
+            construction_id: ItemId::default(),
+        };
+        let mut regions = WallRegions::default();
+        regions.regions = vec![
+            wall((0.0, 0.0), (6.0, 0.0), front_top), // nearer front wall (Back)
+            wall((rx0, 3.0), (rx1, 3.0), rear_top),  // rear wall behind it (Back)
+            wall((0.0, 10.0), (6.0, 10.0), front_top), // pulls centroid up (faces Front)
+        ];
+        let mut storey = Storey::default();
+        storey.walls = regions;
+        let mut ber = Ber::default();
+        ber.storeys.push(storey);
+        ber
+    }
+
+    /// HIDDEN-LINE removal for wall PANELS (report: 8 Ashgrove Hill back
+    /// elevation). A rear wall FULLY behind a nearer facing wall (same side,
+    /// greater depth, x and z fully covered) contributes NO visible edge in the
+    /// covered range — its top edge no longer draws across the wall in front of
+    /// it. The nearer wall's own outline is untouched.
+    #[test]
+    fn side_elevation_clips_a_rear_panel_behind_a_nearer_wall() {
+        use crate::ber::common::ExternalSide;
+
+        // Front wall z 0..3; rear wall z 0..2, x [1, 5] — fully inside the front
+        // wall's x-span and below its top, so its top edge (z=2) is hidden.
+        let ber = two_back_walls(3.0, 2.0, 1.0, 5.0);
+        let back = ber.side_elevation(ExternalSide::Back);
+        assert_eq!(back.panels.len(), 2, "two walls face Back");
+
+        // The front wall spans the wider composite range; the rear (x [1,5] in
+        // plan) is narrower and inset. (Back projects x → −x, so pick by width.)
+        let width = |p: &&ElevPanel| p.x1 - p.x0;
+        let front = back
+            .panels
+            .iter()
+            .max_by(|a, b| width(&a).partial_cmp(&width(&b)).unwrap())
+            .expect("front panel present");
+        let rear = back
+            .panels
+            .iter()
+            .min_by(|a, b| width(&a).partial_cmp(&width(&b)).unwrap())
+            .expect("rear panel present");
+
+        // The rear wall's TOP edge (a horizontal segment at z≈2 within x [1,5])
+        // is the spurious line — it must be gone.
+        let has_top_line = rear
+            .segments
+            .iter()
+            .any(|&((_, za), (_, zb))| (za - 2.0).abs() < 1e-6 && (zb - 2.0).abs() < 1e-6);
+        assert!(
+            !has_top_line,
+            "rear top edge hidden behind the front wall: {:?}",
+            rear.segments
+        );
+        // In fact nothing of the rear wall survives in the covered z-band except
+        // its ground base line (z=0, which sits on the front wall's base edge and
+        // is not strictly behind it).
+        for &((_, za), (_, zb)) in &rear.segments {
+            assert!(
+                za.abs() < 1e-6 && zb.abs() < 1e-6,
+                "only the ground base edge of the rear wall remains, got z {za}..{zb}"
+            );
+        }
+
+        // The NEARER wall is unchanged — full outline: base (z=0), top (z=3), and
+        // two end verticals spanning 0..3.
+        assert!(
+            front
+                .segments
+                .iter()
+                .any(|&((_, za), (_, zb))| (za - 3.0).abs() < 1e-6 && (zb - 3.0).abs() < 1e-6),
+            "front wall keeps its top edge: {:?}",
+            front.segments
+        );
+        assert!(
+            front.segments.iter().any(|&((xa, za), (xb, zb))| {
+                (xa - xb).abs() < 1e-6 && za.min(zb).abs() < 1e-6 && (za.max(zb) - 3.0).abs() < 1e-6
+            }),
+            "front wall keeps a full-height end vertical: {:?}",
+            front.segments
+        );
+    }
+
+    /// A rear wall only PARTIALLY behind the nearer wall — it stands TALLER, so
+    /// the part above the front wall's top is kept and the hidden part below is
+    /// dropped.
+    #[test]
+    fn side_elevation_keeps_the_visible_part_of_a_partly_hidden_panel() {
+        use crate::ber::common::ExternalSide;
+
+        // Front wall z 0..3; rear wall z 0..4 (peeks 1 m above), x [1, 5].
+        let ber = two_back_walls(3.0, 4.0, 1.0, 5.0);
+        let back = ber.side_elevation(ExternalSide::Back);
+        // The rear wall (x [1,5] in plan) is the narrower panel.
+        let width = |p: &&ElevPanel| p.x1 - p.x0;
+        let rear = back
+            .panels
+            .iter()
+            .min_by(|a, b| width(&a).partial_cmp(&width(&b)).unwrap())
+            .expect("rear panel present");
+
+        // Its top edge (z=4, above the front wall's 3.0) is KEPT.
+        assert!(
+            rear.segments
+                .iter()
+                .any(|&((_, za), (_, zb))| (za - 4.0).abs() < 1e-6 && (zb - 4.0).abs() < 1e-6),
+            "rear top edge above the front wall stays visible: {:?}",
+            rear.segments
+        );
+        // Its verticals keep the ABOVE-front portion (some visible span has z>3)
+        // and drop the behind-front portion (no visible span strictly within
+        // 0<z<3 on a vertical).
+        let vertical_above = rear.segments.iter().any(|&((xa, za), (xb, zb))| {
+            (xa - xb).abs() < 1e-6 && za.max(zb) > 3.0 + 1e-6 && za.min(zb) > 3.0 - 1e-6
+        });
+        assert!(
+            vertical_above,
+            "rear vertical keeps only its part above the front wall: {:?}",
+            rear.segments
+        );
+    }
+
+    /// A single facing wall (nothing behind it) is unchanged: its outline is the
+    /// full base + top + two verticals, none clipped.
+    #[test]
+    fn side_elevation_single_wall_outline_is_unclipped() {
+        use crate::ber::common::ExternalSide;
+
+        let mut ber = Ber::default();
+        let mut storey = Storey::default();
+        storey.walls = square_storey_walls(0.0, 2.4).0;
+        ber.storeys.push(storey);
+        let front = ber.side_elevation(ExternalSide::Front);
+        assert_eq!(front.panels.len(), 1);
+        let p = &front.panels[0];
+        // Base + top + 2 verticals = 4 segments for a flat-top rectangular wall.
+        assert_eq!(
+            p.segments.len(),
+            4,
+            "unobstructed wall keeps its whole outline: {:?}",
+            p.segments
+        );
+        assert!(
+            p.segments
+                .iter()
+                .any(|&((_, za), (_, zb))| za.abs() < 1e-6 && zb.abs() < 1e-6),
+            "base edge present"
+        );
+        assert!(
+            p.segments
+                .iter()
+                .any(|&((_, za), (_, zb))| (za - 2.4).abs() < 1e-6 && (zb - 2.4).abs() < 1e-6),
+            "top edge present"
+        );
+    }
+
+    /// OPENING occlusion is unchanged by the panel pass: a window on the REAR
+    /// wall that the nearer wall fully covers is still dropped, while a window on
+    /// the NEARER (front) wall is kept.
+    #[test]
+    fn side_elevation_opening_occlusion_still_drops_a_covered_rear_window() {
+        use crate::ber::common::ExternalSide;
+        use crate::ber::openings::add_wall_window;
+
+        // Front wall z 0..3 over x [0,6]; rear wall z 0..2.4 over x [1,5].
+        let mut ber = two_back_walls(3.0, 2.4, 1.0, 5.0);
+        let rear_id = ber.storeys[0].walls.regions[1].id;
+        let front_id = ber.storeys[0].walls.regions[0].id;
+        // A window well inside the rear wall (covered by the front wall) …
+        add_wall_window(
+            &mut ber.storeys[0],
+            rear_id,
+            2.0,
+            1.0,
+            1.0,
+            0.6,
+            ItemId::default(),
+        )
+        .expect("rear window placed");
+        // … and one on the nearer front wall (must survive).
+        add_wall_window(
+            &mut ber.storeys[0],
+            front_id,
+            3.0,
+            1.0,
+            1.0,
+            0.6,
+            ItemId::default(),
+        )
+        .expect("front window placed");
+
+        let back = ber.side_elevation(ExternalSide::Back);
+        assert_eq!(
+            back.openings.len(),
+            1,
+            "the covered rear window is dropped, the front one kept: {:?}",
+            back.openings
+        );
+        assert_eq!(
+            back.openings[0].wall_id, front_id,
+            "the surviving window is the front one"
         );
     }
 

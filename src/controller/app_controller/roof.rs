@@ -101,6 +101,7 @@ impl AppController {
             self.set_exposure_mode(false);
             self.set_openings_mode(false);
             self.set_living_area_mode(false);
+            self.set_porch_mode(false);
             self.phase_mode = false;
             self.step_mode = false;
             self.ceiling_step_mode = false;

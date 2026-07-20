@@ -299,6 +299,8 @@ fn import_one(
         insulation_notes: ins.notes.unwrap_or_default(),
         mprn: seed.mprn.unwrap_or_default(),
         reason: seed.reason.unwrap_or_default(),
+        // On-site question answers are never seeded by the booking form.
+        ..Default::default()
     };
 
     // Name the BER by its address, minus the county and any eircode (the eircode

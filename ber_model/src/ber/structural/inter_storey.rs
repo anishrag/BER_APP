@@ -63,15 +63,21 @@ const MAX_WALL_SPLIT_DEPTH: usize = 16;
 ///   pieces.
 /// - **Walls** (perimeter walls AND risers, storey `i` vs `j = i ± 1`):
 ///   along-base sub-ranges inside the neighbour footprint intersect the
-///   neighbour's backing band in absolute z —
-///   `[datum_j − slab_j, top_z_j(p)]` where `slab_j` is the neighbour's
-///   `floor_thickness_m` and `top_z_j(p)` its ceiling surface
-///   ([`CeilingRegions::top_z_at`]) over a plan sample just inside its
-///   footprint. Non-degenerate overlap → split vertically at the sub-range
-///   ends ([`split_wall_by_segment`] semantics, [`MIN_SUBWALL_M`] guard) and
-///   horizontally at the band bounds ([`split_wall_by_line`], with a
-///   [`MIN_SUBWALL_M`]-sized absolute-z sliver guard so re-derivation over
-///   non-regenerated walls never shaves a sliver); stamp covered pieces.
+///   neighbour's backing band in absolute z — `[datum_j − slab_j,
+///   band-top PROFILE]` where `slab_j` is the neighbour's `floor_thickness_m`
+///   and the band top is the neighbour's ceiling surface traced ALONG the
+///   wall base as a continuous polyline (each breakpoint interval evaluated
+///   on its covering region's plane, [`covering_roof_plane`], sampled just
+///   inside the footprint). Non-degenerate overlap → split vertically ONLY
+///   where the profile is discontinuous (a real neighbour ceiling STEP) or
+///   the footprint ends ([`split_wall_by_segment`] semantics,
+///   [`MIN_SUBWALL_M`] guard); a FLAT profile then splits horizontally at
+///   the band bounds ([`split_wall_by_line`], with a [`MIN_SUBWALL_M`]-sized
+///   absolute-z sliver guard so re-derivation over non-regenerated walls
+///   never shaves a sliver), while a SLOPED profile (a fanned/ridged
+///   neighbour ceiling meeting the wall) is ONE cut along the profile
+///   polyline ([`clip_wall_by_band_profile`]) — covered piece under it,
+///   remainder above, never a per-facet staircase; stamp covered pieces.
 ///
 /// GATE (`dimensioned`): a junction between storeys `i` and `j` is derived only
 /// when BOTH are `dimensioned[·]` (the controller passes each
@@ -573,27 +579,34 @@ struct NeighbourBand<'a> {
 }
 
 impl NeighbourBand<'_> {
-    /// Absolute band-top z over the wall-base sub-range midpoint `m`
-    /// (`nrm` = the base's unit plan normal): the neighbour ceiling surface
-    /// sampled just inside its footprint on each side of the base line, the
-    /// HIGHER side winning (a wall on a step line is backed by the taller
-    /// neighbour volume beside it). `None` when no sample lands inside a
-    /// ceiling-covered part of the footprint.
-    fn band_top_at(&self, m: Point2f64, nrm: (f64, f64)) -> Option<f64> {
-        let mut best: Option<f64> = None;
+    /// The covering PLANE of the neighbour ceiling surface backing the wall
+    /// near the wall-base point `m` (`nrm` = the base's unit plan normal), as
+    /// `z = c0 + cx·x + cy·y` in ABSOLUTE z: the surface is probed just
+    /// inside the neighbour footprint on each side of the base line
+    /// ([`covering_roof_plane`]), the HIGHER side (plane z at `m`) winning —
+    /// a wall on a step line is backed by the taller neighbour volume beside
+    /// it. Evaluating the returned plane AT points of the base line gives the
+    /// band-top PROFILE exactly, without the perpendicular-nudge error a
+    /// point sample carries on a sloped facet. `None` when no probe lands
+    /// inside a ceiling-covered part of the footprint.
+    fn band_plane_at(&self, m: Point2f64, nrm: (f64, f64)) -> Option<(f64, f64, f64)> {
+        let mut best: Option<(f64, (f64, f64, f64))> = None;
         for s in [1.0, -1.0] {
-            let z = [SAMPLE_NUDGE_M, SAMPLE_NUDGE_M * 0.1].iter().find_map(|d| {
+            let plane = [SAMPLE_NUDGE_M, SAMPLE_NUDGE_M * 0.1].iter().find_map(|d| {
                 let p = Point2f64::new(m.x + s * nrm.0 * d, m.y + s * nrm.1 * d);
                 if !self.fp.contains(p) {
                     return None;
                 }
-                self.ceilings.top_z_at(p).map(|z| self.datum + z)
+                covering_roof_plane(self.ceilings, p, nrm).map(|(_, pl)| pl)
             });
-            if let Some(z) = z {
-                best = Some(best.map_or(z, |b: f64| b.max(z)));
+            if let Some((c0, cx, cy)) = plane {
+                let z = c0 + cx * m.x + cy * m.y;
+                if best.as_ref().is_none_or(|&(bz, _)| z > bz) {
+                    best = Some((z, (c0, cx, cy)));
+                }
             }
         }
-        best
+        best.map(|(_, (c0, cx, cy))| (c0 + self.datum, cx, cy))
     }
 }
 
@@ -653,15 +666,23 @@ fn process_wall(
     ts.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
 
     // Maximal along-base runs whose midpoint lies on/inside the footprint,
-    // each carrying ITS OWN band top (sampled at its midpoint — now always
-    // strictly between two neighbour boundaries — nudged off the base line
-    // by `band_top_at`'s two-side probe). Contiguous runs sharing one band
-    // top merge back, so a neighbour-ceiling seam that does NOT change the
-    // band (a coplanar carve, a phase split) never splits the wall.
+    // each carrying the neighbour's band-top PROFILE over the run: a (t, z)
+    // polyline, one linear piece per breakpoint interval, z evaluated at the
+    // interval ENDS on the covering ceiling region's plane (region picked at
+    // the interval midpoint — always strictly between two neighbour
+    // boundaries — by `band_plane_at`'s two-side probe). Contiguous
+    // intervals whose profile is CONTINUOUS at the shared breakpoint merge
+    // into ONE run — a fanned/sloped neighbour ceiling meeting the wall is
+    // one continuous profile (so a facet seam, a coplanar carve or a phase
+    // split never splits the wall) — while a REAL neighbour ceiling STEP
+    // (discontinuous band top) still starts a new run, keeping the vertical
+    // split at the step line.
     struct Run {
         t0: f64,
         t1: f64,
-        band_top: f64, // ABSOLUTE z
+        /// Band-top polyline over `[t0, t1]`: `(t, z)`, ABSOLUTE z,
+        /// ascending t.
+        profile: Vec<(f64, f64)>,
     }
     let mut runs: Vec<Run> = Vec::new();
     for w in ts.windows(2) {
@@ -673,19 +694,27 @@ fn process_wall(
         if !nb.fp.contains_within(mid, CONTAINMENT_TOL_M) {
             continue;
         }
-        let Some(top) = nb.band_top_at(mid, nrm) else {
+        let Some((c0, cx, cy)) = nb.band_plane_at(mid, nrm) else {
             continue;
         };
+        let (p0, p1) = (at(t0), at(t1));
+        let (z0, z1) = (c0 + cx * p0.x + cy * p0.y, c0 + cx * p1.x + cy * p1.y);
         match runs.last_mut() {
             // Contiguous with the previous run (only sub-µm noise spans
-            // between them) at the SAME band top — extend it.
-            Some(r) if (t0 - r.t1) * len <= 1e-6 && (r.band_top - top).abs() <= RISER_Z_EPS_M => {
-                r.t1 = t1
+            // between them) and CONTINUOUS in z — extend its profile.
+            Some(r)
+                if (t0 - r.t1) * len <= 1e-6
+                    && r.profile
+                        .last()
+                        .is_some_and(|&(_, ze)| (ze - z0).abs() <= RISER_Z_EPS_M) =>
+            {
+                r.t1 = t1;
+                r.profile.push((t1, z1));
             }
             _ => runs.push(Run {
                 t0,
                 t1,
-                band_top: top,
+                profile: vec![(t0, z0), (t1, z1)],
             }),
         }
     }
@@ -698,7 +727,8 @@ fn process_wall(
         t0: f64,
         t1: f64,
         band_lo: f64,
-        band_top: f64, // storey-LOCAL z
+        /// Band-top polyline `(t, z)`, storey-LOCAL z, ascending t.
+        profile: Vec<(f64, f64)>,
     }
     let mut active: Vec<Active> = Vec::new();
     for r in &runs {
@@ -707,10 +737,16 @@ fn process_wall(
             continue; // sliver guard along the base
         }
         let band_lo = nb.band_lo - own_datum;
-        let band_top = r.band_top - own_datum;
+        let profile: Vec<(f64, f64)> = r.profile.iter().map(|&(t, z)| (t, z - own_datum)).collect();
+        // The run's HIGHEST band top gates the overlap — a profile anywhere
+        // above the wall base makes the band real; the profile cut below
+        // trims where it is not.
+        let band_top = profile
+            .iter()
+            .fold(f64::NEG_INFINITY, |m, &(_, z)| m.max(z));
         // The wall's top over the run, sampled at quarter points (never a
         // breakpoint) — enough for the overlap gate; the exact geometry is
-        // cut by `split_by_line`, not by these samples.
+        // cut by `split_by_line` / the profile clip, not by these samples.
         let ztop_run = [0.25, 0.5, 0.75]
             .iter()
             .map(|f| wall.top_z_at_along((t0 + (t1 - t0) * f) * len))
@@ -723,7 +759,7 @@ fn process_wall(
             t0,
             t1,
             band_lo,
-            band_top,
+            profile,
         });
     }
     let Some(run) = active.first() else {
@@ -758,10 +794,27 @@ fn process_wall(
         // Graze — fall through and treat the whole wall against this band.
     }
 
-    // Horizontal split at the band bounds (only where a bound strictly
-    // bisects, with the absolute-z sliver guard for idempotence), then stamp
-    // the pieces buried inside the band.
-    let (band_lo, band_top) = (run.band_lo, run.band_top);
+    // Cut the wall against the run's band. A SLOPED profile (a fanned/ridged
+    // neighbour ceiling meeting the wall) is ONE cut along the profile
+    // polyline — the covered piece under it, the remainder above, never a
+    // per-facet staircase.
+    let band_lo = run.band_lo;
+    let (profile_lo, profile_hi) = run
+        .profile
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &(_, z)| {
+            (lo.min(z), hi.max(z))
+        });
+    if profile_hi - profile_lo > RISER_Z_EPS_M {
+        let profile = run.profile.clone();
+        clip_wall_by_band_profile(wall, (a, (ux, uy), len), band_lo, &profile, out);
+        return;
+    }
+    // FLAT profile (the classic flat neighbour ceiling): horizontal split at
+    // the band bounds (only where a bound strictly bisects, with the
+    // absolute-z sliver guard for idempotence), then stamp the pieces buried
+    // inside the band.
+    let band_top = profile_hi;
     let cuts: Vec<f64> = [band_lo, band_top]
         .into_iter()
         .filter(|zc| zc - zmin > MIN_SUBWALL_M && zmax - zc > MIN_SUBWALL_M)
@@ -801,6 +854,218 @@ fn process_wall(
         }
         out.push(piece);
     }
+}
+
+/// ONE cut along the neighbour's sloped band-top `profile` — the
+/// sloped-neighbour counterpart of the flat horizontal band cut. The wall is
+/// UNROLLED onto its plane space (`d` = metres along the base from `frame`'s
+/// origin, `z` unchanged — exact for the vertical planar wall), the covered
+/// band under the profile is built as a polygon there, and the wall face is
+/// clipped against it with geo booleans: pieces under the profile are
+/// stamped `InterStorey`, pieces above keep the parent's exposure — so a
+/// fanned neighbour roof yields exactly one covered piece tracing the slope
+/// plus one remainder, never a per-facet staircase.
+///
+/// The band polygon is extended PAST the wall on every non-cutting side —
+/// 1 m past both base ends (an interior run end was already split vertically
+/// by the caller; a graze inside the [`MIN_SUBWALL_M`] guard must not cut)
+/// and down past the wall bottom unless `band_lo` strictly bisects (the same
+/// [`MIN_SUBWALL_M`] guard the flat path applies to its cuts) — so the ONLY
+/// cut introduced is the profile itself.
+///
+/// SLIVER + FIXPOINT guarantees: degenerate pieces
+/// ([`band_piece_is_degenerate`]) are never emitted — a covered sliver
+/// leaves the wall INTACT (same id, same ring), a remainder sliver buries
+/// the wall WHOLE (same id, same ring, stamped). That identity is also what
+/// makes a re-derive over previously-cut pieces exact: the covered piece
+/// re-covers fully (remainder side degenerate → stamped whole, untouched)
+/// and the remainder's covered overlap is a hairline (→ intact), so splits
+/// never accumulate.
+fn clip_wall_by_band_profile(
+    wall: WallRegion,
+    frame: (Point2f64, (f64, f64), f64),
+    band_lo: f64,
+    profile: &[(f64, f64)],
+    out: &mut Vec<WallRegion>,
+) {
+    use geo::bool_ops::BooleanOps;
+    let (origin, (ux, uy), len) = frame;
+    let (Some(&(_, z_first)), Some(&(_, z_last))) = (profile.first(), profile.last()) else {
+        out.push(wall);
+        return;
+    };
+    // Unroll the wall ring: plane space doubles as a "plan" for the 2D
+    // boolean helpers (x := along-base metres, y := z).
+    let ring2d: Vec<Point2f64> = wall
+        .polygon
+        .exterior
+        .iter()
+        .map(|v| Point2f64::new((v.x - origin.x) * ux + (v.y - origin.y) * uy, v.z))
+        .collect();
+    // The profile only covers the BASE FRAME's span. A ring extending past
+    // it — a floor-band-truncated frame (the steep-profile remainder, see
+    // `steep_profile_truncates_remainder_base_to_the_floor_band`) or a
+    // coplanar-flush merged host whose guest arm continues the line — must
+    // not be cut: the band beyond the frame is unscanned, and continuing the
+    // profile flat there would carve real wall face (a re-derive over the
+    // steep remainder would shave a sliver triangle, breaking the fixpoint).
+    // Leave such walls whole.
+    let (dmin, dmax) = ring2d
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), p| {
+            (lo.min(p.x), hi.max(p.x))
+        });
+    if dmin < -MIN_SUBWALL_M || dmax > len + MIN_SUBWALL_M {
+        out.push(wall);
+        return;
+    }
+    let wall2d = ring_to_poly(&ring2d);
+    let (zmin, zmax) = z_extent(&wall);
+    let d_lo = -1.0;
+    let d_hi = len + 1.0;
+    let bottom = if band_lo - zmin > MIN_SUBWALL_M && zmax - band_lo > MIN_SUBWALL_M {
+        band_lo
+    } else {
+        // Band bottom doesn't strictly bisect — no bottom cut. Extend the
+        // cover floor below the wall AND below the profile's own minimum: a
+        // merged continuous profile can dip more than 1 m under the wall
+        // bottom (a neighbour ceiling falling away along the wall), and a
+        // floor above that dip would make the cover ring self-intersecting.
+        let profile_lo = profile.iter().fold(f64::INFINITY, |m, &(_, z)| m.min(z));
+        zmin.min(profile_lo) - 1.0
+    };
+    let mut cover: Vec<Point2f64> =
+        vec![Point2f64::new(d_lo, bottom), Point2f64::new(d_hi, bottom)];
+    cover.push(Point2f64::new(d_hi, z_last));
+    for &(t, z) in profile.iter().rev() {
+        cover.push(Point2f64::new(t * len, z));
+    }
+    cover.push(Point2f64::new(d_lo, z_first));
+    let cover = ring_to_poly(&cover);
+    let covered: Vec<Polygon<f64>> = wall2d
+        .intersection(&cover)
+        .0
+        .iter()
+        .flat_map(split_to_simple)
+        .filter(|p| !band_piece_is_degenerate(p))
+        .collect();
+    if covered.is_empty() {
+        out.push(wall); // the profile only grazes — no real covered piece
+        return;
+    }
+    let remainder: Vec<Polygon<f64>> = wall2d
+        .difference(&cover)
+        .0
+        .iter()
+        .flat_map(split_to_simple)
+        .filter(|p| !band_piece_is_degenerate(p))
+        .collect();
+    if remainder.is_empty() {
+        // Fully buried — stamp the wall WHOLE (same id, same ring).
+        out.push(WallRegion {
+            exposure: WallExposure::InterStorey,
+            ..wall
+        });
+        return;
+    }
+    for (polys, buried) in [(&covered, true), (&remainder, false)] {
+        for poly in polys.iter() {
+            if let Some(piece) = wall_piece_from_plane_poly(poly, origin, (ux, uy), &wall, buried) {
+                out.push(piece);
+            }
+        }
+    }
+}
+
+/// Whether a wall-plane boolean piece is a degenerate SLIVER the profile cut
+/// must never emit: sub-`MIN_SUBWALL_M²` area, or a bounding-box minor
+/// dimension under [`MIN_SUBWALL_M`] (a long-thin strip the area guard can
+/// miss — e.g. the remainder left where the profile hugs the wall top). The
+/// wall-scale sibling of [`plan_piece_is_degenerate`].
+fn band_piece_is_degenerate(poly: &Polygon<f64>) -> bool {
+    use geo::{Area, BoundingRect};
+    if poly.unsigned_area() < MIN_SUBWALL_M * MIN_SUBWALL_M {
+        return true;
+    }
+    match poly.bounding_rect() {
+        Some(bb) => bb.width().min(bb.height()) < MIN_SUBWALL_M,
+        None => true,
+    }
+}
+
+/// Rebuild a wall piece from its unrolled plane-space polygon (x = metres
+/// along the base from `origin` toward `u`, y = z): closing/consecutive
+/// duplicates dropped, winding normalised to CCW in (along, z) — the wall
+/// vertex-order contract's winding (base forward, top back) — and the ring
+/// ROTATED to start at its leftmost-lowest vertex, so `base_frame()` finds
+/// the piece's real base (for the remainder above a sloped covered band
+/// that base is the profile polyline itself — a first-class wall that can
+/// host openings; starting at the global z-min could land on a short
+/// bottom-corner scrap instead). CAVEAT: `base_edge()` restricts the far
+/// endpoint to the FLOOR BAND (`MAX_FLOOR_STEP_M` = 0.6 m above the start
+/// vertex), so a remainder whose profile RISES more than that along the
+/// wall gets a frame truncated to the in-band leading run, not the full
+/// plan width — the opening-placement span shrinks accordingly (pinned by
+/// `steep_profile_truncates_remainder_base_to_the_floor_band`). `None` for
+/// a degenerate ring. Fresh id, parent's construction, `InterStorey` when
+/// `buried`, else the parent's exposure.
+fn wall_piece_from_plane_poly(
+    poly: &Polygon<f64>,
+    origin: Point2f64,
+    (ux, uy): (f64, f64),
+    parent: &WallRegion,
+    buried: bool,
+) -> Option<WallRegion> {
+    let mut pts: Vec<Point2f64> = poly
+        .exterior()
+        .coords()
+        .map(|c| Point2f64::new(c.x, c.y))
+        .collect();
+    let near = |a: &Point2f64, b: &Point2f64| (a.x - b.x).abs() < 1e-9 && (a.y - b.y).abs() < 1e-9;
+    pts.dedup_by(|b, a| near(a, b));
+    while pts.len() > 1 && near(&pts[0], pts.last().unwrap()) {
+        pts.pop();
+    }
+    if pts.len() < 3 {
+        return None;
+    }
+    // CCW in (along, z) == the contract's winding.
+    let doubled_area: f64 = (0..pts.len())
+        .map(|i| {
+            let (p, q) = (pts[i], pts[(i + 1) % pts.len()]);
+            p.x * q.y - q.x * p.y
+        })
+        .sum();
+    if doubled_area < 0.0 {
+        pts.reverse();
+    }
+    // Start the ring at the leftmost-lowest vertex (min along, then min z).
+    let start = (0..pts.len())
+        .min_by(|&i, &j| {
+            (pts[i].x, pts[i].y)
+                .partial_cmp(&(pts[j].x, pts[j].y))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .unwrap_or(0);
+    pts.rotate_left(start);
+    let exterior: Vec<Point3f64> = pts
+        .iter()
+        .map(|p| Point3f64::new(origin.x + ux * p.x, origin.y + uy * p.x, p.y))
+        .collect();
+    let region = WallRegion {
+        id: ItemId::default(),
+        polygon: Polygon3D::new(exterior),
+        exposure: if buried {
+            WallExposure::InterStorey
+        } else {
+            parent.exposure
+        },
+        opes: Opes::default(),
+        construction_id: parent.construction_id,
+    };
+    // Belt: if the leftmost-lowest start still yields no base frame (an
+    // exotic ring), fall back to the generic contract rebase.
+    Some(rebase_ring_start(region))
 }
 
 #[cfg(test)]
@@ -1742,5 +2007,284 @@ mod tests {
             (a_hi - 5.0).abs() < 1e-4,
             "the assessor carve at x=5 holds, got {a_hi}"
         );
+    }
+
+    // ── Sloped-neighbour band-top PROFILE (field report ff5a5ee3) ─────────
+
+    /// A two-storey stack whose GROUND ceiling meets the shared BACK wall
+    /// line (y = 4) along a continuous TENT profile: flat 2.4 over the front
+    /// strip y∈[0,2] (the datum anchor the first floor sits on) and two
+    /// sloped facets over the back strip y∈[2,4] whose planes depend only on
+    /// x — z runs `zl` → `zm` over x∈[0,4] and `zm` → `zr` over x∈[4,8], so
+    /// the profile along y=4 is the piecewise-linear polyline
+    /// (0,zl)–(4,zm)–(8,zr). First floor: full 8×4 footprint, flat 2.4
+    /// ceiling, 0.3 slab → datum 2.7.
+    fn sloped_back_fixture(zl: f64, zm: f64, zr: f64) -> Ber {
+        let z_at = move |x: f64| {
+            if x <= 4.0 {
+                zl + (zm - zl) * x / 4.0
+            } else {
+                zm + (zr - zm) * (x - 4.0) / 4.0
+            }
+        };
+        let region = |ring: Vec<Point2f64>, zf: &dyn Fn(f64) -> f64| CeilingRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(
+                ring.into_iter()
+                    .map(|p| Point3f64::new(p.x, p.y, zf(p.x)))
+                    .collect(),
+            ),
+            opes: Default::default(),
+            construction_id: ItemId::default(),
+            exposure: CeilingExposure::default(),
+        };
+        let mut ground = flat_storey(square(0.0, 0.0, 8.0, 4.0), 2.4, None);
+        ground.ceilings = CeilingRegions {
+            regions: vec![
+                region(square(0.0, 0.0, 8.0, 2.0), &|_| 2.4),
+                region(square(0.0, 2.0, 4.0, 4.0), &z_at),
+                region(square(4.0, 2.0, 8.0, 4.0), &z_at),
+            ],
+        };
+        let first = flat_storey(square(0.0, 0.0, 8.0, 4.0), 2.4, Some(0.3));
+        let mut ber = Ber::default();
+        ber.storeys = vec![ground, first];
+        ber
+    }
+
+    /// The ff5a5ee3 mechanism in miniature: the first floor's back wall is
+    /// backed by the ground's TENT roof — profile local z = −0.3 + 0.2x
+    /// rising to 0.5 at the ridge (x=4), falling back — so the wall must get
+    /// ONE cut along that profile: the covered triangle under it (top
+    /// tracing the slope, `InterStorey`) plus ONE remainder — never the old
+    /// per-facet staircase (vertical cut at x=4, one flat step per facet).
+    #[test]
+    fn sloped_neighbour_profile_cuts_wall_into_covered_slope_and_one_remainder() {
+        let mut ber = sloped_back_fixture(2.4, 3.2, 2.4);
+        derive_all(&mut ber);
+        let datums = ber.storey_floor_datums();
+        assert!(
+            (datums[1] - 2.7).abs() < 1e-9,
+            "datum anchors on the flat strip, got {datums:?}"
+        );
+        let pieces = walls_on_y(&ber.storeys[1], 4.0);
+        assert_eq!(
+            pieces.len(),
+            2,
+            "ONE profile cut: covered piece + remainder — no per-facet staircase"
+        );
+        let covered = pieces
+            .iter()
+            .find(|w| w.exposure == WallExposure::InterStorey)
+            .expect("covered piece");
+        let remainder = pieces
+            .iter()
+            .find(|w| w.exposure != WallExposure::InterStorey)
+            .expect("remainder");
+        // The covered piece is EXACTLY the triangle under the profile: base
+        // on the wall bottom between the profile's z=0 crossings (x = 1.5 /
+        // 6.5), apex at the tent ridge (x = 4, local z = 0.5).
+        let mut cov: Vec<(f64, f64)> = covered
+            .polygon
+            .exterior
+            .iter()
+            .map(|v| (v.x, v.z))
+            .collect();
+        cov.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let want = [(1.5, 0.0), (4.0, 0.5), (6.5, 0.0)];
+        assert_eq!(cov.len(), want.len(), "a clean triangle, got {cov:?}");
+        for ((x, z), (wx, wz)) in cov.iter().zip(want) {
+            assert!(
+                (x - wx).abs() < 1e-6 && (z - wz).abs() < 1e-6,
+                "covered top traces the profile vertices: got {cov:?}"
+            );
+        }
+        // ONE remainder across the whole junction span, full height, its
+        // underside tracing the same profile vertices — a z-step staircase
+        // would have shown flat tops at the per-facet sample heights instead.
+        let (x0, x1) = x_extent(remainder);
+        assert!(
+            (x0 - 0.0).abs() < 1e-6 && (x1 - 8.0).abs() < 1e-6,
+            "one remainder across the junction span, got x [{x0}, {x1}]"
+        );
+        let (rzmin, rzmax) = z_extent(remainder);
+        assert!((rzmin - 0.0).abs() < 1e-6 && (rzmax - 2.4).abs() < 1e-6);
+        assert_eq!(remainder.exposure, WallExposure::Exposed);
+        for (wx, wz) in want {
+            assert!(
+                remainder
+                    .polygon
+                    .exterior
+                    .iter()
+                    .any(|v| (v.x - wx).abs() < 1e-6 && (v.z - wz).abs() < 1e-6),
+                "remainder underside misses profile vertex ({wx}, {wz})"
+            );
+        }
+        // The remainder is a FIRST-CLASS wall: a full-span base frame (its
+        // base is the profile polyline), so it can host the wide window the
+        // field report was refused.
+        let (_, _, rlen, _) = remainder
+            .base_frame()
+            .expect("the remainder has a real base frame");
+        assert!((rlen - 8.0).abs() < 1e-6, "full plan span, got {rlen}");
+    }
+
+    /// Deriving twice over the profile cut must be byte-identical — the
+    /// covered piece re-covers whole (stamped intact, never re-cut) and the
+    /// remainder's overlap with the band is a hairline (left intact), so
+    /// profile splits never accumulate.
+    #[test]
+    fn sloped_profile_derive_is_an_exact_fixpoint() {
+        let mut ber = sloped_back_fixture(2.4, 3.2, 2.4);
+        derive_all(&mut ber);
+        let once = serde_json::to_string(&ber.storeys).unwrap();
+        derive_all(&mut ber);
+        let twice = serde_json::to_string(&ber.storeys).unwrap();
+        assert_eq!(once, twice, "profile cut must be re-derive stable");
+    }
+
+    /// Degenerate profile: entirely ABOVE the wall top → the wall is buried
+    /// WHOLE — one region, same ring, no cut.
+    #[test]
+    fn profile_above_the_wall_top_buries_the_wall_whole() {
+        let mut ber = sloped_back_fixture(5.2, 5.4, 5.2); // local 2.5..2.7 > 2.4
+        let before: Vec<Vec<Point3f64>> = walls_on_y(&ber.storeys[1], 4.0)
+            .iter()
+            .map(|w| w.polygon.exterior.clone())
+            .collect();
+        assert_eq!(before.len(), 1);
+        derive_all(&mut ber);
+        let pieces = walls_on_y(&ber.storeys[1], 4.0);
+        assert_eq!(
+            pieces.len(),
+            1,
+            "no cut — the whole wall is under the profile"
+        );
+        assert_eq!(pieces[0].exposure, WallExposure::InterStorey);
+        assert_eq!(pieces[0].polygon.exterior, before[0], "ring untouched");
+    }
+
+    /// Degenerate profile: entirely BELOW the wall base → the wall (and every
+    /// other first-floor wall) is untouched, byte-for-byte.
+    #[test]
+    fn profile_below_the_wall_base_leaves_the_wall_untouched() {
+        let mut ber = sloped_back_fixture(2.3, 2.38, 2.3); // local −0.4..−0.32
+        let before = serde_json::to_string(&ber.storeys[1].walls).unwrap();
+        derive_all(&mut ber);
+        assert_eq!(
+            serde_json::to_string(&ber.storeys[1].walls).unwrap(),
+            before,
+            "a band below the base never splits or stamps"
+        );
+    }
+
+    /// Sliver guard: a profile hugging the wall TOP (within [`MIN_SUBWALL_M`])
+    /// must never emit the hairline remainder strip — the wall buries WHOLE
+    /// instead, and stays a fixpoint.
+    #[test]
+    fn profile_hugging_the_wall_top_never_emits_a_sliver_remainder() {
+        // Local band top 2.392..2.398 — 2–8 mm under the 2.4 wall top.
+        let mut ber = sloped_back_fixture(5.092, 5.098, 5.092);
+        derive_all(&mut ber);
+        let pieces = walls_on_y(&ber.storeys[1], 4.0);
+        assert_eq!(
+            pieces.len(),
+            1,
+            "the sub-[`MIN_SUBWALL_M`] strip above the profile is never emitted"
+        );
+        assert_eq!(
+            pieces[0].exposure,
+            WallExposure::InterStorey,
+            "the wall buries whole instead"
+        );
+        let once = serde_json::to_string(&ber.storeys).unwrap();
+        derive_all(&mut ber);
+        assert_eq!(serde_json::to_string(&ber.storeys).unwrap(), once);
+    }
+
+    /// A profile dipping FAR (> 1 m) below the wall bottom at both ends: the
+    /// cover polygon's floor must extend below the profile's own minimum —
+    /// a floor pegged 1 m under the WALL bottom alone would sit above the
+    /// dipped profile ends and make the cover ring self-intersecting. The
+    /// cut still yields exactly the covered triangle between the profile's
+    /// base crossings plus one remainder, and stays a fixpoint.
+    #[test]
+    fn profile_dipping_far_below_the_base_still_cuts_cleanly() {
+        // Tent 0.7 → 3.2 → 0.7 abs = local −2.0 → 0.5 → −2.0 (datum 2.7):
+        // slope 0.625/m, base crossings at x = 3.2 / 4.8, ridge (4, 0.5).
+        let mut ber = sloped_back_fixture(0.7, 3.2, 0.7);
+        derive_all(&mut ber);
+        let pieces = walls_on_y(&ber.storeys[1], 4.0);
+        assert_eq!(pieces.len(), 2, "covered triangle + one remainder");
+        let covered = pieces
+            .iter()
+            .find(|w| w.exposure == WallExposure::InterStorey)
+            .expect("covered piece");
+        let mut cov: Vec<(f64, f64)> = covered
+            .polygon
+            .exterior
+            .iter()
+            .map(|v| (v.x, v.z))
+            .collect();
+        cov.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let want = [(3.2, 0.0), (4.0, 0.5), (4.8, 0.0)];
+        assert_eq!(cov.len(), want.len(), "a clean triangle, got {cov:?}");
+        for ((x, z), (wx, wz)) in cov.iter().zip(want) {
+            assert!(
+                (x - wx).abs() < 1e-6 && (z - wz).abs() < 1e-6,
+                "covered top traces the profile: got {cov:?}"
+            );
+        }
+        let once = serde_json::to_string(&ber.storeys).unwrap();
+        derive_all(&mut ber);
+        assert_eq!(serde_json::to_string(&ber.storeys).unwrap(), once);
+    }
+
+    /// PIN of a known frame limitation, not desired behaviour: a neighbour
+    /// ceiling rising MONOTONICALLY by more than `MAX_FLOOR_STEP_M` (0.6 m)
+    /// along the wall still cuts cleanly into covered piece + remainder, but
+    /// the remainder's `base_frame()` — whose far endpoint `base_edge`
+    /// restricts to the floor band of its start vertex — is TRUNCATED to the
+    /// in-band leading run of the profile, not the full plan span. The
+    /// opening-placement span shrinks accordingly. If the base logic ever
+    /// becomes profile-aware this pin should be updated to the full span.
+    #[test]
+    fn steep_profile_truncates_remainder_base_to_the_floor_band() {
+        // Monotonic rise 2.4 → 3.2 → 4.0 abs = local −0.3 → 0.5 → 1.3:
+        // base crossing at x = 1.5, total rise 1.6 m ≫ the 0.6 m floor band.
+        let mut ber = sloped_back_fixture(2.4, 3.2, 4.0);
+        derive_all(&mut ber);
+        let pieces = walls_on_y(&ber.storeys[1], 4.0);
+        assert_eq!(pieces.len(), 2, "one profile cut even when steep");
+        let remainder = pieces
+            .iter()
+            .find(|w| w.exposure != WallExposure::InterStorey)
+            .expect("remainder");
+        let (x0, x1) = x_extent(remainder);
+        assert!(
+            (x0 - 0.0).abs() < 1e-6 && (x1 - 8.0).abs() < 1e-6,
+            "the remainder GEOMETRY spans the whole wall, got x [{x0}, {x1}]"
+        );
+        // …but its base frame is TRUNCATED. The parent wall's base runs
+        // x = 8 → 0 (perimeter direction), so the ring's leftmost-lowest
+        // start in the wall's own frame is the profile's TALL end (8, 1.3);
+        // the frame then reaches only the ridge vertex (4, 0.5) — a 4 m
+        // span, not the full 8 — because every farther bottom vertex is
+        // outside the 0.6 m floor band of the 1.3 start.
+        let (_, _, rlen, base_z) = remainder
+            .base_frame()
+            .expect("the remainder still has a base frame");
+        assert!(
+            (base_z - 1.3).abs() < 1e-6,
+            "frame anchors at the profile's tall end, got base_z {base_z}"
+        );
+        assert!(
+            (rlen - 4.0).abs() < 1e-6,
+            "frame truncated to the floor-band run (pinned limitation), got {rlen}"
+        );
+        // Steep or not, re-derivation stays exact.
+        let once = serde_json::to_string(&ber.storeys).unwrap();
+        derive_all(&mut ber);
+        assert_eq!(serde_json::to_string(&ber.storeys).unwrap(), once);
     }
 }

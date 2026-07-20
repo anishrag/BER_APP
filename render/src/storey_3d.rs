@@ -171,6 +171,14 @@ pub fn render_at_z_offset(
             fade_internal,
         );
     }
+    // PORCH INNER walls (`Storey::porch_walls`) — recordable, openings-placeable
+    // geometry, drawn in the porch overlay's violet so they read as porch, not
+    // envelope. Always `Unset` (no heat-loss role until the resolve-phase porch
+    // decision), so none of the exposure fade rules apply; they draw in every
+    // view the storey does.
+    for wall in &storey.porch_walls.regions {
+        draw_porch_wall_region(painter, t, wall, z_offset, display_mode, view, selected);
+    }
     // Openings (windows blue, doors brown) — each opening's 4 vertices are a
     // real quad in 3D (in the wall plane, or on the roof plane for roof
     // windows), so they fill cleanly even though a wall window's PLAN footprint
@@ -407,6 +415,39 @@ fn draw_wall_region(
         egui::Stroke::new(2.0, color)
     };
     painter.add(egui::Shape::closed_line(pts, stroke));
+}
+
+/// One PORCH INNER wall's polygon (same real geometry as an outline wall —
+/// base edge at the bottom, top tracing the roof), drawn in the porch
+/// overlay's violet regardless of exposure (porch walls are always `Unset`;
+/// their colour says "porch", not a heat-loss class). Selected regions shade
+/// like any other wall so the Structure review can highlight them.
+fn draw_porch_wall_region(
+    painter: &egui::Painter,
+    t: &Transform2d,
+    region: &WallRegion,
+    z_offset: f64,
+    display_mode: DisplayMode,
+    view: ViewParams,
+    selected: &HashSet<ItemId>,
+) {
+    if region.polygon.exterior.len() < 3 {
+        return;
+    }
+    let pts: Vec<egui::Pos2> = region
+        .polygon
+        .exterior
+        .iter()
+        .map(|v| {
+            let (px, py) = view.project_3d(v.x, v.y, z_offset + v.z);
+            t.apply(px, py)
+        })
+        .collect();
+    let color = color_for(DisplayMode::Walls, display_mode, style::PORCH_WALL);
+    if selected.contains(&region.id) {
+        fill_polygon(painter, &pts, style::highlight_fill(style::PORCH_WALL));
+    }
+    painter.add(egui::Shape::closed_line(pts, egui::Stroke::new(2.0, color)));
 }
 
 /// One roof region's outline at its own per-vertex z (`z_offset` + the stored

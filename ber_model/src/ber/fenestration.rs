@@ -83,16 +83,36 @@ pub struct WindowType {
     pub notes: Option<String>,
 }
 
+/// Durable identity of a PORCH inside its storey: the porch plan ring's
+/// area-weighted centroid quantized to the mm grid `(x_mm, y_mm)` — the same
+/// centroid-key convention the floor/ceiling exposure side-tables use. Chosen
+/// over a porch INDEX (deletion reorders `porches`) and over the porch plan's
+/// own `VertexId`s alone (each porch plan mints its own 0..n space, so a vid
+/// can't say WHICH porch). Resolution matches the key exactly first, then
+/// heals by containment (the stored point inside a current porch ring) when a
+/// re-dimension drifted the centroid.
+pub type PorchKey = (i64, i64);
+
 /// Durable PARAMETRIC anchor for a wall opening: the perimeter wall it sits on
 /// (by stable `VertexId`, via [`SurfaceRef`]) plus the opening centre's
 /// along-position as a fraction (0..1) of that perimeter wall. The fraction is
 /// PARENT-relative, so a structure split is handled for free — the fraction
 /// picks which sub-wall the centre falls in. The `wall_id`/`along_m` inside the
 /// opening's `placement` are a per-resolve CACHE re-derived from this anchor.
+///
+/// PORCH-WALL openings (`porch: Some`): `wall` then names an edge of that
+/// porch's OWN `FloorPlan` (its vid space, not the outline's), and the anchor
+/// resolves against `Storey::porch_walls` instead of `walls`. `None` — the
+/// serde default, so every pre-porch record loads unchanged — is an outline
+/// anchor.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct WallAnchor {
     pub wall: SurfaceRef,
     pub along_fraction: f32,
+    /// The porch whose plan `wall` refers to, for an opening hosted on a porch
+    /// INNER wall — see [`PorchKey`]. `None` = an outline-wall anchor.
+    #[serde(default)]
+    pub porch: Option<PorchKey>,
 }
 
 /// Where an opening sits, parametrically — the DURABLE record of its location.
@@ -120,8 +140,9 @@ pub enum OpeningPlacement {
 /// The make-up of a door panel. `AssemblyPanel` is the door element of a
 /// door+sidelights assembly (the glazed sidelights/transom are separate
 /// `Window`s sharing the door's `assembly_id`).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub enum DoorKind {
+    #[default]
     Solid,
     HalfGlazed,
     FullyGlazed,
@@ -143,6 +164,18 @@ pub enum WindowShape {
     /// Half-ellipse fanlight: flat bottom, the top edge arcs up the full height
     /// (the legacy arched window; a semicircular door+sidelights transom).
     Arched,
+    /// PLAIN-FLOW shaped top (the "semi-circular top" tick — see
+    /// [`WindowTopShape`]): a rectangle capped by a TRUE SEMICIRCLE of radius
+    /// `width_m / 2` spanning the full width. No parameters — `height_m` is the
+    /// TOTAL height measured at the CENTRE (the arc apex), so the rectangular
+    /// body is `height_m − width_m/2` tall. Because the radius re-derives from
+    /// the current width, the shape stays consistent through resizes.
+    SemiCircularTop,
+    /// PLAIN-FLOW shaped top (the "pointed top" tick): a rectangle capped by a
+    /// centred triangle `width_m / 2` tall (apex at the centre of the top). As
+    /// with [`WindowShape::SemiCircularTop`], `height_m` is the TOTAL height at
+    /// the apex and there are no free parameters.
+    PointedTop,
     /// A rectangle with a segmental (elliptical) arc on top rising `rise_m`.
     RoundedTop { rise_m: f32 },
     /// A rectangle topped by a centred triangle peaking `peak_m` above it.
@@ -324,6 +357,62 @@ impl ComplexWindowKind {
     }
 }
 
+/// The optional SHAPED TOP a plain window can take in the NORMAL placement flow
+/// — a tick, not a shape tool: no dimensions beyond the usual width/height
+/// (contrast [`ComplexWindowKind`], whose shapes collect their own
+/// measurements). `SemiCircular` caps the rectangle with a true semicircle of
+/// radius `width/2`; `Pointed` with a centred triangle `width/2` tall; either
+/// way the entered height is the TOTAL height at the centre (apex). Not
+/// serialized: the durable record is the mapped [`WindowShape`] on the window
+/// (`to_shape`), and `from_shape` recovers the tick state for editing — one
+/// `shape` field holds both the plain-with-top and complex families, so the
+/// two can never contradict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WindowTopShape {
+    #[default]
+    Flat,
+    SemiCircular,
+    Pointed,
+}
+
+impl WindowTopShape {
+    /// Every top shape, in picker order.
+    pub const ALL: [WindowTopShape; 3] = [
+        WindowTopShape::Flat,
+        WindowTopShape::SemiCircular,
+        WindowTopShape::Pointed,
+    ];
+
+    /// Label for the tick / picker.
+    pub fn label(self) -> &'static str {
+        match self {
+            WindowTopShape::Flat => "Flat top",
+            WindowTopShape::SemiCircular => "Semi-circular top",
+            WindowTopShape::Pointed => "Pointed top",
+        }
+    }
+
+    /// The [`WindowShape`] this tick stores on the window.
+    pub fn to_shape(self) -> WindowShape {
+        match self {
+            WindowTopShape::Flat => WindowShape::Rectangular,
+            WindowTopShape::SemiCircular => WindowShape::SemiCircularTop,
+            WindowTopShape::Pointed => WindowShape::PointedTop,
+        }
+    }
+
+    /// The tick state a stored shape maps back to — `None` for a COMPLEX shape
+    /// (one from [`ComplexWindowKind`], edited by its own tool, not this tick).
+    pub fn from_shape(shape: WindowShape) -> Option<WindowTopShape> {
+        match shape {
+            WindowShape::Rectangular => Some(WindowTopShape::Flat),
+            WindowShape::SemiCircularTop => Some(WindowTopShape::SemiCircular),
+            WindowShape::PointedTop => Some(WindowTopShape::Pointed),
+            _ => None,
+        }
+    }
+}
+
 /// Segments used to tessellate a curved arc (a full semicircle → `ARC_N` steps).
 const ARC_N: usize = 32;
 
@@ -367,6 +456,20 @@ pub fn window_outline(shape: WindowShape, w: f32, h: f32) -> Vec<(f32, f32)> {
             pts.push((0.0, 0.0));
             pts.push((w, 0.0));
             pts.extend(half_ellipse(w / 2.0, 0.0, w / 2.0, h));
+        }
+        // Plain-flow shaped tops: the cap height is width/2 by definition, the
+        // body the rest. Should the total height be shorter than width/2 the
+        // body vanishes and the cap flattens to fit the box (degenerate input,
+        // still well-defined and inside the bbox).
+        WindowShape::SemiCircularTop => {
+            let rh = (h - w / 2.0).max(0.0);
+            pts.extend([(0.0, 0.0), (w, 0.0), (w, rh)]);
+            pts.extend(half_ellipse(w / 2.0, rh, w / 2.0, h - rh));
+            pts.push((0.0, rh));
+        }
+        WindowShape::PointedTop => {
+            let rh = (h - w / 2.0).max(0.0);
+            pts.extend([(0.0, 0.0), (w, 0.0), (w, rh), (w / 2.0, h), (0.0, rh)]);
         }
         WindowShape::RoundedTop { rise_m } => {
             let rh = (h - rise_m).max(0.0);
@@ -416,10 +519,33 @@ pub fn window_outline(shape: WindowShape, w: f32, h: f32) -> Vec<(f32, f32)> {
 }
 
 /// The true geometric AREA (m²) of a window `shape` in its `width_m × height_m`
-/// box — the shoelace of [`window_outline`], so it always matches the drawn
-/// silhouette (curves are the tessellated area, within a fraction of a percent of
-/// the analytic value). This is the glazing area a future DEAP wiring should use.
+/// box. This is the glazing area a future DEAP wiring should use, and what
+/// [`super::openings::wall_net_area`] subtracts from the host wall.
+///
+/// The plain-flow shaped tops ([`WindowShape::SemiCircularTop`] /
+/// [`WindowShape::PointedTop`]) use their EXACT closed forms —
+/// `w·(h − w/2) + π·(w/2)²/2` and `w·(h − w/2) + w²/4` — because the derived
+/// area is a DEAP input, so it should be the true figure; the tessellated
+/// outline is only the drawing (its shoelace tracks the exact value within a
+/// fraction of a percent at `ARC_N` facets). Every other shape is the shoelace
+/// of [`window_outline`], so it always matches the drawn silhouette.
 pub fn window_shape_area(shape: WindowShape, w: f32, h: f32) -> f32 {
+    use std::f32::consts::PI;
+    match shape {
+        WindowShape::SemiCircularTop => {
+            // Body + semicircle (radius w/2). A degenerate `h < w/2` flattens
+            // the cap to a half-ellipse of rise `h`, mirroring the outline.
+            let rh = (h - w / 2.0).max(0.0);
+            return w * rh + PI * (w / 2.0) * (h - rh) / 2.0;
+        }
+        WindowShape::PointedTop => {
+            // Body + centred triangle (height w/2, clamped to the box like the
+            // outline: apex at `h`, base at `rh`).
+            let rh = (h - w / 2.0).max(0.0);
+            return w * rh + w * (h - rh) / 2.0;
+        }
+        _ => {}
+    }
     let pts = window_outline(shape, w, h);
     let mut a = 0.0f32;
     for i in 0..pts.len() {
@@ -501,6 +627,112 @@ mod shape_tests {
         let rt = window_shape_area(WindowShape::RoundedTop { rise_m: 0.3 }, 1.2, 1.3);
         let expect = 1.2 * 1.0 + PI * 1.2 * 0.3 / 4.0;
         assert!((rt - expect).abs() < 0.01, "rounded-top {rt} vs {expect}");
+    }
+
+    /// Shoelace of a local outline — the FACET area, for comparing the drawn
+    /// polygon against the exact derivation.
+    fn shoelace(pts: &[(f32, f32)]) -> f32 {
+        let mut a = 0.0f32;
+        for i in 0..pts.len() {
+            let (x0, y0) = pts[i];
+            let (x1, y1) = pts[(i + 1) % pts.len()];
+            a += x0 * y1 - x1 * y0;
+        }
+        (a * 0.5).abs()
+    }
+
+    #[test]
+    fn plain_flow_top_areas_are_the_exact_closed_forms() {
+        let (w, h) = (1.2f32, 1.5f32);
+        // Semi-circular top: w·(h − w/2) + π·(w/2)²/2.
+        let semi = window_shape_area(WindowShape::SemiCircularTop, w, h);
+        let semi_exact = w * (h - w / 2.0) + PI * (w / 2.0) * (w / 2.0) / 2.0;
+        assert!((semi - semi_exact).abs() < 1e-6, "{semi} vs {semi_exact}");
+        // Pointed top: w·(h − w/2) + w²/4.
+        let pointed = window_shape_area(WindowShape::PointedTop, w, h);
+        let pointed_exact = w * (h - w / 2.0) + w * w / 4.0;
+        assert!(
+            (pointed - pointed_exact).abs() < 1e-6,
+            "{pointed} vs {pointed_exact}"
+        );
+        // The FACET polygon (what gets drawn / subtracted geometrically) stays
+        // within 1% of the exact area used for the derivation.
+        let semi_facet = shoelace(&window_outline(WindowShape::SemiCircularTop, w, h));
+        assert!(
+            (semi_facet - semi_exact).abs() / semi_exact < 0.01,
+            "facet {semi_facet} vs exact {semi_exact}"
+        );
+        // Pointed is polygonal, so its facet area IS the exact area.
+        let pointed_facet = shoelace(&window_outline(WindowShape::PointedTop, w, h));
+        assert!((pointed_facet - pointed_exact).abs() < 1e-4);
+    }
+
+    #[test]
+    fn plain_flow_top_outlines_apex_at_centre_and_within_bbox() {
+        let (w, h) = (1.2f32, 1.5f32);
+        for shape in [WindowShape::SemiCircularTop, WindowShape::PointedTop] {
+            let pts = window_outline(shape, w, h);
+            // The base spans the full width at y = 0.
+            assert!(pts.contains(&(0.0, 0.0)) && pts.contains(&(w, 0.0)));
+            // The topmost point is the CENTRE at the full entered height — the
+            // "height is measured at the centre" contract.
+            let top = pts
+                .iter()
+                .copied()
+                .max_by(|a, b| a.1.total_cmp(&b.1))
+                .unwrap();
+            assert!((top.0 - w / 2.0).abs() < 1e-4, "{shape:?} apex x {}", top.0);
+            assert!((top.1 - h).abs() < 1e-4, "{shape:?} apex y {}", top.1);
+            // Nothing leaves the w×h bounding box (host confinement / clamps
+            // reason over that box).
+            assert!(pts
+                .iter()
+                .all(|p| (-1e-4..=w + 1e-4).contains(&p.0) && (-1e-4..=h + 1e-4).contains(&p.1)));
+            // The cap springs from the body top at h − w/2 on both sides.
+            let rh = h - w / 2.0;
+            assert!(pts.contains(&(0.0, rh)) && pts.contains(&(w, rh)));
+        }
+    }
+
+    #[test]
+    fn window_shape_serde_defaults_flat_and_round_trips_new_variants() {
+        let win = Window {
+            id: crate::ber::common::ItemId::default(),
+            vertices: vec![],
+            width_m: 1.2,
+            height_m: 1.5,
+            window_type_id: crate::ber::common::ItemId::default(),
+            placement: None,
+            wall_anchor: None,
+            assembly_id: None,
+            multi_storey: false,
+            shape: WindowShape::SemiCircularTop,
+            overshading: Overshading::Average,
+            num_opes: None,
+        };
+        // Round trip: the new variant survives serde intact.
+        let json = serde_json::to_value(&win).unwrap();
+        let back: Window = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(back.shape, WindowShape::SemiCircularTop);
+        // A record written BEFORE the `shape` field existed (key absent) loads
+        // as a plain rectangular window.
+        let mut old = json;
+        old.as_object_mut().unwrap().remove("shape");
+        let legacy: Window = serde_json::from_value(old).unwrap();
+        assert_eq!(legacy.shape, WindowShape::Rectangular);
+    }
+
+    #[test]
+    fn top_shape_tick_maps_to_and_from_shapes() {
+        for t in WindowTopShape::ALL {
+            assert_eq!(WindowTopShape::from_shape(t.to_shape()), Some(t));
+        }
+        // Complex shapes are outside the tick's domain.
+        assert_eq!(WindowTopShape::from_shape(WindowShape::Circular), None);
+        assert_eq!(
+            WindowTopShape::from_shape(WindowShape::RoundedTop { rise_m: 0.3 }),
+            None
+        );
     }
 
     #[test]

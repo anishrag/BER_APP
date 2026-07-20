@@ -31,6 +31,11 @@ impl AppController {
         if on {
             self.exit_openings_mode();
             self.living_area_mode = false;
+            self.porch_mode = false;
+            // Raw flag writes skip the setters' cleanup and the outline may
+            // already be active (no `activate_shape` sync) — drop the staged
+            // living-area/porch cut-pick explicitly (see `set_phase_mode`).
+            self.pending_cut = None;
             self.exposure_mode = false;
             self.phase_mode = false;
             self.ceiling_step_mode = false;

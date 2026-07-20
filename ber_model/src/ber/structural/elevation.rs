@@ -1,10 +1,11 @@
 //! External per-side ELEVATIONS — the Stage-1 review's view of one building
 //! side: every wall (across all storeys) whose outward normal faces the side,
 //! stacked by storey height, with its openings, projected onto a vertical view
-//! plane. Wall PANELS are facing-only (no panel occlusion), but an OPENING that
-//! a NEARER facing wall fully covers is dropped — so a recessed return wall's
-//! window doesn't show through the wall standing in front of it, matching what a
-//! camera pointed at that side would (and wouldn't) see.
+//! plane. A depth-based HIDDEN-LINE pass drops what a NEARER facing wall stands
+//! in front of: an OPENING it fully covers is dropped, and a PANEL edge segment
+//! it covers is clipped out — so a recessed/rear wall's window and outline don't
+//! show through the wall standing in front of it, matching what a camera pointed
+//! at that side would (and wouldn't) see.
 //!
 //! Pure coordinate math over the resolved model (reuses [`WallRegion::base_edge`]
 //! / [`base_frame`](WallRegion::base_frame) / [`top_profile`](WallRegion::top_profile)
@@ -69,14 +70,20 @@ pub struct ElevOpening {
 }
 
 /// One facing wall projected onto the side's view plane: its horizontal span
-/// `[x0, x1]`, its base z, and its top edge as an `(x, z)` polyline (supports
-/// stepped / sloped tops), all in the composite frame.
+/// `[x0, x1]`, its base z, and its VISIBLE outline as a set of `(x, z)→(x, z)`
+/// line segments (base edge, top polyline, and end verticals), all in the
+/// composite frame. The segments are the wall's full outline already CLIPPED by
+/// the hidden-line pass — sub-spans lying behind a nearer facing wall are
+/// removed — so a rear wall's edge doesn't draw across the wall in front of it.
+/// A wall with nothing in front contributes its whole outline (base + top
+/// polyline + two verticals), unchanged. Render draws each segment, further
+/// clipping it around openings.
 #[derive(Debug, Clone)]
 pub struct ElevPanel {
     pub x0: f64,
     pub x1: f64,
     pub base_z: f64,
-    pub top: Vec<(f64, f64)>,
+    pub segments: Vec<((f64, f64), (f64, f64))>,
 }
 
 /// The external elevation of one building side — facing walls (stacked by
@@ -114,8 +121,10 @@ impl Ber {
     /// projected onto the side's horizontal view axis `h = (-n.y, n.x)` (whose
     /// handedness matches a viewer standing OUTSIDE the side looking in). A
     /// wall's outward normal is the base-edge perpendicular flipped to point
-    /// away from the storey's centroid. Wall panels are facing-only; an opening a
-    /// NEARER facing wall fully covers is dropped (the occlusion retain below).
+    /// away from the storey's centroid. A depth-based hidden-line pass removes
+    /// what a NEARER facing wall (greater depth along `+n`) stands in front of:
+    /// an opening it fully covers is dropped, and a panel edge segment it covers
+    /// is clipped out (both use the `occ` list built below).
     ///
     /// [`FACING_MIN`]: a wall counts as facing the side when its outward normal
     /// is within ~60° of the side's normal.
@@ -126,10 +135,22 @@ impl Ber {
         let h = side.view_axis(); // unit horizontal view axis, ⟂ n
         let datums = self.storey_floor_datums();
 
-        let mut panels: Vec<ElevPanel> = Vec::new();
+        // A facing wall's raw projection, kept until every wall is collected so
+        // the hidden-line pass (below) can clip each panel against ALL nearer
+        // walls (which may live in other storeys / later in iteration).
+        struct RawPanel {
+            id: ItemId,
+            depth: f64,
+            x0: f64,
+            x1: f64,
+            base_z: f64,
+            top: Vec<(f64, f64)>,
+        }
+        let mut raw: Vec<RawPanel> = Vec::new();
         let mut openings: Vec<ElevOpening> = Vec::new();
         // Per facing wall: (id, depth along +n, x0, x1, base_z, top_z) — used to
-        // occlude openings on walls that stand BEHIND a nearer facing wall.
+        // occlude openings AND panel edges on walls that stand BEHIND a nearer
+        // facing wall.
         let mut occ: Vec<(ItemId, f64, f64, f64, f64, f64)> = Vec::new();
         let (mut min_x, mut max_x) = (f64::INFINITY, f64::NEG_INFINITY);
         let (mut min_z, mut max_z) = (f64::INFINITY, f64::NEG_INFINITY);
@@ -227,7 +248,9 @@ impl Ber {
                 let top_z = top.iter().map(|&(_, z)| z).fold(bz, f64::max);
                 occ.push((w.id, depth, xa.min(xb), xa.max(xb), bz, top_z));
 
-                panels.push(ElevPanel {
+                raw.push(RawPanel {
+                    id: w.id,
+                    depth,
                     x0: xa.min(xb),
                     x1: xa.max(xb),
                     base_z: bz,
@@ -264,9 +287,64 @@ impl Ber {
             })
         });
 
-        if panels.is_empty() {
+        if raw.is_empty() {
             return SideElevation::empty(side);
         }
+
+        // Panel hidden-line pass: build each facing wall's full outline (base
+        // edge + top polyline + the two end verticals) as segments, then clip
+        // each segment against every NEARER facing wall's solid box. A rear
+        // wall's base/top edge that runs behind the wall in front of it is
+        // dropped, so it no longer draws across that front wall (and its
+        // windows). A nearer wall's box is `[x0, x1] × [base_z, top_z]` — a
+        // FLAT-TOP approximation using its top peak: exact for the common (and
+        // reported) flat-top-behind-flat-top case, and for a sloped/stepped
+        // nearer top only ever over-covers the triangular gap below its peak, so
+        // it can hide but never invent a rear edge (no spurious line — the bug
+        // being fixed). Occluders are OTHER walls strictly nearer (depth greater
+        // by > eps); a wall never occludes itself or an equal-depth neighbour.
+        let panels: Vec<ElevPanel> = raw
+            .iter()
+            .map(|panel| {
+                let occluders: Vec<(f64, f64, f64, f64)> = occ
+                    .iter()
+                    .filter(|&&(wid, d, ..)| wid != panel.id && d > panel.depth + 1e-6)
+                    .map(|&(_, _, x0, x1, bz, tz)| (x0, x1, bz, tz))
+                    .collect();
+
+                // The wall's full outline as raw edges (mirrors what the
+                // renderer used to reconstruct from base_z + top + the ends).
+                let mut edges: Vec<((f64, f64), (f64, f64))> = Vec::new();
+                edges.push(((panel.x0, panel.base_z), (panel.x1, panel.base_z)));
+                for w in panel.top.windows(2) {
+                    edges.push((w[0], w[1]));
+                }
+                if let (Some(&first), Some(&last)) = (panel.top.first(), panel.top.last()) {
+                    edges.push((first, (first.0, panel.base_z)));
+                    edges.push((last, (last.0, panel.base_z)));
+                }
+
+                // Clip each edge to the spans no nearer wall covers.
+                let mut segments: Vec<((f64, f64), (f64, f64))> = Vec::new();
+                for (a, b) in edges {
+                    let (dx, dz) = (b.0 - a.0, b.1 - a.1);
+                    for (ta, tb) in unoccluded_spans(a, b, &occluders) {
+                        segments.push((
+                            (a.0 + dx * ta, a.1 + dz * ta),
+                            (a.0 + dx * tb, a.1 + dz * tb),
+                        ));
+                    }
+                }
+
+                ElevPanel {
+                    x0: panel.x0,
+                    x1: panel.x1,
+                    base_z: panel.base_z,
+                    segments,
+                }
+            })
+            .collect();
+
         SideElevation {
             side,
             panels,
@@ -277,4 +355,68 @@ impl Ber {
             max_z,
         }
     }
+}
+
+/// The visible sub-spans (as `t` sub-intervals of `a`→`b`, `t ∈ [0, 1]`) of an
+/// elevation outline segment once the parts STRICTLY inside any occluder rect
+/// are removed — the hidden-line clip behind the panel pass. `occluders` are
+/// `(x0, x1, base_z, top_z)` solid boxes (nearer facing walls) in the same
+/// `(x, z)` frame. A segment covered by no box returns the whole `[(0.0, 1.0)]`;
+/// one fully covered returns empty. Strictly-interior (open-interval) clipping:
+/// a segment lying exactly on a box edge (e.g. a rear top edge coincident with
+/// the nearer wall's top line) is kept, so only edges genuinely BEHIND the box
+/// are dropped — matching the opening-occlusion convention.
+///
+/// Mirrors `render::elevation::wall_line_visible_spans` (which clips outline
+/// lines around openings); kept here — not shared — because hidden-line removal
+/// is a data-model derivation and `ber_model` must own its own geometry.
+fn unoccluded_spans(
+    a: (f64, f64),
+    b: (f64, f64),
+    occluders: &[(f64, f64, f64, f64)],
+) -> Vec<(f64, f64)> {
+    let (dx, dz) = (b.0 - a.0, b.1 - a.1);
+    // The t-interval (along a→b) STRICTLY inside each box, via slab clipping on
+    // x and z. A component parallel to a slab (d≈0) is "inside" only when its
+    // fixed coordinate is strictly within that slab's open interval, so a line
+    // lying exactly on a box edge is never treated as covered.
+    let mut cuts: Vec<(f64, f64)> = Vec::new();
+    for &(x0, x1, bz, tz) in occluders {
+        let mut t0 = 0.0_f64;
+        let mut t1 = 1.0_f64;
+        let slab = |lo: f64, hi: f64, o: f64, d: f64, t0: &mut f64, t1: &mut f64| -> bool {
+            if d.abs() < 1e-12 {
+                return o > lo + 1e-9 && o < hi - 1e-9; // parallel: fixed coord in the open slab
+            }
+            let (mut ta, mut tb) = ((lo - o) / d, (hi - o) / d);
+            if ta > tb {
+                std::mem::swap(&mut ta, &mut tb);
+            }
+            *t0 = t0.max(ta);
+            *t1 = t1.min(tb);
+            true
+        };
+        if slab(x0, x1, a.0, dx, &mut t0, &mut t1)
+            && slab(bz, tz, a.1, dz, &mut t0, &mut t1)
+            && t1 - t0 > 1e-6
+        {
+            cuts.push((t0.clamp(0.0, 1.0), t1.clamp(0.0, 1.0)));
+        }
+    }
+    if cuts.is_empty() {
+        return vec![(0.0, 1.0)];
+    }
+    cuts.sort_by(|x, y| x.0.partial_cmp(&y.0).unwrap());
+    let mut spans = Vec::new();
+    let mut cursor = 0.0_f64;
+    for (cl, ch) in cuts {
+        if cl > cursor + 1e-6 {
+            spans.push((cursor, cl));
+        }
+        cursor = cursor.max(ch);
+    }
+    if cursor < 1.0 - 1e-6 {
+        spans.push((cursor, 1.0));
+    }
+    spans
 }

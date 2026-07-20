@@ -101,6 +101,15 @@ pub enum ConstructionMakeup {
         #[serde(default)]
         plasterboard: bool,
     },
+    /// The DEFAULT construction PLUS insulation whose EVIDENCE exists but
+    /// whose thickness is NOT measurable — the "some insulation" state. Sits
+    /// between `Default` (nothing found) and `DefaultPlus` (measured): the
+    /// DEAP side grants partial ("half") credit rather than a measured
+    /// adjustment. Like every asserted-fabric claim it needs a backing PHOTO
+    /// — the photo IS the evidence ([`requires_photo`](Self::requires_photo)).
+    /// ADDITIVE serde variant (2026-07): older records never contain the tag,
+    /// so old JSON keeps loading unchanged.
+    SomeInsulation,
     Layers(Vec<ConstructionLayer>), // custom stack of layers
 }
 
@@ -230,13 +239,17 @@ impl ConstructionMakeup {
     /// the assessor asserted concrete fabric on top of the default, and
     /// (exactly like a ceiling's specified
     /// [`CeilingInsulation::ThicknessMm`]) a measurable fabric claim needs
-    /// photographic evidence. `Default` (a standard assumed construction),
-    /// `Unknown` (declared unknown) and `NonHeatLoss` are not specified
-    /// fabric and need no photo.
+    /// photographic evidence. `SomeInsulation` does too — the claim is
+    /// unmeasurable but it's still an asserted upgrade, and the photo of the
+    /// evidence is what backs the partial credit. `Default` (a standard
+    /// assumed construction), `Unknown` (declared unknown) and `NonHeatLoss`
+    /// are not specified fabric and need no photo.
     pub fn requires_photo(&self) -> bool {
         matches!(
             self,
-            ConstructionMakeup::Layers(_) | ConstructionMakeup::DefaultPlus { .. }
+            ConstructionMakeup::Layers(_)
+                | ConstructionMakeup::DefaultPlus { .. }
+                | ConstructionMakeup::SomeInsulation
         )
     }
 
@@ -569,8 +582,10 @@ impl CeilingInsulation {
     /// separate open question (the combined "Default" dropdown's unknown /
     /// thickness choice, stored in [`CeilingConstruction::insulation`]). Every
     /// other make-up already carries its own answer: `DefaultPlus` holds the
-    /// measured extra thickness, `Layers` specifies the stack,
-    /// `Unknown`/`NonHeatLoss` declare there is nothing further to specify —
+    /// measured extra thickness, `SomeInsulation` declares unmeasurable
+    /// insulation (photo-backed via the build-up gate), `Layers` specifies
+    /// the stack, `Unknown`/`NonHeatLoss` declare there is nothing further
+    /// to specify —
     /// and the unset `Tbd` is caught by the build-up gate, not this one. The
     /// per-make-up successor to bare [`spec_done`](Self::spec_done) in
     /// [`CeilingConstruction::is_complete`] and the Structure editor's group
@@ -651,7 +666,8 @@ impl CeilingConstruction {
     /// `Default` make-up only — its extra insulation is specified
     /// ([`CeilingInsulation::spec_done_for`] — a thickness needs a backing
     /// photo; declared-unknown doesn't; unspecified never counts). Any other
-    /// make-up (`Unknown`, `Layers`, `DefaultPlus`, `NonHeatLoss`) already
+    /// make-up (`Unknown`, `Layers`, `DefaultPlus`, `SomeInsulation`,
+    /// `NonHeatLoss`) already
     /// answers the insulation question itself, so only the build-up rules
     /// (incl. its photo gate) apply.
     pub fn is_complete(&self) -> bool {
@@ -1176,11 +1192,216 @@ impl Ber {
         };
         count > 0 && self.incomplete_surface_ids(idx, kind).is_empty()
     }
+
+    /// WHY [`structure_surfaces_complete`](Self::structure_surfaces_complete)
+    /// isn't green for (`idx`, `kind`) — the SAME branches, decomposed into
+    /// user-facing reasons for the tappable checklist row. Guaranteed empty
+    /// exactly when the predicate is true: both read the same storey guard,
+    /// the same [`Storey::surface_counts`] gate, and the same
+    /// [`incomplete_surface_ids`](Self::incomplete_surface_ids) set, so colour
+    /// and reasons can never disagree. Each incomplete surface is attributed
+    /// to the FIRST failing clause of its construction's completeness test
+    /// ([`WallConstruction::is_complete`] and its floor/ceiling mirrors):
+    /// unresolvable construction → type unset → build-up unset → photo-backed
+    /// build-up missing its photo → (ceilings only) insulation spec
+    /// unresolved. `m` in the "n of m" messages is the same
+    /// [`Storey::surface_ids`] total the Structure header's "N/M" read-out
+    /// uses.
+    pub fn structure_incomplete_reasons(&self, idx: usize, kind: SurfaceKind) -> Vec<String> {
+        let Some(storey) = self.storeys.get(idx) else {
+            return vec!["Storey not resolved yet".to_string()];
+        };
+        let counts = storey.surface_counts();
+        let (count, noun) = match kind {
+            SurfaceKind::Walls => (counts.walls, "wall"),
+            SurfaceKind::Floors => (counts.floors, "floor"),
+            SurfaceKind::Ceilings => (counts.ceilings, "ceiling"),
+        };
+        if count == 0 {
+            return vec![format!("No {noun} surfaces resolved yet")];
+        }
+        let total = storey.surface_ids(kind).len();
+        // Bucket counters, in the order `is_complete` checks its clauses. The
+        // `other` catch-all keeps the emptiness guarantee airtight even if a
+        // future `is_complete` clause isn't decomposed here yet.
+        let (mut unassigned, mut no_type, mut no_build_up, mut no_photo, mut insulation, mut other) =
+            (0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
+        for id in self.incomplete_surface_ids(idx, kind) {
+            // The same region → construction lookups the incomplete filter
+            // used: (type set, base build-up state, insulation answered).
+            let attrs: Option<(bool, &ConstructionBase, bool)> = match kind {
+                SurfaceKind::Walls => storey
+                    .walls
+                    .regions
+                    .iter()
+                    .find(|r| r.id == id)
+                    .and_then(|r| self.wall_construction(r.construction_id))
+                    .map(|c| (c.construction_type.is_set(), &c.base, true)),
+                SurfaceKind::Floors => storey
+                    .floors
+                    .regions
+                    .iter()
+                    .find(|r| r.id == id)
+                    .and_then(|r| self.floor_construction(r.construction_id))
+                    .map(|c| (c.construction_type.is_set(), &c.base, true)),
+                SurfaceKind::Ceilings => storey
+                    .ceilings
+                    .regions
+                    .iter()
+                    .find(|r| r.id == id)
+                    .and_then(|r| self.ceiling_construction(r.construction_id))
+                    .map(|c| {
+                        (
+                            c.construction_type.is_set(),
+                            &c.base,
+                            CeilingInsulation::spec_done_for(
+                                &c.base.construction_makeup,
+                                c.insulation,
+                                !c.base.photos.is_empty(),
+                            ),
+                        )
+                    }),
+            };
+            match attrs {
+                None => unassigned += 1,
+                Some((type_set, base, insulation_done)) => {
+                    if !type_set {
+                        no_type += 1;
+                    } else if !base.construction_makeup.is_set() {
+                        no_build_up += 1;
+                    } else if base.construction_makeup.requires_photo() && base.photos.is_empty() {
+                        no_photo += 1;
+                    } else if !insulation_done {
+                        insulation += 1;
+                    } else {
+                        other += 1; // unreachable while is_complete has exactly these clauses
+                    }
+                }
+            }
+        }
+        let mut reasons = Vec::new();
+        for (n, cause) in [
+            (unassigned, "no construction assigned"),
+            (no_type, "no construction type set"),
+            (no_build_up, "no build-up set"),
+            (no_photo, "a build-up awaiting its backing photo"),
+            (
+                insulation,
+                "extra insulation unspecified or awaiting its photo",
+            ),
+            (other, "an incomplete construction"),
+        ] {
+            if n > 0 {
+                reasons.push(format!("{n} of {total} {noun} surface(s) have {cause}"));
+            }
+        }
+        reasons
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `structure_incomplete_reasons` is the detailed core behind
+    /// `structure_surfaces_complete`: the reason list is empty exactly when
+    /// the predicate is green (swept at every stage of the fixture's life,
+    /// over every kind), and the bucket messages carry the same counts the
+    /// predicate's branches see.
+    #[test]
+    fn structure_incomplete_reasons_track_the_completeness_predicate() {
+        use crate::ber::structural::{Storey, SurfaceKind, WallExposure, WallRegion, WallRegions};
+        use domain::points::Point3f64;
+
+        let equivalent = |ber: &Ber, idx: usize| {
+            for kind in [
+                SurfaceKind::Walls,
+                SurfaceKind::Floors,
+                SurfaceKind::Ceilings,
+            ] {
+                assert_eq!(
+                    ber.structure_incomplete_reasons(idx, kind).is_empty(),
+                    ber.structure_surfaces_complete(idx, kind),
+                    "reasons/colour must agree for {kind:?} on storey {idx}"
+                );
+            }
+        };
+
+        // Out-of-range storey.
+        let mut ber = Ber::default();
+        assert_eq!(
+            ber.structure_incomplete_reasons(0, SurfaceKind::Walls),
+            vec!["Storey not resolved yet".to_string()]
+        );
+        equivalent(&ber, 0);
+
+        // Storey with no surfaces of the kind resolved yet.
+        ber.storeys.push(Storey::default());
+        assert_eq!(
+            ber.structure_incomplete_reasons(0, SurfaceKind::Walls),
+            vec!["No wall surfaces resolved yet".to_string()]
+        );
+        assert_eq!(
+            ber.structure_incomplete_reasons(0, SurfaceKind::Ceilings),
+            vec!["No ceiling surfaces resolved yet".to_string()]
+        );
+        equivalent(&ber, 0);
+
+        // One wall on a SPECIFIED (Layers) build-up with no photo yet.
+        let cid = ber.ensure_wall_construction(
+            WallConstructionType::CavityWall,
+            ConstructionMakeup::Layers(vec![]),
+            ConstructionPhase::default(),
+        );
+        let wall = |construction_id| WallRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(vec![
+                Point3f64::new(0.0, 0.0, 0.0),
+                Point3f64::new(1.0, 0.0, 0.0),
+                Point3f64::new(1.0, 0.0, 2.4),
+                Point3f64::new(0.0, 0.0, 2.4),
+            ]),
+            exposure: WallExposure::Exposed,
+            opes: Opes::default(),
+            construction_id,
+        };
+        let mut walls = WallRegions::default();
+        walls.regions = vec![wall(cid)];
+        ber.storeys[0].walls = walls;
+        assert_eq!(
+            ber.structure_incomplete_reasons(0, SurfaceKind::Walls),
+            vec!["1 of 1 wall surface(s) have a build-up awaiting its backing photo".to_string()]
+        );
+        equivalent(&ber, 0);
+
+        // A second wall whose construction id resolves to nothing → the two
+        // causes report side by side, over the same total.
+        ber.storeys[0].walls.regions.push(wall(ItemId::default()));
+        assert_eq!(
+            ber.structure_incomplete_reasons(0, SurfaceKind::Walls),
+            vec![
+                "1 of 2 wall surface(s) have no construction assigned".to_string(),
+                "1 of 2 wall surface(s) have a build-up awaiting its backing photo".to_string(),
+            ]
+        );
+        equivalent(&ber, 0);
+
+        // Back the build-up with a photo and assign the orphan → green, and
+        // the reason list agrees by construction.
+        ber.wall_constructions
+            .iter_mut()
+            .find(|c| c.base.id == cid)
+            .unwrap()
+            .base
+            .photos
+            .push(Photo::default());
+        ber.storeys[0].walls.regions[1].construction_id = cid;
+        assert!(ber
+            .structure_incomplete_reasons(0, SurfaceKind::Walls)
+            .is_empty());
+        assert!(ber.structure_surfaces_complete(0, SurfaceKind::Walls));
+        equivalent(&ber, 0);
+    }
 
     /// Every `WallConstructionType` (incl. the additive `AeratedBlock`)
     /// round-trips through serde, and — additive evolution — JSON produced by
@@ -1311,6 +1532,14 @@ mod tests {
             "legacy DefaultPlus + photo completes without the insulation field"
         );
         assert!(
+            !ceiling(ConstructionMakeup::SomeInsulation, false).is_complete(),
+            "some-insulation still needs its evidence photo"
+        );
+        assert!(
+            ceiling(ConstructionMakeup::SomeInsulation, true).is_complete(),
+            "some-insulation + photo completes without a separate insulation spec"
+        );
+        assert!(
             !ceiling(ConstructionMakeup::Tbd, false).is_complete(),
             "the unset placeholder stays incomplete via the build-up gate"
         );
@@ -1380,6 +1609,30 @@ mod tests {
         }
     }
 
+    /// `SomeInsulation` — evidence of insulation exists but the thickness is
+    /// unmeasurable — is a real choice (set) and, like every asserted-fabric
+    /// claim, completes only with a backing photo (the photo IS the
+    /// evidence). Its wire shape is the additive plain-string tag.
+    #[test]
+    fn some_insulation_is_set_and_requires_photo() {
+        let mk = ConstructionMakeup::SomeInsulation;
+        assert!(mk.is_set(), "some-insulation is a made choice");
+        assert!(mk.requires_photo(), "the evidence photo backs the claim");
+
+        let mut base = ConstructionBase {
+            construction_makeup: mk,
+            ..Default::default()
+        };
+        assert!(!base.build_up_done(), "no photo → not done");
+        base.photos.push(Photo::default());
+        assert!(base.build_up_done(), "a backing photo completes it");
+
+        assert_eq!(
+            serde_json::to_string(&ConstructionMakeup::SomeInsulation).unwrap(),
+            r#""SomeInsulation""#
+        );
+    }
+
     /// The `DefaultPlus` variant (incl. the additive `plasterboard` field)
     /// round-trips through serde, and — additive evolution — JSON produced by
     /// the OLD enum shapes (no `DefaultPlus` tag at all; a `DefaultPlus`
@@ -1393,6 +1646,7 @@ mod tests {
             ConstructionMakeup::Default,
             ConstructionMakeup::Tbd,
             ConstructionMakeup::Unknown,
+            ConstructionMakeup::SomeInsulation,
             ConstructionMakeup::DefaultPlus {
                 extra_insulation_mm: 40,
                 plasterboard: false,

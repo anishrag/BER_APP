@@ -1240,6 +1240,85 @@ pub fn render_living_areas(
     }
 }
 
+/// Porch regions overlaid like living areas (`render_living_areas`), in a
+/// distinct violet with a "Porch" text label at each region's centroid so the
+/// region reads as a porch at a glance. Same active-brighter highlight and the
+/// same known-wall length labels.
+#[allow(clippy::too_many_arguments)]
+pub fn render_porches(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    ber: Option<&Ber>,
+    current_storey_idx: Option<usize>,
+    sketch_mode: SketchMode,
+    display_mode: DisplayMode,
+    view: ViewParams,
+    polygons: &[Vec<(f64, f64)>],
+    // Per porch, the known-length walls as (start, end, length) in world coords.
+    wall_labels: &[Vec<((f64, f64), (f64, f64), f32)>],
+    active: Option<usize>,
+) {
+    if polygons.is_empty() {
+        return;
+    }
+    let Some((_storey, t)) = storey_transform(rect, ber, current_storey_idx, sketch_mode, view)
+    else {
+        return;
+    };
+    for (i, poly) in polygons.iter().enumerate() {
+        if poly.len() < 3 {
+            continue;
+        }
+        let is_active = active == Some(i);
+        let pts: Vec<egui::Pos2> = poly.iter().map(|(x, y)| t.apply(*x, *y)).collect();
+        let (color, width) = if is_active {
+            (egui::Color32::from_rgb(200, 130, 240), 3.0)
+        } else {
+            (egui::Color32::from_rgb(150, 95, 185), 2.0)
+        };
+        let stroke = egui::Stroke::new(width, color);
+        let n = pts.len();
+        for k in 0..n {
+            painter.line_segment([pts[k], pts[(k + 1) % n]], stroke);
+        }
+        // "Porch" label at the region's centroid — the porch records a
+        // labelled region, so the label is part of the rendering.
+        let (cx, cy) = poly.iter().fold((0.0, 0.0), |(sx, sy), (x, y)| {
+            (sx + *x / poly.len() as f64, sy + *y / poly.len() as f64)
+        });
+        painter.text(
+            t.apply(cx, cy),
+            egui::Align2::CENTER_CENTER,
+            "Porch",
+            egui::FontId::proportional(12.0),
+            color,
+        );
+    }
+
+    // Length labels on each porch's known walls — same gating and look as the
+    // living areas' (and the storey's) dimension labels.
+    if matches!(
+        display_mode,
+        DisplayMode::FloorMapDims | DisplayMode::AllSurfaces
+    ) {
+        for area in wall_labels {
+            for (a, b, len) in area {
+                if *len < 1e-3 {
+                    continue;
+                }
+                let mid = t.apply((a.0 + b.0) * 0.5, (a.1 + b.1) * 0.5);
+                painter.text(
+                    mid,
+                    egui::Align2::CENTER_CENTER,
+                    format!("{len:.2} m"),
+                    egui::FontId::monospace(11.0),
+                    egui::Color32::from_rgb(215, 165, 245),
+                );
+            }
+        }
+    }
+}
+
 /// Colour each outline wall's exposure SECTIONS: orange = exposed, amber =
 /// semi-exposed, slate-blue = non-heat-loss. In exposure mode every wall is
 /// shown faint grey first (so un-marked gaps read as grey), the selected wall's

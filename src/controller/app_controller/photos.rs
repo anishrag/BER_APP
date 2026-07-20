@@ -224,16 +224,12 @@ impl AppController {
     /// "BER complete" (Front can't be deferred, so the front photo is always
     /// really required here).
     pub fn external_photos_complete(&self) -> bool {
-        let Some(record) = self.current_record.as_ref() else {
-            return false;
-        };
-        let data = &record.data;
-        ExternalSide::ALL
-            .iter()
-            .filter(|s| s.photo_required())
-            .all(|&side| {
-                data.photos.iter().any(|p| p.side == Some(side)) || data.photo_deferred(side)
-            })
+        // Wraps the reason core (`Ber::missing_external_photo_sides`) the
+        // checklist row's bubble lists, so the gate and its explanation can't
+        // disagree.
+        self.current_record
+            .as_ref()
+            .is_some_and(|r| r.data.missing_external_photo_sides().is_empty())
     }
 
     /// Toggle `side`'s photo DEFERRAL (the panel's per-side "Defer" button):

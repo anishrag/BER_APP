@@ -81,6 +81,40 @@ impl AppController {
         self.sketch_engine.display = mode;
     }
 
+    /// User-initiated tool pick (the toolbar's ChangeEditTool): exits the
+    /// canvas-claiming overlay modes FIRST so the picked tool's strokes
+    /// actually land. Without this, an active exposure / openings / roof /
+    /// partition mode kept owning the canvas and silently swallowed every
+    /// Trim/Extend stroke while the tool button showed selected (the field
+    /// porch-trim failure). Each exit is guarded on the mode actually being
+    /// on — the setters clear their own transient state (e.g. `set_roof_mode`
+    /// drops `pending_redraw`), which must not happen collaterally.
+    ///
+    /// Internal flows that programmatically pick a tool (living areas, phase /
+    /// step / ceiling flows) keep calling [`set_edit_mode`](Self::set_edit_mode),
+    /// which leaves modes alone.
+    pub fn select_edit_tool(&mut self, mode: EditTools) {
+        if self.openings_mode {
+            self.set_openings_mode(false);
+        }
+        if self.exposure_mode {
+            self.set_exposure_mode(false);
+        }
+        if self.floor_exposure_mode {
+            self.set_floor_exposure_mode(false);
+        }
+        if self.ceiling_exposure_mode {
+            self.set_ceiling_exposure_mode(false);
+        }
+        if self.roof_mode {
+            self.set_roof_mode(false);
+        }
+        if self.partition_mode() {
+            self.close_wall_partition();
+        }
+        self.set_edit_mode(mode);
+    }
+
     pub fn set_edit_mode(&mut self, mode: EditTools) {
         // Picking an edit tool leaves navigation mode (clicks/drags act again).
         self.navigation_mode = false;
@@ -116,6 +150,7 @@ impl AppController {
         self.set_ceiling_step_mode(false);
         self.set_roof_point_mode(false);
         self.set_living_area_mode(false);
+        self.set_porch_mode(false);
         self.close_wall_partition();
         // Deselecting every tool ends the interaction the snap tags belong to —
         // clear them so they don't hang on the canvas in navigation mode.
@@ -519,7 +554,9 @@ impl AppController {
     /// by sketch.rs via `fit_transform.inverse`). Clears any leftover
     /// canvas-pixel stroke from the sketch engine, then forwards to the
     /// merge logic.
-    pub fn apply_extend_stroke_event(&mut self, world_points: &[(f32, f32)]) {
+    /// Returns the rejection message when the stroke fails — the UI shows it
+    /// (a silently-logged rejection reads as "nothing happened" on the tablet).
+    pub fn apply_extend_stroke_event(&mut self, world_points: &[(f32, f32)]) -> Result<(), String> {
         let _ = self.sketch_engine.take_stroke_raw();
         let pts: Vec<Point2f32> = world_points
             .iter()
@@ -531,7 +568,7 @@ impl AppController {
         self.begin_snap_capture();
         let res = self.apply_extend_stroke(&pts);
         self.splice_debug = self.take_splice_debug_if_enabled();
-        if let Err(e) = res {
+        if let Err(e) = &res {
             log::error!("apply_extend_stroke: {}", e);
         }
         self.capture_snap_action(SnapAction::Freehand {
@@ -539,6 +576,7 @@ impl AppController {
             points: pts,
             closed: false,
         });
+        res
     }
 
     /// Apply an Extend stroke. The geometry — snapping, orthogonalizing, and
@@ -669,7 +707,9 @@ impl AppController {
 
     /// Entry point for Trim strokes from the UI (world coords, like Extend).
     /// The stroke's first and last points define the straight cut line.
-    pub fn apply_trim_stroke_event(&mut self, world_points: &[(f32, f32)]) {
+    /// Returns the rejection message when the stroke fails — the UI shows it
+    /// (a silently-logged rejection reads as "nothing happened" on the tablet).
+    pub fn apply_trim_stroke_event(&mut self, world_points: &[(f32, f32)]) -> Result<(), String> {
         let _ = self.sketch_engine.take_stroke_raw();
         let pts: Vec<Point2f32> = world_points
             .iter()
@@ -683,7 +723,7 @@ impl AppController {
         // Capture the pipeline phases (recorded even when the splice is rejected)
         // for the UI's coloured debug overlay — only when explicitly enabled.
         self.splice_debug = self.take_splice_debug_if_enabled();
-        if let Err(e) = res {
+        if let Err(e) = &res {
             log::error!("apply_trim_stroke: {}", e);
         }
         self.capture_snap_action(SnapAction::Freehand {
@@ -691,6 +731,7 @@ impl AppController {
             points: pts,
             closed: false,
         });
+        res
     }
 
     /// Drain the splice pipeline's recorded phases, KEEPING them for the overlay

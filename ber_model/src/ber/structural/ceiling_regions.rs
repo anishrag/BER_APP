@@ -2,7 +2,9 @@ use geo::{Contains, LineString, MultiPolygon, Point as GeoPoint, Polygon};
 use serde::{Deserialize, Serialize};
 
 use crate::ber::common::ItemId;
-use domain::points::{point_to_segment_distance, ring_centroid, Point2f64, Point3f64};
+use domain::points::{
+    point_on_ring_boundary, point_to_segment_distance, ring_centroid, Point2f64, Point3f64,
+};
 
 #[allow(unused_imports)]
 use super::*;
@@ -1139,7 +1141,6 @@ impl CeilingRegions {
         fill_cid: ItemId,
     ) -> Self {
         use geo::bool_ops::BooleanOps;
-        use geo::Area;
         let fp_polys: Vec<Polygon<f64>> = footprint
             .iter()
             .filter(|r| r.len() >= 3)
@@ -1178,7 +1179,11 @@ impl CeilingRegions {
             let region_poly: Polygon<f64> = region.polygon.clone().into();
             let clipped = region_poly.intersection(&fp);
             for poly in clipped.0.iter().flat_map(split_to_simple) {
-                if poly.unsigned_area() < SLIVER_AREA_M2 {
+                // Thickness-aware degenerate guard (field reports 797a7ff5 /
+                // eddc2f3f): drop sub-area SLIVERS and long-thin strips a
+                // near-coincident clip edge produces, instead of emitting them
+                // as phantom regions.
+                if plan_piece_is_degenerate(&poly) {
                     continue;
                 }
                 next.push(mk(
@@ -1192,7 +1197,10 @@ impl CeilingRegions {
         }
         // Newly-exposed footprint (grew, or a region clipped away) → flat default.
         for poly in fp.difference(&covered).0.iter().flat_map(split_to_simple) {
-            if poly.unsigned_area() < SLIVER_AREA_M2 {
+            // Same thickness-aware guard for the fill pieces: a strip between a
+            // stored ring and a barely-moved footprint edge is boolean debris,
+            // not a new ceiling.
+            if plan_piece_is_degenerate(&poly) {
                 continue;
             }
             next.push(mk(
@@ -1203,6 +1211,151 @@ impl CeilingRegions {
             ));
         }
         Self { regions: next }
+    }
+
+    /// Whether the stored regions carry an OUTLINE-EDIT SCAR (field report
+    /// eddc2f3f): an interior SEAM between two FLAT regions at the SAME height
+    /// where at least one side is an `Unset`-exposure, opening-free region and
+    /// the seam lies along NONE of the `justified` rings — the durable inputs
+    /// that legitimately split a flat ceiling (structure `ceiling_splits`,
+    /// ceiling-step/divider rings, dormer footprints). Such a seam is the
+    /// signature left when a resolve re-fit the regions against a superseded
+    /// (mid-dimensioning / undone) outline: the old cut line survives as a
+    /// region boundary with `Unset` fill pieces beside it. A seam bordering an
+    /// [`CeilingExposure::InterStorey`] region is SKIPPED — those splits are
+    /// owned (re-derived and re-stamped) by the cross-storey derivation — and
+    /// so is a seam with an ENDPOINT on an `InterStorey` region's plan ring:
+    /// when an upper footprint sits strictly INSIDE this storey's ceiling, the
+    /// derivation's remainder is a ring-with-hole that `split_to_simple`
+    /// decomposes with a bridge cut THROUGH the hole, so the two remainder
+    /// pieces legitimately share coplanar seams that each end on the hole
+    /// (i.e. on the `InterStorey` piece's ring) — derivation-owned, not a
+    /// scar. Also
+    /// true when any region is outright degenerate (the 797a7ff5 guard's
+    /// definition). Detection only — the caller owns the repair (recomposing
+    /// the ceilings from their durable inputs).
+    pub fn has_unjustified_flat_seams(&self, justified: &[Vec<Point2f64>]) -> bool {
+        // Any degenerate region is a scar on its own (zero-area included).
+        for r in &self.regions {
+            let plan: Polygon<f64> = r.polygon.clone().into();
+            if plan_piece_is_degenerate(&plan) {
+                return true;
+            }
+        }
+        // Flat height of a region, `None` when sloped.
+        let flat_z = |r: &CeilingRegion| -> Option<f64> {
+            let zs: Vec<f64> = r.polygon.exterior.iter().map(|v| v.z).collect();
+            let (lo, hi) = zs
+                .iter()
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), &z| {
+                    (l.min(z), h.max(z))
+                });
+            (hi - lo < 1e-6).then_some((lo + hi) * 0.5)
+        };
+        // Justified plan edges, flattened.
+        let justified_edges: Vec<(Point2f64, Point2f64)> = justified
+            .iter()
+            .flat_map(|ring| {
+                let n = ring.len();
+                (0..n).map(move |i| (ring[i], ring[(i + 1) % n]))
+            })
+            .collect();
+        let on_justified = |a: Point2f64, b: Point2f64| -> bool {
+            justified_edges.iter().any(|(ja, jb)| {
+                point_to_segment_distance(a.x, a.y, ja.x, ja.y, jb.x, jb.y) < 1e-3
+                    && point_to_segment_distance(b.x, b.y, ja.x, ja.y, jb.x, jb.y) < 1e-3
+            })
+        };
+        let plan_edges = |r: &CeilingRegion| -> Vec<(Point2f64, Point2f64)> {
+            let ring: Vec<Point2f64> = r
+                .polygon
+                .exterior
+                .iter()
+                .map(|v| Point2f64::new(v.x, v.y))
+                .collect();
+            let n = ring.len();
+            (0..n).map(|i| (ring[i], ring[(i + 1) % n])).collect()
+        };
+        let unset_side = |r: &CeilingRegion| -> bool {
+            r.exposure == CeilingExposure::Unset
+                && r.opes.doors.is_empty()
+                && r.opes.windows.is_empty()
+        };
+        // Plan rings of the InterStorey regions: a seam ENDING on one of these
+        // is the cross-storey derivation's bridge cut (see the doc comment),
+        // not a scar.
+        let inter_rings: Vec<Vec<Point2f64>> = self
+            .regions
+            .iter()
+            .filter(|r| r.exposure == CeilingExposure::InterStorey)
+            .map(|r| {
+                r.polygon
+                    .exterior
+                    .iter()
+                    .map(|v| Point2f64::new(v.x, v.y))
+                    .collect()
+            })
+            .collect();
+        let on_inter_ring = |p: Point2f64| -> bool {
+            inter_rings
+                .iter()
+                .any(|ring| point_on_ring_boundary(ring, p.x, p.y, 1e-3))
+        };
+        for (i, a) in self.regions.iter().enumerate() {
+            let Some(za) = flat_z(a) else { continue };
+            if a.exposure == CeilingExposure::InterStorey {
+                continue;
+            }
+            for b in self.regions.iter().skip(i + 1) {
+                let Some(zb) = flat_z(b) else { continue };
+                if b.exposure == CeilingExposure::InterStorey {
+                    continue;
+                }
+                if (za - zb).abs() > 1e-6 || (!unset_side(a) && !unset_side(b)) {
+                    continue;
+                }
+                // Shared collinear overlap between an edge of `a` and one of `b`.
+                for (p0, p1) in plan_edges(a) {
+                    let len = ((p1.x - p0.x).powi(2) + (p1.y - p0.y).powi(2)).sqrt();
+                    if len < 1e-6 {
+                        continue;
+                    }
+                    for (q0, q1) in plan_edges(b) {
+                        // Both endpoints of the candidate edge near the line of
+                        // (p0, p1) → collinear.
+                        if point_to_segment_distance(q0.x, q0.y, p0.x, p0.y, p1.x, p1.y) > 1e-6
+                            || point_to_segment_distance(q1.x, q1.y, p0.x, p0.y, p1.x, p1.y) > 1e-6
+                        {
+                            continue;
+                        }
+                        // Overlap length along (p0, p1).
+                        let t = |p: Point2f64| {
+                            ((p.x - p0.x) * (p1.x - p0.x) + (p.y - p0.y) * (p1.y - p0.y)) / len
+                        };
+                        let (t0, t1) = (t(q0).min(t(q1)), t(q0).max(t(q1)));
+                        let (lo, hi) = (t0.max(0.0), t1.min(len));
+                        if hi - lo < 1e-3 {
+                            continue; // touch, not a seam
+                        }
+                        // The overlapped sub-segment's endpoints in the plane.
+                        let at = |d: f64| {
+                            Point2f64::new(
+                                p0.x + (p1.x - p0.x) * d / len,
+                                p0.y + (p1.y - p0.y) * d / len,
+                            )
+                        };
+                        let (sa, sb) = (at(lo), at(hi));
+                        if on_inter_ring(sa) || on_inter_ring(sb) {
+                            continue; // derivation-owned bridge cut, not a scar
+                        }
+                        if !on_justified(sa, sb) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
     }
 
     /// The LOWEST flat ceiling height over `footprint`: the minimum

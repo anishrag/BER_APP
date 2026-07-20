@@ -40,17 +40,16 @@ android {
     }
 
     buildTypes {
-	getByName("release") {
+        getByName("release") {
+            // Signed with android/berapp.keystore via keystore.properties
+            // (untracked); debug builds sign automatically.
             if (keystorePropertiesFile.exists()) {
                 signingConfig = signingConfigs.getByName("release")
             }
-            isMinifyEnabled = true   // optional
-            // proguardFiles(...)
-        }
-        release {
+            // No R8/minify: the app is a thin GameActivity shell over the Rust
+            // cdylib — shrinking risks stripping JNI entry points for no
+            // meaningful size win.
             isMinifyEnabled = false
-            // Signing: generate a keystore once (see android/README.md) and
-            // wire a signingConfig here; debug builds sign automatically.
         }
     }
 }

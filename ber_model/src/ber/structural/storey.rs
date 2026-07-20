@@ -44,6 +44,31 @@ pub struct Storey {
     /// need no parametric snapshot. `#[serde(default)]` so older records load.
     #[serde(default)]
     pub living_areas: FloorRegions,
+    /// Porch sub-areas inside the storey — each records its labelled region
+    /// (label + area) only; a later resolve-phase step will decide its
+    /// inclusion/exclusion in the calculations. Stored as resolved floor
+    /// polygons — like `living_areas` they're non-editable on reload (redraw
+    /// to change), so unlike the outline they need no parametric snapshot.
+    /// `#[serde(default)]` so older records load.
+    #[serde(default)]
+    pub porches: FloorRegions,
+    /// The porches' INNER-boundary walls: for each finalised porch, its ring
+    /// edges that do NOT run along the storey outline (the dwelling-side
+    /// boundary — where the real front door often sits) extruded into wall
+    /// surfaces so window/door openings can be RECORDED on them. Derived by
+    /// `document::resolve_storey` every resolve, like `walls`.
+    ///
+    /// Deliberately a SEPARATE collection from `walls`, NOT merged: every
+    /// existing consumer that iterates `walls.regions` (heat-loss sums, DEAP
+    /// derivations, structure counts, exposure-completeness predicates) must
+    /// stay untouched — porch walls have NO effect on any heat-loss/area
+    /// calculation until the resolve-phase porch inclusion/exclusion step
+    /// decides whether the porch is unheated (which would make this wall part
+    /// of the heat-loss envelope, openings already in place). Regions default
+    /// to [`WallExposure::Unset`] (an internal boundary awaiting that
+    /// decision), never `Exposed`. `#[serde(default)]` so older records load.
+    #[serde(default)]
+    pub porch_walls: WallRegions,
     /// Default ceiling height in metres above this storey's floor datum.
     /// `None` until the assessor enters it — gates 3D viewing; when `Some`,
     /// resolve derives the default ceiling regions and extrudes walls to it.
@@ -163,12 +188,35 @@ pub struct Storey {
     #[serde(default)]
     pub object_rooms: Vec<crate::ber::objects::ObjectRoom>,
     // No editable sketch snapshot is stored: the resolved geometry above
-    // (`floors`/`walls`/`living_areas`) is the only persisted representation,
+    // (`floors`/`walls`/`living_areas`/`porches`) is the only persisted
+    // representation,
     // and the editor rebuilds its working state from it on load. The DB only
     // ever holds finalised (complete, metre-scale) geometry.
 }
 
 impl Storey {
+    /// Whether this storey's stored ceilings carry an OUTLINE-EDIT SCAR (field
+    /// report eddc2f3f): a flat-to-flat interior seam that none of the durable
+    /// ceiling inputs justify — the fingerprint a resolve left when it re-fit
+    /// the regions-as-truth ceilings against a superseded (mid-dimensioning /
+    /// undone) outline. The justified set is this storey's own durable inputs:
+    /// structure `ceiling_splits`, ceiling-step/divider rings, and dormer
+    /// footprints; `InterStorey` splits are excluded inside the seam scan (the
+    /// cross-storey derivation owns and re-derives those). A storey with
+    /// ceiling CONTINUATIONS is conservatively reported clean — continuations
+    /// re-emit target regions on the source plane, a legitimate coplanar
+    /// adjacency this detector doesn't model. Detection only; the shell heals
+    /// by recomposing the ceilings from the durable inputs on load.
+    pub fn ceilings_carry_outline_edit_scars(&self) -> bool {
+        if !self.ceiling_continuations.is_empty() {
+            return false;
+        }
+        let mut justified: Vec<Vec<Point2f64>> = self.ceiling_splits.clone();
+        justified.extend(self.ceiling_steps.iter().map(|(ring, _)| ring.clone()));
+        justified.extend(self.dormers.iter().map(|d| d.footprint.clone()));
+        self.ceilings.has_unjustified_flat_seams(&justified)
+    }
+
     /// Record a dimensioned Structure-phase split onto the durable split field
     /// for `kind` (replayed by `resolve_storey`). Floors/ceilings store the whole
     /// carved `ring`; walls store the fixed interior cut SEGMENT(s) in
@@ -274,7 +322,8 @@ impl Storey {
         self.ceiling_continuations.clear();
     }
 
-    /// Drop all DERIVED geometry — floors, walls, living areas, ceilings, and the
+    /// Drop all DERIVED geometry — floors, walls, living areas, porches,
+    /// ceilings, and the
     /// fan apexes over them — back to empty. The persist path calls this when
     /// the outline isn't finalised yet: that geometry is still pixel/incomplete
     /// (ceilings derived over a pixel footprint are pixel units too, so the apexes
@@ -285,6 +334,8 @@ impl Storey {
         self.floors = FloorRegions::default();
         self.walls = WallRegions::default();
         self.living_areas = FloorRegions::default();
+        self.porches = FloorRegions::default();
+        self.porch_walls = WallRegions::default();
         self.ceilings = CeilingRegions::default();
         self.ceiling_apexes = Vec::new();
     }
@@ -294,6 +345,11 @@ impl Storey {
     /// diagram shows). Counts the derived regions, so they're meaningful only
     /// after the outline is finalised (walls/ceilings/floors are re-derived by
     /// `document::resolve_storey`).
+    ///
+    /// `porch_walls` are deliberately EXCLUDED (here and in every wall
+    /// aggregator over `walls.regions`): a porch inner wall is recordable
+    /// geometry only — it enters no calculation or Structure-phase count
+    /// until the resolve-phase porch inclusion/exclusion step lands.
     pub fn surface_counts(&self) -> SurfaceCounts {
         SurfaceCounts {
             walls: self.walls.regions.len(),
@@ -746,6 +802,36 @@ impl Storey {
             .find(|r| r.id == id)
             .map(|r| r.level_m)
     }
+
+    /// Every wall region an OPENING can be hosted on — the perimeter/riser
+    /// `walls` followed by the porch inner `porch_walls`. THE iteration the
+    /// opening machinery (and the shell's host search) uses, so a porch wall
+    /// hosts, confines, draws and links an opening exactly like an outline
+    /// wall. Calculation-side consumers keep iterating `walls.regions`
+    /// directly — porch walls stay out of every heat-loss/area/structure
+    /// aggregate (see `porch_walls`' doc).
+    pub fn placeable_wall_regions(&self) -> impl Iterator<Item = &WallRegion> {
+        self.walls
+            .regions
+            .iter()
+            .chain(self.porch_walls.regions.iter())
+    }
+
+    /// The opening-placeable wall region with `id` — `walls` first, then
+    /// `porch_walls` (ids are uuid-unique, so order is cosmetic). The by-id
+    /// lookup every opening operation goes through.
+    pub fn placeable_wall(&self, id: ItemId) -> Option<&WallRegion> {
+        self.placeable_wall_regions().find(|r| r.id == id)
+    }
+
+    /// Mutable [`placeable_wall`](Self::placeable_wall) — for `opes` linking.
+    pub fn placeable_wall_mut(&mut self, id: ItemId) -> Option<&mut WallRegion> {
+        self.walls
+            .regions
+            .iter_mut()
+            .chain(self.porch_walls.regions.iter_mut())
+            .find(|r| r.id == id)
+    }
 }
 
 /// Per-storey tally of structural surfaces, one field per kind. Drives the
@@ -820,4 +906,87 @@ pub struct ThermalMassInfo {
     pub partition_walls: ThermalMassCategoryEnum,
     pub external_walls: ThermalMassCategoryEnum,
     pub separating_walls: ThermalMassCategoryEnum,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An OLD stored record — serialized before `porches` existed, so the key
+    /// is absent — still deserializes (`#[serde(default)]`), with the porch
+    /// regions empty.
+    #[test]
+    fn old_record_without_porches_key_still_deserializes() {
+        let mut json = serde_json::to_value(Storey::default()).unwrap();
+        let obj = json.as_object_mut().unwrap();
+        assert!(obj.remove("porches").is_some(), "key was present");
+        let loaded: Storey = serde_json::from_value(json).expect("old record loads");
+        assert!(loaded.porches.regions.is_empty(), "defaults to empty");
+    }
+
+    /// `clear_derived_geometry` drops porches back to empty along with the
+    /// other derived regions.
+    #[test]
+    fn clear_derived_geometry_clears_porches() {
+        let mut storey = Storey {
+            porches: FloorRegions::from_vertex_lists(
+                vec![vec![
+                    Point2f64::new(0.0, 0.0),
+                    Point2f64::new(2.0, 0.0),
+                    Point2f64::new(2.0, 2.0),
+                    Point2f64::new(0.0, 2.0),
+                ]],
+                ItemId::default(),
+            ),
+            porch_walls: one_porch_wall(),
+            ..Storey::default()
+        };
+        storey.clear_derived_geometry();
+        assert!(storey.porches.regions.is_empty());
+        assert!(
+            storey.porch_walls.regions.is_empty(),
+            "porch walls are derived geometry — cleared with the rest"
+        );
+    }
+
+    /// A single porch-wall region fixture (a 2 m Unset quad).
+    fn one_porch_wall() -> WallRegions {
+        WallRegions {
+            regions: vec![WallRegion {
+                id: ItemId::default(),
+                polygon: Polygon3D::new(vec![
+                    Point3f64::new(2.0, 0.0, 0.0),
+                    Point3f64::new(2.0, 2.0, 0.0),
+                    Point3f64::new(2.0, 2.0, 2.4),
+                    Point3f64::new(2.0, 0.0, 2.4),
+                ]),
+                exposure: WallExposure::Unset,
+                opes: Opes::default(),
+                construction_id: ItemId::default(),
+            }],
+        }
+    }
+
+    /// An OLD stored record — serialized before `porch_walls` existed, so the
+    /// key is absent — still deserializes (`#[serde(default)]`), with the
+    /// porch walls empty.
+    #[test]
+    fn old_record_without_porch_walls_key_still_deserializes() {
+        let mut json = serde_json::to_value(Storey::default()).unwrap();
+        let obj = json.as_object_mut().unwrap();
+        assert!(obj.remove("porch_walls").is_some(), "key was present");
+        let loaded: Storey = serde_json::from_value(json).expect("old record loads");
+        assert!(loaded.porch_walls.regions.is_empty(), "defaults to empty");
+    }
+
+    /// `surface_counts` deliberately EXCLUDES porch walls — recordable
+    /// geometry only, no effect on the Structure-phase tallies.
+    #[test]
+    fn surface_counts_exclude_porch_walls() {
+        let storey = Storey {
+            porch_walls: one_porch_wall(),
+            ..Storey::default()
+        };
+        assert_eq!(storey.surface_counts().walls, 0);
+    }
 }

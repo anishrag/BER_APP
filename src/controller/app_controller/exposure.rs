@@ -51,6 +51,8 @@ pub enum ExposureSnapKind {
     PhaseLine,
     /// A living-area wall meeting the outline wall.
     LivingAreaWall,
+    /// A porch wall meeting the outline wall.
+    PorchWall,
     /// A floor/ceiling step (riser) line meeting the wall.
     StepLine,
 }
@@ -63,6 +65,7 @@ impl ExposureSnapKind {
             Self::SectionEdge => "section edge",
             Self::PhaseLine => "phase line",
             Self::LivingAreaWall => "living-area wall",
+            Self::PorchWall => "porch wall",
             Self::StepLine => "step line",
         }
     }
@@ -148,6 +151,7 @@ impl AppController {
             // reads it). Then leave living-area mode and act on the outline.
             self.sync_active();
             self.set_living_area_mode(false);
+            self.set_porch_mode(false);
             self.phase_mode = false;
             self.step_mode = false;
             // Mutually exclusive with the ceiling-step line and roof-point
@@ -398,6 +402,10 @@ impl AppController {
         crossings(
             &self.document.living_area_wall_segments(),
             ExposureSnapKind::LivingAreaWall,
+        );
+        crossings(
+            &self.document.porch_wall_segments(),
+            ExposureSnapKind::PorchWall,
         );
         crossings(&self.step_line_segments(), ExposureSnapKind::StepLine);
         out

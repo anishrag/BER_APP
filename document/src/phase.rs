@@ -481,17 +481,39 @@ pub fn phase_snap_segments(ber: &Ber, idx: usize, outline: &[Point2f32]) -> Vec<
 /// committed/materialized before this is meaningful — the checklist's
 /// per-storey "Construction phase" rollup.
 pub fn construction_phase_complete(ber: &Ber, idx: usize) -> bool {
+    construction_phase_reasons(ber, idx).is_empty()
+}
+
+/// Every reason [`construction_phase_complete`] is false — empty exactly when
+/// it is true. A floor region whose construction is missing counts as
+/// unassigned, exactly as the bool treats it. No storey prefix in the messages
+/// (the controller adds the storey name itself).
+pub fn construction_phase_reasons(ber: &Ber, idx: usize) -> Vec<String> {
     let Some(storey) = ber.storeys.get(idx) else {
-        return false;
+        return vec!["Storey not resolved yet".to_string()];
     };
     if storey.floors.regions.is_empty() {
-        return false;
+        return vec!["No floor regions resolved yet".to_string()];
     }
-    storey.floors.regions.iter().all(|fr| {
-        ber.floor_construction(fr.construction_id)
-            .map(|c| c.base.construction_phase != ConstructionPhase::Unassigned)
-            .unwrap_or(false)
-    })
+    let failing: Vec<_> = storey
+        .floors
+        .regions
+        .iter()
+        .filter(|fr| {
+            !ber.floor_construction(fr.construction_id)
+                .map(|c| c.base.construction_phase != ConstructionPhase::Unassigned)
+                .unwrap_or(false)
+        })
+        .collect();
+    if failing.is_empty() {
+        return Vec::new();
+    }
+    let area: f64 = failing.iter().map(|fr| fr.area()).sum();
+    vec![format!(
+        "{} of {} floor area(s) ({area:.1} m²) with no construction phase assigned",
+        failing.len(),
+        storey.floors.regions.len(),
+    )]
 }
 
 #[cfg(test)]
@@ -947,5 +969,67 @@ mod tests {
             !construction_phase_complete(&ber, 9),
             "a missing storey fails"
         );
+    }
+
+    /// `construction_phase_reasons` carries the failing count and summed m²,
+    /// and the bool is exactly `reasons.is_empty()` across the fixture's
+    /// states (mirrors `construction_phase_complete_requires_every_floor_tagged`).
+    #[test]
+    fn construction_phase_reasons_carry_counts_and_match_the_bool() {
+        let mut ber = Ber::default();
+        let unassigned_cid = ber.ensure_floor_construction(
+            Default::default(),
+            Default::default(),
+            ConstructionPhase::Unassigned,
+        );
+        let ext_cid = ber.ensure_floor_construction(
+            Default::default(),
+            Default::default(),
+            ConstructionPhase::Extension1,
+        );
+        let square = |off: f64| {
+            vec![
+                Point2f64::new(off, 0.0),
+                Point2f64::new(off + 4.0, 0.0),
+                Point2f64::new(off + 4.0, 4.0),
+                Point2f64::new(off, 4.0),
+            ]
+        };
+        // One Unassigned 4 × 4 region + one Extension1 → "1 of 2 … (16.0 m²)".
+        let mut floors = FloorRegions::from_vertex_lists(vec![square(0.0)], unassigned_cid);
+        floors
+            .regions
+            .extend(FloorRegions::from_vertex_lists(vec![square(4.0)], ext_cid).regions);
+        ber.storeys.push(Storey {
+            floors,
+            ..Storey::default()
+        });
+        assert_eq!(
+            construction_phase_reasons(&ber, 0),
+            vec!["1 of 2 floor area(s) (16.0 m²) with no construction phase assigned".to_string()]
+        );
+
+        // All tagged → no reasons.
+        ber.storeys[0].floors.regions[0].construction_id = ext_cid;
+        assert!(construction_phase_reasons(&ber, 0).is_empty());
+
+        // Empty and missing storeys → the resolve-first reasons.
+        ber.storeys.push(Storey::default());
+        assert_eq!(
+            construction_phase_reasons(&ber, 1),
+            vec!["No floor regions resolved yet".to_string()]
+        );
+        assert_eq!(
+            construction_phase_reasons(&ber, 9),
+            vec!["Storey not resolved yet".to_string()]
+        );
+
+        // Equivalence sweep over the fixture's states.
+        for idx in [0, 1, 9] {
+            assert_eq!(
+                construction_phase_complete(&ber, idx),
+                construction_phase_reasons(&ber, idx).is_empty()
+            );
+        }
     }
 }

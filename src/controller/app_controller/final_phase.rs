@@ -272,14 +272,36 @@ impl AppController {
         self.show_summary = false;
     }
 
+    /// The form dropdowns still Unset, by field label — the reason core the
+    /// "Details form" checklist row shows; [`final_form_done`]
+    /// (Self::final_form_done) is its emptiness, so colour and reasons can't
+    /// disagree.
+    fn final_form_missing(&self) -> Vec<String> {
+        let d = self.final_details();
+        [
+            (d.floor == FloorKind::Unset, "Floor type not set"),
+            (
+                d.internal_wall == WallFinish::Unset,
+                "Internal wall finish not set",
+            ),
+            (
+                d.separating_wall == WallFinish::Unset,
+                "Separating wall finish not set",
+            ),
+            (
+                d.external_wall == WallFinish::Unset,
+                "External wall finish not set",
+            ),
+            (d.heating == HeatingKind::Unset, "Heating type not set"),
+        ]
+        .into_iter()
+        .filter_map(|(missing, label)| missing.then(|| label.to_string()))
+        .collect()
+    }
+
     /// Whether the form is fully filled (every dropdown set).
     fn final_form_done(&self) -> bool {
-        let d = self.final_details();
-        d.floor != FloorKind::Unset
-            && d.internal_wall != WallFinish::Unset
-            && d.separating_wall != WallFinish::Unset
-            && d.external_wall != WallFinish::Unset
-            && d.heating != HeatingKind::Unset
+        self.final_form_missing().is_empty()
     }
 
     /// Whether all three Phase-4 parts are done — gates "Mark BER complete".
@@ -287,31 +309,38 @@ impl AppController {
         self.final_form_done() && self.north_aligned() && self.sheltering().all_set()
     }
 
-    /// The Phase-4 checklist: progress rows for the form, north, and sheltering.
+    /// The Phase-4 checklist: progress rows for the form, north, and sheltering,
+    /// each carrying the concrete unmet conditions (empty iff green — the
+    /// reasons come from the same cores that decide the colour).
     pub fn final_details_checklist(&self) -> Vec<ChecklistItem> {
-        let form_done = self.final_form_done();
-        let north_done = self.north_aligned();
-        let shelter_done = self.sheltering().all_set();
-        let dot = |b: bool| {
-            if b {
+        let form_missing = self.final_form_missing();
+        let north_missing: Vec<String> = if self.north_aligned() {
+            Vec::new()
+        } else {
+            vec!["Satellite image not rotated to north yet".to_string()]
+        };
+        let shelter_missing: Vec<String> = self
+            .sheltering()
+            .unset_sides()
+            .into_iter()
+            .map(|side| format!("{} side's shelter not set", side.label()))
+            .collect();
+        let row = |label: &'static str, reasons: Vec<String>| {
+            let status = if reasons.is_empty() {
                 ChecklistStatus::AllStoreys
             } else {
                 ChecklistStatus::Incomplete
+            };
+            ChecklistItem {
+                label,
+                status,
+                reasons,
             }
         };
         vec![
-            ChecklistItem {
-                label: "Details form",
-                status: dot(form_done),
-            },
-            ChecklistItem {
-                label: "North aligned",
-                status: dot(north_done),
-            },
-            ChecklistItem {
-                label: "Sheltered sides",
-                status: dot(shelter_done),
-            },
+            row("Details form", form_missing),
+            row("North aligned", north_missing),
+            row("Sheltered sides", shelter_missing),
         ]
     }
 }

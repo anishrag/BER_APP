@@ -10,6 +10,7 @@
 //   - `exposure`      — wall-exposure marking interaction.
 //   - `history`       — undo/redo snapshots.
 //   - `living_areas`  — living-area carving workflow.
+//   - `porches`       — porch carving workflow (mirrors living areas).
 //   - `persistence`   — BER record lifecycle, persist/autosave/snapshot.
 //   - `phase_regions` — construction-phase tagging workflow.
 //   - `review`        — the collinearity-review cursor.
@@ -40,6 +41,7 @@ mod openings;
 mod partition;
 mod phase_regions;
 mod photos;
+mod porches;
 mod roof;
 mod structure;
 mod structure_review;
@@ -105,7 +107,7 @@ use ceiling_rects::{PendingCeilingRect, RectPins};
 use ceiling_ridges::{PendingCeilingRidge, RidgeQuestion};
 use ceiling_steps::PendingCeilingStep;
 use copy_height::CopyHeightTarget;
-pub use dimensioning::{DimensionPromptUiData, PositionPromptUiData};
+pub use dimensioning::{CentreBetweenPick, DimensionPromptUiData, PositionPromptUiData};
 pub use editing::{
     EditDragPrompt, EditDragPromptUiData, MeasurementOption, VertexDropPrompt,
     VertexDropPromptUiData, VertexMeasurement, VertexMeasurementKind, VertexMeasurementUiData,
@@ -119,12 +121,12 @@ use new_storey::{NewStoreyStage, PendingNewStorey};
 pub use objects::{
     ActiveObjectRoomView, ObjectPinView, ObjectReviewView, ObjectRowView, ObjectTotalView,
 };
-use openings::PendingOpening;
 pub use openings::{
-    ComplexWindowPlacement, DoorSidelightsMode, DoorSidelightsPlacement, ElevationView,
-    ExistingWindowType, FullSpanInfo, OpeningEditPrefill, OpeningFieldSpec, OpeningFieldsPrompt,
-    OpeningPromptUiData, OpeningToolKind, OpeningViewKind, WindowTypeChoice,
+    ComplexWindowPlacement, DoorEditPrefill, DoorSidelightsMode, DoorSidelightsPlacement,
+    ElevationView, ExistingWindowType, FullSpanInfo, OpeningEditPrefill, OpeningFieldSpec,
+    OpeningFieldsPrompt, OpeningPromptUiData, OpeningToolKind, OpeningViewKind, WindowTypeChoice,
 };
+use openings::{OpeningEdit, PendingOpening};
 pub use partition::{
     PartitionDimAxis, PartitionDimPrompt, PartitionInset, PartitionRegionView, PartitionSnapTag,
     PartitionView,
@@ -188,6 +190,11 @@ pub struct AppController {
     /// living area (rather than replacing the outline), and the other tools act
     /// on the most-recent living area. Toggled by the UI.
     living_area_mode: bool,
+    /// True when the editor is in porch mode: `DrawPerpWalls` starts a new
+    /// porch region (drawn, carved and dimensioned exactly like a living
+    /// area; recorded for the resolve step — no effect on calculations yet).
+    /// Mutually exclusive with living-area mode. Toggled by the UI.
+    porch_mode: bool,
     /// True when the editor is in wall-exposure mode: tapping an outline wall
     /// selects it, and the type buttons mark it exposed/semi/non-heat-loss.
     /// Toggled by the UI.
@@ -213,10 +220,13 @@ pub struct AppController {
     /// riser. Cleared everywhere the wall selection is.
     selected_riser: Option<ItemId>,
     /// A straight CUT line has split the storey into two candidate regions; the
-    /// user picks which becomes the living area by tapping inside it. Transient
-    /// (not persisted / not in undo history); `None` when nothing is awaiting a
-    /// choice.
-    pending_cut: Option<[ShapeSlot; 2]>,
+    /// user picks which becomes the living area OR the porch by tapping inside
+    /// it. The flow is STAGED with the regions (by the stroke that cut them) so
+    /// the pick commits to the right list even if the mode flags have shifted
+    /// since — `choose_cut_region` never routes by the current mode. Transient
+    /// (not persisted / not in undo history — a restore clears it); `None` when
+    /// nothing is awaiting a choice.
+    pending_cut: Option<(SubareaFlow, [ShapeSlot; 2])>,
     /// True when the editor is marking HORIZONTAL-surface (floor/ceiling)
     /// True when the editor is tagging construction-phase areas (year of
     /// construction). Routes `DrawPerpWalls` to phase carving; mutually
@@ -257,6 +267,15 @@ pub struct AppController {
     /// side → position → amount). Transient — outside undo, cleared on storey
     /// switch / mode exit / cancel.
     pending_ceiling_step: Option<PendingCeilingStep>,
+    /// The in-flight 'Centre between 2 points' pick for a whole-shape
+    /// `Translate` position prompt: `First` (awaiting tap 1) → `Second` (tap 1
+    /// snapped + placed, awaiting tap 2) → apply + clear. Transient — outside
+    /// undo, cleared on cancel / apply / storey switch / record load (its
+    /// `Second { a }` holds a coordinate in the active storey's metre space, so
+    /// it must not survive into another storey — same reset discipline as
+    /// `pending_ceiling_step` / `pending_roof_point`); the open document
+    /// position prompt stays put behind it. See `dimensioning.rs`.
+    pending_centre_between: Option<CentreBetweenPick>,
     /// True when the editor is tagging roof points (apexes that fan a ceiling
     /// region up to a height, entered as a tap + per-axis position + height).
     /// Routes canvas taps to the point input; mutually exclusive with the
@@ -308,11 +327,13 @@ pub struct AppController {
     /// [`pending_rect_is_dormer`](Self::pending_rect_is_dormer)); the pavilion
     /// flow leaves it false, byte-for-byte unchanged.
     pending_rect_is_dormer: bool,
-    /// Which SIDES of the in-flight DORMER rect are PINNED — snapped flush onto
-    /// a reference edge at draw time, so their dimension prompt is skipped and
+    /// Which SIDES of the in-flight rect are PINNED — snapped flush onto a
+    /// reference edge at draw time, so their dimension prompt is skipped and
     /// their coordinate is un-overridable (see `ceiling_dormers.rs` /
-    /// `ceiling_rects.rs`). Default all-false and set only on the dormer path;
-    /// the pavilion never reads or sets it, so its FSM is unaffected.
+    /// `ceiling_rects.rs`). Set on BOTH the dormer path (surrounding roof/dormer
+    /// edges) and the pavilion path (the containing ceiling region's walls);
+    /// (re)set clean on every rect birth in `apply_roof_rect_stroke`, so the FSM
+    /// never reads a stale pin and the guards key on the pins directly.
     pending_rect_pins: RectPins,
     /// True when the editor is placing windows/doors. A tap near a wall drops
     /// the selected opening type on the nearest wall (then prompts size); a tap
@@ -345,10 +366,11 @@ pub struct AppController {
     elevation_drag: Option<ber_model::ber::openings::OpeningRef>,
     /// The opening selected in the elevation, for Delete (transient).
     elevation_selection: Option<ber_model::ber::openings::OpeningRef>,
-    /// The WINDOW being attribute-edited from the elevation ("Edit…"): the
-    /// placement box re-opens in edit mode, prefilled with its size / type /
-    /// overshading. Transient — cleared with the rest of the elevation state.
-    elevation_edit: Option<ber_model::ber::common::ItemId>,
+    /// The opening being attribute-edited on-surface ("Edit…"): a wall window or
+    /// door from the elevation, or a roof window from the plan. The placement box
+    /// re-opens in edit mode prefilled from it (size / type / attributes).
+    /// Transient — cleared with the rest of the openings edit state.
+    opening_edit: Option<OpeningEdit>,
     /// A ROOF window selected in the PLAN view (Edit-on-surface tool), for drag /
     /// delete — roof windows live in plan, so their "surface" is the footprint.
     /// Transient.
@@ -715,6 +737,7 @@ impl AppController {
             pending_redraw: None,
             document: Document::default(),
             living_area_mode: false,
+            porch_mode: false,
             exposure_mode: false,
             selected_exposure_wall: None,
             exposure_sel: None,
@@ -731,6 +754,7 @@ impl AppController {
             ceiling_step_mode: false,
             ceiling_step_regions: HashMap::new(),
             pending_ceiling_step: None,
+            pending_centre_between: None,
             ceiling_point_mode: false,
             pending_roof_point: None,
             continuation_tool: None,
@@ -750,7 +774,7 @@ impl AppController {
             elevation_wall: None,
             elevation_drag: None,
             elevation_selection: None,
-            elevation_edit: None,
+            opening_edit: None,
             roof_window_sel: None,
             roof_window_drag: None,
             confirm_delete: false,

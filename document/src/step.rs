@@ -139,6 +139,9 @@ mod tests {
         let plan = FloorPlan::from_clean_ring(pts).unwrap();
         let mut doc = StoreyDoc::default();
         doc.dimensioning.scale_set = true;
+        // Finalised = every active param known (resolve defers on an
+        // outline the dimensioning loop would still prompt for).
+        doc.dimensioning.known_params = plan.all_active_params();
         doc.floor_plan = plan.clone();
         doc.outline = ShapeSlot {
             floor_plan: plan,

@@ -176,8 +176,13 @@ impl StoreyDoc {
     /// Paint a section `[start, end]` (clamped to the wall's length `len`) with
     /// `exposure` onto outline wall `vid`. ONLY painted sections are stored —
     /// unmarked length never materializes into sections; it shows up as `Unset`
-    /// in the derived coverage instead (single-representation rule: the
-    /// in-session model equals the post-reload one with no canonicalize pass).
+    /// in the derived coverage instead. Single-representation rule, with ONE
+    /// canonicalize pass: reload's `sections_from_wall_regions` coalesces
+    /// adjacent sections whose paint AND construction agree (the painted-
+    /// staircase heal) — so two same-exposure sections painted separately
+    /// in-session merge into one on the next reload. An agreeing seam carries
+    /// no durable payload, so nothing DEAP-relevant changes; only the
+    /// tap-selectable sub-ranges unify.
     ///
     /// [`WallExposure::InterStorey`] is DERIVED-only (`derive_inter_storey`
     /// stamps and clears it) — painting it is refused as a no-op.
@@ -535,12 +540,37 @@ impl StoreyDoc {
     /// (`from_storey` does; the shell reconstructs partitions before
     /// sections).
     ///
+    /// AGREEMENT HEAL (field report 17e15dc7 / ff5a5ee3): adjacent recovered
+    /// sections on the SAME wall whose paint AND construction attribution
+    /// (`WallRegion::construction_id`) both AGREE are COALESCED into one
+    /// section. Rationale: two adjacent same-paint, same-construction
+    /// sections carry exactly the same durable information as their union —
+    /// their seam encodes nothing — yet the seam pre-splits the regenerated
+    /// wall, which is how an OBSOLETE derived split (the per-facet staircase
+    /// an older derivation baked in, then the assessor painted) survives
+    /// every re-derive: painted pieces recover per piece, the seams become
+    /// section boundaries, and regenerate re-splits at them forever. Seams
+    /// the CURRENT derivation justifies (footprint crossings, band-profile
+    /// discontinuities) need no protection here — the derive re-cuts them on
+    /// the regenerated wall — and durable `wall_splits` / face partitions
+    /// re-apply at resolve regardless of 1-D coverage. Genuinely meaningful
+    /// seams survive via the disagreement guards: mixed paint or differing
+    /// construction attributions never merge, and a band section recovered by
+    /// pass 2 (the stacked-paint fixpoint machinery) never participates.
+    ///
     /// [`wall_face_partitions`]: StoreyDoc::wall_face_partitions
     pub fn sections_from_wall_regions(
         &self,
         walls: &WallRegions,
     ) -> HashMap<VertexId, Vec<ExposureSection>> {
-        let mut out: HashMap<VertexId, Vec<ExposureSection>> = HashMap::new();
+        // Adjacency tolerance (m) for the agreement heal: recovered spans are
+        // f32 projections of one shared cut coordinate, so a real seam pair
+        // agrees to well under this; real gaps (openings never split sections;
+        // distinct paints) are centimetres+.
+        const SEAM_EPS_M: f32 = 1e-3;
+        // Per section: (section, source construction, healable) — pass-1
+        // painted pieces are healable, pass-2 band spans never are.
+        let mut out: HashMap<VertexId, Vec<(ExposureSection, ItemId, bool)>> = HashMap::new();
         // Pass 1 — every directly recoverable painted region (remembering
         // which ones DID recover, so a band never duplicates their span).
         let mut recovered_ids: std::collections::HashSet<ItemId> = std::collections::HashSet::new();
@@ -564,11 +594,15 @@ impl StoreyDoc {
                 continue; // 2-D partition piece — the recipe owns its exposure
             }
             recovered_ids.insert(region.id);
-            out.entry(vid).or_default().push(ExposureSection {
-                start_m,
-                end_m,
-                exposure: region.exposure,
-            });
+            out.entry(vid).or_default().push((
+                ExposureSection {
+                    start_m,
+                    end_m,
+                    exposure: region.exposure,
+                },
+                region.construction_id,
+                true,
+            ));
         }
         // Pass 2 — each band's span carries the STACKED remainder's paint (see
         // the doc above), unless that remainder already recovered itself or a
@@ -583,20 +617,43 @@ impl StoreyDoc {
             if self.is_wall_partitioned(vid) {
                 continue; // 2-D partition piece — the recipe owns its exposure
             }
-            out.entry(vid).or_default().push(ExposureSection {
-                start_m,
-                end_m,
-                exposure,
-            });
+            out.entry(vid).or_default().push((
+                ExposureSection {
+                    start_m,
+                    end_m,
+                    exposure,
+                },
+                ItemId::nil(),
+                false,
+            ));
         }
-        for secs in out.values_mut() {
-            secs.sort_by(|x, y| {
-                x.start_m
-                    .partial_cmp(&y.start_m)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-        }
-        out
+        // Sort, then apply the AGREEMENT HEAL (see the doc above): coalesce
+        // adjacent healable sections with equal paint + equal construction.
+        out.into_iter()
+            .map(|(vid, mut entries)| {
+                entries.sort_by(|x, y| {
+                    x.0.start_m
+                        .partial_cmp(&y.0.start_m)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                let mut secs: Vec<(ExposureSection, ItemId, bool)> = Vec::new();
+                for e in entries {
+                    match secs.last_mut() {
+                        Some((last, cid, healable))
+                            if *healable
+                                && e.2
+                                && last.exposure == e.0.exposure
+                                && *cid == e.1
+                                && e.0.start_m <= last.end_m + SEAM_EPS_M =>
+                        {
+                            last.end_m = last.end_m.max(e.0.end_m);
+                        }
+                        _ => secs.push(e),
+                    }
+                }
+                (vid, secs.into_iter().map(|(s, _, _)| s).collect())
+            })
+            .collect()
     }
 
     /// The resolved storey's derived RISER walls, projected to their plan
@@ -851,15 +908,35 @@ pub fn retract_legacy_party_rings(below: &mut Storey, removed_fp: &[Point2f64]) 
 /// rollup. `Unset` floors are the still-to-label ones the floor-exposure tool
 /// shows; a derived `InterStorey` piece counts as classified.
 pub fn floor_exposure_complete(ber: &Ber, idx: usize) -> bool {
+    floor_exposure_reasons(ber, idx).is_empty()
+}
+
+/// Every reason [`floor_exposure_complete`] is false — empty exactly when it
+/// is true. Plain messages for the tappable checklist row; no storey prefix
+/// (the controller adds the storey name itself).
+pub fn floor_exposure_reasons(ber: &Ber, idx: usize) -> Vec<String> {
     let Some(storey) = ber.storeys.get(idx) else {
-        return false;
+        return vec!["Storey not resolved yet".to_string()];
     };
-    !storey.floors.regions.is_empty()
-        && storey
-            .floors
-            .regions
-            .iter()
-            .all(|r| r.exposure != FloorExposure::Unset)
+    let regions = &storey.floors.regions;
+    if regions.is_empty() {
+        return vec![
+            "No floor areas resolved yet — draw the storey and set its height".to_string(),
+        ];
+    }
+    let unset: Vec<_> = regions
+        .iter()
+        .filter(|r| r.exposure == FloorExposure::Unset)
+        .collect();
+    if unset.is_empty() {
+        return Vec::new();
+    }
+    let area: f64 = unset.iter().map(|r| r.area()).sum();
+    vec![format!(
+        "{} of {} floor area(s) still unclassified ({area:.1} m²)",
+        unset.len(),
+        regions.len(),
+    )]
 }
 
 /// True when storey `idx`'s CEILING/roof regions are fully classified: at least
@@ -867,15 +944,34 @@ pub fn floor_exposure_complete(ber: &Ber, idx: usize) -> bool {
 /// mirror of [`floor_exposure_complete`] — the checklist's "Ceiling exposures"
 /// rollup.
 pub fn ceiling_exposure_complete(ber: &Ber, idx: usize) -> bool {
+    ceiling_exposure_reasons(ber, idx).is_empty()
+}
+
+/// Every reason [`ceiling_exposure_complete`] is false — empty exactly when it
+/// is true. The ceiling mirror of [`floor_exposure_reasons`].
+pub fn ceiling_exposure_reasons(ber: &Ber, idx: usize) -> Vec<String> {
     let Some(storey) = ber.storeys.get(idx) else {
-        return false;
+        return vec!["Storey not resolved yet".to_string()];
     };
-    !storey.ceilings.regions.is_empty()
-        && storey
-            .ceilings
-            .regions
-            .iter()
-            .all(|r| r.exposure != CeilingExposure::Unset)
+    let regions = &storey.ceilings.regions;
+    if regions.is_empty() {
+        return vec![
+            "No ceiling areas resolved yet — draw the storey and set its height".to_string(),
+        ];
+    }
+    let unset: Vec<_> = regions
+        .iter()
+        .filter(|r| r.exposure == CeilingExposure::Unset)
+        .collect();
+    if unset.is_empty() {
+        return Vec::new();
+    }
+    let area: f64 = unset.iter().map(|r| r.area()).sum();
+    vec![format!(
+        "{} of {} ceiling area(s) still unclassified ({area:.1} m²)",
+        unset.len(),
+        regions.len(),
+    )]
 }
 
 /// True when storey `idx`'s horizontal surfaces are fully classified — both
@@ -894,15 +990,32 @@ pub fn surfaces_exposure_complete(ber: &Ber, idx: usize) -> bool {
 /// (the derivation already accounted for it); only genuine `Unset` remnants
 /// block completion.
 pub fn wall_exposure_complete(ber: &Ber, idx: usize) -> bool {
+    wall_exposure_reasons(ber, idx).is_empty()
+}
+
+/// Every reason [`wall_exposure_complete`] is false — empty exactly when it is
+/// true. Counts only (no area: [`WallRegion`] carries no cheap plan area).
+pub fn wall_exposure_reasons(ber: &Ber, idx: usize) -> Vec<String> {
     let Some(storey) = ber.storeys.get(idx) else {
-        return false;
+        return vec!["Storey not resolved yet".to_string()];
     };
-    !storey.walls.regions.is_empty()
-        && storey
-            .walls
-            .regions
-            .iter()
-            .all(|r| r.exposure != WallExposure::Unset)
+    let regions = &storey.walls.regions;
+    if regions.is_empty() {
+        return vec![
+            "No wall surfaces resolved yet — draw the storey and set its height".to_string(),
+        ];
+    }
+    let unset = regions
+        .iter()
+        .filter(|r| r.exposure == WallExposure::Unset)
+        .count();
+    if unset == 0 {
+        return Vec::new();
+    }
+    vec![format!(
+        "{unset} of {} wall surface(s) still unclassified",
+        regions.len(),
+    )]
 }
 
 /// Drop the floor/ceiling exposure-map entries of `doc` whose keyed plan point
@@ -1400,6 +1513,85 @@ mod tests {
         assert!(!surfaces_exposure_complete(&ber, 9));
     }
 
+    /// The exposure reasons carry the unset counts (and m² for floors and
+    /// ceilings), and each bool is exactly `reasons.is_empty()` across the
+    /// module's fixtures.
+    #[test]
+    fn exposure_reasons_carry_counts_and_match_the_bools() {
+        use ber_model::ber::structural::{Opes, Polygon3D};
+        use domain::points::Point3f64;
+
+        let mut ber = Ber::default();
+        ber.storeys.push(storey_with(square_ring(0.0, 4.0)));
+        // Fresh 4 × 4 storey: one Unset floor + one Unset ceiling (16 m² each),
+        // no walls resolved.
+        assert_eq!(
+            floor_exposure_reasons(&ber, 0),
+            vec!["1 of 1 floor area(s) still unclassified (16.0 m²)".to_string()]
+        );
+        assert_eq!(
+            ceiling_exposure_reasons(&ber, 0),
+            vec!["1 of 1 ceiling area(s) still unclassified (16.0 m²)".to_string()]
+        );
+        assert_eq!(
+            wall_exposure_reasons(&ber, 0),
+            vec!["No wall surfaces resolved yet — draw the storey and set its height".to_string()]
+        );
+
+        // Two walls, one classified → "1 of 2" (counts only, no area).
+        let wall = |exposure| WallRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(vec![
+                Point3f64::new(0.0, 0.0, 0.0),
+                Point3f64::new(4.0, 0.0, 0.0),
+                Point3f64::new(4.0, 0.0, 2.4),
+                Point3f64::new(0.0, 0.0, 2.4),
+            ]),
+            exposure,
+            opes: Opes::default(),
+            construction_id: ItemId::default(),
+        };
+        ber.storeys[0].walls = WallRegions {
+            regions: vec![wall(WallExposure::Exposed), wall(WallExposure::Unset)],
+        };
+        assert_eq!(
+            wall_exposure_reasons(&ber, 0),
+            vec!["1 of 2 wall surface(s) still unclassified".to_string()]
+        );
+
+        // Classify everything → no reasons ⇔ complete.
+        ber.storeys[0].floors.regions[0].exposure = FloorExposure::Ground;
+        ber.storeys[0].ceilings.regions[0].exposure = CeilingExposure::ExposedRoof;
+        ber.storeys[0].walls.regions[1].exposure = WallExposure::Exposed;
+        assert!(floor_exposure_reasons(&ber, 0).is_empty());
+        assert!(ceiling_exposure_reasons(&ber, 0).is_empty());
+        assert!(wall_exposure_reasons(&ber, 0).is_empty());
+
+        // Missing storey → the not-resolved reason.
+        assert_eq!(
+            floor_exposure_reasons(&ber, 9),
+            vec!["Storey not resolved yet".to_string()]
+        );
+
+        // Equivalence sweep: complete ⇔ reasons empty, for every kind, over a
+        // classified storey, an empty storey, and a missing index.
+        ber.storeys.push(Storey::default());
+        for idx in [0, 1, 9] {
+            assert_eq!(
+                floor_exposure_complete(&ber, idx),
+                floor_exposure_reasons(&ber, idx).is_empty()
+            );
+            assert_eq!(
+                ceiling_exposure_complete(&ber, idx),
+                ceiling_exposure_reasons(&ber, idx).is_empty()
+            );
+            assert_eq!(
+                wall_exposure_complete(&ber, idx),
+                wall_exposure_reasons(&ber, idx).is_empty()
+            );
+        }
+    }
+
     /// A FACE-PARTITIONED wall is owned by the 2-D partition, not the 1-D
     /// "remaining → Exposed" machinery: it's excluded from the bulk paint (which
     /// must not corrupt it), and `exposure_complete` keys off whether its face
@@ -1534,6 +1726,70 @@ mod tests {
         );
         assert!(doc.floor_exposure.is_empty(), "no spurious write");
         assert!(doc.ceiling_exposure.is_empty(), "no spurious write");
+    }
+
+    /// AGREEMENT HEAL (field report 17e15dc7 / ff5a5ee3): an OBSOLETE derived
+    /// split — the per-facet staircase an older derivation baked into a wall
+    /// the assessor then painted — recovers as ONE section when the adjacent
+    /// pieces' paint AND construction attribution agree: the seam encodes
+    /// nothing, so keeping it would pre-split the regenerated wall forever.
+    /// Mixed paint or differing construction attributions still recover per
+    /// piece (a real assessor boundary is never dissolved).
+    #[test]
+    fn sections_recovery_coalesces_agreeing_adjacent_pieces() {
+        let doc = square_doc();
+        let (vid, _, _) = doc.outline.floor_plan.perimeter_walls()[0];
+        let cid = ItemId::default();
+        let mk = |x0: f64, x1: f64, e: WallExposure| {
+            let mut r = wall_region(Point2f64::new(x0, 0.0), Point2f64::new(x1, 0.0), e);
+            r.construction_id = cid;
+            r
+        };
+        // The painted-agreeing staircase: three adjacent Exposed pieces, one
+        // shared construction → ONE healed section over the full span.
+        let walls = WallRegions {
+            regions: vec![
+                mk(0.0, 1.5, WallExposure::Exposed),
+                mk(1.5, 3.0, WallExposure::Exposed),
+                mk(3.0, 4.0, WallExposure::Exposed),
+            ],
+        };
+        let recovered = doc.sections_from_wall_regions(&walls);
+        let secs = recovered.get(&vid).expect("the painted pieces recover");
+        assert_eq!(secs.len(), 1, "agreeing seams coalesce into one section");
+        assert_eq!(secs[0].exposure, WallExposure::Exposed);
+        assert!(
+            (secs[0].start_m - 0.0).abs() < 1e-3 && (secs[0].end_m - 4.0).abs() < 1e-3,
+            "the healed section spans the whole staircase, got {secs:?}"
+        );
+
+        // MIXED PAINT: the seam is a real assessor boundary — never merged.
+        let walls = WallRegions {
+            regions: vec![
+                mk(0.0, 2.0, WallExposure::Exposed),
+                mk(2.0, 4.0, WallExposure::SemiExposed),
+            ],
+        };
+        let recovered = doc.sections_from_wall_regions(&walls);
+        assert_eq!(
+            recovered.get(&vid).unwrap().len(),
+            2,
+            "mixed paint keeps the seam"
+        );
+
+        // SAME paint, DIFFERENT construction attributions: treated like
+        // mixed paint — the attribution boundary survives.
+        let mut other = mk(0.0, 2.0, WallExposure::Exposed);
+        other.construction_id = ItemId::default();
+        let walls = WallRegions {
+            regions: vec![other, mk(2.0, 4.0, WallExposure::Exposed)],
+        };
+        let recovered = doc.sections_from_wall_regions(&walls);
+        assert_eq!(
+            recovered.get(&vid).unwrap().len(),
+            2,
+            "differing construction attributions keep the seam"
+        );
     }
 
     /// `sections_from_wall_regions` never recovers an `InterStorey` region into
@@ -1770,6 +2026,36 @@ mod tests {
         ber.storeys.push(Storey::default());
         assert!(!wall_exposure_complete(&ber, 1));
         assert!(!wall_exposure_complete(&ber, 9));
+    }
+
+    /// `porch_walls` never enter the Mapping completeness predicates: their
+    /// permanently-`Unset` regions (a porch inner wall awaits the resolve-phase
+    /// porch decision) must NOT block `wall_exposure_complete`, which reads
+    /// `walls.regions` only — the reason the collection is kept separate.
+    #[test]
+    fn porch_walls_do_not_block_wall_exposure_completeness() {
+        let mut ber = Ber::default();
+        ber.storeys.push(Storey {
+            walls: WallRegions {
+                regions: vec![wall_region(
+                    Point2f64::new(0.0, 0.0),
+                    Point2f64::new(4.0, 0.0),
+                    WallExposure::Exposed,
+                )],
+            },
+            porch_walls: WallRegions {
+                regions: vec![wall_region(
+                    Point2f64::new(1.0, 1.0),
+                    Point2f64::new(3.0, 1.0),
+                    WallExposure::Unset,
+                )],
+            },
+            ..Storey::default()
+        });
+        assert!(
+            wall_exposure_complete(&ber, 0),
+            "an Unset porch inner wall is invisible to wall completeness"
+        );
     }
 
     /// `purge_shadowed_exposure_entries` drops exactly the floor/ceiling map

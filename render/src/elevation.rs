@@ -57,19 +57,12 @@ pub fn render_side_elevation(
         draw_clipped_wall_line(painter, &p, a, b, &open_rects, w, c);
     };
     for panel in &elev.panels {
-        // Base edge + the top polyline; close the two ends down to the base.
-        wline(
-            (panel.x0, panel.base_z),
-            (panel.x1, panel.base_z),
-            2.0,
-            wall_col,
-        );
-        for w in panel.top.windows(2) {
-            wline((w[0].0, w[0].1), (w[1].0, w[1].1), 2.0, wall_col);
-        }
-        if let (Some(first), Some(last)) = (panel.top.first(), panel.top.last()) {
-            wline((first.0, first.1), (first.0, panel.base_z), 2.0, wall_col);
-            wline((last.0, last.1), (last.0, panel.base_z), 2.0, wall_col);
+        // The panel's visible outline segments (base edge + top polyline + end
+        // verticals) — already clipped by the model's hidden-line pass so a rear
+        // wall's edge doesn't draw across the wall in front of it. Each is
+        // further clipped around openings here.
+        for &(a, b) in &panel.segments {
+            wline(a, b, 2.0, wall_col);
         }
     }
     for o in &elev.openings {

@@ -19,8 +19,10 @@ impl AppController {
         let _ = writeln!(s, "=== SESSION STATE ===");
         let _ = writeln!(
             s,
-            "modes: living_area={} exposure={} phase={} step={} ceiling_step={} ceiling_point={}",
+            "modes: living_area={} porch={} exposure={} phase={} step={} ceiling_step={} \
+             ceiling_point={}",
             self.living_area_mode,
+            self.porch_mode,
             self.exposure_mode,
             self.phase_mode,
             self.step_mode,

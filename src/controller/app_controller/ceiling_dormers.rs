@@ -60,6 +60,7 @@ impl AppController {
         if on {
             self.exit_openings_mode();
             self.living_area_mode = false;
+            self.porch_mode = false;
             self.exposure_mode = false;
             self.phase_mode = false;
             self.step_mode = false;
@@ -165,7 +166,7 @@ impl AppController {
         // Skip any LENGTH stage a fully-pinned axis determines (a fully-pinned
         // rect runs the finalize check here — a rejection is logged, leaving the
         // FSM at LenX for the user to cancel/redraw).
-        if let Err(e) = self.open_dormer_len_stage(ParameterAxis::X, lo, len) {
+        if let Err(e) = self.open_rect_len_stage(ParameterAxis::X, lo, len) {
             log::error!("dormer placement: {}", e);
         }
         // Capture for the elective snap-tag overlay + tap-to-unsnap replay.

@@ -139,6 +139,7 @@ impl AppController {
         if on {
             self.exit_openings_mode();
             self.living_area_mode = false;
+            self.porch_mode = false;
             self.exposure_mode = false;
             self.phase_mode = false;
             self.step_mode = false;
@@ -1002,30 +1003,32 @@ impl AppController {
 
     /// The current storey's same-height DIVIDER cut segments (world coords) —
     /// one per committed `|Δ| < 1e-3` ceiling-step region, for the UI's faint
-    /// dashed pass. The cut geometry (the divider's interior bbox edge on the
-    /// split axis, shared with the other piece) is pure coordinate math, so it
-    /// lives in [`manip_plan::interior_split_edge`]; this just iterates the
-    /// session dividers and hands each ring + the outline bbox to it. View data
-    /// only — derived, not stored.
+    /// dashed pass. A projection of
+    /// [`ceiling_divider_snap_segments`](Self::ceiling_divider_snap_segments)
+    /// (the same geometry the porch carve pre-snaps onto) to the canvas's f64
+    /// pairs. View data only — derived, not stored.
     pub fn ceiling_divider_lines(&self) -> Vec<((f64, f64), (f64, f64))> {
+        self.ceiling_divider_snap_segments()
+            .into_iter()
+            .map(|[a, b]| ((a.x as f64, a.y as f64), (b.x as f64, b.y as f64)))
+            .collect()
+    }
+
+    /// The current storey's same-height DIVIDER cut segments as world-metre
+    /// snap references — the shell gathers the session step regions (session
+    /// state lives here) and the model derives each divider's interior cut
+    /// edge ([`StoreyDoc::ceiling_divider_segments`], geometry in
+    /// [`manip_plan::interior_split_edge`]). ONE source of truth for "where
+    /// the divider lines are": the canvas dashes
+    /// ([`ceiling_divider_lines`](Self::ceiling_divider_lines)) and the porch
+    /// carve's line pre-snap both read this. Empty without dividers.
+    ///
+    /// [`StoreyDoc::ceiling_divider_segments`]: document::StoreyDoc::ceiling_divider_segments
+    pub(super) fn ceiling_divider_snap_segments(&self) -> Vec<[Point2f32; 2]> {
         let idx = self.current_storey_idx.unwrap_or(0);
-        let Some(((ox0, oy0), (ox1, oy1))) = self.document.outline.floor_plan.bounding_box() else {
-            return Vec::new();
-        };
-        let outline_bbox = ((ox0 as f64, oy0 as f64), (ox1 as f64, oy1 as f64));
         self.ceiling_step_regions
             .get(&idx)
-            .map(|regions| {
-                regions
-                    .iter()
-                    .filter(|r| r.delta_m.abs() < 1e-3)
-                    .filter_map(|r| {
-                        let ring: Vec<(f64, f64)> =
-                            r.polygon.iter().map(|p| (p.x as f64, p.y as f64)).collect();
-                        manip_plan::interior_split_edge(&ring, outline_bbox)
-                    })
-                    .collect()
-            })
+            .map(|regions| self.document.ceiling_divider_segments(regions))
             .unwrap_or_default()
     }
 

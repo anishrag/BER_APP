@@ -12,9 +12,13 @@
 //! apexes (`Ber::add_ceiling_apex` ×4 — quantization included) as the DURABLE
 //! record: one apex group, no new serde. Commit shape is byte-for-byte the
 //! ridge's: mark dirty → materialize → canonicalize the session
-//! ceiling-step list. Per-side snapping is deferred (Centre + typed
-//! positions cover the pavilion case); the shell owns this in-flight state
-//! machine, outside undo — ceiling-ridge parity throughout.
+//! ceiling-step list. Per-side snapping (added later, mirroring the dormer):
+//! the closed stroke enters via
+//! [`apply_pavilion_rect_stroke`](AppController::apply_pavilion_rect_stroke),
+//! which edge-snaps the flat top's sides onto the CONTAINING ceiling region's
+//! walls and PINS the snapped ones (a fully-pinned axis skips its LENGTH prompt,
+//! a pinned side its POSITION prompt) — Centre + typed positions still cover the
+//! unsnapped case. The shell owns this in-flight state machine, outside undo.
 use super::*;
 use ber_model::ber::structural::{apexes_form_rect, CeilingApex};
 use document::LinePositionPrompt;
@@ -71,13 +75,18 @@ impl PendingCeilingRect {
     }
 }
 
-/// Which SIDES of an in-flight DORMER rect snapped flush onto a reference edge
-/// at draw time — `[x_lo, x_hi, y_lo, y_hi]` (LEFT, RIGHT, BOTTOM, TOP). Only
-/// the dormer path sets these (from [`manip_plan::snap_axis_rect_to_refs`]); the
-/// PAVILION leaves the default all-false, so its FSM asks every prompt exactly
-/// as before. A pinned axis's POSITION prompt is skipped (the fitted coordinate
-/// stands); a FULLY-pinned axis (both sides) also skips its LENGTH prompt (the
-/// length is the gap between the two refs).
+/// Which SIDES of the in-flight rect snapped flush onto a reference edge at
+/// draw time — `[x_lo, x_hi, y_lo, y_hi]` (LEFT, RIGHT, BOTTOM, TOP). BOTH the
+/// dormer path (snapping to surrounding roof/dormer edges) and the PAVILION
+/// path (snapping to the containing ceiling region's ring edges) set these from
+/// [`manip_plan::snap_axis_rect_to_refs`]; with no reference nearby the default
+/// stays all-false, so the FSM asks every prompt exactly as before. A pinned
+/// axis's POSITION prompt is skipped (the fitted coordinate stands); a
+/// FULLY-pinned axis (both sides) also skips its LENGTH prompt (the length is
+/// the gap between the two refs). The pins are (re)set on every rect birth in
+/// [`apply_roof_rect_stroke`](AppController::apply_roof_rect_stroke), so the FSM
+/// never reads a stale pin — the guards can therefore key on the pins directly,
+/// dormer or pavilion alike.
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct RectPins {
     x_lo: bool,
@@ -144,6 +153,12 @@ impl AppController {
     /// off-footprint rect is rejected (logged), like a ridge fit failure.
     pub(super) fn apply_roof_rect_stroke(&mut self, pts: &[Point2f32]) {
         dump_stroke("ceiling-rect", pts);
+        // Every pending rect — dormer OR pavilion — is BORN here, so reset the
+        // pins clean at birth; the caller overwrites them with the snap result
+        // for THIS rect. This is the invariant the (dormer/pavilion-agnostic)
+        // pin guards rely on: an FSM only ever reads pins set for the rect it is
+        // advancing, never a stale pin left set on an abandoned prior rect.
+        self.pending_rect_pins = RectPins::default();
         let (lo, hi) = match self.document.fit_roof_rect(pts) {
             Ok(fit) => fit,
             Err(e) => {
@@ -157,31 +172,116 @@ impl AppController {
         });
     }
 
-    /// DORMER-only: open the LENGTH stage for `axis` unless BOTH its sides are
-    /// pinned — then its length is fixed (the gap between the two snapped refs),
-    /// so skip it: X skips to Y's length, Y skips to the position/finalize
-    /// advance. The pavilion never calls this (pins are always unset there), so
-    /// its LenX→LenY flow is unchanged.
-    pub(super) fn open_dormer_len_stage(
+    /// The PAVILION entry point (a CLOSED stroke in ceiling-point mode): fit the
+    /// flat top ([`apply_roof_rect_stroke`](Self::apply_roof_rect_stroke)), then
+    /// EDGE-snap its four sides onto the CONTAINING ceiling region's ring edges —
+    /// the region walls the assessor draws the raised area flush to. The DORMER's
+    /// analogue ([`apply_dormer_stroke_event`](Self::apply_dormer_stroke_event))
+    /// snaps to surrounding roof/dormer edges; the pavilion instead snaps to the
+    /// ONE region it sits in, so a full-width flat top pins to that region's E/W
+    /// (or N/S) walls and its LENGTH becomes the region span (skipping the
+    /// prompt) rather than the freehand-drawn width. Same whole-SIDE snap, same
+    /// elective [`SnapDecision`] + tap-to-unsnap replay as the dormer (both go
+    /// through [`manip_plan::snap_axis_rect_to_refs`]). With no region edge in
+    /// reach nothing pins and the flow is byte-for-byte the old pavilion.
+    pub(super) fn apply_pavilion_rect_stroke(
+        &mut self,
+        raw: &[Point2f32],
+        world_points: &[(f32, f32)],
+    ) {
+        // The FSM pushes no undo entry (the pavilion commits at the HEIGHT stage),
+        // so the snap-tag replay must carry its own pre-fit snapshot — taken
+        // BEFORE the edge snap so an un-snap replay restores exactly this state.
+        let before = self.current_history_snapshot();
+        self.begin_snap_capture();
+        // Bring the derived ceiling regions current so the containing-region
+        // gather sees them.
+        self.materialize();
+        self.apply_roof_rect_stroke(raw);
+        let Some(PendingCeilingRect::LenX { lo, len }) = self.pending_roof_rect.as_ref() else {
+            // Fit failed (logged) — drop any orphaned decisions.
+            let _ = manip_plan::take_snap_decisions();
+            return;
+        };
+        let (lo, len) = (*lo, *len);
+        // The region the flat top sits in is the one containing its CENTRE.
+        let centre = Point2f32::new(lo.0 + len.0 * 0.5, lo.1 + len.1 * 0.5);
+        let refs = self.ceiling_region_ring_refs(centre);
+        let tol = self.snap_tol_dormer();
+        let (plo, phi) = (
+            Point2f32::new(lo.0, lo.1),
+            Point2f32::new(lo.0 + len.0, lo.1 + len.1),
+        );
+        let (lo, len, pins) = manip_plan::snap_axis_rect_to_refs(plo, phi, &refs, tol);
+        self.pending_roof_rect = Some(PendingCeilingRect::LenX { lo, len });
+        self.pending_rect_pins = RectPins::from_sides(pins);
+        // A fully-pinned axis skips its LENGTH prompt (the length is the region
+        // span between the two snapped walls); a one-sided pin still asks it.
+        if let Err(e) = self.open_rect_len_stage(ParameterAxis::X, lo, len) {
+            log::error!("pavilion placement: {}", e);
+        }
+        // Capture for the elective snap-tag overlay + tap-to-unsnap replay.
+        self.capture_snap_action_pending(
+            SnapAction::Pavilion {
+                points: world_points.to_vec(),
+            },
+            before,
+            manip_plan::take_snap_decisions(),
+        );
+    }
+
+    /// The ceiling region CONTAINING `centre` (world xy), its exterior ring as
+    /// world-metre reference segments — the walls a pavilion flat top snaps its
+    /// sides flush onto. Reads the RESOLVED `ceilings.regions` rings (as
+    /// [`ceiling_carve_reference_segments`](Self::ceiling_carve_reference_segments)
+    /// does, but scoped to the ONE region under the flat top so a side pins to
+    /// its own region's wall, not a distant region's). Empty when no region
+    /// contains the centre.
+    fn ceiling_region_ring_refs(&self, centre: Point2f32) -> Vec<[Point2f32; 2]> {
+        let idx = self.current_storey_idx.unwrap_or(0);
+        let Some(storey) = self
+            .current_record
+            .as_ref()
+            .and_then(|r| r.data.storeys.get(idx))
+        else {
+            return Vec::new();
+        };
+        let xy = |p: &domain::points::Point3f64| to_f32(Point2f64::new(p.x, p.y));
+        for region in &storey.ceilings.regions {
+            let ring: Vec<Point2f32> = region.polygon.exterior.iter().map(xy).collect();
+            if manip_plan::ring_contains_point(&ring, centre.x, centre.y) {
+                let n = ring.len();
+                return (0..n).map(|i| [ring[i], ring[(i + 1) % n]]).collect();
+            }
+        }
+        Vec::new()
+    }
+
+    /// Open the LENGTH stage for `axis` unless BOTH its sides are pinned — then
+    /// its length is fixed (the gap between the two snapped refs), so skip it: X
+    /// skips to Y's length, Y skips to the position/finalize advance. Serves BOTH
+    /// the dormer and the (now snap-capable) pavilion — the pin read is what
+    /// discriminates, not the mode; a rect with no pins (the common pavilion /
+    /// unsnapped-dormer case) falls straight through to LenX→LenY unchanged.
+    pub(super) fn open_rect_len_stage(
         &mut self,
         axis: ParameterAxis,
         lo: (f32, f32),
         len: (f32, f32),
     ) -> Result<(), String> {
-        // Every pin read is gated on `is_dormer` so a stale pin (pins are reset
-        // at fewer sites than the flag) is provably inert on any non-dormer
-        // path — the invariant holds by construction, not by luck.
+        // Key on the pins directly (dormer/pavilion-agnostic): `apply_roof_rect_stroke`
+        // reset them at this rect's birth, so a set pin here belongs to THIS rect.
         match axis {
             ParameterAxis::X => {
-                if self.pending_rect_is_dormer && self.pending_rect_pins.both(ParameterAxis::X) {
-                    self.open_dormer_len_stage(ParameterAxis::Y, lo, len)
+                if self.pending_rect_pins.both(ParameterAxis::X) {
+                    self.open_rect_len_stage(ParameterAxis::Y, lo, len)
                 } else {
                     self.pending_roof_rect = Some(PendingCeilingRect::LenX { lo, len });
                     Ok(())
                 }
             }
             ParameterAxis::Y => {
-                if self.pending_rect_is_dormer && self.pending_rect_pins.both(ParameterAxis::Y) {
+                if self.pending_rect_pins.both(ParameterAxis::Y) {
                     self.advance_roof_rect(lo, len, &[ParameterAxis::X, ParameterAxis::Y])
                 } else {
                     self.pending_roof_rect = Some(PendingCeilingRect::LenY { lo, len });
@@ -208,11 +308,11 @@ impl AppController {
         remaining: &[ParameterAxis],
     ) -> Result<(), String> {
         for &axis in remaining {
-            // DORMER pin: a side snapped onto a reference fixes that axis's
-            // POSITION exactly — the fitted `lo` coordinate stands, so skip the
-            // position question (un-overridable by a later typed value). The
-            // pavilion never sets pins, so this branch never fires there.
-            if self.pending_rect_is_dormer && self.pending_rect_pins.any(axis) {
+            // PIN: a side snapped onto a reference fixes that axis's POSITION
+            // exactly — the fitted `lo` coordinate stands, so skip the position
+            // question (un-overridable by a later typed value). Fires for a
+            // pinned dormer OR a pinned pavilion; an unpinned rect asks as before.
+            if self.pending_rect_pins.any(axis) {
                 continue;
             }
             let coord = match axis {
@@ -295,9 +395,9 @@ impl AppController {
                 .ok_or("no storey to assign a ceiling rect to")?;
             document::validate_roof_rect_length(storey, axis, len_m)?;
         }
-        // DORMER pin: when the HI side of this axis is pinned, keep IT fixed as
-        // the length changes (shift `lo`); the pavilion always anchors `lo`.
-        let lo = if self.pending_rect_is_dormer && self.pending_rect_pins.keep_hi(axis) {
+        // PIN: when the HI side of this axis is pinned (dormer or pavilion), keep
+        // IT fixed as the length changes (shift `lo`); an unpinned side anchors `lo`.
+        let lo = if self.pending_rect_pins.keep_hi(axis) {
             match axis {
                 ParameterAxis::X => (lo.0 + len.0 - len_m, lo.1),
                 ParameterAxis::Y => (lo.0, lo.1 + len.1 - len_m),
@@ -306,13 +406,9 @@ impl AppController {
             lo
         };
         if on_x {
-            // DORMER: skip LenY when Y is fully pinned; the pavilion always asks.
-            if self.pending_rect_is_dormer {
-                self.open_dormer_len_stage(ParameterAxis::Y, lo, proposed)
-            } else {
-                self.pending_roof_rect = Some(PendingCeilingRect::LenY { lo, len: proposed });
-                Ok(())
-            }
+            // Skip LenY when Y is fully pinned (dormer or pavilion); with Y
+            // unpinned this just opens LenY as before.
+            self.open_rect_len_stage(ParameterAxis::Y, lo, proposed)
         } else {
             self.advance_roof_rect(lo, proposed, &[ParameterAxis::X, ParameterAxis::Y])
         }
@@ -326,13 +422,9 @@ impl AppController {
         match self.pending_roof_rect.as_ref() {
             Some(PendingCeilingRect::LenX { lo, len }) => {
                 let (lo, len) = (*lo, *len);
-                // DORMER: skip LenY when Y is fully pinned; the pavilion asks.
-                if self.pending_rect_is_dormer {
-                    self.open_dormer_len_stage(ParameterAxis::Y, lo, len)
-                } else {
-                    self.pending_roof_rect = Some(PendingCeilingRect::LenY { lo, len });
-                    Ok(())
-                }
+                // Skip LenY when Y is fully pinned (dormer or pavilion); with Y
+                // unpinned this just opens LenY as before.
+                self.open_rect_len_stage(ParameterAxis::Y, lo, len)
             }
             Some(PendingCeilingRect::LenY { lo, len }) => {
                 let (lo, len) = (*lo, *len);

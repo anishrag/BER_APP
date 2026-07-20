@@ -72,6 +72,10 @@ pub mod style {
     pub const UNSET_WALL: Color32 = Color32::from_rgb(150, 150, 150);
     /// Ground-contact walls (a riser-only assessor choice) — earth tone.
     pub const GROUND_WALL: Color32 = Color32::from_rgb(150, 105, 60);
+    /// Porch INNER walls (`Storey::porch_walls`) — the 2D porch overlay's
+    /// violet, so the openings-placeable porch boundary reads as porch (not
+    /// envelope) in the 3D views too.
+    pub const PORCH_WALL: Color32 = Color32::from_rgb(150, 95, 185);
     pub const WINDOW_FILL: Color32 = Color32::from_rgba_premultiplied(130, 200, 230, 180);
     pub const DOOR_FILL: Color32 = Color32::from_rgba_premultiplied(180, 130, 80, 200);
     /// Bright marquee colour for the Structure pre-edit SELECTION outline — a

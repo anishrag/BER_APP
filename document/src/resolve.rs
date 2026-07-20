@@ -57,6 +57,25 @@ pub fn resolve_storey(
     // (then removed in cleanup); resolve no longer reads it.
     _ceiling_steps: &[CeilingStepRegion],
 ) -> Storey {
+    // IN-FLUX OUTLINE GUARD (field report eddc2f3f): after a trim/extend mints
+    // new params, the outline is mid-dimensioning — its drawn cut line is a
+    // provisional position the dimension entries are about to move. Deriving
+    // regions from it (and, above all, RE-FITTING the regions-as-truth ceilings
+    // against it) bakes that provisional line into the resolved regions as a
+    // permanent scar: the next resolve intersects against the scarred rings,
+    // leaving stale cut lines, Unset sliver fills between the drawn and the
+    // dimensioned cut, and wall tops tracing edges of a footprint that no
+    // longer exists. So: while the outline is NOT fully dimensioned, project
+    // nothing — return the PREVIOUS resolved storey untouched (stale but
+    // consistent; a fresh storey resolves to its empty default, matching the
+    // no-regions-before-dimensioning behaviour). The completeness gate is the
+    // same one the persist filter and the cross-storey `derive_inter_storey`
+    // junction gate use (`measurements_complete`: metre scale set AND the
+    // dimensioning loop has nothing left to prompt). The deferred projection
+    // catches up on the first resolve after the loop completes.
+    if !s.measurements_complete() {
+        return ber.storeys[idx].clone();
+    }
     // The storey footprint is always the OUTLINE (never a living area, even
     // when one is active). One ring → one FloorRegion.
     let polygons_f64: Vec<Vec<Point2f64>> = s
@@ -82,6 +101,22 @@ pub fn resolve_storey(
     // non-editable on reload, so their resolved geometry suffices.
     let living_area_lists: Vec<Vec<Point2f64>> = s
         .living_areas
+        .iter()
+        .map(|slot| {
+            slot.floor_plan
+                .get_points()
+                .into_iter()
+                .map(to_f64)
+                .collect()
+        })
+        .collect();
+
+    // Resolved porch polygons, mirroring the living areas: stored in
+    // `Storey.porches`, NOT the snapshot — non-editable on reload, so their
+    // resolved geometry suffices. A porch records its labelled region (label +
+    // area) only; a later resolve-phase step will decide inclusion/exclusion.
+    let porch_lists: Vec<Vec<Point2f64>> = s
+        .porches
         .iter()
         .map(|slot| {
             slot.floor_plan
@@ -293,6 +328,9 @@ pub fn resolve_storey(
         storey.floors = std::mem::take(&mut storey.floors).with_splits(&storey.floor_splits);
     }
     storey.living_areas = FloorRegions::from_vertex_lists(living_area_lists, floor_cid);
+    // Porches: geometry only — no height stamp (that snap is a living-area
+    // concern) and no effect on the calculations yet.
+    storey.porches = FloorRegions::from_vertex_lists(porch_lists, floor_cid);
     // Re-derive walls from the full-perimeter coverage (one region per
     // coverage range — `Unset` ranges included):
     // `WallRegions::regenerate` traces each wall's TOP along the derived roof
@@ -340,6 +378,31 @@ pub fn resolve_storey(
     // `[a, b]`.
     let walls = WallRegions::regenerate(
         wall_segments,
+        roofs_for_walls,
+        &storey.floors,
+        wall_base_z,
+        fallback_top_z,
+        wall_cid,
+    );
+    // PORCH INNER WALLS: each FINALISED porch's ring edges that do NOT run
+    // along the outline (`finalised_porch_inner_edges` — the dwelling-side
+    // boundary, where the porch's front door often sits) extrude through the
+    // SAME per-edge machinery as the perimeter walls above (same base level,
+    // same ceiling profile / fallback top), into the SEPARATE
+    // `storey.porch_walls` — recordable geometry only, no effect on any
+    // heat-loss/area calculation until the resolve-phase porch
+    // inclusion/exclusion step (see the field's doc). Exposure is `Unset`
+    // (an internal boundary awaiting that decision — never `Exposed`), and
+    // being a separate collection it can't reach `wall_exposure_complete`.
+    // Ids re-mint every resolve, exactly like `walls.regions` (durable
+    // identity is parametric, never the id); assigned unconditionally so
+    // deleting the last porch clears them. An outline-flush porch edge is
+    // excluded — it already resolves as a perimeter wall.
+    let porch_walls = WallRegions::regenerate(
+        s.finalised_porch_inner_edges()
+            .into_iter()
+            .map(|[a, b]| (a, b, WallExposure::Unset))
+            .collect(),
         roofs_for_walls,
         &storey.floors,
         wall_base_z,
@@ -405,6 +468,10 @@ pub fn resolve_storey(
         .map(|f| (f, WallExposure::Unset))
         .collect();
     storey.walls = walls.with_risers(risers, wall_cid);
+    // The pre-projection porch walls — like `previous_walls`, kept only to
+    // seed opening anchors whose placement still references a pre-projection
+    // porch-wall id.
+    let previous_porch_walls = std::mem::replace(&mut storey.porch_walls, porch_walls);
     // LIVING-AREA HEIGHT SNAP: each living area's floor-to-ceiling height snaps
     // to the ceiling directly above it (derived every resolve, so it tracks a
     // ceiling change). Runs here — ceilings AND walls are final, so the
@@ -437,7 +504,7 @@ pub fn resolve_storey(
     // pre-projection walls (whose ids still match the stored placement). Then
     // recompute each placed opening's `vertices` and drop any whose host the
     // edit removed.
-    reanchor_openings(s, &mut storey, &previous_walls);
+    reanchor_openings(s, &mut storey, &previous_walls, &previous_porch_walls);
     // The re-home above picks a sub-wall by the opening's CENTRE but does not
     // re-bound its WIDTH; after a wall is split into per-section regions (a face
     // partition or reshape), a pre-existing wide opening could span past its
@@ -669,13 +736,30 @@ fn split_partitioned_wall(
 /// from `wall_sections`). An entry overrides the derived/amended exposure; an
 /// absent key leaves it untouched (so un-seeded risers keep working off the
 /// amend until Stage 2c retires it). Runs after `with_risers`.
-fn stamp_riser_exposure(s: &StoreyDoc, storey: &mut Storey) {
+///
+/// Public because the cross-storey pass must RE-APPLY it: the per-storey resolve
+/// runs this once, but the later [`derive_inter_storey`](ber_model::ber::structural::derive_inter_storey)
+/// re-derives/re-splits the wall regions and resets each riser to its derived
+/// default — so the controller calls this again AFTER that derive, making the
+/// override the last word on a non-junction riser (mirroring how
+/// [`stamp_horizontal_exposure`] re-applies the floor/ceiling maps). A
+/// `WallExposure::InterStorey` region is the derivation's own stamp on a buried
+/// riser piece — never an assessor override — so it is skipped, preserving the
+/// junction classification through the re-stamp. (No region is `InterStorey`
+/// during the in-resolve call, so that guard is a no-op there.)
+pub fn stamp_riser_exposure(s: &StoreyDoc, storey: &mut Storey) {
     if s.riser_exposure.is_empty() {
         return;
     }
     const TOL_M: f32 = 0.05;
     let plan = &s.outline.floor_plan;
     for region in &mut storey.walls.regions {
+        // A derived storey junction is `derive_inter_storey`'s word, not an
+        // assessor override — leave it so the post-derive re-stamp can't clobber
+        // a buried riser piece back to the painted value.
+        if region.exposure == WallExposure::InterStorey {
+            continue;
+        }
         let Some((e0, e1)) = region.base_edge() else {
             continue;
         };
@@ -757,12 +841,28 @@ pub fn stamp_horizontal_exposure(doc: &StoreyDoc, storey: &mut Storey) {
 /// length. A wall that's both split and reshaped is ambiguous (the perimeter
 /// edge carries two sub-walls) and is left for the orphan-prune. Wall splits on
 /// their own keep `wall_id` valid via `rehome`, so this no-ops there.
-fn reanchor_openings(s: &StoreyDoc, storey: &mut Storey, previous: &WallRegions) {
+///
+/// PORCH-WALL openings run the same loop against the porch axis: a porch
+/// anchor (`WallAnchor::porch: Some(key)`) resolves its centre against ITS
+/// porch's own plan (found via [`porch_plan_for_key`] — exact centroid key,
+/// containment heal on drift) and re-homes over `storey.porch_walls`; seeding
+/// reads `previous_porch` (the pre-projection porch walls, whose ids a
+/// just-placed opening still references — the current set is also tried, for
+/// the relink path where ids stay live). A porch anchor whose key drifted (the
+/// porch was re-dimensioned and the heal matched by containment) is RE-STAMPED
+/// with the porch's current key, so it keeps tracking.
+fn reanchor_openings(
+    s: &StoreyDoc,
+    storey: &mut Storey,
+    previous: &WallRegions,
+    previous_porch: &WallRegions,
+) {
     use ber_model::ber::common::ItemId;
     use ber_model::ber::fenestration::{OpeningPlacement, WallAnchor};
 
     let plan = &s.outline.floor_plan;
     let walls = &storey.walls;
+    let porch_walls = &storey.porch_walls;
 
     // (anchor-to-set, (wall_id, along_m, sill_m)-to-set) for one opening.
     // `height_m` bounds the opening's world rectangle for the z-aware host
@@ -781,44 +881,80 @@ fn reanchor_openings(s: &StoreyDoc, storey: &mut Storey, previous: &WallRegions)
             return (None, None); // roof opening / unplaced — nothing to anchor
         };
         // The opening's WORLD rectangle (storey-local z), from whichever wall
-        // set still carries the placement's host: the current one (id live —
+        // set still carries the placement's host: a current one (id live —
         // e.g. the relink after `derive_inter_storey`, whose placements still
-        // reference the resolve's ids), else the pre-projection one (a normal
-        // resolve, whose regeneration minted fresh ids).
+        // reference the resolve's ids), else a pre-projection one (a normal
+        // resolve, whose regeneration minted fresh ids). Porch walls are a
+        // placeable host set like the perimeter, so all four sets are tried.
         let rect = walls
             .regions
             .iter()
+            .chain(porch_walls.regions.iter())
+            .chain(previous.regions.iter())
+            .chain(previous_porch.regions.iter())
             .find(|r| r.id == *wall_id)
-            .or_else(|| previous.regions.iter().find(|r| r.id == *wall_id))
             .and_then(|host| host.base_frame())
             .map(|(_, _, _, base_z)| {
                 let lo = base_z + *sill_m as f64;
                 (lo, lo + height_m as f64)
             });
         // Seed from the pre-projection wall when this opening has no anchor yet
-        // (its placement still references that wall's id — legacy / just-placed).
+        // (its placement still references that wall's id — legacy / just-placed):
+        // an outline anchor from the perimeter set, else a PORCH anchor from the
+        // porch sets (previous first — the resolve path; current for relink).
         let seeded = if anchor.is_none() {
             previous
                 .regions
                 .iter()
                 .find(|r| r.id == *wall_id)
                 .and_then(|r| opening_wall_anchor(plan, r, *along_m))
+                .or_else(|| {
+                    previous_porch
+                        .regions
+                        .iter()
+                        .chain(porch_walls.regions.iter())
+                        .find(|r| r.id == *wall_id)
+                        .and_then(|r| opening_porch_wall_anchor(s, r, *along_m))
+                })
         } else {
             None
         };
+        // A porch anchor the containment heal matched (its stored key no
+        // longer equals its porch's current centroid key — the porch was
+        // re-dimensioned) re-stamps itself with the current key.
+        let refreshed = anchor.and_then(|a| {
+            let key = a.porch?;
+            let (_, current_key) = porch_plan_for_key(s, key)?;
+            (current_key != key).then_some(WallAnchor {
+                porch: Some(current_key),
+                ..a
+            })
+        });
         // Re-derive the wall_id/along_m cache from the (existing or seeded)
-        // anchor: the centre at the parent-relative fraction, then the sub-wall
-        // whose z-extent holds the rectangle (`host_wall_for_rect` — the
-        // labellable piece wins; a buried InterStorey band hosts only a
-        // rectangle genuinely inside it). Handles fresh ids, reshape, split
-        // sub-walls, and the derivation's horizontal band/remainder split.
-        let repoint = anchor.or(seeded).and_then(|a| {
-            a.wall
-                .wall_start()
-                .and_then(|st| plan.wall_point_at_fraction(st, a.along_fraction))
-                .and_then(|c| {
-                    host_wall_for_rect(walls, Point2f64::new(c.x as f64, c.y as f64), rect)
-                })
+        // anchor: the centre at the parent-relative fraction — against the
+        // OUTLINE plan for a perimeter anchor, the porch's own plan for a
+        // porch anchor — then the sub-wall of the matching host SET whose
+        // z-extent holds the rectangle (`host_wall_for_rect` — the labellable
+        // piece wins; a buried InterStorey band hosts only a rectangle
+        // genuinely inside it). Handles fresh ids, reshape, split sub-walls,
+        // and the derivation's horizontal band/remainder split.
+        let repoint = refreshed.or(anchor).or(seeded).and_then(|a| {
+            let start = a.wall.wall_start()?;
+            let (centre, host_set) = match a.porch {
+                None => (plan.wall_point_at_fraction(start, a.along_fraction)?, walls),
+                Some(key) => {
+                    let (porch_plan, _) = porch_plan_for_key(s, key)?;
+                    (
+                        porch_plan.wall_point_at_fraction(start, a.along_fraction)?,
+                        porch_walls,
+                    )
+                }
+            };
+            host_wall_for_rect(
+                host_set,
+                Point2f64::new(centre.x as f64, centre.y as f64),
+                rect,
+            )
         });
         // SILL REBASE: `sill_m` stays host-`base_z`-relative (the model's
         // meaning), so a re-home onto a host with a DIFFERENT base_z (whole
@@ -843,7 +979,8 @@ fn reanchor_openings(s: &StoreyDoc, storey: &mut Storey, previous: &WallRegions)
             // otherwise flutters the cache by one ulp per re-home.
             (id, quantize_placement_m(along), sill)
         });
-        (seeded, repoint)
+        // Store back: a fresh seed, or a drift-refreshed porch anchor.
+        (seeded.or(refreshed), repoint)
     };
 
     let win: Vec<_> = storey
@@ -908,7 +1045,139 @@ pub fn opening_wall_anchor(
     Some(WallAnchor {
         wall: sref,
         along_fraction: frac,
+        porch: None,
     })
+}
+
+/// The durable [`WallAnchor`](ber_model::ber::fenestration::WallAnchor) for an
+/// opening centred at `along_m` on the live PORCH wall region `wall`
+/// (`Storey::porch_walls`) — the porch mirror of [`opening_wall_anchor`]: the
+/// centre is looked up on each FINALISED porch's OWN plan (`surface_ref_at`
+/// against the porch's vid space), and the winning porch's mm-quantized
+/// ring-centroid [`PorchKey`](ber_model::ber::fenestration::PorchKey) is
+/// stamped so resolution knows WHICH porch the vid belongs to. `None` when the
+/// centre lies on no finalised porch's plan (e.g. the porch was deleted).
+/// Shared by the resolve tail's seeding and the controller (which seeds after
+/// each porch-wall opening op), so both produce identical anchors.
+///
+/// FIRST-MATCH rule: the FIRST finalised porch (in `porches` order) with an
+/// edge within 0.05 m of the centre wins. Two ADJACENT porches sharing a
+/// coincident inner wall could both match — the first would claim the anchor.
+/// Accepted: porches are carved from the available region, so adjacent
+/// coincident inner edges don't normally arise from the drawing tools, and a
+/// mis-stamped neighbour would still resolve to the same physical wall line.
+pub fn opening_porch_wall_anchor(
+    s: &StoreyDoc,
+    wall: &ber_model::ber::structural::WallRegion,
+    along_m: f32,
+) -> Option<ber_model::ber::fenestration::WallAnchor> {
+    use ber_model::ber::fenestration::WallAnchor;
+    const TOL_M: f32 = 0.05;
+    let (origin, (ux, uy), _wlen, _bz) = wall.base_frame()?;
+    let centre = Point2f32::new(
+        (origin.x + ux * along_m as f64) as f32,
+        (origin.y + uy * along_m as f64) as f32,
+    );
+    for slot in s.porches.iter().filter(|p| p.finalised()) {
+        let Some(sref) = slot.floor_plan.surface_ref_at(centre, TOL_M) else {
+            continue;
+        };
+        let start = sref.wall_start()?;
+        let frac = slot.floor_plan.wall_along_fraction(start, centre)?;
+        return Some(WallAnchor {
+            wall: sref,
+            along_fraction: frac,
+            porch: Some(porch_slot_key(slot)),
+        });
+    }
+    None
+}
+
+/// The mm-quantized ring-centroid [`PorchKey`] of one porch slot — the durable
+/// porch identity a porch-wall anchor stores (deletion/reorder-safe, unlike
+/// the slot's index; reload-safe, since the ring round-trips verbatim through
+/// `Storey.porches`).
+///
+/// [`PorchKey`]: ber_model::ber::fenestration::PorchKey
+fn porch_slot_key(slot: &crate::ShapeSlot) -> ber_model::ber::fenestration::PorchKey {
+    let ring: Vec<Point2f64> = slot
+        .floor_plan
+        .get_points()
+        .into_iter()
+        .map(to_f64)
+        .collect();
+    crate::phase::ring_centroid_key(&ring)
+}
+
+/// The FINALISED porch slot a stored [`PorchKey`] names, as its plan plus its
+/// CURRENT key: exact centroid-key match first; on a miss, the CONTAINMENT
+/// heal — the porch whose current ring contains the stored key point (a
+/// re-dimension drifted the centroid off the stored key; the same heal shape
+/// as `centroid_override_by_containment` for the exposure side-tables). The
+/// returned current key lets a drifted anchor re-stamp itself.
+///
+/// `None` when no finalised porch matches either way. That covers the porch
+/// being DELETED — and, explicitly, the DATA-LOSS edge of an extreme
+/// re-dimension: a porch moved/reshaped so far that the stored centroid point
+/// exits every current ring has no heal, so its openings silently go stale
+/// and `prune_orphaned_openings` drops them on that same resolve (with its
+/// "dropping orphaned ..." warn). Accepted: the anchor re-stamps its key on
+/// every successful resolve, so only a single edit that jumps the porch past
+/// its own old centroid — not gradual editing — can strand an opening.
+///
+/// FIRST-MATCH rule: both loops take the FIRST matching finalised porch, in
+/// `porches` order. Overlapping porches, or a concave porch whose centroid
+/// falls inside a NEIGHBOUR, could in principle mis-attribute — accepted, as
+/// the drawing tools carve porches from the available (non-overlapping)
+/// region, so such configurations don't normally exist.
+///
+/// [`PorchKey`]: ber_model::ber::fenestration::PorchKey
+fn porch_plan_for_key(
+    s: &StoreyDoc,
+    key: ber_model::ber::fenestration::PorchKey,
+) -> Option<(
+    &manip_plan::FloorPlan,
+    ber_model::ber::fenestration::PorchKey,
+)> {
+    // Exact key.
+    for slot in s.porches.iter().filter(|p| p.finalised()) {
+        let k = porch_slot_key(slot);
+        if k == key {
+            return Some((&slot.floor_plan, k));
+        }
+    }
+    // Containment heal: the stored key point inside a current porch ring.
+    let p = Point2f32::new(key.0 as f32 / 1000.0, key.1 as f32 / 1000.0);
+    for slot in s.porches.iter().filter(|p| p.finalised()) {
+        if manip_plan::point_in_polygon(&slot.floor_plan.get_points(), p) {
+            return Some((&slot.floor_plan, porch_slot_key(slot)));
+        }
+    }
+    None
+}
+
+/// Re-derive the LIVE `(wall_id, along_m)` for a PORCH-WALL opening from its
+/// durable anchor against a freshly-resolved storey's `porch_walls` + the
+/// document's porch slots — the porch mirror of [`resolve_wall_anchor`],
+/// exposed so the controller can re-home a PENDING porch placement at confirm
+/// time without trusting the tap-time `wall_id` (re-minted on every resolve).
+/// `None` for a non-porch anchor, or when the porch / its point can't be
+/// placed (deleted porch).
+pub fn resolve_porch_wall_anchor(
+    s: &StoreyDoc,
+    porch_walls: &WallRegions,
+    anchor: &ber_model::ber::fenestration::WallAnchor,
+) -> Option<(ber_model::ber::common::ItemId, f32)> {
+    let key = anchor.porch?;
+    let (porch_plan, _) = porch_plan_for_key(s, key)?;
+    let centre = anchor
+        .wall
+        .wall_start()
+        .and_then(|st| porch_plan.wall_point_at_fraction(st, anchor.along_fraction))?;
+    host_wall_at(
+        porch_walls,
+        Point2f64::new(centre.x as f64, centre.y as f64),
+    )
 }
 
 /// RE-SEED every wall opening's durable [`WallAnchor`] from its OWN host wall's
@@ -948,6 +1217,59 @@ pub fn reseed_wall_anchors_on_load(plan: &manip_plan::FloorPlan, storey: &mut St
         };
         let wall = storey.walls.regions.iter().find(|r| r.id == *wall_id)?;
         opening_wall_anchor(plan, wall, *along_m)
+    };
+    let win: Vec<_> = storey
+        .windows
+        .iter()
+        .map(|w| anchor_of(&w.placement))
+        .collect();
+    let drs: Vec<_> = storey
+        .doors
+        .iter()
+        .map(|d| anchor_of(&d.placement))
+        .collect();
+    for (w, a) in storey.windows.iter_mut().zip(win) {
+        if a.is_some() {
+            w.wall_anchor = a;
+        }
+    }
+    for (d, a) in storey.doors.iter_mut().zip(drs) {
+        if a.is_some() {
+            d.wall_anchor = a;
+        }
+    }
+}
+
+/// The PORCH sibling of [`reseed_wall_anchors_on_load`]: re-derive each
+/// porch-wall opening's durable anchor from its saved host PORCH wall's
+/// geometry against the just-RELOADED porch slots.
+///
+/// A snapshot-less reload reconstructs each porch slot's `FloorPlan` via
+/// `from_clean_ring` (`load.rs`), re-minting its VertexIds in ring order —
+/// which need not match the drawn porch's vid order — so a persisted porch
+/// anchor can name a DIFFERENT edge of the same porch. The just-loaded
+/// `storey.porch_walls` still carry the SAVED ids each placement references,
+/// so the anchor is re-derived from that host's geometry via
+/// [`opening_porch_wall_anchor`] (which also re-stamps the porch key against
+/// the reloaded ring). Idempotent; outline-wall openings, roof openings, and
+/// any opening whose host isn't a live porch wall are left untouched. Call
+/// right after the reload rebuilds the porch slots and BEFORE the first
+/// resolve, alongside the outline heal.
+pub fn reseed_porch_wall_anchors_on_load(s: &StoreyDoc, storey: &mut Storey) {
+    use ber_model::ber::fenestration::OpeningPlacement;
+    let anchor_of = |placement: &Option<OpeningPlacement>| {
+        let Some(OpeningPlacement::Wall {
+            wall_id, along_m, ..
+        }) = placement
+        else {
+            return None; // roof / unplaced
+        };
+        let wall = storey
+            .porch_walls
+            .regions
+            .iter()
+            .find(|r| r.id == *wall_id)?;
+        opening_porch_wall_anchor(s, wall, *along_m)
     };
     let win: Vec<_> = storey
         .windows
@@ -1427,7 +1749,10 @@ pub fn relink_openings_after_derive(
     storey: &mut Storey,
     previous_walls: &WallRegions,
 ) {
-    reanchor_openings(s, storey, previous_walls);
+    // The inter-storey derivation never touches `porch_walls`, so the CURRENT
+    // porch set (searched by `reanchor_openings` anyway) is the live one here
+    // — no pre-derivation porch snapshot exists or is needed.
+    reanchor_openings(s, storey, previous_walls, &WallRegions::default());
     // A geometry change can bury part of a wall UNDER an existing opening —
     // move the opening clear (up, else along) rather than leave it looking
     // into the dwelling's own neighbouring storey.
@@ -1460,6 +1785,7 @@ mod tests {
         let plan = FloorPlan::from_clean_ring(&pts).unwrap();
         let mut doc = StoreyDoc::default();
         doc.dimensioning.scale_set = true;
+        doc.dimensioning.known_params = plan.all_active_params();
         doc.floor_plan = plan.clone();
         doc.outline = ShapeSlot {
             floor_plan: plan,
@@ -1514,6 +1840,7 @@ mod tests {
         let plan = FloorPlan::from_clean_ring(&pts).unwrap();
         let mut doc = StoreyDoc::default();
         doc.dimensioning.scale_set = true;
+        doc.dimensioning.known_params = plan.all_active_params();
         doc.floor_plan = plan.clone();
         doc.outline = ShapeSlot {
             floor_plan: plan,
@@ -1541,6 +1868,511 @@ mod tests {
             storey.living_areas.regions[0].height_m,
             Some(2.55),
             "living area snaps to the flat ceiling above it"
+        );
+    }
+
+    /// Porches project into `Storey.porches` exactly like living areas project
+    /// into `Storey.living_areas` — geometry only: no height snap (a
+    /// living-area concern) and no effect on the calculations yet.
+    #[test]
+    fn porches_project_geometry_only() {
+        let pts = vec![
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(6.0, 0.0),
+            Point2f32::new(6.0, 6.0),
+            Point2f32::new(0.0, 6.0),
+        ];
+        let plan = FloorPlan::from_clean_ring(&pts).unwrap();
+        let mut doc = StoreyDoc::default();
+        doc.dimensioning.scale_set = true;
+        doc.dimensioning.known_params = plan.all_active_params();
+        doc.floor_plan = plan.clone();
+        doc.outline = ShapeSlot {
+            floor_plan: plan,
+            dimensioning: doc.dimensioning.clone(),
+        };
+        // One interior porch: a 2×2 m region in the corner of the storey.
+        let porch = vec![
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(2.0, 0.0),
+            Point2f32::new(2.0, 2.0),
+            Point2f32::new(0.0, 2.0),
+        ];
+        doc.porches.push(ShapeSlot {
+            floor_plan: FloorPlan::from_clean_ring(&porch).unwrap(),
+            dimensioning: Default::default(),
+        });
+
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &[]);
+        ber.set_default_ceiling_height(Some(0), 2.55);
+        let storey = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+
+        assert_eq!(storey.porches.regions.len(), 1);
+        assert_eq!(
+            storey.porches.regions[0].height_m, None,
+            "a porch records label + area only — no ceiling-height snap"
+        );
+        // The floor partition is untouched: a porch has no effect on the
+        // resolved floors.
+        assert_eq!(storey.floors.regions.len(), 1);
+    }
+
+    /// A FINALISED porch `ShapeSlot` over `ring` (all params known, no
+    /// position prompts — the state `add_active_porch` + dimensioning leaves).
+    fn finalised_porch_slot(ring: &[Point2f32]) -> ShapeSlot {
+        let plan = FloorPlan::from_clean_ring(ring).unwrap();
+        let mut dimensioning = crate::DimensionState::default();
+        dimensioning.known_params = plan.all_active_params();
+        ShapeSlot {
+            floor_plan: plan,
+            dimensioning,
+        }
+    }
+
+    /// A finalised corner porch's INNER edges — and only those — extrude into
+    /// `Storey.porch_walls`: the two edges NOT lying along the outline become
+    /// one `Unset` wall region each (base at the storey floor, top at the
+    /// ceiling height, like a perimeter wall), while the two outline-flush
+    /// edges extrude nothing (they are already perimeter walls). The perimeter
+    /// `walls` themselves are untouched.
+    #[test]
+    fn porch_inner_edges_extrude_into_porch_walls() {
+        let mut doc = square_doc(&[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(6.0, 0.0),
+            Point2f32::new(6.0, 6.0),
+            Point2f32::new(0.0, 6.0),
+        ]);
+        // Corner porch: edges along y = 0 and x = 0 are outline-flush; the
+        // edges through (2, 1) and (1, 2) are the dwelling-side boundary.
+        doc.porches.push(finalised_porch_slot(&[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(2.0, 0.0),
+            Point2f32::new(2.0, 2.0),
+            Point2f32::new(0.0, 2.0),
+        ]));
+
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &[]);
+        ber.set_default_ceiling_height(Some(0), 2.55);
+        let storey = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+
+        assert_eq!(
+            storey.porch_walls.regions.len(),
+            2,
+            "exactly the two inner edges extrude"
+        );
+        let mut mids: Vec<(i64, i64)> = storey
+            .porch_walls
+            .regions
+            .iter()
+            .map(|r| {
+                let m = r.base_midpoint().unwrap();
+                ((m.x * 1000.0).round() as i64, (m.y * 1000.0).round() as i64)
+            })
+            .collect();
+        mids.sort_unstable();
+        assert_eq!(
+            mids,
+            vec![(1000, 2000), (2000, 1000)],
+            "the inner edges, not the outline-flush ones"
+        );
+        for r in &storey.porch_walls.regions {
+            assert_eq!(
+                r.exposure,
+                WallExposure::Unset,
+                "an internal boundary awaiting the porch decision — never Exposed"
+            );
+            let (zmin, zmax) = r
+                .polygon
+                .exterior
+                .iter()
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), v| {
+                    (a.min(v.z), b.max(v.z))
+                });
+            assert!(zmin.abs() < 1e-9, "base at the storey floor datum");
+            assert!((zmax - 2.55).abs() < 1e-9, "top at the ceiling height");
+        }
+        // The perimeter set is untouched: 4 outline walls, none of them a
+        // porch wall.
+        assert_eq!(storey.walls.regions.len(), 4);
+    }
+
+    /// An UN-DIMENSIONED (not finalised) porch extrudes NO porch walls — its
+    /// ring is still pixel/provisional — even though the resolve still
+    /// projects its region into `Storey.porches`.
+    #[test]
+    fn un_dimensioned_porch_extrudes_no_porch_walls() {
+        let mut doc = square_doc(&[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(6.0, 0.0),
+            Point2f32::new(6.0, 6.0),
+            Point2f32::new(0.0, 6.0),
+        ]);
+        doc.porches.push(ShapeSlot {
+            floor_plan: FloorPlan::from_clean_ring(&[
+                Point2f32::new(0.0, 0.0),
+                Point2f32::new(2.0, 0.0),
+                Point2f32::new(2.0, 2.0),
+                Point2f32::new(0.0, 2.0),
+            ])
+            .unwrap(),
+            dimensioning: Default::default(),
+        });
+        assert!(
+            !doc.porches[0].finalised(),
+            "fixture: porch mid-dimensioning"
+        );
+
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &[]);
+        ber.set_default_ceiling_height(Some(0), 2.55);
+        let storey = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+
+        assert!(storey.porch_walls.regions.is_empty());
+        assert_eq!(
+            storey.porches.regions.len(),
+            1,
+            "the region itself still projects (resolve projects ALL porches)"
+        );
+    }
+
+    /// The in-flux defer gate covers porch walls like everything else: while
+    /// the OUTLINE is mid-dimensioning, `resolve_storey` returns the previous
+    /// resolved storey untouched — `porch_walls` byte-identical to the last
+    /// complete resolve. And deleting the porch clears them on the next
+    /// complete resolve (unconditional assignment).
+    #[test]
+    fn porch_walls_defer_while_the_outline_is_mid_dimensioning() {
+        let mut doc = square_doc(&[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(4.0, 0.0),
+            Point2f32::new(4.0, 4.0),
+            Point2f32::new(0.0, 4.0),
+        ]);
+        doc.porches.push(finalised_porch_slot(&[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(1.5, 0.0),
+            Point2f32::new(1.5, 1.5),
+            Point2f32::new(0.0, 1.5),
+        ]));
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &[]);
+        ber.set_default_ceiling_height(Some(0), 2.4);
+        let resolved = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+        assert_eq!(resolved.porch_walls.regions.len(), 2);
+        ber.storeys[0] = resolved.clone();
+
+        // A trim chamfers a corner: fresh params, none known → in flux.
+        let chamfer_plan = FloorPlan::from_clean_ring(&[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(4.0, 0.0),
+            Point2f32::new(4.0, 3.0),
+            Point2f32::new(3.0, 4.0),
+            Point2f32::new(0.0, 4.0),
+        ])
+        .unwrap();
+        let mut mid_doc = doc.clone();
+        mid_doc.floor_plan = chamfer_plan.clone();
+        mid_doc.outline.floor_plan = chamfer_plan;
+        assert!(!mid_doc.measurements_complete(), "fixture: outline in flux");
+        let mid = resolve_storey(&mid_doc, &ber, 0, &[], &[], &[]);
+        assert_eq!(mid.porch_walls.regions.len(), 2);
+        for (a, b) in mid
+            .porch_walls
+            .regions
+            .iter()
+            .zip(resolved.porch_walls.regions.iter())
+        {
+            assert_eq!(
+                a.polygon.exterior, b.polygon.exterior,
+                "previous porch walls carried over untouched"
+            );
+        }
+
+        // Porch deleted → the next COMPLETE resolve clears porch_walls.
+        let mut gone_doc = doc.clone();
+        gone_doc.porches.clear();
+        let gone = resolve_storey(&gone_doc, &ber, 0, &[], &[], &[]);
+        assert!(gone.porch_walls.regions.is_empty());
+    }
+
+    /// A 6×6 storey with a finalised 2×2 corner porch, resolved once — the
+    /// shared porch-opening fixture. Returns `(doc, ber)` with `ber.storeys[0]`
+    /// holding the first resolve (two porch inner walls, through (2,1) and
+    /// (1,2)).
+    fn porch_doc_and_ber() -> (StoreyDoc, Ber) {
+        let mut doc = square_doc(&[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(6.0, 0.0),
+            Point2f32::new(6.0, 6.0),
+            Point2f32::new(0.0, 6.0),
+        ]);
+        doc.porches.push(finalised_porch_slot(&[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(2.0, 0.0),
+            Point2f32::new(2.0, 2.0),
+            Point2f32::new(0.0, 2.0),
+        ]));
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &[]);
+        ber.set_default_ceiling_height(Some(0), 2.4);
+        ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+        (doc, ber)
+    }
+
+    /// The porch wall of `storey` whose base midpoint is `(x, y)`.
+    fn porch_wall_at(storey: &Storey, x: f64, y: f64) -> &ber_model::ber::structural::WallRegion {
+        storey
+            .porch_walls
+            .regions
+            .iter()
+            .find(|r| {
+                r.base_midpoint()
+                    .is_some_and(|m| (m.x - x).abs() < 1e-6 && (m.y - y).abs() < 1e-6)
+            })
+            .expect("a porch wall at that midpoint")
+    }
+
+    /// An opening PLACED on a porch wall survives a full re-resolve (every
+    /// porch wall id re-mints): the resolve tail SEEDS its porch anchor from
+    /// the pre-projection porch walls (no controller seeding needed), re-homes
+    /// the placement onto the fresh region on the same edge, and the prune
+    /// keeps it — resolve after resolve.
+    #[test]
+    fn porch_wall_opening_survives_re_resolve() {
+        use ber_model::ber::fenestration::OpeningPlacement;
+        let (doc, mut ber) = porch_doc_and_ber();
+        let host_id = porch_wall_at(&ber.storeys[0], 2.0, 1.0).id;
+        let win = ber_model::ber::openings::add_wall_window(
+            &mut ber.storeys[0],
+            host_id,
+            1.0,
+            0.8,
+            1.0,
+            0.8,
+            ItemId::default(),
+        )
+        .expect("window placed on the porch wall");
+        assert!(
+            ber.storeys[0].windows[0].wall_anchor.is_none(),
+            "fixture: anchor NOT pre-seeded — the resolve tail must seed it"
+        );
+
+        // Re-resolve: fresh porch-wall ids throughout.
+        ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+        let s0 = &ber.storeys[0];
+        let w = s0
+            .windows
+            .iter()
+            .find(|w| w.id == win)
+            .expect("survived the id re-mint");
+        let anchor = w.wall_anchor.expect("anchor seeded by the resolve tail");
+        assert!(anchor.porch.is_some(), "a PORCH anchor, not an outline one");
+        let Some(OpeningPlacement::Wall {
+            wall_id, along_m, ..
+        }) = w.placement
+        else {
+            panic!("still a wall placement");
+        };
+        let host = s0
+            .porch_walls
+            .regions
+            .iter()
+            .find(|r| r.id == wall_id)
+            .expect("host is a LIVE porch wall");
+        let m = host.base_midpoint().unwrap();
+        assert!(
+            (m.x - 2.0).abs() < 1e-6 && (m.y - 1.0).abs() < 1e-6,
+            "same edge as placed"
+        );
+        assert!((along_m - 1.0).abs() < 1e-3, "along preserved");
+        assert!(!w.vertices.is_empty(), "vertices derived on the new host");
+        assert!(
+            host.opes.windows.contains(&win),
+            "opes rebuilt onto the porch wall"
+        );
+
+        // A third resolve is a fixpoint — still hosted, still on the edge.
+        ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+        assert!(ber.storeys[0].windows.iter().any(|w| w.id == win));
+    }
+
+    /// A porch RE-DIMENSIONED in place (2×2 → 2.5×2.5, drifting its centroid
+    /// off the anchor's stored key) keeps its opening: the containment heal
+    /// matches the porch by the old key point, the anchor re-stamps itself
+    /// with the current key, and the opening follows the MOVED edge at its
+    /// along-fraction.
+    #[test]
+    fn porch_wall_opening_follows_a_re_dimensioned_porch() {
+        use ber_model::ber::fenestration::OpeningPlacement;
+        let (mut doc, mut ber) = porch_doc_and_ber();
+        let host_id = porch_wall_at(&ber.storeys[0], 2.0, 1.0).id;
+        let win = ber_model::ber::openings::add_wall_window(
+            &mut ber.storeys[0],
+            host_id,
+            1.0,
+            0.8,
+            1.0,
+            0.8,
+            ItemId::default(),
+        )
+        .unwrap();
+        // Resolve once to seed the anchor with the ORIGINAL porch key.
+        ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+        let key0 = ber.storeys[0].windows[0]
+            .wall_anchor
+            .expect("seeded")
+            .porch
+            .expect("porch anchor");
+
+        // Re-dimension the porch in place: same corner, 2.5 m sides. The
+        // centroid moves (1,1) → (1.25,1.25) — the exact key misses, the old
+        // key point lies inside the new ring (containment heal).
+        doc.porches[0] = finalised_porch_slot(&[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(2.5, 0.0),
+            Point2f32::new(2.5, 2.5),
+            Point2f32::new(0.0, 2.5),
+        ]);
+        ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+        let s0 = &ber.storeys[0];
+        let w = s0
+            .windows
+            .iter()
+            .find(|w| w.id == win)
+            .expect("followed the re-dimensioned porch");
+        let anchor = w.wall_anchor.unwrap();
+        assert_ne!(
+            anchor.porch.unwrap(),
+            key0,
+            "anchor re-stamped with the porch's current key"
+        );
+        let Some(OpeningPlacement::Wall { wall_id, .. }) = w.placement else {
+            panic!("still a wall placement");
+        };
+        let host = s0
+            .porch_walls
+            .regions
+            .iter()
+            .find(|r| r.id == wall_id)
+            .expect("hosted on a live porch wall");
+        let m = host.base_midpoint().unwrap();
+        assert!(
+            (m.x - 2.5).abs() < 1e-6 && (m.y - 1.25).abs() < 1e-6,
+            "the opening followed the MOVED inner edge: ({}, {})",
+            m.x,
+            m.y
+        );
+    }
+
+    /// Deleting the porch orphan-prunes ITS openings cleanly — no panic, no
+    /// leak onto an outline wall — while an outline-wall opening on the same
+    /// storey is untouched.
+    #[test]
+    fn deleting_the_porch_prunes_its_openings_only() {
+        use ber_model::ber::fenestration::OpeningPlacement;
+        let (mut doc, mut ber) = porch_doc_and_ber();
+        // One opening on an OUTLINE wall, one on the porch inner wall.
+        let outline_id = ber.storeys[0].walls.regions[0].id;
+        let outline_win = ber_model::ber::openings::add_wall_window(
+            &mut ber.storeys[0],
+            outline_id,
+            3.0,
+            1.0,
+            1.0,
+            0.8,
+            ItemId::default(),
+        )
+        .unwrap();
+        let porch_id = porch_wall_at(&ber.storeys[0], 2.0, 1.0).id;
+        let porch_win = ber_model::ber::openings::add_wall_window(
+            &mut ber.storeys[0],
+            porch_id,
+            1.0,
+            0.8,
+            1.0,
+            0.8,
+            ItemId::default(),
+        )
+        .unwrap();
+        // Resolve once so both anchors seed.
+        ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+        assert_eq!(ber.storeys[0].windows.len(), 2);
+
+        doc.porches.clear();
+        ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+        let s0 = &ber.storeys[0];
+        assert!(s0.porch_walls.regions.is_empty());
+        assert!(
+            !s0.windows.iter().any(|w| w.id == porch_win),
+            "the porch's opening orphan-pruned with its host"
+        );
+        let survivor = s0
+            .windows
+            .iter()
+            .find(|w| w.id == outline_win)
+            .expect("the outline opening is untouched");
+        let Some(OpeningPlacement::Wall { wall_id, .. }) = survivor.placement else {
+            panic!("still a wall placement");
+        };
+        assert!(
+            s0.walls.regions.iter().any(|r| r.id == wall_id),
+            "and still hosted on an OUTLINE wall — no leak"
+        );
+    }
+
+    /// A SNAPSHOT-LESS reload (porch slots rebuilt via `from_clean_ring`,
+    /// re-minting porch-plan VertexIds) keeps porch-wall openings homed: the
+    /// load-time heal `reseed_porch_wall_anchors_on_load` re-derives each
+    /// anchor from its saved host porch wall's geometry against the reloaded
+    /// slots, and the next resolve re-homes onto the re-derived porch walls.
+    #[test]
+    fn porch_wall_openings_survive_snapshotless_reload() {
+        use ber_model::ber::fenestration::OpeningPlacement;
+        let (doc, mut ber) = porch_doc_and_ber();
+        let host_id = porch_wall_at(&ber.storeys[0], 2.0, 1.0).id;
+        let win = ber_model::ber::openings::add_wall_window(
+            &mut ber.storeys[0],
+            host_id,
+            1.0,
+            0.8,
+            1.0,
+            0.8,
+            ItemId::default(),
+        )
+        .unwrap();
+        ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+
+        // ---- reload: rebuild the document from the resolved storey ----
+        let doc2 = StoreyDoc::from_storey(&ber.storeys[0]);
+        assert!(doc2.porches[0].finalised(), "reloaded porch is finalised");
+        reseed_porch_wall_anchors_on_load(&doc2, &mut ber.storeys[0]);
+        ber.storeys[0] = resolve_storey(&doc2, &ber, 0, &[], &[], &[]);
+
+        let s0 = &ber.storeys[0];
+        let w = s0
+            .windows
+            .iter()
+            .find(|w| w.id == win)
+            .expect("survived the reload");
+        let Some(OpeningPlacement::Wall { wall_id, .. }) = w.placement else {
+            panic!("still a wall placement");
+        };
+        let m = s0
+            .porch_walls
+            .regions
+            .iter()
+            .find(|r| r.id == wall_id)
+            .expect("hosted on a live porch wall")
+            .base_midpoint()
+            .unwrap();
+        assert!(
+            (m.x - 2.0).abs() < 1e-3 && (m.y - 1.0).abs() < 1e-3,
+            "same inner edge after the reload: ({}, {})",
+            m.x,
+            m.y
         );
     }
 
@@ -1788,11 +2620,111 @@ mod tests {
         );
     }
 
+    /// IN-FLUX OUTLINE GATE (field report eddc2f3f): while the outline
+    /// is mid-dimensioning (a trim/extend minted params the loop still prompts
+    /// for), `resolve_storey` projects NOTHING — it returns the PREVIOUS
+    /// resolved storey untouched, so the provisional (drawn) cut line never
+    /// reaches the regions-as-truth ceilings as a permanent scar. Once the
+    /// loop completes, the very next resolve catches up: the ceilings re-fit
+    /// to the FINAL footprint only — one clean clip, no stale-line slivers.
+    #[test]
+    fn resolve_defers_while_the_outline_is_mid_dimensioning() {
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &[]);
+        ber.set_default_ceiling_height(Some(0), 2.4);
+        let doc = square_doc(&[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(4.0, 0.0),
+            Point2f32::new(4.0, 4.0),
+            Point2f32::new(0.0, 4.0),
+        ]);
+        let resolved = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+        assert_eq!(resolved.ceilings.regions.len(), 1, "flat default ceiling");
+        ber.storeys[0] = resolved.clone();
+
+        // A trim chamfers the (4,4) corner. Mid-loop: the outline slot holds
+        // the new plan but its fresh params are NOT yet known — the
+        // dimensioning loop would still prompt, so the outline is IN FLUX.
+        let chamfer = [
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(4.0, 0.0),
+            Point2f32::new(4.0, 3.0),
+            Point2f32::new(3.0, 4.0),
+            Point2f32::new(0.0, 4.0),
+        ];
+        let chamfer_plan = FloorPlan::from_clean_ring(&chamfer).unwrap();
+        let mut mid_doc = doc.clone();
+        mid_doc.floor_plan = chamfer_plan.clone();
+        mid_doc.outline.floor_plan = chamfer_plan.clone();
+        // Keep the OLD known set: the chamfer plan's params are all unknown.
+        assert!(
+            !mid_doc.measurements_complete(),
+            "fixture: the trimmed outline is mid-dimensioning"
+        );
+        let mid = resolve_storey(&mid_doc, &ber, 0, &[], &[], &[]);
+        assert_eq!(
+            mid.ceilings.regions.len(),
+            resolved.ceilings.regions.len(),
+            "mid-loop resolve returns the previous storey untouched"
+        );
+        assert_eq!(
+            mid.ceilings.regions[0].polygon.exterior, resolved.ceilings.regions[0].polygon.exterior,
+            "the previous ceiling ring is byte-identical — the provisional cut never touched it"
+        );
+        assert_eq!(
+            mid.floors.to_vertex_lists(),
+            resolved.floors.to_vertex_lists(),
+            "previous floors untouched too"
+        );
+
+        // The loop completes → the next resolve derives the FINAL footprint.
+        let mut done_doc = mid_doc.clone();
+        done_doc.dimensioning.known_params = chamfer_plan.all_active_params();
+        done_doc.outline.dimensioning.known_params = chamfer_plan.all_active_params();
+        assert!(done_doc.measurements_complete());
+        let done = resolve_storey(&done_doc, &ber, 0, &[], &[], &[]);
+        let floor_ring = &done.floors.to_vertex_lists()[0];
+        assert_eq!(floor_ring.len(), 5, "the chamfered footprint resolved");
+        // ONE clean clipped ceiling — no Unset sliver fills, and no vertex at
+        // (or beyond) the trimmed-away corner.
+        assert_eq!(done.ceilings.regions.len(), 1, "one clean re-fit ceiling");
+        for v in &done.ceilings.regions[0].polygon.exterior {
+            assert!(
+                v.x + v.y <= 7.0 + 1e-6,
+                "no ceiling vertex survives beyond the chamfer line: ({}, {})",
+                v.x,
+                v.y
+            );
+        }
+        // Walls re-derive against the clean ceilings: every wall is a plain
+        // quad — exactly two distinct plan positions, no phantom top vertex
+        // from a stale roof edge.
+        for w in &done.walls.regions {
+            let mut plan_pts: Vec<(i64, i64)> = w
+                .polygon
+                .exterior
+                .iter()
+                .map(|v| ((v.x * 1e6).round() as i64, (v.y * 1e6).round() as i64))
+                .collect();
+            plan_pts.sort_unstable();
+            plan_pts.dedup();
+            assert_eq!(
+                plan_pts.len(),
+                2,
+                "wall region carries only its base-edge plan positions: {:?}",
+                w.polygon.exterior
+            );
+        }
+    }
+
     /// A finalised square StoreyDoc with the given corner points as its outline.
     fn square_doc(pts: &[Point2f32]) -> StoreyDoc {
         let plan = FloorPlan::from_clean_ring(pts).unwrap();
         let mut doc = StoreyDoc::default();
         doc.dimensioning.scale_set = true;
+        // Finalised = every active param known (resolve defers on an
+        // outline the dimensioning loop would still prompt for).
+        doc.dimensioning.known_params = plan.all_active_params();
         doc.floor_plan = plan.clone();
         doc.outline = ShapeSlot {
             floor_plan: plan,
@@ -2044,6 +2976,7 @@ mod tests {
         let plan = FloorPlan::from_clean_ring(&pts).unwrap();
         let mut doc = StoreyDoc::default();
         doc.dimensioning.scale_set = true;
+        doc.dimensioning.known_params = plan.all_active_params();
         doc.floor_plan = plan.clone();
         doc.outline = ShapeSlot {
             floor_plan: plan,
@@ -3014,6 +3947,97 @@ mod tests {
             riser.exposure,
             WallExposure::SemiExposed,
             "riser exposure came from the durable table, not the amend"
+        );
+    }
+
+    /// The PUBLIC [`stamp_riser_exposure`] re-stamp — the post-derive call the
+    /// controller adds after `derive_inter_storey`, which re-splits the walls and
+    /// resets each riser to its derived default. Two guarantees:
+    ///   1. re-stamping onto a derived-default (`Unset`) riser re-applies the
+    ///      durable override — this is the field fix (report 09d2f42b), where the
+    ///      cross-storey derive cleared an assessor-set external riser.
+    ///   2. re-stamping onto a region the derive marked `InterStorey` (a buried
+    ///      riser piece) is a NO-OP — the junction classification is the
+    ///      derivation's word, never clobbered back to the painted value.
+    #[test]
+    fn stamp_riser_exposure_reapplies_after_derive_but_spares_interstorey() {
+        let mut doc = square_doc(&[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(4.0, 0.0),
+            Point2f32::new(4.0, 4.0),
+            Point2f32::new(0.0, 4.0),
+        ]);
+        let steps = vec![crate::StepRegion {
+            polygon: vec![
+                Point2f32::new(0.0, 0.0),
+                Point2f32::new(2.0, 0.0),
+                Point2f32::new(2.0, 4.0),
+                Point2f32::new(0.0, 4.0),
+            ],
+            level_m: -0.3,
+        }];
+        let on_step_line = |r: &&ber_model::ber::structural::WallRegion| {
+            let e = &r.polygon.exterior;
+            (e[0].x - 2.0).abs() < 1e-6 && (e[1].x - 2.0).abs() < 1e-6
+        };
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &[]);
+        let mut storey = resolve_storey(&doc, &ber, 0, &[], &steps, &[]);
+        let (e0, e1) = storey
+            .walls
+            .regions
+            .iter()
+            .find(on_step_line)
+            .unwrap()
+            .base_edge()
+            .unwrap();
+        let key = crate::riser_key(Point2f64::new(e0.x, e0.y), Point2f64::new(e1.x, e1.y));
+        doc.riser_exposure.insert(key, WallExposure::Exposed);
+
+        // (1) Simulate the cross-storey derive clearing the riser back to its
+        // derived default, then run the post-derive re-stamp: the override lands.
+        for r in storey
+            .walls
+            .regions
+            .iter_mut()
+            .filter(|r| on_step_line(&&**r))
+        {
+            r.exposure = WallExposure::Unset;
+        }
+        stamp_riser_exposure(&doc, &mut storey);
+        assert_eq!(
+            storey
+                .walls
+                .regions
+                .iter()
+                .find(on_step_line)
+                .unwrap()
+                .exposure,
+            WallExposure::Exposed,
+            "post-derive re-stamp re-applies the durable override onto a cleared riser"
+        );
+
+        // (2) Now the derive classifies that same riser InterStorey (buried by a
+        // neighbour storey). The re-stamp must LEAVE it — the junction wins.
+        for r in storey
+            .walls
+            .regions
+            .iter_mut()
+            .filter(|r| on_step_line(&&**r))
+        {
+            r.exposure = WallExposure::InterStorey;
+        }
+        stamp_riser_exposure(&doc, &mut storey);
+        assert_eq!(
+            storey
+                .walls
+                .regions
+                .iter()
+                .find(on_step_line)
+                .unwrap()
+                .exposure,
+            WallExposure::InterStorey,
+            "the re-stamp spares a derived InterStorey riser (guard)"
         );
     }
 

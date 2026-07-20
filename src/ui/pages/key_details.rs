@@ -61,6 +61,9 @@ pub struct KeyDetailsState {
     pub property_type: String,
     pub heating_system: String,
     pub window_year: String,
+    /// The "unknown" checkbox for the window-installation year — mutually
+    /// exclusive with a typed `window_year` (mirrors the extension-year row).
+    pub window_year_unknown: bool,
     pub door_year: String,
     pub insulation_walls: bool,
     pub insulation_roof: bool,
@@ -68,6 +71,10 @@ pub struct KeyDetailsState {
     pub insulation_notes: String,
     pub mprn: String,
     pub reason: String,
+    // --- On-site question answers (asked at the property; None = unanswered) ---
+    pub builder_letter_possible: Option<bool>,
+    pub architect_letter_extension: Option<bool>,
+    pub architect_letter_original: Option<bool>,
 }
 
 /// One extension row on the form: a descriptive nickname, a year, and the
@@ -112,6 +119,25 @@ fn next_free_extension_phase(extensions: &[ExtensionInput]) -> Option<Constructi
     EXTENSION_PHASES
         .into_iter()
         .find(|v| !extensions.iter().any(|e| e.phase == *v))
+}
+
+/// Builds from this year on get the "architect letter possible for the
+/// original build?" on-site question (recent enough that certification
+/// documents plausibly exist).
+const ARCHITECT_LETTER_YEAR: u32 = 2010;
+
+/// A Yes/No answer pair for an on-site question. Clicking the selected answer
+/// again clears it back to unanswered. Returns whether the answer changed.
+fn yes_no_buttons(ui: &mut Ui, answer: &mut Option<bool>) -> bool {
+    let mut changed = false;
+    for (label, value) in [("Yes", true), ("No", false)] {
+        let selected = *answer == Some(value);
+        if ui.selectable_label(selected, label).clicked() {
+            *answer = if selected { None } else { Some(value) };
+            changed = true;
+        }
+    }
+    changed
 }
 
 /// The row's display label, from its owned variant ("Extension 1" .. "4").
@@ -172,6 +198,7 @@ impl KeyDetailsState {
                 .window_year
                 .map(|y| y.to_string())
                 .unwrap_or_default(),
+            window_year_unknown: intake.window_year_unknown,
             door_year: intake.door_year.map(|y| y.to_string()).unwrap_or_default(),
             insulation_walls: intake.insulation_walls,
             insulation_roof: intake.insulation_roof,
@@ -179,6 +206,9 @@ impl KeyDetailsState {
             insulation_notes: intake.insulation_notes.clone(),
             mprn: intake.mprn.clone(),
             reason: intake.reason.clone(),
+            builder_letter_possible: intake.builder_letter_possible,
+            architect_letter_extension: intake.architect_letter_extension,
+            architect_letter_original: intake.architect_letter_original,
         }
     }
 }
@@ -216,7 +246,13 @@ fn collect_intake(state: &KeyDetailsState) -> IntakeDetails {
     IntakeDetails {
         property_type: state.property_type.clone(),
         heating_system: state.heating_system.clone(),
-        window_year: parse_year(&state.window_year),
+        // "unknown" wins over any stale text: the year commits as None + the flag.
+        window_year: if state.window_year_unknown {
+            None
+        } else {
+            parse_year(&state.window_year)
+        },
+        window_year_unknown: state.window_year_unknown,
         door_year: parse_year(&state.door_year),
         insulation_walls: state.insulation_walls,
         insulation_roof: state.insulation_roof,
@@ -224,6 +260,9 @@ fn collect_intake(state: &KeyDetailsState) -> IntakeDetails {
         insulation_notes: state.insulation_notes.clone(),
         mprn: state.mprn.clone(),
         reason: state.reason.clone(),
+        builder_letter_possible: state.builder_letter_possible,
+        architect_letter_extension: state.architect_letter_extension,
+        architect_letter_original: state.architect_letter_original,
     }
 }
 
@@ -367,9 +406,24 @@ impl KeyDetailsPage {
                 ui.end_row();
 
                 ui.label("Windows installed (year):");
-                if metre_input(ui, &mut state.window_year, 80.0, "e.g. 2010").changed {
-                    intake_changed = true;
-                }
+                ui.horizontal(|ui| {
+                    if metre_input(ui, &mut state.window_year, 80.0, "e.g. 2010").changed {
+                        // Typing owns the field — it unticks "unknown" (mutually
+                        // exclusive, like the extension-year row).
+                        state.window_year_unknown = false;
+                        intake_changed = true;
+                    }
+                    if ui
+                        .checkbox(&mut state.window_year_unknown, "unknown")
+                        .changed()
+                    {
+                        if state.window_year_unknown {
+                            // Ticking clears the box: commits as year-unknown.
+                            state.window_year.clear();
+                        }
+                        intake_changed = true;
+                    }
+                });
                 ui.end_row();
 
                 ui.label("Doors installed (year):");
@@ -410,6 +464,53 @@ impl KeyDetailsPage {
                 }
                 ui.end_row();
             });
+        // On-site questions: posed only while their trigger holds (insulation
+        // works ticked / an extension row / a recent build). A hidden question
+        // keeps its stored answer — unticking the trigger doesn't erase it.
+        let insulation_ticked =
+            state.insulation_walls || state.insulation_roof || state.insulation_floor;
+        let has_extension = !state.extensions.is_empty();
+        let recent_build =
+            parse_year(&state.construction_year).is_some_and(|y| y >= ARCHITECT_LETTER_YEAR);
+        if insulation_ticked || has_extension || recent_build {
+            ui.add_space(20.0);
+            ui.label(RichText::new("On-site questions").strong());
+            ui.label(RichText::new("Ask the client while at the property.").weak());
+            ui.add_space(4.0);
+            egui::Grid::new("key_details_questions")
+                .num_columns(2)
+                .spacing([40.0, 10.0])
+                .show(ui, |ui| {
+                    if insulation_ticked {
+                        ui.label("Is a letter from the builder possible?");
+                        ui.horizontal(|ui| {
+                            if yes_no_buttons(ui, &mut state.builder_letter_possible) {
+                                intake_changed = true;
+                            }
+                        });
+                        ui.end_row();
+                    }
+                    if has_extension {
+                        ui.label("Is a letter from the architect available for the extension?");
+                        ui.horizontal(|ui| {
+                            if yes_no_buttons(ui, &mut state.architect_letter_extension) {
+                                intake_changed = true;
+                            }
+                        });
+                        ui.end_row();
+                    }
+                    if recent_build {
+                        ui.label("Is a letter from the architect possible for the original build?");
+                        ui.horizontal(|ui| {
+                            if yes_no_buttons(ui, &mut state.architect_letter_original) {
+                                intake_changed = true;
+                            }
+                        });
+                        ui.end_row();
+                    }
+                });
+        }
+
         if intake_changed {
             on_event(UiEvent::KeyDetails(KeyDetailsEvent::SetIntake(
                 collect_intake(state),
@@ -583,6 +684,66 @@ mod tests {
         assert!(row.year.is_empty());
         assert_eq!(row.last_valid_year, None);
         assert_eq!(row.nickname, "Side return");
+    }
+
+    /// On-site question answers survive the record → form → record round trip
+    /// (from_record picks them up, collect_intake writes them back), including
+    /// the unanswered `None` state.
+    #[test]
+    fn on_site_answers_round_trip_through_intake() {
+        let intake = IntakeDetails {
+            builder_letter_possible: Some(true),
+            architect_letter_extension: Some(false),
+            architect_letter_original: None,
+            ..Default::default()
+        };
+        let state = KeyDetailsState::from_record(
+            "test".to_string(),
+            String::new(),
+            String::new(),
+            NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+            &ConstructionPhases::default(),
+            &intake,
+        );
+        assert_eq!(state.builder_letter_possible, Some(true));
+        assert_eq!(state.architect_letter_extension, Some(false));
+        assert_eq!(state.architect_letter_original, None);
+        assert_eq!(collect_intake(&state), intake);
+    }
+
+    /// The window-year "unknown" checkbox round-trips: ticking it commits
+    /// `window_year = None` + `window_year_unknown = true` (distinct from a
+    /// blank year), and a stale typed year is dropped when unknown wins.
+    #[test]
+    fn window_year_unknown_round_trips_and_overrides_a_typed_year() {
+        // Unknown ticked with leftover text → commits None + the flag.
+        let mut state = KeyDetailsState {
+            window_year: "2010".to_string(),
+            window_year_unknown: true,
+            ..Default::default()
+        };
+        let intake = collect_intake(&state);
+        assert_eq!(intake.window_year, None);
+        assert!(intake.window_year_unknown);
+
+        // The flag survives the record → form → record round trip.
+        let back = KeyDetailsState::from_record(
+            "t".to_string(),
+            String::new(),
+            String::new(),
+            NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+            &ConstructionPhases::default(),
+            &intake,
+        );
+        assert!(back.window_year_unknown);
+        assert!(back.window_year.is_empty());
+
+        // A real typed year (no unknown) still commits normally.
+        state.window_year_unknown = false;
+        state.window_year = "2010".to_string();
+        let intake2 = collect_intake(&state);
+        assert_eq!(intake2.window_year, Some(2010));
+        assert!(!intake2.window_year_unknown);
     }
 
     /// All four variants taken → no free variant → the add button's cap.

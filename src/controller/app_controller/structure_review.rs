@@ -388,6 +388,7 @@ fn makeup_label(m: &ConstructionMakeup) -> String {
         } => {
             format!("Default + {extra_insulation_mm}mm insulation")
         }
+        ConstructionMakeup::SomeInsulation => "Some insulation (unmeasurable)".to_string(),
         ConstructionMakeup::Layers(layers) => format!("Custom ({} layers)", layers.len()),
     }
 }

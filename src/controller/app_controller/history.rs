@@ -14,6 +14,9 @@ pub struct HistorySnapshot {
     /// The living-area MODE flag (a UI tab toggle) is session state kept OUT of
     /// `Document`, but undo restores it so a draw/undo also round-trips the tab.
     pub(super) living_area_mode: bool,
+    /// The porch MODE flag — same session-state-outside-`Document` story as
+    /// `living_area_mode` (the shared cut-pick also routes by it on replay).
+    pub(super) porch_mode: bool,
     /// The active storey's BER record AS IT WAS — the only undoable state that
     /// lives on the BER side rather than in `Document`: window/door OPENINGS
     /// (and the `opes` links + window types). Captured per snapshot so an
@@ -61,6 +64,7 @@ impl AppController {
         HistorySnapshot {
             document: self.document.clone(),
             living_area_mode: self.living_area_mode,
+            porch_mode: self.porch_mode,
             record_storey,
             window_types,
             all_storeys: None,
@@ -83,6 +87,7 @@ impl AppController {
         let all_storeys_restored = snap.all_storeys.is_some();
         self.document = snap.document;
         self.living_area_mode = snap.living_area_mode;
+        self.porch_mode = snap.porch_mode;
         // Restore the BER-side openings (and window types) BEFORE the next
         // re-resolve, which re-derives vertices and amends `opes` from them.
         if let Some(record) = self.current_record.as_mut() {
@@ -111,7 +116,11 @@ impl AppController {
         // Re-derive them from the just-restored record (the storey-switch
         // landing sequence).
         self.refresh_session_regions_after_restore(all_storeys_restored);
-        // In-flight prompts no longer match the restored state — clear.
+        // In-flight prompts no longer match the restored state — clear. The
+        // staged cut-pick goes with them: its candidate regions were carved
+        // from the pre-undo geometry, so an undo across it must not leave a
+        // resurrectable pick behind.
+        self.pending_cut = None;
         self.edit_drag_prompt = None;
         self.vertex_drop_prompt = None;
     }

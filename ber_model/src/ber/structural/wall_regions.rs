@@ -982,7 +982,7 @@ pub(crate) fn region_plane(region: &CeilingRegion) -> Option<(f64, f64, f64)> {
 /// piece and the caller's fallback silently flattens them to the default
 /// height. The exact pick stays first so behaviour on clean geometry — tie
 /// order included — is unchanged.
-fn covering_roof_plane(
+pub(crate) fn covering_roof_plane(
     ceilings: &CeilingRegions,
     p: Point2f64,
     n: (f64, f64),

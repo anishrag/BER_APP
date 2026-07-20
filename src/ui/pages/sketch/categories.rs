@@ -20,7 +20,7 @@ use crate::ui::pages::events::UiEvent;
 use crate::ui::widgets::{metre_input, HintExt};
 use ber_model::ber::common::ConstructionPhase;
 use ber_model::ber::structural::SurfaceCounts;
-use domain::sketch::EditTools;
+use domain::sketch::{EditTools, SketchMode};
 
 /// One tool/toggle slot inside a category.
 #[derive(Clone, Copy)]
@@ -29,6 +29,9 @@ pub enum Tool {
     EditTool(EditTools),
     /// Living-area drawing mode toggle (+ a delete button for the active area).
     LivingArea,
+    /// Porch drawing mode toggle (+ a delete button for the active porch).
+    /// Drawn & dimensioned like a living area; recorded for the resolve step.
+    Porch,
     /// Construction-year (phase-region) tagging mode toggle.
     ConstructionYear,
     /// Wall-exposure painting mode toggle.
@@ -113,6 +116,7 @@ pub const CATEGORIES: &[Category] = &[
         name: "Area",
         tools: &[
             Tool::LivingArea,
+            Tool::Porch,
             Tool::ConstructionYear,
             Tool::Exposure,
             Tool::FloorExposure,
@@ -207,6 +211,10 @@ pub struct CategoryUiState {
     /// Which shape the Complex-window box is entering (rounded top, circular, …).
     /// Pinned across placements like `door_sidelights_mode`.
     pub complex_window_kind: ber_model::ber::fenestration::ComplexWindowKind,
+    /// The plain Window tool's shaped-top tick (Flat / Semi-circular /
+    /// Pointed). Pinned across placements like `complex_window_kind`; an edit
+    /// prompt re-seeds it from the window being edited.
+    pub window_top_shape: ber_model::ber::fenestration::WindowTopShape,
 }
 
 impl Default for CategoryUiState {
@@ -221,6 +229,7 @@ impl Default for CategoryUiState {
             input_mode_pinned: false,
             door_sidelights_mode: crate::controller::app_controller::DoorSidelightsMode::default(),
             complex_window_kind: ber_model::ber::fenestration::ComplexWindowKind::default(),
+            window_top_shape: ber_model::ber::fenestration::WindowTopShape::default(),
         }
     }
 }
@@ -239,9 +248,18 @@ pub struct ToolFlags {
     /// tool would wipe the pre-drag state its Cancel reverts to, so every
     /// Edit-category tool is disabled until the prompt is resolved.
     pub measurement_prompt_active: bool,
+    /// Why the canvas would refuse an edit-tool stroke right now (a pending
+    /// prompt/pick, or a later assessment phase), or `None` when strokes land.
+    /// While set, the Edit tools are disabled WITH this hint — previously the
+    /// tool stayed selectable and the drawn stroke was silently discarded
+    /// (the field porch-trim failure). Overlay modes a tool pick auto-exits
+    /// (exposure / openings / roof / partition) are deliberately NOT gates.
+    pub stroke_gate: Option<&'static str>,
     pub has_floor_plan: bool,
     pub living_area_mode: bool,
     pub active_living_area: Option<usize>,
+    pub porch_mode: bool,
+    pub active_porch: Option<usize>,
     pub exposure_mode: bool,
     /// The floor-exposure tool is active (all-storeys overlaid floor view).
     pub floor_exposure_mode: bool,
@@ -317,9 +335,12 @@ impl ToolFlags {
             read_only: view.current_storey_idx.is_none(),
             measurement_prompt_active: view.edit_drag_prompt.is_some()
                 || view.vertex_drop_prompt.is_some(),
+            stroke_gate: stroke_gate(view),
             has_floor_plan: view.has_floor_plan,
             living_area_mode: view.living_area_mode,
             active_living_area: view.active_living_area,
+            porch_mode: view.porch_mode,
+            active_porch: view.active_porch,
             exposure_mode: view.exposure_mode,
             floor_exposure_mode: view.floor_exposure_mode,
             ceiling_exposure_mode: view.ceiling_exposure_mode,
@@ -356,6 +377,52 @@ impl ToolFlags {
             structure_existing_groups: view.structure_existing_groups.clone(),
         }
     }
+}
+
+/// Why the canvas would refuse an edit-tool stroke right now — the same
+/// conditions the canvas's `primary_available` gate blocks on, MINUS the
+/// overlay modes a tool pick now auto-exits (`select_edit_tool`) and minus
+/// navigation (picking a tool leaves it). Keep the two in sync: a condition
+/// that blocks strokes but isn't listed here reverts to the silent-swallow
+/// failure this hint exists to prevent.
+fn stroke_gate(view: &SketchView<'_>) -> Option<&'static str> {
+    if !matches!(view.mode, SketchMode::Storey2D) {
+        return Some("Switch to the 2D plan first");
+    }
+    if view.review.is_some() {
+        return Some("Answer the wall-alignment question first");
+    }
+    if view.pending_redraw {
+        return Some("Resolve the redrawn-outline choice first");
+    }
+    if view.dim_prompt.is_some() {
+        return Some("Answer the measurement prompt first");
+    }
+    if !view.pending_cut_regions.is_empty()
+        || view.phase_pick_pending
+        || !view.pending_phase_cut_regions.is_empty()
+        || view.step_pick_pending
+        || !view.pending_step_cut_regions.is_empty()
+    {
+        return Some("Finish the pending area pick first");
+    }
+    if view.ceiling_step_pending
+        || view.ceiling_point_pending
+        || view.ceiling_ridge_pending
+        || view.ceiling_rect_pending
+    {
+        return Some("Finish the pending ceiling step first");
+    }
+    if matches!(
+        view.current_phase,
+        AssessmentPhase::Structure | AssessmentPhase::Objects
+    ) {
+        return Some("Go back to the Mapping step to edit the plan");
+    }
+    if view.north_image.is_some() {
+        return Some("Finish the North alignment first");
+    }
+    None
 }
 
 /// Portrait renderer: a category tab strip plus the active category's tools
@@ -541,6 +608,7 @@ fn tool_ui<F: FnMut(UiEvent)>(
             // prompt's Cancel reverts to.
             let enabled = !flags.read_only
                 && !flags.measurement_prompt_active
+                && flags.stroke_gate.is_none()
                 && (matches!(t, EditTools::DrawPerpWalls) || flags.has_floor_plan);
             // In navigation mode no edit tool is selected (the canvas only
             // moves the view), so none is highlighted.
@@ -551,6 +619,10 @@ fn tool_ui<F: FnMut(UiEvent)>(
             );
             if flags.measurement_prompt_active {
                 resp = resp.disabled_hint("Finish or cancel the measurement first");
+            } else if let Some(gate) = flags.stroke_gate {
+                // The canvas would silently discard this tool's strokes right
+                // now — say WHY instead of offering a dead tool.
+                resp = resp.disabled_hint(gate);
             }
             if resp.clicked() {
                 on_event(UiEvent::Sketch(SketchEvent::ChangeEditTool(t)));
@@ -583,6 +655,37 @@ fn tool_ui<F: FnMut(UiEvent)>(
                         .clicked()
                     {
                         on_event(UiEvent::Sketch(SketchEvent::DeleteLivingArea(idx)));
+                    }
+                }
+            }
+        }
+        Tool::Porch => {
+            let enabled = !flags.read_only && flags.has_floor_plan;
+            if ui
+                .add_enabled(
+                    enabled,
+                    egui::Button::selectable(flags.porch_mode, "🚪 Porch"),
+                )
+                .hint(
+                    "Draw the porch area (drawn & dimensioned like a living \
+                     area; recorded for the resolve step)",
+                )
+                .clicked()
+            {
+                on_event(UiEvent::Sketch(SketchEvent::SetPorchMode(
+                    !flags.porch_mode,
+                )));
+            }
+            // In porch mode, delete the active porch (porches are
+            // non-editable — redraw to change).
+            if flags.porch_mode {
+                if let Some(idx) = flags.active_porch {
+                    if ui
+                        .button("🗑 Delete porch")
+                        .hint("Delete this porch (redraw to change one)")
+                        .clicked()
+                    {
+                        on_event(UiEvent::Sketch(SketchEvent::DeletePorch(idx)));
                     }
                 }
             }

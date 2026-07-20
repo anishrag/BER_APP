@@ -103,6 +103,7 @@ impl AppController {
     fn exit_mapping_modes(&mut self) {
         self.set_openings_mode(false);
         self.set_living_area_mode(false);
+        self.set_porch_mode(false);
         self.set_exposure_mode(false);
         // The floor-exposure tool takes over the canvas with the all-storeys
         // overlaid view; leaving Mapping must drop it so Structure shows the

@@ -814,6 +814,81 @@ impl Roof {
     }
 }
 
+/// One roofable ceiling region still lacking roof cover — the WHY behind a red
+/// roof checklist row (see [`Ber::roof_coverage`](crate::ber::ber_struct::Ber::roof_coverage)).
+#[derive(Debug, Clone)]
+pub struct RoofGap {
+    /// Index of the storey whose ceiling region is uncovered.
+    pub storey_idx: usize,
+    /// The uncovered region's plan area (m²).
+    pub area_m2: f64,
+}
+
+/// The detailed core behind the dwelling roof gate: how many ceiling regions
+/// NEED roofing over, and which of them no drawn roof area covers yet.
+#[derive(Debug, Clone)]
+pub struct RoofCoverage {
+    /// Roofable ceiling regions across the storey stack (sky/attic above).
+    pub roofable_regions: usize,
+    /// The roofable regions no roof area covers, in storey-stack order.
+    pub uncovered: Vec<RoofGap>,
+}
+
+impl RoofCoverage {
+    /// The roof gate's green test: NOT vacuous — there must be at least one
+    /// area to cover (heights set → ceilings resolved), and a roof must cover
+    /// every one of them.
+    pub fn complete(&self) -> bool {
+        self.roofable_regions > 0 && self.uncovered.is_empty()
+    }
+}
+
+impl crate::ber::ber_struct::Ber {
+    /// Per-DWELLING roof coverage — the detailed core behind the roof
+    /// checklist gate. Every ceiling region that has sky / attic above it —
+    /// i.e. everything except a `Party` ceiling (another dwelling above) and a
+    /// derived `InterStorey` one (our own storey above) — is ROOFABLE; it is
+    /// UNCOVERED until a roof area is assigned over it ([`Roof::covers_on`] at
+    /// the region's centroid). Lenient on geometry: whether the roof's eave
+    /// drops short or overhangs doesn't matter, only that something covers
+    /// each area.
+    pub fn roof_coverage(&self) -> RoofCoverage {
+        // A ceiling region below this plan area is a numerical resolve artifact
+        // (a collapsed sliver — e.g. two edges a fraction of a micrometre
+        // apart), not a real surface to roof over. Gating on it would leave the
+        // roof stuck red forever: its centroid can land exactly on a covering
+        // roof footprint's boundary, where `covers_on`'s strict interior
+        // containment returns false. Matches the `MIN_PIECE_AREA_M2` used in the
+        // roof-void / storey splitters (1e-4 m² — far below any real ceiling
+        // patch, comfortably above sliver noise).
+        const MIN_ROOFABLE_AREA_M2: f64 = 1e-4;
+        let mut roofable_regions = 0;
+        let mut uncovered = Vec::new();
+        for (idx, s) in self.storeys.iter().enumerate() {
+            for r in &s.ceilings.regions {
+                let roofable = !matches!(
+                    r.exposure,
+                    CeilingExposure::Party | CeilingExposure::InterStorey
+                ) && r.area() > MIN_ROOFABLE_AREA_M2;
+                if !roofable {
+                    continue;
+                }
+                roofable_regions += 1;
+                if !self.roof.covers_on(idx, r.centroid()) {
+                    uncovered.push(RoofGap {
+                        storey_idx: idx,
+                        area_m2: r.area(),
+                    });
+                }
+            }
+        }
+        RoofCoverage {
+            roofable_regions,
+            uncovered,
+        }
+    }
+}
+
 /// The ceiling ROOF TYPE the drawn geometry implies for one ceiling region —
 /// the region's own shape (flat / sloped) crossed with the dwelling roof area
 /// covering it. RUNTIME-ONLY (derived fresh per query, deliberately not
@@ -1013,6 +1088,63 @@ mod tests {
         assert!(roof.covers_on(0, p), "covers its base storey");
         assert!(roof.covers_on(1, p), "covers the attic storey too");
         assert!(!roof.covers_on(2, p), "not a storey outside the set");
+    }
+
+    /// The roof-gate core: no roofable regions → NOT complete (not vacuous);
+    /// an uncovered region is reported with its storey index and area; a
+    /// covering roof area completes it; a `Party` ceiling isn't roofable.
+    #[test]
+    fn roof_coverage_reports_gaps_and_completeness() {
+        use crate::ber::ber_struct::Ber;
+        use crate::ber::structural::Storey;
+
+        // Nothing resolved yet → zero roofable regions, no gaps, NOT complete.
+        let mut ber = Ber::default();
+        let cov = ber.roof_coverage();
+        assert_eq!(cov.roofable_regions, 0);
+        assert!(cov.uncovered.is_empty());
+        assert!(!cov.complete(), "no regions to cover is not green");
+
+        // One flat 10×10 ceiling region, no roof drawn → one gap.
+        let mut storey = Storey::default();
+        storey.ceilings =
+            CeilingRegions::default_for_footprint(square_10(), 2.4, ItemId::default());
+        ber.storeys.push(storey);
+        let cov = ber.roof_coverage();
+        assert_eq!(cov.roofable_regions, 1);
+        assert_eq!(cov.uncovered.len(), 1);
+        assert_eq!(cov.uncovered[0].storey_idx, 0);
+        assert!(
+            (cov.uncovered[0].area_m2 - 100.0).abs() < 1e-6,
+            "gap area {} (want 100 m²)",
+            cov.uncovered[0].area_m2
+        );
+        assert!(!cov.complete());
+
+        // A flat roof area over the footprint covers it → complete.
+        ber.roof.areas.push(RoofArea {
+            id: ItemId::default(),
+            storey_idx: 0,
+            covered_storeys: Vec::new(),
+            shape: RoofShape::Flat,
+            pitch_deg: 0.0,
+            eave_z: 2.4,
+            ridge: None,
+            footprint: square_10(),
+            apexes: Vec::new(),
+        });
+        let cov = ber.roof_coverage();
+        assert_eq!(cov.roofable_regions, 1);
+        assert!(cov.uncovered.is_empty());
+        assert!(cov.complete());
+
+        // A Party ceiling (another dwelling above) is NOT roofable — and with
+        // no roofable region left, the gate goes red again (not vacuous).
+        ber.storeys[0].ceilings.regions[0].exposure = CeilingExposure::Party;
+        let cov = ber.roof_coverage();
+        assert_eq!(cov.roofable_regions, 0);
+        assert!(cov.uncovered.is_empty());
+        assert!(!cov.complete());
     }
 
     /// A RoofArea JSON written before `covered_storeys` existed deserializes

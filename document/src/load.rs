@@ -34,6 +34,9 @@ impl StoreyDoc {
             dimensioning: doc.dimensioning.clone(),
         };
         doc.living_areas = reconstruct_living_areas(&storey.living_areas);
+        // Porches reload the same way as living areas: non-editable resolved
+        // polygons back into finalised slots.
+        doc.porches = reconstruct_living_areas(&storey.porches);
         // Partitions BEFORE sections: the 1-D recovery skips face-partitioned
         // walls by the working map, so it must be rebuilt (from the Layer-1
         // recipe) first — otherwise a partition piece's base span would
@@ -44,7 +47,8 @@ impl StoreyDoc {
     }
 }
 
-/// Rebuild the runtime living-area slots from their resolved polygons on load.
+/// Rebuild the runtime living-area slots from their resolved polygons on load
+/// (porches reconstruct through the same helper — same non-editable pattern).
 /// Living areas are non-editable, so each is reconstructed from exact points
 /// (`from_clean_ring`) with a COMPLETE dimensioning state (metre scale already
 /// set, all params known) — they render and can be deleted, but aren't
@@ -119,6 +123,23 @@ mod tests {
         // Loaded geometry is finalised; the outline slot mirrors the buffer.
         assert!(doc.dimensioning.scale_set);
         assert_eq!(doc.outline.floor_plan.get_points(), pts);
+    }
+
+    /// Porches reload exactly like living areas: resolved polygons back into
+    /// finalised, non-editable slots.
+    #[test]
+    fn from_storey_reconstructs_porches() {
+        let storey = Storey {
+            floors: FloorRegions::from_vertex_lists(vec![square_m(5.0)], ItemId::default()),
+            porches: FloorRegions::from_vertex_lists(vec![square_m(2.0)], ItemId::default()),
+            ..Storey::default()
+        };
+        let doc = StoreyDoc::from_storey(&storey);
+        assert_eq!(doc.porches.len(), 1);
+        let slot = &doc.porches[0];
+        assert_eq!(slot.floor_plan.get_points().len(), 4);
+        assert!(slot.finalised(), "reloaded porches are finalised");
+        assert!(slot.dimensioning.scale_set);
     }
 
     #[test]

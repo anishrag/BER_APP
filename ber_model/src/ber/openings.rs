@@ -233,12 +233,11 @@ impl DoorSidelightsSpec {
 
 /// The length of the wall with `wall_id`, or `None` if absent/degenerate.
 /// Public so the shell can display the span a "Full width" opening will take.
+/// Searches every opening-placeable region (`placeable_wall`: outline walls
+/// AND porch inner walls), like the rest of the opening machinery.
 pub fn wall_length(storey: &Storey, wall_id: ItemId) -> Option<f32> {
     storey
-        .walls
-        .regions
-        .iter()
-        .find(|r| r.id == wall_id)
+        .placeable_wall(wall_id)
         .and_then(|r| r.base_frame())
         .map(|(_, _, len, _)| len as f32)
 }
@@ -248,11 +247,25 @@ pub fn wall_length(storey: &Storey, wall_id: ItemId) -> Option<f32> {
 /// wall is absent. Degenerate walls report 0 (mirrors `max_sill_for`).
 pub fn wall_face_height(storey: &Storey, wall_id: ItemId, along_m: f32) -> Option<f32> {
     storey
-        .walls
-        .regions
-        .iter()
-        .find(|r| r.id == wall_id)
+        .placeable_wall(wall_id)
         .map(|r| r.max_sill_for(along_m as f64, 0.0) as f32)
+}
+
+/// The NET area (m²) of a wall region's face: the gross wall polygon area
+/// minus the TRUE shape area of every opening placed on it
+/// ([`super::fenestration::window_shape_area`] — the exact closed form for the
+/// plain-flow shaped tops, w×h for rectangles and doors). The DEAP
+/// envelope-area anchor: the net wall area carries the wall U-value while the
+/// subtracted glazing/door areas carry their own. `None` when `wall_id`
+/// resolves to no placeable region. Floored at 0 (a legacy over-wide opening
+/// can't drive a wall negative).
+pub fn wall_net_area(storey: &Storey, wall_id: ItemId) -> Option<f64> {
+    let gross = storey.placeable_wall(wall_id)?.polygon.area();
+    let opes: f64 = wall_openings(storey, wall_id)
+        .iter()
+        .map(|o| super::fenestration::window_shape_area(o.shape, o.width_m, o.height_m) as f64)
+        .sum();
+    Some((gross - opes).max(0.0))
 }
 
 /// The nearest OUTLINE wall to a world plan point and the along-distance of the
@@ -273,6 +286,37 @@ pub fn pick_wall_along(storey: &Storey, wx: f64, wy: f64, tol: f64) -> Option<(I
         if r.exposure == super::structural::WallExposure::InterStorey {
             continue; // buried behind a neighbour storey — never a tap target
         }
+        let Some((origin, (ux, uy), len, _)) = r.base_frame() else {
+            continue;
+        };
+        let (bx, by) = (origin.x + ux * len, origin.y + uy * len);
+        let d = point_to_segment_distance(wx, wy, origin.x, origin.y, bx, by);
+        if d <= tol && best.as_ref().is_none_or(|b| d < b.3) {
+            let along = ((wx - origin.x) * ux + (wy - origin.y) * uy).clamp(0.0, len);
+            best = Some((r.id, along as f32, len as f32, d));
+        }
+    }
+    best.map(|(id, a, l, _)| (id, a, l))
+}
+
+/// The nearest PORCH INNER wall (`Storey::porch_walls`) to a world plan point
+/// — the porch analogue of [`pick_wall_along`], kept separate so the SHELL
+/// decides tap priority between outline and porch walls. (The two sets are
+/// not guaranteed disjoint in reach: a porch edge can partially run along a
+/// notched outline — inner-edge classification is by MIDPOINT within 1 mm —
+/// and near a porch/outline junction both picks can fire within one `tol`;
+/// the shell's outline-first ordering resolves that deliberately.)
+/// `(wall_id, along_m, len_m)` or `None` when no porch wall base edge is
+/// within `tol`. Porch walls carry no derived `InterStorey` pieces, so there
+/// is nothing to skip.
+pub fn pick_porch_wall_along(
+    storey: &Storey,
+    wx: f64,
+    wy: f64,
+    tol: f64,
+) -> Option<(ItemId, f32, f32)> {
+    let mut best: Option<(ItemId, f32, f32, f64)> = None;
+    for r in &storey.porch_walls.regions {
         let Some((origin, (ux, uy), len, _)) = r.base_frame() else {
             continue;
         };
@@ -788,7 +832,40 @@ pub fn roof_window_at(storey: &Storey, x: f32, y: f32) -> Option<ItemId> {
 /// ridge) or off every region means the rooflight overshoots. Surfaced through
 /// the "Windows" mapping gate so the assessor repositions, resizes, or rotates
 /// it to fit — the stored size/area is never silently changed. Empty = all fit.
+/// Thin wrapper over [`roof_window_overhangs`] — the detailed core is the
+/// single source of truth, so the id list and the reasons can never disagree.
 pub fn oversized_roof_windows(storey: &Storey) -> Vec<ItemId> {
+    roof_window_overhangs(storey)
+        .into_iter()
+        .map(|o| o.id)
+        .collect()
+}
+
+/// How far, and which way, one roof window spills off its host ceiling region
+/// — the WHY behind an [`oversized_roof_windows`] entry, for the tappable
+/// checklist row.
+#[derive(Debug, Clone)]
+pub struct RoofWindowOverhang {
+    pub id: ItemId,
+    pub width_m: f32,
+    pub height_m: f32,
+    /// Over the corners that FAIL the fit test, the maximum plan distance from
+    /// the (un-nudged) corner to the host region's plan-ring boundary — how
+    /// far the rooflight overshoots its surface.
+    pub overhang_m: f64,
+    /// Which way the rooflight overshoots: the dominant plan axis of (worst
+    /// corner − its closest point on the host region's boundary) — one of
+    /// "west"/"east"/"north"/"south" (plan-relative, +x = east and +y =
+    /// north).
+    pub direction: &'static str,
+}
+
+/// The detailed core behind [`oversized_roof_windows`]: EXACTLY its fit test
+/// (same host-region lookup, same [`roof_window_plan_corners`] footprint, same
+/// `PROFILE_EPS_M` nudge, same skip when the centre resolves to no region) —
+/// one entry per failing window, carrying how far (`overhang_m`) and which way
+/// (`direction`) the worst corner overshoots. Empty = all fit.
+pub fn roof_window_overhangs(storey: &Storey) -> Vec<RoofWindowOverhang> {
     let mut out = Vec::new();
     for w in &storey.windows {
         let Some(OpeningPlacement::Roof { plan, .. }) = &w.placement else {
@@ -819,19 +896,93 @@ pub fn oversized_roof_windows(storey: &Storey) -> Vec<ItemId> {
                 (x + dx * t, y + dy * t)
             }
         };
-        let fits = corners.iter().all(|&corner| {
+        // The worst FAILING corner (max distance from the un-nudged corner to
+        // the host's plan-ring boundary) plus its closest boundary point;
+        // `None` when every corner fits.
+        let mut worst: Option<((f64, f64), f64, (f64, f64))> = None;
+        for &corner in &corners {
             let (x, y) = nudged(corner);
-            storey
+            let fits = storey
                 .ceilings
                 .region_strictly_containing(domain::points::Point2f64::new(x, y))
                 .map(|r| r.id)
-                == Some(host_id)
-        });
-        if !fits {
-            out.push(w.id);
+                == Some(host_id);
+            if fits {
+                continue;
+            }
+            let (d, closest) = plan_boundary_closest(host, corner.0, corner.1);
+            if worst.is_none_or(|(_, wd, _)| d > wd) {
+                worst = Some((corner, d, closest));
+            }
+        }
+        if let Some(((cx, cy), overhang_m, (bx, by))) = worst {
+            // The actual overshoot vector: worst corner − its closest boundary
+            // point (NOT centre → corner, which mislabels a corner overhang —
+            // e.g. a 1.12×1.14 rooflight past the west edge has centre→corner
+            // (−0.56, ±0.57), reading north/south; corner−boundary is
+            // (−0.14, 0): west). DEGENERATE case: a failing corner sitting ON
+            // (or within `PROFILE_EPS_M` noise of) the host boundary — e.g. an
+            // oblique nudge that retreats less than the corner's overshoot
+            // across a shared ridge — makes that vector ≈ zero, and its axis
+            // tie-break would always read "east". Fall back to centre→corner
+            // there: it still points at the offending side of the window.
+            let (dx, dy) = if overhang_m < super::structural::PROFILE_EPS_M {
+                (cx - centre.0, cy - centre.1)
+            } else {
+                (cx - bx, cy - by)
+            };
+            let direction = if dx.abs() >= dy.abs() {
+                if dx < 0.0 {
+                    "west"
+                } else {
+                    "east"
+                }
+            } else if dy > 0.0 {
+                "north"
+            } else {
+                "south"
+            };
+            out.push(RoofWindowOverhang {
+                id: w.id,
+                width_m: w.width_m,
+                height_m: w.height_m,
+                overhang_m,
+                direction,
+            });
         }
     }
     out
+}
+
+/// Minimum PLAN (xy) distance from `(px, py)` to `region`'s exterior-ring
+/// boundary, together with the closest boundary point itself — min
+/// point-to-segment distance over the plan-projected polygon edges. Serves
+/// [`roof_window_overhangs`]'s overhang measurement and outward direction.
+fn plan_boundary_closest(
+    region: &super::structural::CeilingRegion,
+    px: f64,
+    py: f64,
+) -> (f64, (f64, f64)) {
+    let ext = &region.polygon.exterior;
+    let mut best = (f64::INFINITY, (px, py));
+    for i in 0..ext.len() {
+        let a = &ext[i];
+        let b = &ext[(i + 1) % ext.len()];
+        // Closest point on the plan-projected segment a→b to (px, py).
+        let (abx, aby) = (b.x - a.x, b.y - a.y);
+        let len2 = abx * abx + aby * aby;
+        let t = if len2 <= f64::EPSILON {
+            0.0
+        } else {
+            (((px - a.x) * abx + (py - a.y) * aby) / len2).clamp(0.0, 1.0)
+        };
+        let (cx, cy) = (a.x + abx * t, a.y + aby * t);
+        let d = ((px - cx).powi(2) + (py - cy).powi(2)).sqrt();
+        if d < best.0 {
+            best = (d, (cx, cy));
+        }
+    }
+    best
 }
 
 /// Compose a door+sidelights assembly on a wall at `along_m` (centre): one
@@ -1152,11 +1303,9 @@ pub fn move_opening(
         new_sill_m.max(0.0)
     } else {
         let h = opening_height(storey, opening) as f64;
+        // `placeable_wall`: porch inner walls clamp like outline walls.
         let max_sill = storey
-            .walls
-            .regions
-            .iter()
-            .find(|r| r.id == wall_id)
+            .placeable_wall(wall_id)
             .map(|r| r.max_sill_for(new_along_m as f64, h) as f32)
             .unwrap_or(f32::INFINITY);
         new_sill_m.clamp(0.0, max_sill.max(0.0))
@@ -1269,11 +1418,9 @@ pub fn resize_opening(
     let multi_storey = matches!(opening, OpeningRef::Window(id)
         if storey.windows.iter().any(|w| w.id == id && w.multi_storey));
     if !multi_storey {
+        // `placeable_wall`: porch inner walls clamp like outline walls.
         let max_sill = storey
-            .walls
-            .regions
-            .iter()
-            .find(|r| r.id == wall_id)
+            .placeable_wall(wall_id)
             .map(|r| r.max_sill_for(along as f64, new_height_m as f64) as f32)
             .unwrap_or(f32::INFINITY);
         let clamped = old_sill.clamp(0.0, max_sill.max(0.0));
@@ -1333,11 +1480,9 @@ pub fn resize_opening_full_width(
     let sill = if multi_storey {
         old_sill
     } else {
+        // `placeable_wall`: porch inner walls clamp like outline walls.
         let max_sill = storey
-            .walls
-            .regions
-            .iter()
-            .find(|r| r.id == wall_id)
+            .placeable_wall(wall_id)
             .map(|r| r.max_sill_for((len / 2.0) as f64, new_height_m as f64) as f32)
             .unwrap_or(f32::INFINITY);
         old_sill.clamp(0.0, max_sill.max(0.0))
@@ -1391,6 +1536,75 @@ pub fn set_window_attributes(
     }
 }
 
+/// Retype an existing DOOR in place: set its `type_name`, `kind`, and
+/// draught-stripped flag. Geometry (size, placement) is untouched — pair with
+/// [`resize_opening`] for size edits. `None` for `kind`/`draught_stripped`
+/// leaves that attribute as-is (mirrors [`set_window_attributes`]'s `num_opes`
+/// hold). No-op if `door_id` isn't in the storey.
+pub fn set_door_attributes(
+    storey: &mut Storey,
+    door_id: ItemId,
+    type_name: String,
+    kind: Option<DoorKind>,
+    draught_stripped: Option<bool>,
+) {
+    if let Some(d) = storey.doors.iter_mut().find(|d| d.id == door_id) {
+        d.type_name = type_name;
+        if kind.is_some() {
+            d.kind = kind;
+        }
+        if draught_stripped.is_some() {
+            d.draught_stripped = draught_stripped;
+        }
+    }
+}
+
+/// Resize a ROOF window in place (ceiling-plane width/height). Unlike a wall
+/// opening there's no host wall / redistribution / sill: the new size is set
+/// directly and the 3D `vertices` re-derive from it at the next resolve (see
+/// the [`OpeningPlacement::Roof`] arm of the derivation). A resize that makes
+/// the footprint OVERHANG its ceiling region is deliberately ACCEPTED — the
+/// "Windows" mapping gate ([`roof_window_overhangs`]) flags it rather than the
+/// size being silently rejected, exactly like placement. `ZeroSize` on a
+/// non-positive dimension; no-op `Ok` if `window_id` isn't a roof window
+/// (mirrors [`resize_opening`]).
+pub fn resize_roof_window(
+    storey: &mut Storey,
+    window_id: ItemId,
+    new_width_m: f32,
+    new_height_m: f32,
+) -> Result<(), OpeningError> {
+    if new_width_m <= 0.0 || new_height_m <= 0.0 {
+        return Err(OpeningError::ZeroSize);
+    }
+    if let Some(w) = storey.windows.iter_mut().find(|w| w.id == window_id) {
+        if matches!(w.placement, Some(OpeningPlacement::Roof { .. })) {
+            w.width_m = new_width_m;
+            w.height_m = new_height_m;
+        }
+    }
+    Ok(())
+}
+
+/// Set a standalone window's TOP-SHAPE tick (Flat / Semi-circular / Pointed)
+/// from the normal-flow edit box, converting its stored [`WindowShape`] in
+/// place. Applies only when the CURRENT shape is itself a tickable top —
+/// a Complex-tool shape (circular, T, rounded-rise, …) is left untouched, so
+/// the tick and the complex flow stay mutually exclusive over the one `shape`
+/// field. The derived `vertices` re-tessellate at the next resolve.
+pub fn set_window_top(
+    storey: &mut Storey,
+    window_id: ItemId,
+    top: super::fenestration::WindowTopShape,
+) {
+    use super::fenestration::WindowTopShape;
+    if let Some(w) = storey.windows.iter_mut().find(|w| w.id == window_id) {
+        if WindowTopShape::from_shape(w.shape).is_some() {
+            w.shape = top.to_shape();
+        }
+    }
+}
+
 /// Delete an opening (the whole assembly if it's a member), then redistribute
 /// its wall.
 pub fn delete_opening(storey: &mut Storey, opening: OpeningRef) {
@@ -1410,7 +1624,12 @@ pub fn delete_opening(storey: &mut Storey, opening: OpeningRef) {
     // Scrub opes refs everywhere (cheap; ids are unique).
     let win_ids: std::collections::HashSet<_> = storey.windows.iter().map(|w| w.id).collect();
     let door_ids: std::collections::HashSet<_> = storey.doors.iter().map(|d| d.id).collect();
-    for r in &mut storey.walls.regions {
+    for r in storey
+        .walls
+        .regions
+        .iter_mut()
+        .chain(storey.porch_walls.regions.iter_mut())
+    {
         r.opes.windows.retain(|id| win_ids.contains(id));
         r.opes.doors.retain(|id| door_ids.contains(id));
     }
@@ -1651,12 +1870,12 @@ pub(crate) fn redistribute_wall_openings_pinned(
 // ── small helpers ───────────────────────────────────────────────────────────
 
 fn link_window(storey: &mut Storey, wall_id: ItemId, win_id: ItemId) {
-    if let Some(r) = storey.walls.regions.iter_mut().find(|r| r.id == wall_id) {
+    if let Some(r) = storey.placeable_wall_mut(wall_id) {
         r.opes.windows.push(win_id);
     }
 }
 fn link_door(storey: &mut Storey, wall_id: ItemId, door_id: ItemId) {
-    if let Some(r) = storey.walls.regions.iter_mut().find(|r| r.id == wall_id) {
+    if let Some(r) = storey.placeable_wall_mut(wall_id) {
         r.opes.doors.push(door_id);
     }
 }
@@ -1698,7 +1917,7 @@ fn rollback_added(storey: &mut Storey, wall_id: ItemId, added: &[OpeningRef]) {
             OpeningRef::Door(id) => storey.doors.retain(|d| d.id != *id),
         }
     }
-    if let Some(reg) = storey.walls.regions.iter_mut().find(|r| r.id == wall_id) {
+    if let Some(reg) = storey.placeable_wall_mut(wall_id) {
         reg.opes
             .windows
             .retain(|id| !added.contains(&OpeningRef::Window(*id)));
@@ -1762,10 +1981,7 @@ fn place_window_with_vertical_fallback(
         .map(|(_, a, s, _)| (a, s))
         .unwrap_or((0.0, 0.0));
     let max_sill = storey
-        .walls
-        .regions
-        .iter()
-        .find(|r| r.id == wall_id)
+        .placeable_wall(wall_id)
         .map(|r| r.max_sill_for(along as f64, height as f64) as f32)
         .unwrap_or(0.0);
     // Candidate sills, in preference order: the requested one, then stacked at the
@@ -1820,6 +2036,9 @@ fn place_window_with_vertical_fallback(
 /// openings are untouched, so it's idempotent. Roof and unplaced openings are
 /// skipped (roof windows aren't wall-bounded).
 pub fn confine_wall_openings_to_host(storey: &mut Storey) {
+    // Field borrows, so the closure doesn't capture `storey` whole (the apply
+    // loops below need `windows`/`doors` mutably). Both placeable sets host.
+    let (walls, porch_walls) = (&storey.walls, &storey.porch_walls);
     // The clamped (width, centre) for one opening, or `None` when it already
     // fits (mirrors the `[0, len]` clamp in `opening_vertices`).
     let confine = |placement: &Option<OpeningPlacement>, width_m: f32| -> Option<(f32, f32)> {
@@ -1829,10 +2048,10 @@ pub fn confine_wall_openings_to_host(storey: &mut Storey) {
         else {
             return None; // roof / unplaced — not wall-bounded
         };
-        let (_, _, len, _) = storey
-            .walls
+        let (_, _, len, _) = walls
             .regions
             .iter()
+            .chain(porch_walls.regions.iter())
             .find(|r| r.id == *wall_id)?
             .base_frame()?;
         let len = len as f32;
@@ -1919,8 +2138,11 @@ pub fn derive_opening_vertices(storey: &mut Storey) {
 /// edit replaced the region with a fresh id), and scrub any now-dangling ids
 /// from every region's `opes`. Legacy openings (`placement: None`) are kept.
 pub fn prune_orphaned_openings(storey: &mut Storey) {
+    // Every placeable host counts — porch inner walls included, so an opening
+    // homed on a live porch wall is KEPT; one whose porch was deleted (its
+    // walls no longer derive) is dropped like any orphan.
     let wall_ids: std::collections::HashSet<_> =
-        storey.walls.regions.iter().map(|r| r.id).collect();
+        storey.placeable_wall_regions().map(|r| r.id).collect();
     let host_present = |p: &Option<OpeningPlacement>| match p {
         None => true, // legacy — not placement-bound
         // Walls amend, so their id is stable.
@@ -1960,7 +2182,12 @@ pub fn prune_orphaned_openings(storey: &mut Storey) {
 /// Call at the resolve tail, after `derive_opening_vertices` +
 /// `prune_orphaned_openings`.
 pub fn rebuild_opes(storey: &mut Storey) {
-    for r in &mut storey.walls.regions {
+    for r in storey
+        .walls
+        .regions
+        .iter_mut()
+        .chain(storey.porch_walls.regions.iter_mut())
+    {
         r.opes.windows.clear();
         r.opes.doors.clear();
     }
@@ -1968,10 +2195,11 @@ pub fn rebuild_opes(storey: &mut Storey) {
         r.opes.windows.clear();
         r.opes.doors.clear();
     }
+    // One index space over both placeable sets: `walls` first, then
+    // `porch_walls` (the `placeable_wall_regions` order).
+    let n_walls = storey.walls.regions.len();
     let wall_idx: std::collections::HashMap<ItemId, usize> = storey
-        .walls
-        .regions
-        .iter()
+        .placeable_wall_regions()
         .enumerate()
         .map(|(i, r)| (r.id, i))
         .collect();
@@ -2007,16 +2235,23 @@ pub fn rebuild_opes(storey: &mut Storey) {
         .iter()
         .map(|d| (d.id, target(&d.placement)))
         .collect();
+    // Route a combined index back to its set (`i < n_walls` → walls, else
+    // porch_walls at `i - n_walls`).
     for (id, t) in win {
         match t {
-            Some(Tgt::Wall(i)) => storey.walls.regions[i].opes.windows.push(id),
+            Some(Tgt::Wall(i)) if i < n_walls => storey.walls.regions[i].opes.windows.push(id),
+            Some(Tgt::Wall(i)) => storey.porch_walls.regions[i - n_walls]
+                .opes
+                .windows
+                .push(id),
             Some(Tgt::Roof(i)) => storey.ceilings.regions[i].opes.windows.push(id),
             None => {}
         }
     }
     for (id, t) in drs {
         match t {
-            Some(Tgt::Wall(i)) => storey.walls.regions[i].opes.doors.push(id),
+            Some(Tgt::Wall(i)) if i < n_walls => storey.walls.regions[i].opes.doors.push(id),
+            Some(Tgt::Wall(i)) => storey.porch_walls.regions[i - n_walls].opes.doors.push(id),
             Some(Tgt::Roof(i)) => storey.ceilings.regions[i].opes.doors.push(id),
             None => {}
         }
@@ -2042,7 +2277,7 @@ fn opening_vertices(
             along_m,
             sill_m,
         } => {
-            let wall = storey.walls.regions.iter().find(|r| r.id == *wall_id)?;
+            let wall = storey.placeable_wall(*wall_id)?;
             let (origin, (ux, uy), len, base_z) = wall.base_frame()?;
             let half = (width_m as f64) * 0.5;
             let centre = (*along_m as f64).clamp(0.0, len);
@@ -2115,7 +2350,7 @@ fn opening_vertices(
 mod tests {
     use super::*;
     use crate::ber::common::ItemId;
-    use crate::ber::fenestration::{Door, OpeningPlacement, Window, WindowShape};
+    use crate::ber::fenestration::{Door, DoorKind, OpeningPlacement, Window, WindowShape};
     use crate::ber::structural::{
         CeilingExposure, CeilingRegion, CeilingRegions, Opes, Polygon3D, Storey, WallExposure,
         WallRegion, WallRegions,
@@ -2210,6 +2445,134 @@ mod tests {
         assert!(near(v[1], (2.5, 0.0, 1.0)), "br {:?}", v[1]);
         assert!(near(v[2], (2.5, 0.0, 2.2)), "tr {:?}", v[2]);
         assert!(near(v[3], (1.5, 0.0, 2.2)), "tl {:?}", v[3]);
+    }
+
+    /// One flat 4 m × 2.4 m wall as a storey, for the shaped-top tests.
+    fn flat_wall_storey(wid: ItemId) -> Storey {
+        Storey {
+            walls: WallRegions {
+                regions: vec![wall(
+                    wid,
+                    vec![
+                        p3(0.0, 0.0, 0.0),
+                        p3(4.0, 0.0, 0.0),
+                        p3(4.0, 0.0, 2.4),
+                        p3(0.0, 0.0, 2.4),
+                    ],
+                )],
+            },
+            ..Storey::default()
+        }
+    }
+
+    #[test]
+    fn derive_semicircular_top_apex_at_centre_full_height() {
+        let wid = ItemId::default();
+        let mut storey = flat_wall_storey(wid);
+        let mut w = window(
+            ItemId::default(),
+            1.0,
+            1.2,
+            Some(OpeningPlacement::Wall {
+                wall_id: wid,
+                along_m: 2.0,
+                sill_m: 1.0,
+            }),
+        );
+        w.shape = WindowShape::SemiCircularTop;
+        storey.windows.push(w);
+        derive_opening_vertices(&mut storey);
+        let v = &storey.windows[0].vertices;
+        // Faceted silhouette, not the 4-corner box.
+        assert!(v.len() > 4, "faceted outline, got {}", v.len());
+        // Topmost vertex = the arc apex: at the window CENTRE (x = 2.0) and at
+        // the full entered height above the sill (z = 1.0 + 1.2 = 2.2).
+        let apex = v
+            .iter()
+            .copied()
+            .max_by(|a, b| a.2.total_cmp(&b.2))
+            .unwrap();
+        assert!((apex.0 - 2.0).abs() < 1e-3, "apex x {}", apex.0);
+        assert!((apex.2 - 2.2).abs() < 1e-3, "apex z {}", apex.2);
+        // Base spans the full width at the sill.
+        assert!(v
+            .iter()
+            .any(|p| (p.0 - 1.5).abs() < 1e-3 && (p.2 - 1.0).abs() < 1e-3));
+        assert!(v
+            .iter()
+            .any(|p| (p.0 - 2.5).abs() < 1e-3 && (p.2 - 1.0).abs() < 1e-3));
+    }
+
+    #[test]
+    fn shaped_windows_confine_and_clamp_by_their_bounding_box() {
+        // The w×h box, not the silhouette, is what host confinement and the
+        // sill clamp reason over — identical behaviour for Flat and shaped.
+        for shape in [
+            WindowShape::Rectangular,
+            WindowShape::SemiCircularTop,
+            WindowShape::PointedTop,
+        ] {
+            let wid = ItemId::default();
+            let mut storey = flat_wall_storey(wid);
+            // Hangs 0.2 m past the wall start: confine trims the BOX to
+            // [0, 0.8] — width 0.8, centre 0.4 — whatever the shape.
+            let mut w = window(
+                ItemId::default(),
+                1.0,
+                1.2,
+                Some(OpeningPlacement::Wall {
+                    wall_id: wid,
+                    along_m: 0.3,
+                    sill_m: 0.5,
+                }),
+            );
+            w.shape = shape;
+            storey.windows.push(w);
+            confine_wall_openings_to_host(&mut storey);
+            let w = &storey.windows[0];
+            assert!((w.width_m - 0.8).abs() < 1e-4, "{shape:?} w {}", w.width_m);
+            let Some(OpeningPlacement::Wall { along_m, .. }) = w.placement else {
+                panic!("wall placement survives");
+            };
+            assert!((along_m - 0.4).abs() < 1e-4, "{shape:?} along {along_m}");
+            // Dragging the sill up clamps the box TOP (sill + height_m, the
+            // entered-at-centre height) under the 2.4 m wall top → sill 1.2.
+            let r = OpeningRef::Window(w.id);
+            move_opening(&mut storey, r, 0.4, 2.0).unwrap();
+            let Some(OpeningPlacement::Wall { sill_m, .. }) = storey.windows[0].placement else {
+                panic!("wall placement survives");
+            };
+            assert!((sill_m - 1.2).abs() < 1e-4, "{shape:?} sill {sill_m}");
+        }
+    }
+
+    #[test]
+    fn shaped_window_subtracts_its_true_area_from_the_wall_net_area() {
+        use std::f64::consts::PI;
+        let wid = ItemId::default();
+        let mut storey = flat_wall_storey(wid);
+        let gross = 4.0 * 2.4;
+        assert!((wall_net_area(&storey, wid).unwrap() - gross).abs() < 1e-6);
+        // A 1.2 × 1.5 semi-circular-top window subtracts its EXACT shape area
+        // — w·(h − w/2) + π·(w/2)²/2 — not the w×h box.
+        add_shaped_wall_window(
+            &mut storey,
+            wid,
+            2.0,
+            1.2,
+            1.5,
+            0.5,
+            ItemId::default(),
+            WindowShape::SemiCircularTop,
+        )
+        .unwrap();
+        let semi_exact = 1.2 * (1.5 - 0.6) + PI * 0.6 * 0.6 / 2.0;
+        let net = wall_net_area(&storey, wid).unwrap();
+        assert!(
+            (net - (gross - semi_exact)).abs() < 1e-4,
+            "net {net} vs {}",
+            gross - semi_exact
+        );
     }
 
     #[test]
@@ -2323,6 +2686,70 @@ mod tests {
         assert!(v
             .iter()
             .any(|c| (c.0 - 1.5).abs() < 1e-4 && (c.1 - 1.5).abs() < 1e-4));
+    }
+
+    #[test]
+    fn resize_roof_window_sets_size_and_leaves_a_zero_reject() {
+        let wid = ItemId::default();
+        let mut storey = Storey {
+            windows: vec![window(
+                wid,
+                0.8,
+                1.0,
+                Some(OpeningPlacement::Roof {
+                    ceiling_region_id: ItemId::default(),
+                    plan: (2.0, 2.0),
+                }),
+            )],
+            ..Storey::default()
+        };
+        resize_roof_window(&mut storey, wid, 1.2, 1.4).unwrap();
+        assert!((storey.windows[0].width_m - 1.2).abs() < 1e-4);
+        assert!((storey.windows[0].height_m - 1.4).abs() < 1e-4);
+        // A non-positive dimension is refused (size untouched).
+        assert_eq!(
+            resize_roof_window(&mut storey, wid, 0.0, 1.4),
+            Err(OpeningError::ZeroSize)
+        );
+        assert!((storey.windows[0].width_m - 1.2).abs() < 1e-4);
+    }
+
+    #[test]
+    fn set_door_attributes_writes_type_kind_and_draught() {
+        let did = ItemId::default();
+        let mut storey = Storey {
+            doors: vec![Door {
+                id: did,
+                type_name: "Door".to_string(),
+                vertices: vec![],
+                photos: vec![],
+                width_m: 0.9,
+                height_m: 2.0,
+                kind: Some(DoorKind::Solid),
+                placement: None,
+                wall_anchor: None,
+                assembly_id: None,
+                draught_stripped: Some(true),
+            }],
+            ..Storey::default()
+        };
+        set_door_attributes(
+            &mut storey,
+            did,
+            "Front door".to_string(),
+            Some(DoorKind::HalfGlazed),
+            Some(false),
+        );
+        let d = &storey.doors[0];
+        assert_eq!(d.type_name, "Front door");
+        assert_eq!(d.kind, Some(DoorKind::HalfGlazed));
+        assert_eq!(d.draught_stripped, Some(false));
+        // `None` holds the previous kind/draught (only the type name changes).
+        set_door_attributes(&mut storey, did, "Back door".to_string(), None, None);
+        let d = &storey.doors[0];
+        assert_eq!(d.type_name, "Back door");
+        assert_eq!(d.kind, Some(DoorKind::HalfGlazed), "kind held");
+        assert_eq!(d.draught_stripped, Some(false), "draught held");
     }
 
     #[test]
@@ -2519,6 +2946,114 @@ mod tests {
             ..Storey::default()
         };
         assert!(oversized_roof_windows(&storey).is_empty());
+    }
+
+    /// A flat 4×4 ceiling with a 1.12×1.14 rooflight hanging past its WEST
+    /// (x=0) edge by 0.14 m: the detailed core reports the KNOWN overhang and
+    /// labels the OUTWARD direction "west" (corner − closest boundary point =
+    /// (−0.14, 0)) — where the naive centre→corner axis (−0.56, ±0.57) would
+    /// misread it as north/south. The id-list wrapper is a thin projection.
+    #[test]
+    fn roof_window_overhang_reports_distance_and_direction() {
+        let rid = ItemId::default();
+        let region = CeilingRegion {
+            id: rid,
+            polygon: Polygon3D::new(vec![
+                p3(0.0, 0.0, 2.4),
+                p3(4.0, 0.0, 2.4),
+                p3(4.0, 4.0, 2.4),
+                p3(0.0, 4.0, 2.4),
+            ]),
+            opes: Opes::default(),
+            construction_id: ItemId::default(),
+            exposure: CeilingExposure::default(),
+        };
+        let wid = ItemId::default();
+        let storey = Storey {
+            ceilings: CeilingRegions {
+                regions: vec![region],
+            },
+            windows: vec![window(
+                wid,
+                1.12, // across → x −0.14..0.98: 0.14 m past the x=0 edge
+                1.14, // along +y → y 1.43..2.57, well inside
+                Some(OpeningPlacement::Roof {
+                    ceiling_region_id: rid,
+                    plan: (0.42, 2.0),
+                }),
+            )],
+            ..Storey::default()
+        };
+        let overhangs = roof_window_overhangs(&storey);
+        assert_eq!(overhangs.len(), 1);
+        let o = &overhangs[0];
+        assert_eq!(o.id, wid);
+        assert_eq!((o.width_m, o.height_m), (1.12, 1.14));
+        assert!(
+            (o.overhang_m - 0.14).abs() < 1e-2,
+            "overhang {} (want ~0.14)",
+            o.overhang_m
+        );
+        assert_eq!(o.direction, "west");
+        // The bool/id-list wrapper is the same core, projected.
+        assert_eq!(oversized_roof_windows(&storey), vec![wid]);
+    }
+
+    /// Degenerate overhang: a corner failing the fit test while sitting within
+    /// `PROFILE_EPS_M` of the host boundary. Two abutting flat regions share
+    /// the x=4 ridge; a tall narrow rooflight centred near the ridge puts its
+    /// right corners ~0.05 mm past it — the centre-ward nudge is so OBLIQUE
+    /// (mostly along y) that it retreats less than that, so the corner still
+    /// resolves to the neighbour and fails. The corner−boundary vector is then
+    /// noise-length; the direction must come from the centre→corner FALLBACK
+    /// (here "south", the first failing corner's side) — the zero-vector axis
+    /// tie-break would have read "east" regardless of geometry.
+    #[test]
+    fn on_boundary_overhang_direction_falls_back_to_centre_corner_axis() {
+        let region = |id: ItemId, x0: f64, x1: f64| CeilingRegion {
+            id,
+            polygon: Polygon3D::new(vec![
+                p3(x0, 0.0, 2.4),
+                p3(x1, 0.0, 2.4),
+                p3(x1, 4.0, 2.4),
+                p3(x0, 4.0, 2.4),
+            ]),
+            opes: Opes::default(),
+            construction_id: ItemId::default(),
+            exposure: CeilingExposure::default(),
+        };
+        let (host, neighbour) = (ItemId::default(), ItemId::default());
+        let wid = ItemId::default();
+        let storey = Storey {
+            ceilings: CeilingRegions {
+                regions: vec![region(host, 0.0, 4.0), region(neighbour, 4.0, 8.0)],
+            },
+            windows: vec![window(
+                wid,
+                0.2001, // half-width 0.10005 → right corners x ≈ 4.00005 (0.05 mm past)
+                2.0,    // tall → the centre-ward nudge is ~10:1 along y (oblique)
+                Some(OpeningPlacement::Roof {
+                    ceiling_region_id: host,
+                    plan: (3.9, 2.0),
+                }),
+            )],
+            ..Storey::default()
+        };
+        let overhangs = roof_window_overhangs(&storey);
+        assert_eq!(overhangs.len(), 1, "the ridge-straddling corner fails");
+        let o = &overhangs[0];
+        assert!(
+            o.overhang_m > 0.0 && o.overhang_m < crate::ber::structural::PROFILE_EPS_M,
+            "sub-epsilon overhang ({} m) — the degenerate band",
+            o.overhang_m
+        );
+        assert_eq!(
+            o.direction, "south",
+            "direction comes from the centre→corner fallback (first failing corner is the \
+             bottom-right one), not the noise-length boundary vector"
+        );
+        // Still flagged by the wrapper — the fallback changes the label only.
+        assert_eq!(oversized_roof_windows(&storey), vec![wid]);
     }
 
     #[test]
@@ -3813,5 +4348,122 @@ mod tests {
             vec![w2],
             "the roof region knows its roof window"
         );
+    }
+
+    /// PORCH inner walls (`Storey::porch_walls`) host openings exactly like
+    /// outline walls: add → placed + linked into the porch region's `opes`,
+    /// vertices derive on the porch wall's plane, the prune keeps the opening
+    /// while its porch wall lives — and drops it (only it) once the porch
+    /// walls are gone (porch deleted), leaving the outline-wall opening alone.
+    #[test]
+    fn porch_walls_host_openings_like_outline_walls() {
+        let (mut s, wid) = storey_with_wall(6.0);
+        let pid = ItemId::default();
+        // A 2 m porch inner wall along x = 2 (base (2,0)→(2,2)).
+        s.porch_walls.regions.push(wall(
+            pid,
+            vec![
+                p3(2.0, 0.0, 0.0),
+                p3(2.0, 2.0, 0.0),
+                p3(2.0, 2.0, 2.4),
+                p3(2.0, 0.0, 2.4),
+            ],
+        ));
+        let outline_win =
+            add_wall_window(&mut s, wid, 3.0, 1.0, 1.0, 0.8, ItemId::default()).unwrap();
+        let porch_win =
+            add_wall_window(&mut s, pid, 1.0, 0.8, 1.0, 0.8, ItemId::default()).unwrap();
+        assert!(
+            s.porch_walls.regions[0].opes.windows.contains(&porch_win),
+            "the porch wall knows its window at add time"
+        );
+        derive_opening_vertices(&mut s);
+        let w = s.windows.iter().find(|w| w.id == porch_win).unwrap();
+        assert!(!w.vertices.is_empty(), "vertices derived");
+        assert!(
+            w.vertices.iter().all(|v| (v.0 - 2.0).abs() < 1e-4),
+            "on the porch wall's x = 2 plane: {:?}",
+            w.vertices
+        );
+        prune_orphaned_openings(&mut s);
+        assert!(
+            s.windows.iter().any(|w| w.id == porch_win),
+            "a live porch wall is a live host — not pruned"
+        );
+        // Rebuild from placements alone: each set links its own opening.
+        s.walls.regions[0].opes = Opes::default();
+        s.porch_walls.regions[0].opes = Opes::default();
+        rebuild_opes(&mut s);
+        assert_eq!(s.walls.regions[0].opes.windows, vec![outline_win]);
+        assert_eq!(s.porch_walls.regions[0].opes.windows, vec![porch_win]);
+        // Porch deleted → its walls no longer derive → the opening orphans;
+        // the outline window is untouched.
+        s.porch_walls.regions.clear();
+        prune_orphaned_openings(&mut s);
+        assert!(!s.windows.iter().any(|w| w.id == porch_win));
+        assert!(s.windows.iter().any(|w| w.id == outline_win));
+    }
+
+    /// The roofline SILL CLAMP applies on porch walls exactly like outline
+    /// walls: a VERTICAL drag (`move_opening`) and a taller resize
+    /// (`resize_opening`) of a porch-wall opening clamp its sill under the
+    /// porch wall's top profile. The clamp's host lookup goes through
+    /// `placeable_wall` — a porch host must never miss and fall through to
+    /// the `f32::INFINITY` no-op (which would let the opening poke above the
+    /// porch roofline).
+    #[test]
+    fn porch_wall_openings_clamp_under_the_porch_roofline() {
+        let (mut s, _wid) = storey_with_wall(6.0);
+        let pid = ItemId::default();
+        // A 2 m porch inner wall along x = 2, top flat at z = 2.4.
+        s.porch_walls.regions.push(wall(
+            pid,
+            vec![
+                p3(2.0, 0.0, 0.0),
+                p3(2.0, 2.0, 0.0),
+                p3(2.0, 2.0, 2.4),
+                p3(2.0, 0.0, 2.4),
+            ],
+        ));
+        let win = add_wall_window(&mut s, pid, 1.0, 0.8, 1.0, 0.2, ItemId::default()).unwrap();
+        let sill_of = |s: &Storey| -> f32 {
+            match s.windows.iter().find(|w| w.id == win).unwrap().placement {
+                Some(OpeningPlacement::Wall { sill_m, .. }) => sill_m,
+                _ => panic!("wall placement"),
+            }
+        };
+        // Vertical drag far past the roofline: sill clamps to top − height.
+        move_opening(&mut s, OpeningRef::Window(win), 1.0, 5.0).unwrap();
+        assert!(
+            (sill_of(&s) - 1.4).abs() < 1e-4,
+            "dragged sill clamped to 2.4 − 1.0: {}",
+            sill_of(&s)
+        );
+        // A taller resize lowers the sill so the top stays under the roofline.
+        resize_opening(&mut s, OpeningRef::Window(win), 0.8, 2.0).unwrap();
+        assert!(
+            (sill_of(&s) - 0.4).abs() < 1e-4,
+            "resized sill lowered to 2.4 − 2.0: {}",
+            sill_of(&s)
+        );
+    }
+
+    /// An OLD record — serialized before `WallAnchor.porch` existed, so the
+    /// key is absent — still deserializes as an OUTLINE anchor
+    /// (`#[serde(default)]` → `porch: None`).
+    #[test]
+    fn old_wall_anchor_without_porch_key_still_deserializes() {
+        use super::super::fenestration::WallAnchor;
+        let anchor = WallAnchor {
+            wall: manip_plan::SurfaceRef::wall(3),
+            along_fraction: 0.25,
+            porch: None,
+        };
+        let mut json = serde_json::to_value(anchor).unwrap();
+        let obj = json.as_object_mut().unwrap();
+        assert!(obj.remove("porch").is_some(), "key was present");
+        let loaded: WallAnchor = serde_json::from_value(json).expect("old anchor loads");
+        assert_eq!(loaded.porch, None, "defaults to an outline anchor");
+        assert_eq!(loaded.along_fraction, 0.25);
     }
 }

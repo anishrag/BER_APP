@@ -43,7 +43,7 @@ use crate::ui::render::ViewParams;
 use crate::ui::widgets::HintExt;
 use ber_model::ber::ber_struct::Ber;
 use ber_model::ber::common::{ConstructionPhase, ExternalSide, ItemId};
-use ber_model::ber::fenestration::{Frame, Glazing, Overshading};
+use ber_model::ber::fenestration::{DoorKind, Frame, Glazing, Overshading, WindowTopShape};
 use ber_model::ber::final_details::{FinalDetails, FloorKind, HeatingKind, WallFinish};
 use ber_model::ber::objects::{ObjectCategory, ObjectKind};
 use ber_model::ber::structural::{SurfaceCounts, WallExposure};
@@ -67,6 +67,8 @@ pub enum SketchEvent {
     CancelStroke,
     ChangeMode(SketchMode),
     ChangeEditTool(EditTools),
+    /// Dismiss the Extend/Trim stroke-rejection banner.
+    ClearStrokeError,
     /// User confirmed the current collinearity suggestion: walls are the same line.
     AcceptCollinearity,
     /// User rejected the current collinearity suggestion: walls are distinct.
@@ -224,11 +226,24 @@ pub enum SketchEvent {
     /// redraw to change).
     DeleteLivingArea(usize),
     /// Tap (world coords) picking which region of a pending cut becomes the
-    /// living area. A tap outside both candidate regions cancels.
+    /// living area (or the porch, while porch mode is on — the two flows share
+    /// the pick). A tap outside both candidate regions cancels.
     ChooseCutRegion {
         world_x: f64,
         world_y: f64,
     },
+    /// Toggle porch mode: when on, DrawPerpWalls draws a new porch region
+    /// (drawn & dimensioned like a living area; recorded for the resolve step)
+    /// and the other tools edit the most-recent one.
+    SetPorchMode(bool),
+    /// A porch DrawPerpWalls stroke (world coords) — starts a new porch inside
+    /// the storey, drawn like a living area.
+    PorchStrokeWorld {
+        points: Vec<(f32, f32)>,
+    },
+    /// Delete the porch at the given index (porches are non-editable; redraw
+    /// to change).
+    DeletePorch(usize),
     /// Toggle construction-phase tagging mode: when on, DrawPerpWalls carves an
     /// area to assign a construction phase (year of construction) to.
     SetPhaseMode(bool),
@@ -386,6 +401,17 @@ pub enum SketchEvent {
     /// start): apply the computed centre-it-within-its-ceiling-area value
     /// through the same path as a typed distance.
     CentreRoofPosition,
+    /// The 'Centre between 2 points' button on a whole-shape `Translate`
+    /// position prompt: enter the two-tap canvas pick sub-mode.
+    EnterCentreBetween,
+    /// A canvas tap (world coords) while the 'Centre between 2 points' pick is
+    /// on: snap + place the first point, or centre the shape on the second.
+    CentreBetweenTap {
+        world_x: f64,
+        world_y: f64,
+    },
+    /// Cancel the in-flight 'Centre between 2 points' pick (restore the prompt).
+    CancelCentreBetween,
     /// The 'Meet other edge' button on the ridge HEIGHT stage: set the ridge to
     /// the raised neighbour's ceiling height so the sloped area meets it flush.
     MeetOtherEdgeRidgeHeight,
@@ -528,6 +554,10 @@ pub enum SketchEvent {
         /// The chosen complex-window shape + its dims (`None` for every other
         /// tool). When `Some`, the controller derives width/height/shape from it.
         complex_window: Option<ComplexWindowPlacement>,
+        /// The plain Window tool's shaped-top tick (`Some` only when the box
+        /// offered it): Flat / Semi-circular / Pointed. The entered height is
+        /// the TOTAL at the centre; no extra dimensions.
+        window_top: Option<WindowTopShape>,
         /// Which shared window type the placed window joins (an existing id, or a
         /// new attribute set find-or-created on Place). Ignored for a plain Door.
         window_type: WindowTypeChoice,
@@ -581,7 +611,27 @@ pub enum SketchEvent {
     /// "Edit…" on the elevation's selected window: open the placement box in
     /// edit mode, prefilled with its size / window type / overshading.
     EditSelectedOpening,
-    /// Apply the elevation window edit: resize + retype from the box's values.
+    /// "Edit door…" on the elevation's selected standalone door: open the box in
+    /// edit mode, prefilled with its size / type name / kind / draught-stripped.
+    EditSelectedDoor,
+    /// "Edit roof window…" on the plan-selected rooflight: open the box in edit
+    /// mode, prefilled with its size / window type / overshading.
+    EditSelectedRoofWindow,
+    /// Apply the door edit: resize + set the door's type name / kind / draught
+    /// from the box's values.
+    ApplyDoorEdit {
+        width_m: f32,
+        height_m: f32,
+        type_name: String,
+        kind: DoorKind,
+        draught_stripped: bool,
+        /// Photos picked in the box, attached to this door (per-door, not a
+        /// shared group).
+        photos: Vec<(std::path::PathBuf, crate::ui::widgets::PhotoQuality)>,
+    },
+    /// Apply the elevation window edit (a wall window, or a roof window — the
+    /// controller dispatches on what's being edited): resize + retype from the
+    /// box's values.
     ApplyOpeningEdit {
         width_m: f32,
         height_m: f32,
@@ -589,6 +639,10 @@ pub enum SketchEvent {
         /// [`Self::PlaceOpening`]) — resize to the whole wall span / face height.
         full_width: bool,
         full_height: bool,
+        /// The shaped-top tick (see [`Self::PlaceOpening`]) — `Some` only when
+        /// the box offered it (the window's shape is tickable); converts the
+        /// window's top in place.
+        window_top: Option<WindowTopShape>,
         /// Which shared window type the window joins after the edit (see
         /// [`Self::PlaceOpening`]).
         window_type: WindowTypeChoice,
@@ -1089,6 +1143,12 @@ pub struct SketchView<'a> {
     pub position_prompt: Option<PositionPromptUiData>,
     pub position_input: &'a mut String,
     pub position_error: Option<&'a str>,
+    /// The 'Centre between 2 points' pick sub-mode over a whole-shape position
+    /// prompt: `centre_between_picking` routes canvas taps to it and swaps the
+    /// position box for the tap instruction; `centre_between_first` is the
+    /// first placed (snapped) point's world coords, drawn as a marker.
+    pub centre_between_picking: bool,
+    pub centre_between_first: Option<(f64, f64)>,
     /// World-coord points of a provisional ExtendCurve/TrimCurve arc awaiting
     /// its attach dimensions, drawn as an amber preview overlay.
     pub arc_preview: Option<&'a [(f64, f64)]>,
@@ -1103,6 +1163,15 @@ pub struct SketchView<'a> {
     /// Per area: known-length walls as (start, end, length) world coords.
     pub living_area_wall_labels: &'a [Vec<((f64, f64), (f64, f64), f32)>],
     pub active_living_area: Option<usize>,
+    /// Porch drawing mode + the resolved porch outlines (world coords) to
+    /// overlay in a distinct colour with a "Porch" label; `active_porch` is
+    /// the one currently edited (highlighted). Drawn & dimensioned exactly
+    /// like living areas.
+    pub porch_mode: bool,
+    pub porch_polygons: &'a [Vec<(f64, f64)>],
+    /// Per porch: known-length walls as (start, end, length) world coords.
+    pub porch_wall_labels: &'a [Vec<((f64, f64), (f64, f64), f32)>],
+    pub active_porch: Option<usize>,
     /// The two candidate regions of a pending cut (world coords); when
     /// non-empty the user taps one to pick it as the living area.
     pub pending_cut_regions: &'a [Vec<(f64, f64)>],
@@ -1325,6 +1394,10 @@ pub struct SketchView<'a> {
     pub vertex_drop_prompt: Option<VertexDropPromptUiData>,
     pub vertex_drop_inputs: &'a mut [String; 4],
     pub vertex_drop_error: Option<&'a str>,
+    /// Last rejection from an Extend/Trim stroke — shown in the prompt dock
+    /// with a Dismiss button (a silently-dropped stroke reads as "nothing
+    /// happened" on the tablet).
+    pub stroke_error: Option<&'a str>,
     pub can_undo: bool,
     pub can_redo: bool,
     pub view_params: ViewParams,
@@ -1416,6 +1489,10 @@ pub struct SketchView<'a> {
     pub opening_num_opes: &'a mut String,
     /// The door placement's draught-stripped checkbox (default ON).
     pub door_draught_stripped: &'a mut bool,
+    /// "Edit door" box: the door's type name (free text) and construction kind,
+    /// seeded from the door being edited. See [`crate::ui::app::SketchState`].
+    pub door_type_name_input: &'a mut String,
+    pub door_kind: &'a mut DoorKind,
     /// The new-window-type draught-stripped checkbox (default ON).
     pub wt_draught_stripped: &'a mut bool,
     /// Photos picked in the placement box for the window being placed, each
@@ -1679,6 +1756,7 @@ impl SketchPage {
         ui: &mut egui::Ui,
         mut view: SketchView<'_>,
         touch: &mut touch::TouchNav,
+        checklist_bubble: &mut Option<String>,
         mut on_event: F,
     ) where
         F: FnMut(UiEvent),
@@ -1743,7 +1821,7 @@ impl SketchPage {
         // --- The canvas fills whatever's left.
         egui::CentralPanel::default().show_inside(ui, |ui| {
             let canvas_rect = ui.max_rect();
-            canvas::render(ui, &view, touch, &mut on_event);
+            canvas::render(ui, &view, touch, checklist_bubble, &mut on_event);
             // External-photo ANNOTATION takeover (paintbrush over the photo):
             // a centred floating window over the canvas while a session is
             // open. Saves via `AnnotateExternalPhoto`; Save/Cancel both close

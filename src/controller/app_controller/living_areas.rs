@@ -65,6 +65,7 @@ impl AppController {
             // setters clear their siblings. Drawing walls / extend-ortho /
             // extend-curve stay usable WITHIN a living area — those are edit
             // tools, not Mapping modes, so they're deliberately not cleared here.
+            self.set_porch_mode(false);
             self.set_exposure_mode(false);
             self.set_floor_exposure_mode(false);
             self.set_ceiling_exposure_mode(false);
@@ -105,7 +106,10 @@ impl AppController {
     pub fn active_living_area_index(&self) -> Option<usize> {
         match self.document.active {
             ActiveShape::LivingArea(i) => Some(i),
-            ActiveShape::Outline | ActiveShape::PhaseArea | ActiveShape::StepArea => None,
+            ActiveShape::Outline
+            | ActiveShape::Porch(_)
+            | ActiveShape::PhaseArea
+            | ActiveShape::StepArea => None,
         }
     }
 
@@ -289,10 +293,13 @@ impl AppController {
             // along the boundary / a phase line are pinned; only the cut wall is set.
             Ok((boundary, SubareaOutcome::Cut(a, b))) => {
                 log::debug!("── cut splits the available region into two — tap one to keep ──");
-                self.pending_cut = Some([
-                    self.pinned_subarea_slot_refs(&boundary, a, &ref_walls),
-                    self.pinned_subarea_slot_refs(&boundary, b, &ref_walls),
-                ]);
+                self.pending_cut = Some((
+                    SubareaFlow::LivingArea,
+                    [
+                        self.pinned_subarea_slot_refs(&boundary, a, &ref_walls),
+                        self.pinned_subarea_slot_refs(&boundary, b, &ref_walls),
+                    ],
+                ));
                 self.capture_snap_action_pending(
                     SnapAction::Subarea {
                         flow: SubareaFlow::LivingArea,
@@ -328,7 +335,7 @@ impl AppController {
     pub fn pending_cut_regions(&self) -> Vec<Vec<(f64, f64)>> {
         self.pending_cut
             .as_ref()
-            .map(|regions| {
+            .map(|(_flow, regions)| {
                 regions
                     .iter()
                     .map(|s| {
@@ -349,9 +356,13 @@ impl AppController {
     }
 
     /// Pick the pending-cut region containing `(world_x, world_y)` as the living
-    /// area. A tap outside both regions cancels the pick. No-op if none pending.
+    /// area — or as the PORCH when the cut was staged by a porch stroke. The
+    /// flow travels WITH the staged regions, so the commit target is decided by
+    /// the stroke that cut them, never by the current mode flags (which can
+    /// have shifted by pick time — e.g. an undo restoring the other mode). A
+    /// tap outside both regions cancels the pick. No-op if none pending.
     pub fn choose_cut_region(&mut self, world_x: f32, world_y: f32) {
-        let Some([a, b]) = self.pending_cut.take() else {
+        let Some((flow, [a, b])) = self.pending_cut.take() else {
             return;
         };
         let chosen = if a.floor_plan.contains_point(world_x, world_y) {
@@ -368,12 +379,16 @@ impl AppController {
                 return;
             }
             let undo_snap = self.current_history_snapshot();
-            self.commit_new_living_area(slot, undo_snap);
+            if flow == SubareaFlow::Porch {
+                self.commit_new_porch(slot, undo_snap);
+            } else {
+                self.commit_new_living_area(slot, undo_snap);
+            }
             // The stroke's tags stay live: replay now re-runs stroke + pick.
-            self.record_subarea_pick(SubareaFlow::LivingArea, Some((world_x, world_y)));
+            self.record_subarea_pick(flow, Some((world_x, world_y)));
         } else {
             // Cancelled — the cut (and the snaps its tags describe) is gone.
-            self.record_subarea_pick(SubareaFlow::LivingArea, None);
+            self.record_subarea_pick(flow, None);
         }
     }
 

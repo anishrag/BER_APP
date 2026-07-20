@@ -37,6 +37,13 @@ impl AppController {
         if on {
             self.exit_openings_mode();
             self.living_area_mode = false;
+            self.porch_mode = false;
+            // The raw flag writes above skip the setters' own cleanup, and the
+            // `activate_shape(Outline)` below early-returns when the outline is
+            // already active — clear the living-area/porch staged cut-pick
+            // explicitly so it can't linger under phase mode (its pick would
+            // commit a sub-area the assessor no longer sees staged).
+            self.pending_cut = None;
             self.exposure_mode = false;
             self.step_mode = false;
             self.ceiling_step_mode = false;

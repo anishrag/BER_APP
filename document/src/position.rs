@@ -13,6 +13,7 @@
 //! silently from geometry coincidence.
 
 use crate::{ActiveShape, StoreyDoc};
+use domain::points::Point2f32;
 use manip_plan::{find_flipped_edge, FloorPlan, ParameterAxis, ParameterId, VertexId};
 
 /// Coordinate tolerance for reference dedupe and "is this wall already on the
@@ -509,6 +510,62 @@ impl StoreyDoc {
         self.apply_translate_target(&prompt, target, "centre")
     }
 
+    /// The 'Centre between 2 points' action for a whole-shape `Translate`
+    /// position prompt: given two ALREADY-SNAPPED world points, translate the
+    /// shape so its axis-extent MIDPOINT lands on the two points' midpoint
+    /// **on the prompt's axis ONLY** — a vertical (Y) prompt uses
+    /// `(a.y + b.y)/2` and ignores x entirely; a horizontal (X) prompt uses
+    /// `(a.x + b.x)/2` and ignores y. Same whole-shape-extent semantics as
+    /// [`center_current_position`], just targeting the PICKED midpoint instead
+    /// of the reference footprint's, and applied through the SAME translate
+    /// path (guardrail + rollback + `finish_position_apply`). The caller (the
+    /// shell) does the snapping — it holds the plans and tolerance; this is
+    /// pure model mutation. `Err` when there is no `Translate` prompt open.
+    pub fn center_current_position_between(
+        &mut self,
+        a: Point2f32,
+        b: Point2f32,
+    ) -> Result<(), String> {
+        let prompt = self
+            .dimensioning
+            .current_position_prompt
+            .clone()
+            .ok_or_else(|| "no active position prompt".to_string())?;
+        if prompt.kind != PositionPromptKind::Translate {
+            return Err("only a whole-shape position can be centred".to_string());
+        }
+        let opt = *prompt
+            .options
+            .get(prompt.current_idx)
+            .ok_or_else(|| "position prompt has no selected option".to_string())?;
+        let (ring, edge_start) = self
+            .floor_plan
+            .find_vertex(opt.area_wall_vid)
+            .ok_or_else(|| "prompt wall vertex no longer exists".to_string())?;
+
+        let axis = prompt.axis;
+        // The midpoint on the PROMPT'S axis only — the other axis is ignored.
+        let target_mid = match axis {
+            ParameterAxis::X => (a.x + b.x) / 2.0,
+            ParameterAxis::Y => (a.y + b.y) / 2.0,
+        };
+        let (shape_lo, shape_hi) = axis_extent(&self.floor_plan, axis);
+        // Centre the shape's extent on the picked midpoint (mid − len/2), then
+        // translate so the measured wall lands at its current coord plus that
+        // same delta — the target the shared path expects (cf. `center_current_position`).
+        let len = shape_hi - shape_lo;
+        let centred_lo = target_mid - len / 2.0;
+        let measured_current = {
+            let p = self.floor_plan.polygons()[ring][edge_start];
+            match axis {
+                ParameterAxis::X => p.x,
+                ParameterAxis::Y => p.y,
+            }
+        };
+        let target = measured_current + (centred_lo - shape_lo);
+        self.apply_translate_target(&prompt, target, "centre between two points")
+    }
+
     /// Skip the current position prompt — accept the drawn position. Records
     /// the axis (`Translate`) or the param (`Wall`) so it isn't re-asked, then
     /// recomputes the next prompt.
@@ -820,6 +877,27 @@ mod tests {
         assert!(
             doc.dimensioning.current_position_prompt.is_none(),
             "but a living area is never asked"
+        );
+    }
+
+    /// Porches carry the free-axes record but — like living areas — are NEVER
+    /// position-prompted.
+    #[test]
+    fn porch_never_prompts() {
+        let mut doc = storey_10x10();
+        let slot = interior_square_slot(&doc);
+        doc.add_active_porch(slot);
+        doc.recompute_prompt();
+        complete_length_loop(&mut doc);
+        assert_eq!(
+            doc.dimensioning.position_free_axes,
+            vec![ParameterAxis::X, ParameterAxis::Y],
+            "the record is carried"
+        );
+        assert!(doc.dimensioning.current_prompt.is_none());
+        assert!(
+            doc.dimensioning.current_position_prompt.is_none(),
+            "but a porch is never asked"
         );
     }
 

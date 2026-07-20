@@ -12,7 +12,10 @@ fn activate_shape_same_target_is_a_noop_for_transient_state() {
     let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
     assert_eq!(c.document.active, ActiveShape::Outline); // default active shape
                                                          // Seed transient state that a real shape-switch would clear.
-    c.pending_cut = Some([ShapeSlot::default(), ShapeSlot::default()]);
+    c.pending_cut = Some((
+        SubareaFlow::LivingArea,
+        [ShapeSlot::default(), ShapeSlot::default()],
+    ));
     c.document.edit_state.dragging = true;
     // Re-activating the SAME shape must leave it all intact.
     c.activate_shape(ActiveShape::Outline);
@@ -537,6 +540,11 @@ fn extend_split_wall_keeps_exposure_on_both_flanks() {
         Point2f32::new(7.0, 0.0),
     ])
     .expect("dormer extend");
+    // Complete the dimensioning loop for the extend's freshly-minted params —
+    // resolve DEFERS while the outline is in flux (the in-flux-outline gate,
+    // field report eddc2f3f), so the record only re-derives once the loop is
+    // done.
+    c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
 
     c.materialize();
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
@@ -589,6 +597,9 @@ fn extend_split_wall_partial_paint_does_not_leak_to_the_far_flank() {
         Point2f32::new(8.0, 0.0),
     ])
     .expect("dormer extend");
+    // Complete the dimensioning loop for the extend's freshly-minted params —
+    // resolve defers while the outline is in flux (see the gate note above).
+    c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
 
     c.materialize();
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
@@ -621,6 +632,326 @@ fn extend_split_wall_partial_paint_does_not_leak_to_the_far_flank() {
         Some(WallExposure::Unset),
         "the far flank's own span was unpainted → Unset (paint did NOT leak)"
     );
+}
+
+/// Every (x, y) plan position appearing in a wall region's polygon, deduped —
+/// a clean wall over a flat roof is a plain quad with exactly TWO of them (its
+/// base-edge endpoints); a stale roof edge shows up as an extra top vertex.
+fn wall_plan_positions(r: &ber_model::ber::structural::WallRegion) -> Vec<(i64, i64)> {
+    let mut pts: Vec<(i64, i64)> = r
+        .polygon
+        .exterior
+        .iter()
+        .map(|v| ((v.x * 1e6).round() as i64, (v.y * 1e6).round() as i64))
+        .collect();
+    pts.sort_unstable();
+    pts.dedup();
+    pts
+}
+
+/// FIELD REPORT eddc2f3f (8 Ashgrove Hill): trimming a corner of a
+/// fully-resolved, exposure-painted storey left "lines everywhere" — the
+/// resolve that ran MID-dimensioning re-fit the regions-as-truth ceilings
+/// against the PROVISIONAL (drawn) cut line, and the post-dimensioning resolve
+/// then intersected against those scarred rings: the superseded line survived
+/// in the porch ceiling, `Unset` sliver fills appeared between the drawn and
+/// the dimensioned cut, and wall tops traced the stale edges ("the exposures
+/// set for the old walls linger rather than cropping with the walls").
+///
+/// With the in-flux-outline gate, resolve DEFERS while the trim's freshly
+/// minted params are still being prompted for — the record holds the pre-trim
+/// state untouched — and the first post-completion resolve clips against the
+/// FINAL outline only: one clean ceiling, quad walls, and the painted wall
+/// exposure CROPPED to the shortened wall.
+#[test]
+fn trim_defers_resolve_until_dimensioned_and_paint_crops_with_the_wall() {
+    let mut c = dimensioned_square_controller(); // 10×10, storey 0
+    c.set_default_ceiling_height(2.4).unwrap();
+    // Paint the whole TOP wall (y=10) Exposed — the paint that must crop.
+    let (vid, a, b) = c
+        .document
+        .outline
+        .floor_plan
+        .perimeter_walls()
+        .into_iter()
+        .find(|(_, a, b)| (a.y - 10.0).abs() < 1e-4 && (b.y - 10.0).abs() < 1e-4)
+        .expect("a y=10 wall");
+    let len = ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt();
+    c.document
+        .set_wall_section(vid, 0.0, len, len, WallExposure::Exposed);
+    c.commit_to_ber().unwrap();
+    let pre = c.current_record.as_ref().unwrap().data.storeys[0].clone();
+    assert_eq!(pre.ceilings.regions.len(), 1, "fixture: one flat ceiling");
+
+    // Chamfer-trim the (10,10) corner. The trim mints new params → the outline
+    // is IN FLUX until the dimensioning loop completes.
+    c.set_edit_mode(EditTools::Trim);
+    c.apply_trim_stroke(&[Point2f32::new(10.0, 7.5), Point2f32::new(7.5, 10.0)])
+        .expect("trim applies");
+    c.materialize();
+    assert!(
+        !c.document.storeys[0].measurements_complete(),
+        "fixture: the trim left params to dimension (the in-flux state)"
+    );
+    // Mid-loop, the record held STEADY: the provisional cut line never reached
+    // the resolved regions (stale but consistent — no scar to intersect later).
+    let mid = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert_eq!(
+        mid.ceilings.regions[0].polygon.exterior, pre.ceilings.regions[0].polygon.exterior,
+        "resolve deferred while the outline is mid-dimensioning"
+    );
+
+    // The dimensioning loop completes (drawn values accepted) → the next
+    // resolve derives the FINAL chamfered outline in ONE clean projection.
+    // (A real `apply_dimension` marks dirty; the direct known_params write
+    // used by tests must do the same for `materialize` to re-derive.)
+    c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
+    c.mark_dirty().unwrap();
+    c.materialize();
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+
+    // One clean re-fit ceiling: no Unset sliver fills, nothing past the cut.
+    assert_eq!(storey.ceilings.regions.len(), 1, "no sliver regions");
+    for v in &storey.ceilings.regions[0].polygon.exterior {
+        assert!(
+            v.x + v.y <= 17.5 + 1e-3,
+            "no ceiling vertex beyond the chamfer: ({}, {})",
+            v.x,
+            v.y
+        );
+    }
+    // Every wall is a plain quad — no phantom top vertex from a stale edge.
+    for w in &storey.walls.regions {
+        assert_eq!(
+            wall_plan_positions(w).len(),
+            2,
+            "wall carries only its base-edge plan positions: {:?}",
+            w.polygon.exterior
+        );
+    }
+    // THE USER'S COMPLAINT: the painted exposure crops with the shortened
+    // wall. The y=10 wall now ends at x=7.5; its Exposed region must cover
+    // exactly the surviving span and nothing may extend past the chamfer.
+    let top_walls: Vec<_> = storey
+        .walls
+        .regions
+        .iter()
+        .filter(|r| {
+            r.base_edge()
+                .is_some_and(|(a, b)| (a.y - 10.0).abs() < 1e-3 && (b.y - 10.0).abs() < 1e-3)
+        })
+        .collect();
+    assert!(!top_walls.is_empty(), "the shortened top wall resolves");
+    for w in &top_walls {
+        let (a, b) = w.base_edge().unwrap();
+        assert!(
+            a.x <= 7.5 + 1e-3 && b.x <= 7.5 + 1e-3,
+            "no top-wall region extends past the chamfered end: {:?}",
+            (a, b)
+        );
+        assert_eq!(
+            w.exposure,
+            WallExposure::Exposed,
+            "the paint survives on the surviving span"
+        );
+    }
+    let covered: f64 = top_walls
+        .iter()
+        .map(|w| {
+            let (a, b) = w.base_edge().unwrap();
+            (b.x - a.x).abs()
+        })
+        .sum();
+    assert!(
+        (covered - 7.5).abs() < 1e-2,
+        "the paint covers exactly the shortened wall (got {covered})"
+    );
+}
+
+/// UNDO must roll back the RESOLVE-side effects of the undone action too
+/// (field report eddc2f3f, second mechanism): after trim → undo, the resolved
+/// record may keep NO geometry from the undone cut — otherwise a later
+/// re-trim + resolve intersects against the stale rings and the abandoned
+/// chamfer lingers as extra lines. The `HistorySnapshot` carries the storey's
+/// record (`record_storey`), and the post-undo re-resolve must reproduce the
+/// pre-trim regions exactly; a different re-trim afterwards must come out
+/// clean, with no coordinate from the first (undone) attempt.
+#[test]
+fn undo_of_a_trim_rolls_back_the_resolved_record() {
+    let mut c = dimensioned_square_controller(); // 10×10
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.commit_to_ber().unwrap();
+    let pre = c.current_record.as_ref().unwrap().data.storeys[0].clone();
+
+    // Trim attempt 1: chamfer A — (10,7)↔(7,10) — dimensioned as drawn.
+    c.set_edit_mode(EditTools::Trim);
+    c.apply_trim_stroke(&[Point2f32::new(10.0, 7.0), Point2f32::new(7.0, 10.0)])
+        .expect("trim A applies");
+    c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
+    c.materialize();
+    let has_pt = |storey: &ber_model::ber::structural::Storey, x: f64, y: f64| {
+        storey
+            .ceilings
+            .regions
+            .iter()
+            .flat_map(|r| r.polygon.exterior.iter())
+            .chain(
+                storey
+                    .walls
+                    .regions
+                    .iter()
+                    .flat_map(|r| r.polygon.exterior.iter()),
+            )
+            .any(|v| (v.x - x).abs() < 1e-3 && (v.y - y).abs() < 1e-3)
+    };
+    assert!(
+        has_pt(
+            &c.current_record.as_ref().unwrap().data.storeys[0],
+            7.0,
+            10.0
+        ),
+        "fixture: chamfer A resolved into the record"
+    );
+
+    // UNDO the trim: the record must return to the PRE-TRIM state — no
+    // chamfer-A geometry may survive anywhere in the resolved regions.
+    c.undo().unwrap();
+    c.materialize();
+    let after_undo = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert_eq!(
+        after_undo.ceilings.regions[0].polygon.exterior, pre.ceilings.regions[0].polygon.exterior,
+        "undo restored the pre-trim ceilings exactly"
+    );
+    assert_eq!(
+        after_undo.floors.to_vertex_lists(),
+        pre.floors.to_vertex_lists(),
+        "undo restored the pre-trim floors exactly"
+    );
+    assert!(
+        !has_pt(after_undo, 7.0, 10.0) && !has_pt(after_undo, 10.0, 7.0),
+        "no geometry from the undone trim survives in the resolved record"
+    );
+
+    // Trim attempt 2: a DIFFERENT chamfer B — (10,8.5)↔(8.5,10) — dimensioned.
+    c.apply_trim_stroke(&[Point2f32::new(10.0, 8.5), Point2f32::new(8.5, 10.0)])
+        .expect("trim B applies");
+    c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
+    c.materialize();
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+
+    // Clean result: one ceiling, quad walls, and NOTHING from abandoned A.
+    assert_eq!(storey.ceilings.regions.len(), 1, "no sliver regions");
+    assert!(
+        !has_pt(storey, 7.0, 10.0) && !has_pt(storey, 10.0, 7.0),
+        "the undone chamfer A left no coordinates behind"
+    );
+    for w in &storey.walls.regions {
+        assert_eq!(
+            wall_plan_positions(w).len(),
+            2,
+            "wall carries only its base-edge plan positions: {:?}",
+            w.polygon.exterior
+        );
+    }
+    assert!(
+        !storey.ceilings_carry_outline_edit_scars(),
+        "the resolved record is scar-free"
+    );
+}
+
+/// LOAD-TIME HEAL for records scarred BEFORE the in-flux-outline gate (field
+/// report eddc2f3f): a saved BER whose regions-as-truth ceilings carry an
+/// unjustified flat seam (the superseded cut line + `Unset` fill pieces) is
+/// detected on reopen (`Storey::ceilings_carry_outline_edit_scars`) and its
+/// ceilings recomposed from the durable inputs — the painted exposure
+/// re-stamps via the containment fallback, and the walls re-derive against
+/// the clean roof. A clean record keeps its stored ceilings verbatim (the
+/// detector never fires), preserving the reload fixpoint.
+#[test]
+fn outline_scarred_ceilings_heal_on_reopen() {
+    use ber_model::ber::common::ItemId;
+    use ber_model::ber::structural::{
+        CeilingExposure, CeilingRegion, CeilingRegions, Opes, Polygon3D,
+    };
+    use domain::points::Point3f64;
+
+    let mut c = dimensioned_square_controller(); // 10×10
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.commit_to_ber().unwrap();
+    let id = c.current_record.as_ref().unwrap().id;
+
+    // Bake the pre-fix scar into the record: the single flat ceiling split
+    // along a stale cut line — the main piece painted ExposedRoof, the corner
+    // triangle an `Unset` fill (the eddc2f3f fingerprint). Together they tile
+    // the unchanged footprint, so a normal resolve keeps them verbatim.
+    {
+        let record = c.current_record.as_mut().unwrap();
+        let storey = &mut record.data.storeys[0];
+        let cid = storey.ceilings.regions[0].construction_id;
+        let mk = |pts: &[(f64, f64)], exposure: CeilingExposure| CeilingRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(
+                pts.iter()
+                    .map(|&(x, y)| Point3f64::new(x, y, 2.4))
+                    .collect(),
+            ),
+            opes: Opes::default(),
+            construction_id: cid,
+            exposure,
+        };
+        storey.ceilings = CeilingRegions {
+            regions: vec![
+                mk(
+                    &[
+                        (0.0, 0.0),
+                        (10.0, 0.0),
+                        (10.0, 8.0),
+                        (8.0, 10.0),
+                        (0.0, 10.0),
+                    ],
+                    CeilingExposure::ExposedRoof,
+                ),
+                mk(
+                    &[(10.0, 8.0), (10.0, 10.0), (8.0, 10.0)],
+                    CeilingExposure::Unset,
+                ),
+            ],
+        };
+        assert!(
+            storey.ceilings_carry_outline_edit_scars(),
+            "fixture: the baked seam is detected as a scar"
+        );
+    }
+    // The scar survives a normal save (regions-as-truth: the footprint is
+    // unchanged, so resolve keeps the stored ceilings verbatim).
+    c.mark_dirty().unwrap();
+    c.flush_if_dirty().unwrap();
+
+    // REOPEN: the load-path heal detects the scar, recomposes the ceilings
+    // from the durable inputs, and the re-resolve re-stamps the paint.
+    c.open_ber(&id).unwrap();
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert_eq!(
+        storey.ceilings.regions.len(),
+        1,
+        "healed back to the single flat ceiling (scar seam + Unset fill gone)"
+    );
+    assert_eq!(
+        storey.ceilings.regions[0].exposure,
+        ber_model::ber::structural::CeilingExposure::ExposedRoof,
+        "the painted exposure re-stamped onto the healed region (containment fallback)"
+    );
+    assert!(
+        !storey.ceilings_carry_outline_edit_scars(),
+        "the reopened record is scar-free"
+    );
+    for w in &storey.walls.regions {
+        assert_eq!(
+            wall_plan_positions(w).len(),
+            2,
+            "walls re-derived against the healed roof are plain quads"
+        );
+    }
 }
 
 fn ring_area(c: &AppController) -> f32 {
@@ -953,6 +1284,466 @@ fn undimensioned_living_area_is_not_persisted() {
         !storey.floors.regions.is_empty(),
         "but the dimensioned outline is"
     );
+}
+
+/// Drawing a porch inside a dimensioned storey (the living-area mirror): it
+/// inherits the storey's scale (no recalibration), becomes the active shape,
+/// is stored, and the storey outline is untouched when you switch back.
+#[test]
+fn porch_inherits_scale_is_stored_and_leaves_outline_intact() {
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    let _ = c.create_ber(
+        "T".into(),
+        chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+    );
+    let square = vec![
+        Point2f32::new(0.0, 0.0),
+        Point2f32::new(10.0, 0.0),
+        Point2f32::new(10.0, 10.0),
+        Point2f32::new(0.0, 10.0),
+        Point2f32::new(0.2, 0.2),
+    ];
+    c.document.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.5, true).unwrap();
+    c.document.dimensioning.scale_set = true; // storey is dimensioned (metres)
+    c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
+    let outline_verts = c.document.floor_plan.polygons()[0].len();
+
+    // Enter porch mode and draw a sub-area inside the storey.
+    c.set_porch_mode(true);
+    assert!(c.porch_mode());
+    let porch: Vec<(f32, f32)> = vec![(2.0, 2.0), (6.0, 2.0), (6.0, 6.0), (2.0, 6.0), (2.1, 2.1)];
+    c.apply_porch_stroke_event(&porch);
+
+    assert_eq!(c.porch_count(), 1, "the porch is stored");
+    assert_eq!(c.active_porch_index(), Some(0), "it's the active shape");
+    // Inherits the storey scale — no first-dimension calibration step.
+    assert!(
+        c.dimensioning_scale_set(),
+        "a porch inside a dimensioned storey inherits its scale"
+    );
+    assert!(
+        c.document.floor_plan.polygons()[0].len() >= 4,
+        "a sub-area was drawn"
+    );
+    assert_eq!(c.porch_polygons().len(), 1, "renderable");
+
+    // Switch back to the outline: it's restored exactly, porch still stored.
+    c.set_porch_mode(false);
+    assert_eq!(c.active_porch_index(), None);
+    assert_eq!(
+        c.document.floor_plan.polygons()[0].len(),
+        outline_verts,
+        "the storey outline is untouched by drawing a porch"
+    );
+    assert_eq!(c.porch_count(), 1, "the porch is still kept");
+}
+
+/// A fully-dimensioned porch is persisted as resolved geometry (into
+/// `Storey.porches`) and comes back on reopen, alongside the outline — the
+/// mirror of `living_areas_survive_save_and_reopen`.
+#[test]
+fn porches_survive_save_and_reopen() {
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    let ber = c.create_ber(
+        "T".into(),
+        chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+    );
+    let square = vec![
+        Point2f32::new(0.0, 0.0),
+        Point2f32::new(10.0, 0.0),
+        Point2f32::new(10.0, 10.0),
+        Point2f32::new(0.0, 10.0),
+        Point2f32::new(0.2, 0.2),
+    ];
+    c.document.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.5, true).unwrap();
+    c.document.dimensioning.scale_set = true;
+    c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
+    c.commit_to_ber().unwrap();
+
+    c.set_porch_mode(true);
+    c.apply_porch_stroke_event(&[(2.0, 2.0), (6.0, 2.0), (6.0, 6.0), (2.0, 6.0), (2.1, 2.1)]);
+    assert_eq!(c.porch_count(), 1);
+    // Finalise the porch (mark every wall dimensioned) so it's written to the
+    // DB — only finalised geometry is persisted.
+    c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
+    c.commit_to_ber().unwrap();
+    c.flush_if_dirty().unwrap();
+
+    // The DURABLE record carries it in `Storey.porches` (the persist path,
+    // not just the editing-layer snapshot).
+    let durable = BerRepository::new(&c.conn).load(&ber.id).unwrap();
+    assert_eq!(
+        durable.data.storeys.first().unwrap().porches.regions.len(),
+        1,
+        "the finalised porch is written into Storey.porches"
+    );
+
+    // Reopen from the DB (same connection): the porch is restored.
+    c.open_ber(&ber.id).unwrap();
+    assert_eq!(c.porch_count(), 1, "the porch survives save + reopen");
+    assert_eq!(
+        c.active_porch_index(),
+        None,
+        "reopen starts on the storey outline"
+    );
+    assert_eq!(c.porch_polygons().len(), 1, "still renderable after reopen");
+}
+
+/// A porch drawn but not dimensioned is excluded from the DB write (kept in
+/// memory); the dimensioned outline around it still persists — the mirror of
+/// `undimensioned_living_area_is_not_persisted`.
+#[test]
+fn undimensioned_porch_is_not_persisted() {
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    let ber = c.create_ber(
+        "T".into(),
+        chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+    );
+    c.document.floor_plan = FloorPlan::from_points_to_orthogonal(
+        &[
+            Point2f32::new(0., 0.),
+            Point2f32::new(10., 0.),
+            Point2f32::new(10., 10.),
+            Point2f32::new(0., 10.),
+            Point2f32::new(0.2, 0.2),
+        ],
+        0.5,
+        true,
+    )
+    .unwrap();
+    c.document.dimensioning.scale_set = true;
+    c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
+    c.commit_to_ber().unwrap();
+
+    c.set_porch_mode(true);
+    c.apply_porch_stroke_event(&[(2.0, 2.0), (6.0, 2.0), (6.0, 6.0), (2.0, 6.0), (2.1, 2.1)]);
+    assert_eq!(c.porch_count(), 1, "drawn (in memory)");
+    c.flush_if_dirty().unwrap();
+
+    // The DURABLE record holds no porch (un-dimensioned → filtered), though
+    // the dimensioned outline IS written.
+    let durable = BerRepository::new(&c.conn).load(&ber.id).unwrap();
+    let storey = durable.data.storeys.first().expect("storey persisted");
+    assert!(
+        storey.porches.regions.is_empty(),
+        "un-dimensioned porch isn't written into the durable BER record"
+    );
+    assert!(
+        !storey.floors.regions.is_empty(),
+        "but the dimensioned outline is"
+    );
+}
+
+/// ALL snap lines are live while drawing a porch (field request, 8 Ashgrove
+/// Hill): a porch wall drawn ~0.1 m off a "Divide ceiling" DIVIDER line
+/// pre-snaps exactly ONTO it, ELECTIVE + tagged — the tag overlay carries a
+/// `ToReferenceSegment` decision, and replaying with every snap skipped
+/// (`unsnap_last`, twice: the second round also declines the carve's
+/// wall-leveling re-catch, exactly like the shipped phase-line flows) puts
+/// the wall back where it was drawn.
+#[test]
+fn porch_stroke_snaps_onto_a_ceiling_divider_line() {
+    let mut c = ceiling_ready_controller();
+    ceiling_step_to_amount_at_x4(&mut c);
+    c.assign_ceiling_step_delta(0.0).unwrap(); // same-height divider at x = 4
+    assert_eq!(c.ceiling_divider_lines().len(), 1, "divider line exists");
+
+    c.set_porch_mode(true);
+    // Free-standing porch ring whose right wall is drawn 0.1 m short of the
+    // divider (well inside the viewport-relative tolerance, ~0.57 m here).
+    c.apply_porch_stroke_event(&[(1.0, 2.0), (3.9, 2.0), (3.9, 6.0), (1.0, 6.0), (1.05, 2.05)]);
+    assert_eq!(c.porch_count(), 1, "the porch committed");
+    let max_x = |c: &AppController| {
+        c.document
+            .floor_plan
+            .get_points()
+            .iter()
+            .map(|p| p.x)
+            .fold(f32::NEG_INFINITY, f32::max)
+    };
+    assert!(
+        (max_x(&c) - 4.0).abs() < 1e-3,
+        "the right wall snapped ONTO the divider (got {})",
+        max_x(&c)
+    );
+
+    // The snap is tagged (replayable), with the reference-segment kind.
+    let tags = c.snap_overlay();
+    assert!(!tags.is_empty(), "the elective snap is tagged");
+    assert!(
+        tags.iter()
+            .any(|t| t.current_kind == Some(manip_plan::SnapKind::ToReferenceSegment)),
+        "tagged as a reference-segment snap (got {tags:?})"
+    );
+
+    // Round 1: decline the pre-snap — the carve's wall-leveling may re-catch
+    // the wall on the same line (a fresh ToParallelWall tag). Round 2 declines
+    // that too: the wall is back at the drawn 3.9.
+    c.unsnap_last();
+    c.unsnap_last();
+    assert!(
+        (max_x(&c) - 3.9).abs() < 0.02,
+        "with every snap declined the wall stays where drawn (got {})",
+        max_x(&c)
+    );
+}
+
+/// A porch stroke FAR from every divider/step line is untouched by the line
+/// pre-snap: no elective decision is recorded (no tags) and the carved ring
+/// stays where it was drawn.
+#[test]
+fn porch_stroke_far_from_divider_is_unchanged() {
+    let mut c = ceiling_ready_controller();
+    ceiling_step_to_amount_at_x4(&mut c);
+    c.assign_ceiling_step_delta(0.0).unwrap(); // divider at x = 4
+    c.set_porch_mode(true);
+    // Every point is ≥ 2 m from the divider and from the outline walls.
+    c.apply_porch_stroke_event(&[(6.0, 2.0), (8.0, 2.0), (8.0, 6.0), (6.0, 6.0), (6.05, 2.05)]);
+    assert_eq!(c.porch_count(), 1);
+    let ring = c.document.floor_plan.get_points();
+    let min_x = ring.iter().map(|p| p.x).fold(f32::INFINITY, f32::min);
+    let max_x = ring.iter().map(|p| p.x).fold(f32::NEG_INFINITY, f32::max);
+    // Loose eps: the orthogonal FIT of the drawn ring (incl. its 6.05 closing
+    // point) may sit a few cm off; the point is that nothing snapped the metre
+    // and a half to the divider.
+    assert!(
+        (min_x - 6.0).abs() < 0.1 && (max_x - 8.0).abs() < 0.1,
+        "far ring unchanged (x extent {min_x}..{max_x})"
+    );
+    assert!(
+        c.snap_overlay().is_empty(),
+        "nothing in reach → no elective decision, no tags"
+    );
+}
+
+/// A porch edge lying exactly ON a ceiling divider (via the pre-snap) still
+/// classifies as an INNER edge — it is interior, not on the outline — so the
+/// resolve extrudes a porch wall along it (`Storey::porch_walls`).
+#[test]
+fn porch_edge_on_divider_still_classifies_inner_and_derives_walls() {
+    let mut c = ceiling_ready_controller();
+    ceiling_step_to_amount_at_x4(&mut c);
+    c.assign_ceiling_step_delta(0.0).unwrap(); // divider at x = 4
+    c.set_porch_mode(true);
+    // Open stroke attached to the outline wall x = 0; the far wall (drawn at
+    // 3.9) snaps onto the divider at x = 4. Both ends on the outline → the
+    // shared cut flow stages two regions; pick the enclosed one.
+    c.apply_porch_stroke_event(&[(0.0, 2.0), (3.9, 2.0), (3.9, 6.0), (0.0, 6.0)]);
+    c.choose_cut_region(2.0, 4.0);
+    assert_eq!(c.porch_count(), 1);
+    // Finalise (mark every wall dimensioned) so the porch resolves.
+    c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
+    c.commit_to_ber().unwrap();
+
+    // The divider-coincident edge is an INNER edge (interior cut), while the
+    // attach edge along the outline wall x = 0 is not.
+    let inner = c.document.finalised_porch_inner_edges();
+    assert!(
+        inner
+            .iter()
+            .any(|[a, b]| (a.x - 4.0).abs() < 1e-3 && (b.x - 4.0).abs() < 1e-3),
+        "the edge ON the divider classifies as inner (got {inner:?})"
+    );
+    assert!(
+        !inner
+            .iter()
+            .any(|[a, b]| a.x.abs() < 1e-3 && b.x.abs() < 1e-3),
+        "the outline-flush edge is excluded"
+    );
+
+    // The resolve extruded a porch wall along the divider-coincident edge.
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    let on_divider = storey.porch_walls.regions.iter().any(|w| {
+        w.base_edge()
+            .is_some_and(|(a, b)| (a.x - 4.0).abs() < 1e-3 && (b.x - 4.0).abs() < 1e-3)
+    });
+    assert!(
+        on_divider,
+        "porch_walls derive on the divider-coincident inner edge (got {:?})",
+        storey.porch_walls.regions.len()
+    );
+}
+
+/// Porch mode and living-area mode are mutually exclusive: entering one exits
+/// the other (both directions), and the active shape follows the mode.
+#[test]
+fn porch_and_living_area_modes_are_mutually_exclusive() {
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    let _ = c.create_ber(
+        "T".into(),
+        chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+    );
+    c.document.floor_plan = FloorPlan::from_points_to_orthogonal(
+        &[
+            Point2f32::new(0., 0.),
+            Point2f32::new(10., 0.),
+            Point2f32::new(10., 10.),
+            Point2f32::new(0., 10.),
+            Point2f32::new(0.2, 0.2),
+        ],
+        0.5,
+        true,
+    )
+    .unwrap();
+    c.document.dimensioning.scale_set = true;
+    c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
+
+    c.set_living_area_mode(true);
+    c.apply_living_area_stroke_event(&[(2.0, 2.0), (6.0, 2.0), (6.0, 6.0), (2.0, 6.0), (2.1, 2.1)]);
+    assert!(c.living_area_mode());
+    assert_eq!(c.active_living_area_index(), Some(0));
+
+    // Entering porch mode exits living-area mode (and its active shape).
+    c.set_porch_mode(true);
+    assert!(c.porch_mode(), "porch mode is on");
+    assert!(!c.living_area_mode(), "living-area mode was exited");
+    assert_eq!(c.active_living_area_index(), None);
+    c.apply_porch_stroke_event(&[(7.0, 7.0), (9.0, 7.0), (9.0, 9.0), (7.0, 9.0), (7.1, 7.1)]);
+    assert_eq!(c.active_porch_index(), Some(0));
+
+    // And back: entering living-area mode exits porch mode.
+    c.set_living_area_mode(true);
+    assert!(c.living_area_mode(), "living-area mode is on");
+    assert!(!c.porch_mode(), "porch mode was exited");
+    assert_eq!(c.active_porch_index(), None);
+    assert_eq!(
+        c.active_living_area_index(),
+        Some(0),
+        "the most-recent living area re-activates"
+    );
+}
+
+/// A 10m x 6m dimensioned + committed storey — the shared setup for the
+/// cut-pick routing tests below (the same footprint as
+/// `cut_line_offers_both_regions_then_keeps_the_tapped_one`).
+fn dimensioned_10x6_controller() -> AppController {
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    let _ = c.create_ber(
+        "T".into(),
+        chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+    );
+    c.document.floor_plan = FloorPlan::from_points_to_orthogonal(
+        &[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(10.0, 0.0),
+            Point2f32::new(10.0, 6.0),
+            Point2f32::new(0.0, 6.0),
+            Point2f32::new(0.1, 0.1),
+        ],
+        0.2,
+        true,
+    )
+    .unwrap();
+    c.document.dimensioning.scale_set = true;
+    c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
+    c.commit_to_ber().unwrap();
+    c
+}
+
+/// A straight-cut stroke in PORCH mode stages a porch-flow pick: tapping a
+/// region commits it into `porches`, not `living_areas`.
+#[test]
+fn porch_cut_pick_lands_in_porches() {
+    let mut c = dimensioned_10x6_controller();
+    c.set_porch_mode(true);
+    // A vertical cut at x~3 (drawn as a noisy near-straight stroke).
+    c.apply_porch_stroke_event(&[(3.0, 0.05), (3.0, 2.0), (3.0, 5.95)]);
+    assert!(c.cut_pick_pending(), "the cut is awaiting a pick");
+    assert_eq!(c.porch_count(), 0, "nothing committed until picked");
+    assert_eq!(c.pending_cut_regions().len(), 2, "two candidate regions");
+
+    c.choose_cut_region(1.0, 3.0);
+    assert!(!c.cut_pick_pending());
+    assert_eq!(c.porch_count(), 1, "the tapped region became the PORCH");
+    assert_eq!(c.active_porch_index(), Some(0));
+    assert_eq!(
+        c.living_area_count(),
+        0,
+        "a porch-staged cut never lands in the living areas"
+    );
+}
+
+/// The pick commits by the flow STAGED with the cut, never by the mode flags
+/// at pick time. Historically reachable desync: stage a living-area cut, then
+/// an undo restores a snapshot with `porch_mode = true` (the restore now also
+/// clears the staged pick — see the test below — but the staged flow must win
+/// regardless, so a desynced flag can never misroute a commit).
+#[test]
+fn cut_pick_commits_by_staged_flow_not_current_mode() {
+    let mut c = dimensioned_10x6_controller();
+    c.set_living_area_mode(true);
+    c.apply_living_area_stroke_event(&[(3.0, 0.05), (3.0, 2.0), (3.0, 5.95)]);
+    assert!(c.cut_pick_pending(), "living-area cut staged");
+
+    // Simulate the mode flags shifting AFTER the cut was staged, without
+    // going through a setter (which would clear the pick).
+    c.porch_mode = true;
+
+    c.choose_cut_region(1.0, 3.0);
+    assert_eq!(
+        c.living_area_count(),
+        1,
+        "the staged LivingArea flow wins the routing"
+    );
+    assert_eq!(
+        c.porch_count(),
+        0,
+        "the desynced porch flag must not capture the commit"
+    );
+}
+
+/// The undo-desync repro (draw porch → switch to living-area mode → cut
+/// stroke → undo → pick): the restore drops the staged pick — its candidate
+/// regions were carved from the pre-undo geometry — so the pick is a no-op
+/// rather than a phantom commit under the restored mode flags.
+#[test]
+fn undo_clears_a_staged_cut_pick() {
+    let mut c = dimensioned_10x6_controller();
+    // A committed porch first, so undo has an entry to pop (restoring the
+    // pre-porch snapshot, whose porch_mode flag is true).
+    c.set_porch_mode(true);
+    c.apply_porch_stroke_event(&[(2.0, 2.0), (5.0, 2.0), (5.0, 5.0), (2.0, 5.0), (2.1, 2.1)]);
+    assert_eq!(c.porch_count(), 1);
+
+    // Stage a LIVING-AREA cut, then undo across it.
+    c.set_living_area_mode(true);
+    c.apply_living_area_stroke_event(&[(3.0, 0.05), (3.0, 2.0), (3.0, 5.95)]);
+    assert!(c.cut_pick_pending(), "living-area cut staged");
+    c.undo().unwrap();
+    assert!(
+        !c.cut_pick_pending(),
+        "undo drops the staged pick (its regions came from the undone state)"
+    );
+
+    // A tap where a region used to be commits nothing anywhere.
+    c.choose_cut_region(1.0, 3.0);
+    assert_eq!(c.living_area_count(), 0, "no phantom living-area commit");
+    assert_eq!(
+        c.porch_count(),
+        0,
+        "the porch commit was undone; none re-added"
+    );
+}
+
+/// The phase-toggle repro: a staged porch cut must not survive entering
+/// phase mode (whose raw flag writes skip the porch setter's cleanup, and
+/// whose `activate_shape(Outline)` early-returns when the outline is already
+/// active — the explicit clear covers it).
+#[test]
+fn entering_phase_mode_drops_a_staged_porch_cut() {
+    let mut c = dimensioned_10x6_controller();
+    c.set_porch_mode(true);
+    c.apply_porch_stroke_event(&[(3.0, 0.05), (3.0, 2.0), (3.0, 5.95)]);
+    assert!(c.cut_pick_pending(), "porch cut staged");
+
+    c.set_phase_mode(true);
+    assert!(
+        !c.cut_pick_pending(),
+        "entering phase mode drops the staged porch cut"
+    );
+    c.choose_cut_region(1.0, 3.0);
+    assert_eq!(c.porch_count(), 0, "the dropped pick commits nothing");
+    assert_eq!(c.living_area_count(), 0);
 }
 
 /// Reproduces the reported "stuck dimensioning a living area" bug: a
@@ -12028,6 +12819,7 @@ fn roof_window_defaults_overshading_to_very_little() {
         .opening_fields_prompt(
             DoorSidelightsMode::default(),
             ber_model::ber::fenestration::ComplexWindowKind::default(),
+            ber_model::ber::fenestration::WindowTopShape::default(),
         )
         .expect("roof placement staged");
     assert_eq!(
@@ -12053,6 +12845,7 @@ fn roof_window_defaults_overshading_to_very_little() {
         .opening_fields_prompt(
             DoorSidelightsMode::default(),
             ber_model::ber::fenestration::ComplexWindowKind::default(),
+            ber_model::ber::fenestration::WindowTopShape::default(),
         )
         .expect("wall placement staged");
     assert_eq!(
@@ -12078,6 +12871,7 @@ fn full_span_checkbox_composes_a_full_width_doorset() {
         .opening_fields_prompt(
             DoorSidelightsMode::Overall,
             ber_model::ber::fenestration::ComplexWindowKind::default(),
+            ber_model::ber::fenestration::WindowTopShape::default(),
         )
         .expect("placement staged");
     let span = p.full_span.expect("the composite offers the checkboxes");
@@ -12095,6 +12889,7 @@ fn full_span_checkbox_composes_a_full_width_doorset() {
             sill: None,
             transom_semicircular: false,
         }),
+        None,
         None,
         WindowTypeChoice::default(),
         ber_model::ber::fenestration::Overshading::Average,
@@ -12163,6 +12958,7 @@ fn multi_field_window_places_with_default_sill() {
         .opening_fields_prompt(
             DoorSidelightsMode::default(),
             ber_model::ber::fenestration::ComplexWindowKind::default(),
+            ber_model::ber::fenestration::WindowTopShape::default(),
         )
         .expect("placement staged");
     assert_eq!(p.fields.len(), 2, "width + height only (no sill)");
@@ -12173,6 +12969,7 @@ fn multi_field_window_places_with_default_sill() {
         1.2,
         false,
         false,
+        None,
         None,
         None,
         WindowTypeChoice::default(),
@@ -12186,6 +12983,7 @@ fn multi_field_window_places_with_default_sill() {
         c.opening_fields_prompt(
             DoorSidelightsMode::default(),
             ber_model::ber::fenestration::ComplexWindowKind::default(),
+            ber_model::ber::fenestration::WindowTopShape::default(),
         )
         .is_none(),
         "placement finished"
@@ -12227,6 +13025,7 @@ fn full_span_checkboxes_place_a_full_wall_door() {
         .opening_fields_prompt(
             DoorSidelightsMode::default(),
             ber_model::ber::fenestration::ComplexWindowKind::default(),
+            ber_model::ber::fenestration::WindowTopShape::default(),
         )
         .expect("placement staged");
     let span = p
@@ -12244,6 +13043,7 @@ fn full_span_checkboxes_place_a_full_wall_door() {
         0.0,
         true,
         true,
+        None,
         None,
         None,
         WindowTypeChoice::default(),
@@ -12290,6 +13090,7 @@ fn exact_wall_width_door_without_the_tick_is_refused() {
         .opening_fields_prompt(
             DoorSidelightsMode::default(),
             ber_model::ber::fenestration::ComplexWindowKind::default(),
+            ber_model::ber::fenestration::WindowTopShape::default(),
         )
         .and_then(|p| p.full_span)
         .expect("wall-hosted door prompt")
@@ -12299,6 +13100,7 @@ fn exact_wall_width_door_without_the_tick_is_refused() {
         2.0,
         false,
         false,
+        None,
         None,
         None,
         WindowTypeChoice::default(),
@@ -12335,6 +13137,7 @@ fn window_type_picker_reuses_existing_and_adds_only_when_different() {
             1.2,
             false,
             false,
+            None,
             None,
             None,
             choice,
@@ -12480,6 +13283,7 @@ fn overshading_is_applied_per_window_at_placement() {
             false,
             None,
             None,
+            None,
             WindowTypeChoice::default(),
             overshading,
             None,
@@ -12527,6 +13331,7 @@ fn window_photo_is_attached_at_placement() {
         1.2,
         false,
         false,
+        None,
         None,
         None,
         WindowTypeChoice::New {
@@ -12587,6 +13392,7 @@ fn failed_placement_discards_copied_photos() {
         1.2,
         false,
         false,
+        None,
         None,
         None,
         WindowTypeChoice::New {
@@ -12712,6 +13518,7 @@ fn place_door_sidelights_overall_mode() {
         .opening_fields_prompt(
             DoorSidelightsMode::Overall,
             ber_model::ber::fenestration::ComplexWindowKind::default(),
+            ber_model::ber::fenestration::WindowTopShape::default(),
         )
         .expect("placement staged");
     assert_eq!(p.fields.len(), 5, "overall W/H + door W/H + sill");
@@ -12729,6 +13536,7 @@ fn place_door_sidelights_overall_mode() {
             sill: Some(0.15),
             transom_semicircular: false,
         }),
+        None,
         None,
         WindowTypeChoice::default(),
         Overshading::Average,
@@ -12798,6 +13606,7 @@ fn place_complex_window_shapes() {
             kind: ComplexWindowKind::Circular,
             dims: vec![0.6],
         }),
+        None,
         WindowTypeChoice::default(),
         Overshading::Average,
         None,
@@ -12817,6 +13626,7 @@ fn place_complex_window_shapes() {
             kind: ComplexWindowKind::RoundedTop,
             dims: vec![1.0, 1.0, 0.3],
         }),
+        None,
         WindowTypeChoice::default(),
         Overshading::Average,
         None,
@@ -12848,6 +13658,364 @@ fn place_complex_window_shapes() {
         "bbox = width × (rect + rise), got {}×{}",
         rt.width_m,
         rt.height_m
+    );
+}
+
+// ── Shaped window tops (the plain-flow Flat / Semi-circular / Pointed tick) ──
+
+/// The NORMAL window flow's shaped-top tick, end to end: tool → tap → prompt
+/// (the tick is offered, the height field spells out the total-at-the-centre
+/// semantics) → `place_opening` with the tick → `WindowShape::SemiCircularTop`
+/// on the window, and the derived vertices arc to an APEX at the window's
+/// CENTRE, the full entered height above the sill. The tick rides every
+/// placement while picked (the UI pins it on `CategoryUiState`), so a second
+/// placement passing the same settled pick is shaped too.
+#[test]
+fn shaped_top_window_places_through_full_flow() {
+    use ber_model::ber::fenestration::{
+        OpeningPlacement, Overshading, WindowShape, WindowTopShape,
+    };
+    let mut c = dimensioned_square_controller();
+    // Roofline high enough that sill 1.0 + total height 2.0 fits unclamped.
+    c.set_default_ceiling_height(3.5).unwrap();
+    c.materialize();
+    c.select_opening_tool(OpeningToolKind::Window);
+    c.openings_pointer_down(5.0, -0.2, 0.5);
+    let p = c
+        .opening_fields_prompt(
+            DoorSidelightsMode::default(),
+            ber_model::ber::fenestration::ComplexWindowKind::default(),
+            WindowTopShape::SemiCircular,
+        )
+        .expect("placement staged");
+    assert_eq!(
+        p.window_top,
+        Some(WindowTopShape::SemiCircular),
+        "the plain Window prompt offers the tick, echoing the settled pick"
+    );
+    assert_eq!(
+        p.fields[1].hint, "total height at the centre",
+        "the height field carries the shaped-top hint"
+    );
+    let place = |c: &mut AppController| {
+        c.place_opening(
+            1.0,
+            2.0,
+            false,
+            false,
+            None,
+            None,
+            Some(WindowTopShape::SemiCircular),
+            WindowTypeChoice::default(),
+            Overshading::Average,
+            None,
+            true,
+            Vec::new(),
+        )
+        .expect("shaped window places");
+    };
+    place(&mut c);
+    // The pinned tick rides the next placement too (the UI passes it again).
+    c.openings_pointer_down(2.0, -0.2, 0.5);
+    place(&mut c);
+    c.materialize();
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert_eq!(storey.windows.len(), 2, "both windows placed");
+    for w in &storey.windows {
+        assert_eq!(
+            w.shape,
+            WindowShape::SemiCircularTop,
+            "the tick landed as the durable shape"
+        );
+        assert_eq!(
+            WindowTopShape::from_shape(w.shape),
+            Some(WindowTopShape::SemiCircular),
+            "the stored shape maps back to the tick"
+        );
+    }
+    // Derived vertices of the first window (centred at along 5 on the bottom
+    // wall): the arc tessellates (>4 points) and peaks at the CENTRE, the
+    // TOTAL height (2.0) above the sill.
+    let w = storey
+        .windows
+        .iter()
+        .find(|w| {
+            matches!(&w.placement,
+                Some(OpeningPlacement::Wall { along_m, .. }) if (along_m - 5.0).abs() < 1e-3)
+        })
+        .expect("the first window, centred at along 5");
+    assert!(
+        w.vertices.len() > 8,
+        "semicircular top tessellated, got {} verts",
+        w.vertices.len()
+    );
+    let apex = w
+        .vertices
+        .iter()
+        .cloned()
+        .max_by(|a, b| a.2.partial_cmp(&b.2).unwrap())
+        .unwrap();
+    let z_min = w.vertices.iter().map(|v| v.2).fold(f32::INFINITY, f32::min);
+    assert!(
+        (apex.0 - 5.0).abs() < 2e-2,
+        "apex at the window's centre (x≈5), got x={}",
+        apex.0
+    );
+    assert!(
+        (apex.2 - z_min - 2.0).abs() < 2e-2,
+        "total height at the centre: apex {} above sill {}",
+        apex.2,
+        z_min
+    );
+}
+
+/// Editing an existing RECTANGULAR window to a POINTED top through the
+/// elevation "Edit window" box: the prompt recovers the Flat tick from the
+/// stored shape, the Apply converts it in place (snapshot → undoable like
+/// sibling edits), and the conversion survives save + reopen.
+#[test]
+fn editing_window_to_pointed_top_persists_and_survives_reopen() {
+    use ber_model::ber::fenestration::{Overshading, WindowShape, WindowTopShape};
+    let mut c = dimensioned_square_controller();
+    // Roofline high enough that sill 1.0 + the edited height 1.4 fits.
+    c.set_default_ceiling_height(2.8).unwrap();
+    c.materialize();
+    c.select_opening_tool(OpeningToolKind::Window);
+    c.openings_pointer_down(5.0, -0.2, 0.5);
+    c.place_opening(
+        1.0,
+        1.2,
+        false,
+        false,
+        None,
+        None,
+        None, // Flat (no tick) → plain rectangle
+        WindowTypeChoice::default(),
+        Overshading::Average,
+        None,
+        true,
+        Vec::new(),
+    )
+    .expect("flat window places");
+    c.materialize();
+    assert_eq!(
+        c.current_record.as_ref().unwrap().data.storeys[0].windows[0].shape,
+        WindowShape::Rectangular
+    );
+    // Edit tool → the wall's elevation → select the window → Edit….
+    c.set_openings_tool(OpeningToolKind::Edit);
+    c.openings_pointer_down(5.0, -0.2, 0.5);
+    assert!(c.elevation_wall().is_some(), "elevation opened");
+    c.elevation_pointer_down(5.0, 1.5); // inside the window (sill 1.0, h 1.2)
+    c.elevation_pointer_up();
+    c.start_edit_selected_window();
+    let p = c
+        .opening_fields_prompt(
+            DoorSidelightsMode::default(),
+            ber_model::ber::fenestration::ComplexWindowKind::default(),
+            WindowTopShape::Pointed,
+        )
+        .expect("edit box open");
+    let edit = p.edit.expect("edit prefill");
+    assert_eq!(
+        edit.top,
+        Some(WindowTopShape::Flat),
+        "a rectangular window recovers the Flat tick for the box to seed"
+    );
+    assert_eq!(
+        p.window_top,
+        Some(WindowTopShape::Pointed),
+        "the box echoes the settled tick for the Apply capture"
+    );
+    c.apply_opening_edit(
+        1.0,
+        1.4,
+        false,
+        false,
+        Some(WindowTopShape::Pointed),
+        WindowTypeChoice::default(),
+        Overshading::Average,
+        None,
+        Vec::new(),
+    )
+    .expect("edit applies");
+    c.materialize();
+    {
+        let w = &c.current_record.as_ref().unwrap().data.storeys[0].windows[0];
+        assert_eq!(w.shape, WindowShape::PointedTop, "converted in place");
+        assert!((w.height_m - 1.4).abs() < 1e-4, "resize applied too");
+    }
+    // Undoable like the sibling edits.
+    c.undo().expect("undo");
+    c.materialize();
+    assert_eq!(
+        c.current_record.as_ref().unwrap().data.storeys[0].windows[0].shape,
+        WindowShape::Rectangular,
+        "undo reverts the conversion"
+    );
+    c.redo().expect("redo");
+    c.materialize();
+    // Survives save + reopen.
+    let id = c.current_record.as_ref().unwrap().id.clone();
+    c.flush_if_dirty().unwrap();
+    c.open_ber(&id).expect("reopen");
+    c.materialize();
+    let w = &c.current_record.as_ref().unwrap().data.storeys[0].windows[0];
+    assert_eq!(
+        w.shape,
+        WindowShape::PointedTop,
+        "the pointed top survived the reload"
+    );
+}
+
+/// A COMPLEX-tool window maps to NO tick state (`from_shape == None`): the
+/// staged Complex placement never offers the tick, the edit box on such a
+/// window hides it (`edit.top == None`, `window_top == None`), and even a
+/// stray tick on the Apply leaves the complex shape untouched (the model op
+/// guards the conversion) — the tick and the Complex flow stay mutually
+/// exclusive over the one `shape` field.
+#[test]
+fn complex_shape_window_offers_no_top_tick() {
+    use ber_model::ber::fenestration::{
+        ComplexWindowKind, OpeningPlacement, Overshading, WindowShape, WindowTopShape,
+    };
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    c.set_openings_mode(true);
+    c.set_openings_tool(OpeningToolKind::ComplexWindow);
+    c.openings_pointer_down(3.0, -0.2, 0.5);
+    let p = c
+        .opening_fields_prompt(
+            DoorSidelightsMode::default(),
+            ComplexWindowKind::Circular,
+            WindowTopShape::Pointed,
+        )
+        .expect("placement staged");
+    assert_eq!(p.window_top, None, "the Complex tool never offers the tick");
+    c.place_opening(
+        0.0,
+        0.0,
+        false,
+        false,
+        None,
+        Some(ComplexWindowPlacement {
+            kind: ComplexWindowKind::Circular,
+            dims: vec![0.6],
+        }),
+        None,
+        WindowTypeChoice::default(),
+        Overshading::Average,
+        None,
+        true,
+        Vec::new(),
+    )
+    .expect("circular window places");
+    c.materialize();
+    let (wid, along) = {
+        let w = &c.current_record.as_ref().unwrap().data.storeys[0].windows[0];
+        assert_eq!(w.shape, WindowShape::Circular);
+        assert_eq!(
+            WindowTopShape::from_shape(w.shape),
+            None,
+            "a complex shape maps to no tick state"
+        );
+        let along = match &w.placement {
+            Some(OpeningPlacement::Wall { along_m, .. }) => *along_m,
+            other => panic!("expected a wall placement, got {other:?}"),
+        };
+        (w.id, along)
+    };
+    // The edit box on it hides the tick.
+    c.set_openings_tool(OpeningToolKind::Edit);
+    c.openings_pointer_down(3.0, -0.2, 0.5);
+    c.elevation_pointer_down(along, 1.3); // inside the 0.6 box over the 1 m sill
+    c.elevation_pointer_up();
+    c.start_edit_selected_window();
+    let p = c
+        .opening_fields_prompt(
+            DoorSidelightsMode::default(),
+            ber_model::ber::fenestration::ComplexWindowKind::default(),
+            WindowTopShape::Pointed,
+        )
+        .expect("edit box open");
+    assert_eq!(
+        p.edit.expect("edit prefill").top,
+        None,
+        "no tick state to seed for a complex shape"
+    );
+    assert_eq!(p.window_top, None, "the edit box hides the tick");
+    // A stray tick on Apply cannot corrupt the complex shape (model guard).
+    c.apply_opening_edit(
+        0.6,
+        0.6,
+        false,
+        false,
+        Some(WindowTopShape::Pointed),
+        WindowTypeChoice::default(),
+        Overshading::Average,
+        None,
+        Vec::new(),
+    )
+    .expect("edit applies");
+    c.materialize();
+    let w = c.current_record.as_ref().unwrap().data.storeys[0]
+        .windows
+        .iter()
+        .find(|w| w.id == wid)
+        .expect("window still there");
+    assert_eq!(
+        w.shape,
+        WindowShape::Circular,
+        "the complex shape is untouched by the stray tick"
+    );
+}
+
+/// The shaped-top tick works on PORCH inner walls too — they share the plain
+/// Window placement path, so the tick is offered and the shape lands.
+#[test]
+fn shaped_top_window_places_on_porch_wall() {
+    use ber_model::ber::fenestration::{Overshading, WindowShape, WindowTopShape};
+    let mut c = porch_square_controller();
+    c.select_opening_tool(OpeningToolKind::Window);
+    c.openings_pointer_down(4.0, 2.2, 0.5);
+    let p = c
+        .opening_fields_prompt(
+            DoorSidelightsMode::default(),
+            ber_model::ber::fenestration::ComplexWindowKind::default(),
+            WindowTopShape::Pointed,
+        )
+        .expect("placement staged");
+    assert_eq!(
+        p.window_top,
+        Some(WindowTopShape::Pointed),
+        "the tick is offered on a porch wall"
+    );
+    c.place_opening(
+        1.0,
+        1.6,
+        false,
+        false,
+        None,
+        None,
+        Some(WindowTopShape::Pointed),
+        WindowTypeChoice::default(),
+        Overshading::Average,
+        None,
+        true,
+        Vec::new(),
+    )
+    .expect("shaped window places on the porch wall");
+    c.materialize();
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    let w = &storey.windows[0];
+    assert_eq!(w.shape, WindowShape::PointedTop, "the tick landed");
+    assert!(
+        storey
+            .porch_walls
+            .regions
+            .iter()
+            .any(|r| r.opes.windows.contains(&w.id)),
+        "hosted on a porch inner wall"
     );
 }
 
@@ -18298,7 +19466,8 @@ fn subarea_decisions_do_not_leak_into_a_later_extend_capture() {
     // a mandatory corner-vs-edge attach decision at y≈10.
     c.set_living_area_mode(false);
     c.set_edit_mode(EditTools::ExtendOrtho);
-    c.apply_extend_stroke_event(&[(0.3, 9.8), (0.3, 12.0), (4.0, 12.0), (4.0, 9.9)]);
+    c.apply_extend_stroke_event(&[(0.3, 9.8), (0.3, 12.0), (4.0, 12.0), (4.0, 9.9)])
+        .unwrap();
     let last = c.last_snap_action.as_ref().expect("the extend captured");
     assert!(
         matches!(last.action, SnapAction::Freehand { .. }),
@@ -18336,7 +19505,8 @@ fn extend_snaps_far_wall_onto_the_storey_below_edge() {
     // A dormer bump off the north wall whose far edge lands at y=9.9 — 10 cm
     // short of the storey-below north edge (y=10). tol ≈ 14.14 × 0.08 ≈ 1.13 m,
     // so 0.1 m snaps.
-    c.apply_extend_stroke_event(&[(3.0, 7.0), (3.0, 9.9), (7.0, 9.9), (7.0, 7.0)]);
+    c.apply_extend_stroke_event(&[(3.0, 7.0), (3.0, 9.9), (7.0, 9.9), (7.0, 7.0)])
+        .unwrap();
 
     let pts = c.document.floor_plan.get_points();
     assert!(
@@ -18371,7 +19541,8 @@ fn extend_leaves_a_comfortably_short_far_wall_unsnapped() {
     c.set_edit_mode(EditTools::ExtendOrtho);
 
     // Far edge at y=8.0 — 2 m short of y=10, well beyond the ~1.13 m tol.
-    c.apply_extend_stroke_event(&[(3.0, 7.0), (3.0, 8.0), (7.0, 8.0), (7.0, 7.0)]);
+    c.apply_extend_stroke_event(&[(3.0, 7.0), (3.0, 8.0), (7.0, 8.0), (7.0, 7.0)])
+        .unwrap();
 
     let pts = c.document.floor_plan.get_points();
     assert!(
@@ -18419,7 +19590,8 @@ fn extend_shallow_setback_keeps_attach_end_on_the_current_wall() {
 
     // A deep bump north off the y=9.9 wall (far edge y=12, beyond the below
     // footprint so it doesn't snap). The attach ends are on the y=9.9 wall.
-    c.apply_extend_stroke_event(&[(3.0, 9.9), (3.0, 12.0), (7.0, 12.0), (7.0, 9.9)]);
+    c.apply_extend_stroke_event(&[(3.0, 9.9), (3.0, 12.0), (7.0, 12.0), (7.0, 9.9)])
+        .unwrap();
 
     let pts = c.document.floor_plan.get_points();
     assert!(
@@ -18454,7 +19626,8 @@ fn extend_curve_is_unaffected_by_the_below_storey_snap() {
     // A curved bump off the north wall bulging up near the below north edge
     // (y≈9.9). If the below-ring snap ran it would record a ToPreviousOutline
     // decision — the arc path must skip it entirely.
-    c.apply_extend_stroke_event(&[(3.0, 7.0), (4.0, 9.9), (5.0, 9.9), (7.0, 7.0)]);
+    c.apply_extend_stroke_event(&[(3.0, 7.0), (4.0, 9.9), (5.0, 9.9), (7.0, 7.0)])
+        .unwrap();
 
     assert!(
         c.document.pending_arc.is_some(),
@@ -18501,7 +19674,8 @@ fn extend_snapped_far_wall_is_pinned_known() {
     c.set_edit_mode(EditTools::ExtendOrtho);
 
     // Snapping extend: far edge drawn at y=9.9 → snaps to the below edge y=10.
-    c.apply_extend_stroke_event(&[(3.0, 7.0), (3.0, 9.9), (7.0, 9.9), (7.0, 7.0)]);
+    c.apply_extend_stroke_event(&[(3.0, 7.0), (3.0, 9.9), (7.0, 9.9), (7.0, 7.0)])
+        .unwrap();
     assert!(
         c.document
             .floor_plan
@@ -18530,7 +19704,8 @@ fn extend_unsnapped_far_wall_stays_promptable() {
     c.set_edit_mode(EditTools::ExtendOrtho);
 
     // Far edge at y=8 — 2 m short of the below edge, no snap.
-    c.apply_extend_stroke_event(&[(3.0, 7.0), (3.0, 8.0), (7.0, 8.0), (7.0, 7.0)]);
+    c.apply_extend_stroke_event(&[(3.0, 7.0), (3.0, 8.0), (7.0, 8.0), (7.0, 7.0)])
+        .unwrap();
     assert!(
         !far_wall_y_is_known(&c, 8.0),
         "an un-snapped far wall stays promptable (not pinned)"
@@ -21918,10 +23093,8 @@ fn plan_area3(ext: &[domain::points::Point3f64]) -> f64 {
 fn dump_797a7ff5_no_degenerate_sliver_after_resolve() {
     let dump = "/tmp/claude-1000/-home-anishrag-WORK-BER-APP-Branch2/\
 c3838f4c-8dc1-4e86-92de-029cef93c73d/scratchpad/bugs-new6/07-14T1534_797a7ff5/state.json";
-    std::fs::copy(dump, crate::engine::checkpoint::DEFAULT_PATH).unwrap();
     let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
-    assert!(c.load_checkpoint(), "checkpoint loads");
-    let _ = std::fs::remove_file(crate::engine::checkpoint::DEFAULT_PATH);
+    assert!(c.load_checkpoint_from(dump), "checkpoint loads");
 
     // Re-resolve every storey from its inputs (the fix acts at partition /
     // split time, so the persisted strip only clears on re-derivation).
@@ -21971,5 +23144,2155 @@ c3838f4c-8dc1-4e86-92de-029cef93c73d/scratchpad/bugs-new6/07-14T1534_797a7ff5/st
     assert!(
         record.data.storeys[0].floors.regions.len() >= 2,
         "the Original/Extension phase split is preserved on the ground storey"
+    );
+}
+
+/// Field regression (2026-07-19 porch trim): chamfering a porch corner on a
+/// FULLY DIMENSIONED outline (scale set, every param known, height entered)
+/// must succeed — the porch was drawn as a 3-sided rectangle bump and the two
+/// front corners were to be cut to make it 5-sided. Same shape as the field
+/// storey: an L-ish 10-vertex ring with a 1.86 × 0.98 porch bump on top.
+#[test]
+fn trim_chamfers_porch_corner_on_dimensioned_outline() {
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    let ring = [
+        Point2f32::new(1.66, 24.03),
+        Point2f32::new(5.03, 24.03),
+        Point2f32::new(5.03, 25.01), // porch front-left corner
+        Point2f32::new(6.89, 25.01), // porch front-right corner
+        Point2f32::new(6.89, 15.93),
+        Point2f32::new(9.01, 15.93),
+        Point2f32::new(9.01, 8.92),
+        Point2f32::new(8.33, 8.92),
+        Point2f32::new(8.33, 5.39),
+        Point2f32::new(1.66, 5.39),
+    ];
+    c.document.floor_plan = FloorPlan::from_clean_ring(&ring).unwrap();
+    // Fully dimensioned, as in the field when the trim was attempted.
+    c.document.dimensioning.scale_set = true;
+    c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
+
+    // Chamfer across the front-left porch corner: the cut line crosses the
+    // porch's left wall (x=5.03) at y≈24.68 and its front (y=25.01) at x≈5.36.
+    c.sketch_engine.edit_tool = EditTools::Trim;
+    c.apply_trim_stroke_event(&[(4.9, 24.55), (5.5, 25.15)])
+        .expect("corner chamfer on a dimensioned outline succeeds");
+    assert_eq!(
+        c.document.floor_plan.get_points().len(),
+        11,
+        "the chamfer replaces the corner with a diagonal cut edge (+1 vertex)"
+    );
+    // Then the front-RIGHT corner — the second cut runs on a ring that already
+    // contains the first diagonal edge, completing the 5-sided porch.
+    c.apply_trim_stroke_event(&[(6.45, 25.15), (7.0, 24.5)])
+        .expect("second corner chamfer succeeds after the first");
+    assert_eq!(
+        c.document.floor_plan.get_points().len(),
+        12,
+        "both porch corners are chamfered (porch front is now 5-sided)"
+    );
+}
+
+/// Field regression (2026-07-19 porch trim): picking an edit tool from the
+/// toolbar must EXIT the canvas-claiming overlay modes. In the field an
+/// active mode kept owning the canvas and every Trim stroke was silently
+/// discarded while the Trim button showed selected.
+#[test]
+fn select_edit_tool_exits_stroke_swallowing_modes() {
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    let square = vec![
+        Point2f32::new(0.0, 0.0),
+        Point2f32::new(10.0, 0.0),
+        Point2f32::new(10.0, 10.0),
+        Point2f32::new(0.0, 10.0),
+        Point2f32::new(0.2, 0.2),
+    ];
+    c.document.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.5, true).unwrap();
+    c.set_openings_mode(true);
+    assert!(c.openings_mode(), "precondition: openings mode on");
+    c.select_edit_tool(EditTools::Trim);
+    assert!(!c.openings_mode(), "tool pick exits openings mode");
+    assert_eq!(c.edit_mode(), EditTools::Trim);
+
+    c.set_exposure_mode(true);
+    c.select_edit_tool(EditTools::ExtendOrtho);
+    assert!(!c.exposure_mode, "tool pick exits wall-exposure mode");
+    assert_eq!(c.edit_mode(), EditTools::ExtendOrtho);
+
+    // The guarded exits must NOT clear unrelated pending state: with roof
+    // mode OFF, `set_roof_mode(false)` (which drops `pending_redraw`) is not
+    // called at all.
+    c.pending_redraw = Some(PendingRedraw {
+        stroke_points: vec![Point2f32::new(0.0, 0.0)],
+        closed: true,
+    });
+    c.select_edit_tool(EditTools::Trim);
+    assert!(
+        c.pending_redraw.is_some(),
+        "a pending redraw survives a tool pick (only the redraw prompt resolves it)"
+    );
+}
+
+/// Picking Trim INSIDE living-area mode must keep the mode (and the active
+/// living area) — the trim then applies to the LIVING AREA's ring, leaving
+/// the storey outline untouched. Living-area / construction-year modes don't
+/// block edit-tool strokes, so `select_edit_tool` deliberately does not exit
+/// them (unlike the stroke-swallowing exposure/openings/roof/partition modes).
+#[test]
+fn trim_inside_living_area_mode_trims_the_living_area() {
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    let _ = c.create_ber(
+        "T".into(),
+        chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+    );
+    let square = vec![
+        Point2f32::new(0.0, 0.0),
+        Point2f32::new(10.0, 0.0),
+        Point2f32::new(10.0, 10.0),
+        Point2f32::new(0.0, 10.0),
+        Point2f32::new(0.2, 0.2),
+    ];
+    c.document.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.5, true).unwrap();
+    c.document.dimensioning.scale_set = true;
+    c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
+    let outline_verts = c.document.floor_plan.polygons()[0].len();
+
+    // Draw a living area; it becomes the active shape.
+    c.set_living_area_mode(true);
+    c.apply_living_area_stroke_event(&[(2.0, 2.0), (6.0, 2.0), (6.0, 6.0), (2.0, 6.0), (2.1, 2.1)]);
+    assert_eq!(c.active_living_area_index(), Some(0));
+    let la_verts = c.document.floor_plan.polygons()[0].len();
+
+    // Picking Trim from the toolbar keeps the living-area context.
+    c.select_edit_tool(EditTools::Trim);
+    assert!(
+        c.living_area_mode(),
+        "a tool pick stays inside living-area mode"
+    );
+    assert_eq!(
+        c.active_living_area_index(),
+        Some(0),
+        "the living area stays active"
+    );
+
+    // Chamfer the living area's top-right corner (at ~(6, 6)).
+    c.apply_trim_stroke_event(&[(6.2, 4.8), (4.8, 6.2)])
+        .expect("trim applies to the active living area");
+    assert_eq!(
+        c.document.floor_plan.polygons()[0].len(),
+        la_verts + 1,
+        "the living area gained the chamfer vertex"
+    );
+
+    // The storey outline is untouched.
+    c.set_living_area_mode(false);
+    assert_eq!(
+        c.document.floor_plan.polygons()[0].len(),
+        outline_verts,
+        "the storey outline is unaffected by the living-area trim"
+    );
+}
+
+/// Picking Trim INSIDE porch mode must keep the mode (and the active porch) —
+/// the trim then applies to the PORCH's ring, leaving the storey outline
+/// untouched. The exact mirror of
+/// `trim_inside_living_area_mode_trims_the_living_area`: porch mode doesn't
+/// block edit-tool strokes either, so `select_edit_tool` deliberately does
+/// not exit it.
+#[test]
+fn trim_inside_porch_mode_trims_the_porch() {
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    let _ = c.create_ber(
+        "T".into(),
+        chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+    );
+    let square = vec![
+        Point2f32::new(0.0, 0.0),
+        Point2f32::new(10.0, 0.0),
+        Point2f32::new(10.0, 10.0),
+        Point2f32::new(0.0, 10.0),
+        Point2f32::new(0.2, 0.2),
+    ];
+    c.document.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.5, true).unwrap();
+    c.document.dimensioning.scale_set = true;
+    c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
+    let outline_verts = c.document.floor_plan.polygons()[0].len();
+
+    // Draw a porch; it becomes the active shape.
+    c.set_porch_mode(true);
+    c.apply_porch_stroke_event(&[(2.0, 2.0), (6.0, 2.0), (6.0, 6.0), (2.0, 6.0), (2.1, 2.1)]);
+    assert_eq!(c.active_porch_index(), Some(0));
+    let porch_verts = c.document.floor_plan.polygons()[0].len();
+
+    // Picking Trim from the toolbar keeps the porch context.
+    c.select_edit_tool(EditTools::Trim);
+    assert!(c.porch_mode(), "a tool pick stays inside porch mode");
+    assert_eq!(c.active_porch_index(), Some(0), "the porch stays active");
+
+    // Chamfer the porch's top-right corner (at ~(6, 6)).
+    c.apply_trim_stroke_event(&[(6.2, 4.8), (4.8, 6.2)])
+        .expect("trim applies to the active porch");
+    assert_eq!(
+        c.document.floor_plan.polygons()[0].len(),
+        porch_verts + 1,
+        "the porch gained the chamfer vertex"
+    );
+
+    // The storey outline is untouched.
+    c.set_porch_mode(false);
+    assert_eq!(
+        c.document.floor_plan.polygons()[0].len(),
+        outline_verts,
+        "the storey outline is unaffected by the porch trim"
+    );
+}
+
+/// Field regression (2026-07-19 porch trim): a REJECTED trim stroke must
+/// return its reason to the UI — logging alone reads as "nothing happened"
+/// on the tablet.
+#[test]
+fn rejected_trim_stroke_returns_the_reason() {
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    let square = vec![
+        Point2f32::new(0.0, 0.0),
+        Point2f32::new(10.0, 0.0),
+        Point2f32::new(10.0, 10.0),
+        Point2f32::new(0.0, 10.0),
+        Point2f32::new(0.2, 0.2),
+    ];
+    c.document.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.5, true).unwrap();
+    c.sketch_engine.edit_tool = EditTools::Trim;
+    // A stroke entirely outside the outline: the cut line never crosses it.
+    let err = c
+        .apply_trim_stroke_event(&[(20.0, 20.0), (25.0, 20.0)])
+        .expect_err("a non-crossing trim is rejected");
+    assert!(
+        err.contains("cross the outline"),
+        "the reason names the failure: {err}"
+    );
+}
+
+/// A strictly-INSET upper storey (its footprint inside the lower one, touching
+/// no edge) durably splits the lower ceiling into the `InterStorey` hole piece
+/// plus TWO `Unset` remainder pieces sharing `split_to_simple`'s bridge seams
+/// through the hole. Those seams are derivation-owned, NOT outline-edit scars:
+/// the scar detector must stay quiet (its InterStorey-ring endpoint rule), so
+/// the load-path heal never fires and the record reloads with its stored
+/// ceiling rings IDENTICAL — the regions-as-truth reload fixpoint for this
+/// topology (advisory finding on the eddc2f3f fix; the field record's storey 2
+/// sits strictly inside storey 1).
+#[test]
+fn inset_upper_storey_remainder_seams_are_not_scars_and_reload_verbatim() {
+    use ber_model::ber::structural::CeilingExposure;
+    let p = |x: f32, y: f32| Point2f32::new(x, y);
+    let mut c = dimensioned_square_controller(); // storey 0 = 10x10
+    c.set_default_ceiling_height(2.4).expect("height applies");
+    c.materialize();
+    c.add_storey().unwrap();
+    c.assign_floor_thickness(0.3).unwrap();
+    // Strictly inside the 10×10: no shared edge with the lower outline.
+    let ring = vec![p(3., 3.), p(7., 3.), p(7., 7.), p(3., 7.)];
+    c.document.adopt_finalised_outline(&ring).expect("adopts");
+    c.maybe_seed_inherited_levels();
+    c.commit_to_ber().unwrap();
+
+    let rings_of = |c: &AppController| -> Vec<Vec<(i64, i64, i64)>> {
+        let mut rings: Vec<Vec<(i64, i64, i64)>> = c.current_record.as_ref().unwrap().data.storeys
+            [0]
+        .ceilings
+        .regions
+        .iter()
+        .map(|r| {
+            r.polygon
+                .exterior
+                .iter()
+                .map(|v| {
+                    (
+                        (v.x * 1e9).round() as i64,
+                        (v.y * 1e9).round() as i64,
+                        (v.z * 1e9).round() as i64,
+                    )
+                })
+                .collect()
+        })
+        .collect();
+        rings.sort();
+        rings
+    };
+    let below = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert_eq!(
+        below.ceilings.regions.len(),
+        3,
+        "fixture: hole piece + two remainder pieces"
+    );
+    assert!(
+        below
+            .ceilings
+            .regions
+            .iter()
+            .any(|r| r.exposure == CeilingExposure::InterStorey),
+        "fixture: the covered piece derived InterStorey"
+    );
+    assert!(
+        below
+            .ceilings
+            .regions
+            .iter()
+            .any(|r| r.exposure == CeilingExposure::Unset),
+        "fixture: an Unset remainder piece exists (the false-positive shape)"
+    );
+    assert!(
+        !below.ceilings_carry_outline_edit_scars(),
+        "the bridge seams between the remainder pieces are NOT scars"
+    );
+    let before = rings_of(&c);
+
+    // Save + reopen: the heal must NOT fire — the stored rings come back
+    // identical (regions-as-truth reload fixpoint).
+    let id = c.current_record.as_ref().unwrap().id;
+    c.flush_if_dirty().unwrap();
+    c.open_ber(&id).unwrap();
+    assert_eq!(
+        rings_of(&c),
+        before,
+        "reopen kept the inset-split ceilings verbatim (no needless recompose)"
+    );
+}
+
+/// FIELD-STATE pin for the eddc2f3f heal (8 Ashgrove Hill), following the
+/// dump_797a7ff5 precedent: replay the captured bug-report checkpoint through
+/// the full load path and assert the scarred storey heals. The state file
+/// lives OUTSIDE the repo (a local backup — deliberately not committed); when
+/// it is absent the test SKIPS cleanly, so CI and other clones stay green.
+///
+/// The captured record's storey 0 carries the first trim attempt's chamfer A
+/// ((6.216, 25.007)→(6.887, 24.268)) baked into its resolved ceilings/walls —
+/// the porch ceiling clipped at A plus two `Unset` sliver fills (0.041 /
+/// 0.067 m²) between A and the final chamfer B — 9 ceiling regions in all.
+/// On load the scar heal recomposes: 7 regions, no chamfer-A coordinate in
+/// any ring, and the porch ceiling reunified (~3.273 m²) with its painted
+/// ExposedRoof intact.
+#[test]
+fn field_state_eddc2f3f_scarred_ceilings_heal_on_load() {
+    use ber_model::ber::structural::CeilingExposure;
+    let src = "/home/anishrag/WORK/BER_backups/2026-07-19-8-ashgrove-hill/bug-reports/\
+               eddc2f3f-33bf-4d33-b683-53749f8cfc8a/state.json";
+    if !std::path::Path::new(src).exists() {
+        eprintln!("field_state_eddc2f3f: state.json not present on this machine — skipping");
+        return;
+    }
+    // Never touch the backup: replay a copy from a temp dir.
+    let tmp = std::env::temp_dir().join("ber-test-eddc2f3f-state.json");
+    std::fs::copy(src, &tmp).expect("copy state.json to temp");
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    assert!(
+        c.load_checkpoint_from(tmp.to_str().unwrap()),
+        "the bug-report checkpoint loads"
+    );
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+
+    // The two sliver fills merged away: 9 stored regions → 7 resolved.
+    assert_eq!(
+        storey.ceilings.regions.len(),
+        7,
+        "the c7/c8 sliver fills healed away"
+    );
+    // No chamfer-A coordinate survives in ANY resolved ring.
+    for (x, y) in [(6.216_f64, 25.007_f64), (6.887_f64, 24.268_f64)] {
+        let hit = storey
+            .ceilings
+            .regions
+            .iter()
+            .flat_map(|r| r.polygon.exterior.iter())
+            .chain(
+                storey
+                    .walls
+                    .regions
+                    .iter()
+                    .flat_map(|r| r.polygon.exterior.iter()),
+            )
+            .find(|v| (v.x - x).abs() < 4e-3 && (v.y - y).abs() < 4e-3);
+        assert!(
+            hit.is_none(),
+            "chamfer-A coordinate ({x}, {y}) survives the heal: {hit:?}"
+        );
+    }
+    assert!(
+        !storey.ceilings_carry_outline_edit_scars(),
+        "the healed record is scar-free"
+    );
+    // The porch ceiling reunified (A-clipped 3.165 + 0.041 + 0.067 ≈ 3.273 m²)
+    // and kept its painted ExposedRoof (containment re-stamp).
+    let porch = storey
+        .ceilings
+        .regions
+        .iter()
+        .find(|r| {
+            let c = r.centroid();
+            (5.0..7.0).contains(&c.x) && (23.0..25.2).contains(&c.y)
+        })
+        .expect("the porch ceiling region resolves");
+    assert!(
+        (porch.area() - 3.273).abs() < 0.02,
+        "the porch ceiling spans to the final chamfer B (got {} m²)",
+        porch.area()
+    );
+    assert_eq!(
+        porch.exposure,
+        CeilingExposure::ExposedRoof,
+        "the assessor's porch paint survived the heal"
+    );
+}
+
+/// FIELD-STATE pin for the ff5a5ee3 report (8 Ashgrove Hill): the first
+/// storey's BACK wall (plan line y = 8.917) is backed by the ground storey's
+/// fanned roof — three facet planes meeting the wall line in a continuous
+/// rise–flat–fall profile (2.371 @ x=4.35 side … 2.955 over x∈[5.207,6.887]
+/// … 2.371 @ x=8.328). The old per-facet staircase split fragmented the wall
+/// into SEVEN regions (vertical cuts at the facet boundaries x=5.207/6.887,
+/// flat steps at local z 0.042/0.326/0.263 — widest piece ~1.68 m), so the
+/// assessor's 2.36 × 1.35 window was refused (`WallTooShort`). With the
+/// profile cut the junction span resolves to exactly TWO regions — one
+/// `InterStorey` piece tracing the slope, ONE labellable remainder — and the
+/// window places on the remainder through the real placement path.
+///
+/// The state file lives OUTSIDE the repo (a local backup — deliberately not
+/// committed); when absent the test SKIPS cleanly, so CI stays green.
+#[test]
+fn field_state_ff5a5ee3_sloped_junction_wall_hosts_the_wide_window() {
+    use ber_model::ber::structural::{WallExposure, WallRegion};
+    let src = "/home/anishrag/WORK/BER_backups/2026-07-19-8-ashgrove-hill/bug-reports/\
+               ff5a5ee3-1b4a-47ac-8a7a-f395aa5c1116/state.json";
+    if !std::path::Path::new(src).exists() {
+        eprintln!("field_state_ff5a5ee3: state.json not present on this machine — skipping");
+        return;
+    }
+    // Never touch the backup: replay a copy from a temp dir.
+    let tmp = std::env::temp_dir().join("ber-test-ff5a5ee3-state.json");
+    std::fs::copy(src, &tmp).expect("copy state.json to temp");
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    assert!(
+        c.load_checkpoint_from(tmp.to_str().unwrap()),
+        "the bug-report checkpoint loads"
+    );
+    c.set_current_storey(Some(1)).expect("first storey active");
+    c.materialize();
+
+    // Every wall piece on the back wall line. The ground backs the WHOLE
+    // line: the fan facets meet it over x∈[4.349, 8.328] and its flat annex
+    // ceiling (2.371, exactly the first floor's slab underside) continues
+    // the profile at the wall base out to x=9.006 — one continuous band-top
+    // profile, so the line resolves to exactly TWO regions.
+    let line_walls = |c: &AppController| -> Vec<WallRegion> {
+        c.current_record.as_ref().unwrap().data.storeys[1]
+            .walls
+            .regions
+            .iter()
+            .filter(|w| {
+                !w.polygon.exterior.is_empty()
+                    && w.polygon
+                        .exterior
+                        .iter()
+                        .all(|v| (v.y - 8.917).abs() < 5e-3)
+            })
+            .cloned()
+            .collect()
+    };
+    let pieces = line_walls(&c);
+    assert_eq!(
+        pieces.len(),
+        2,
+        "the sloped junction resolves to covered piece + remainder, got {:?}",
+        pieces
+            .iter()
+            .map(|w| {
+                let (zmin, zmax) = w
+                    .polygon
+                    .exterior
+                    .iter()
+                    .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), v| {
+                        (a.min(v.z), b.max(v.z))
+                    });
+                (w.exposure, zmin, zmax)
+            })
+            .collect::<Vec<_>>()
+    );
+    let covered = pieces
+        .iter()
+        .find(|w| w.exposure == WallExposure::InterStorey)
+        .expect("one InterStorey piece");
+    let remainder = pieces
+        .iter()
+        .find(|w| w.exposure != WallExposure::InterStorey)
+        .expect("one labellable remainder");
+    // The covered piece TRACES the slope — its profile edge rises 0.193 →
+    // 0.334 (local z) between the facet planes, no flat z-step staircase.
+    let top_zs: Vec<f64> = covered
+        .polygon
+        .exterior
+        .iter()
+        .filter(|v| v.z > -0.2) // above the slab band — the profile edge
+        .map(|v| v.z)
+        .collect();
+    let (t_lo, t_hi) = top_zs
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &z| {
+            (a.min(z), b.max(z))
+        });
+    assert!(
+        t_hi - t_lo > 0.1,
+        "the covered top is SLOPED (traces the fan), got z range [{t_lo}, {t_hi}]"
+    );
+    // The remainder spans the whole line — wide enough for the window
+    // (the widest staircase fragment was ~1.68 m).
+    let (_, _, rlen, _) = remainder
+        .base_frame()
+        .expect("the remainder is a first-class wall");
+    assert!(
+        rlen > 4.0,
+        "remainder spans the junction (~4.66 m), got {rlen}"
+    );
+
+    // The field-rejected 2.36 × 1.35 window now places through the REAL
+    // path: tool → tap on the wall → floating-box confirm. (The captured
+    // session already carries the assessor's other windows — track ids.)
+    let ids_before: Vec<ber_model::ber::common::ItemId> =
+        c.current_record.as_ref().unwrap().data.storeys[1]
+            .windows
+            .iter()
+            .map(|w| w.id)
+            .collect();
+    c.select_opening_tool(OpeningToolKind::Window);
+    c.openings_pointer_down(6.0, 9.05, 0.5);
+    assert!(
+        c.opening_fields_prompt(
+            DoorSidelightsMode::default(),
+            ber_model::ber::fenestration::ComplexWindowKind::default(),
+            ber_model::ber::fenestration::WindowTopShape::default(),
+        )
+        .is_some(),
+        "the tap staged a wall placement"
+    );
+    c.place_opening(
+        2.36,
+        1.35,
+        false,
+        false,
+        None,
+        None,
+        None,
+        WindowTypeChoice::default(),
+        ber_model::ber::fenestration::Overshading::Average,
+        None,
+        true,
+        Vec::new(),
+    )
+    .expect("the 2.36 × 1.35 window places on the sloped-junction wall");
+    c.materialize();
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[1];
+    assert_eq!(
+        storey.windows.len(),
+        ids_before.len() + 1,
+        "the new window landed"
+    );
+    let w = storey
+        .windows
+        .iter()
+        .find(|w| !ids_before.contains(&w.id))
+        .expect("the newly placed window");
+    assert!(
+        (w.width_m - 2.36).abs() < 1e-4 && (w.height_m - 1.35).abs() < 1e-4,
+        "the field-rejected dimensions, got {} × {}",
+        w.width_m,
+        w.height_m
+    );
+    let (host_id, sill) = match &w.placement {
+        Some(ber_model::ber::fenestration::OpeningPlacement::Wall {
+            wall_id, sill_m, ..
+        }) => (*wall_id, *sill_m),
+        other => panic!("expected a wall placement, got {other:?}"),
+    };
+    // The DEFAULT 1 m sill survives: the remainder's base sits at the slab
+    // underside (local −0.25), so sill 1.0 puts the window bottom at 0.75 —
+    // clear of the buried band's ~0.334 profile top and under the 2.368
+    // wall top. No forced sill-0 fallback.
+    assert!(
+        (sill - 1.0).abs() < 1e-4,
+        "the default 1 m sill survives on this profile, got {sill}"
+    );
+    let host = storey
+        .walls
+        .regions
+        .iter()
+        .find(|r| r.id == host_id)
+        .expect("host wall resolves");
+    assert_ne!(
+        host.exposure,
+        WallExposure::InterStorey,
+        "the window hosts on the labellable REMAINDER, not the buried band"
+    );
+    assert!(
+        host.polygon
+            .exterior
+            .iter()
+            .all(|v| (v.y - 8.917).abs() < 5e-3),
+        "hosted on the back wall line"
+    );
+}
+
+// ── Openings on PORCH inner walls ───────────────────────────────────────────
+
+/// A dimensioned 10×10 storey with one FINALISED porch at (2,2)–(6,6) — fully
+/// inside the outline, so all four porch ring edges resolve as porch INNER
+/// walls (`Storey.porch_walls`), openings-placeable but outside every
+/// heat-loss aggregate.
+fn porch_square_controller() -> AppController {
+    let mut c = dimensioned_square_controller();
+    c.set_porch_mode(true);
+    c.apply_porch_stroke_event(&[(2.0, 2.0), (6.0, 2.0), (6.0, 6.0), (2.0, 6.0), (2.1, 2.1)]);
+    assert_eq!(c.porch_count(), 1, "the porch is stored");
+    // Finalise the porch (mark every wall dimensioned) so it resolves.
+    c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
+    c.commit_to_ber().unwrap();
+    c.set_porch_mode(false);
+    c.materialize();
+    assert_eq!(
+        c.current_record.as_ref().unwrap().data.storeys[0]
+            .porch_walls
+            .regions
+            .len(),
+        4,
+        "an interior porch's four inner edges all resolve as porch walls"
+    );
+    c
+}
+
+/// Placing a window on a PORCH inner wall via the full controller path — tool →
+/// tap (outline pick misses, porch pick fires) → number-box `place_opening` —
+/// lands it on the porch wall: the tap stages a PORCH-key anchor, the confirm
+/// re-homes across an id re-mint, the window links into the porch wall's
+/// `opes`, and no OUTLINE wall picks up the opening (calc-side untouched).
+#[test]
+fn place_window_on_porch_wall_via_controller() {
+    use super::openings::PendingOpeningTarget;
+    use ber_model::ber::fenestration::{OpeningPlacement, Overshading};
+    let mut c = porch_square_controller();
+    c.select_opening_tool(OpeningToolKind::Window);
+    // Tap 0.2 m off the porch's bottom inner edge (y=2) — 2.2 m from the
+    // nearest outline wall, so only the porch pick is in tolerance.
+    c.openings_pointer_down(4.0, 2.2, 0.5);
+    assert!(
+        c.pending_opening_prompt().is_some(),
+        "a porch wall was picked"
+    );
+    match c.pending_opening.as_ref().map(|p| p.target) {
+        Some(PendingOpeningTarget::Wall {
+            wall_id, anchor, ..
+        }) => {
+            assert!(
+                c.current_record.as_ref().unwrap().data.storeys[0]
+                    .porch_walls
+                    .regions
+                    .iter()
+                    .any(|r| r.id == wall_id),
+                "the pending host is a porch wall"
+            );
+            assert!(
+                anchor.and_then(|a| a.porch).is_some(),
+                "the tap staged a porch-key-stamped anchor"
+            );
+        }
+        other => panic!("expected a pending wall target, got {other:?}"),
+    }
+    // The measurement box works identically to an outline wall: width + height.
+    let p = c
+        .opening_fields_prompt(
+            DoorSidelightsMode::default(),
+            ber_model::ber::fenestration::ComplexWindowKind::default(),
+            ber_model::ber::fenestration::WindowTopShape::default(),
+        )
+        .expect("placement staged");
+    assert_eq!(p.fields.len(), 2, "width + height, like an outline wall");
+    // Re-mint every wall id under the pending target (photo-attach scenario) —
+    // the confirm must re-home through `resolve_porch_wall_anchor`.
+    c.mark_dirty().unwrap();
+    c.place_opening(
+        1.0,
+        1.2,
+        false,
+        false,
+        None,
+        None,
+        None,
+        WindowTypeChoice::default(),
+        Overshading::Average,
+        None,
+        true,
+        Vec::new(),
+    )
+    .expect("window places on the re-minted porch wall");
+    c.materialize();
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert_eq!(storey.windows.len(), 1, "window added");
+    let w = &storey.windows[0];
+    let host = match &w.placement {
+        Some(OpeningPlacement::Wall { wall_id, .. }) => *wall_id,
+        other => panic!("expected a wall placement, got {other:?}"),
+    };
+    let wall = storey
+        .porch_walls
+        .regions
+        .iter()
+        .find(|r| r.id == host)
+        .expect("placement points at a LIVE porch wall");
+    assert!(
+        wall.opes.windows.contains(&w.id),
+        "opes linked on the porch wall"
+    );
+    // It sits on the porch's bottom inner edge (y ≈ 2), and its durable anchor
+    // keeps the porch key.
+    let (origin, _, _, _) = wall.base_frame().unwrap();
+    assert!(
+        (origin.y - 2.0).abs() < 0.1,
+        "landed on the porch inner edge (y≈2), got y={}",
+        origin.y
+    );
+    assert!(
+        w.wall_anchor.and_then(|a| a.porch).is_some(),
+        "the placed window carries a porch-key anchor"
+    );
+    // No OUTLINE wall picked up the opening — heat-loss consumers see nothing.
+    assert!(
+        storey
+            .walls
+            .regions
+            .iter()
+            .all(|r| r.opes.windows.is_empty() && r.opes.doors.is_empty()),
+        "outline walls carry no opes for a porch-wall window"
+    );
+}
+
+/// A porch-wall window survives save + reopen: the reload rebuilds the porch
+/// slots via `from_clean_ring` (re-minting the porch plan's VertexIds), and the
+/// porch anchor heal (`reseed_porch_wall_anchors_on_load`) re-homes the window
+/// onto the SAME porch inner edge — the porch mirror of the outline heal.
+#[test]
+fn porch_wall_window_survives_save_and_reopen() {
+    use ber_model::ber::fenestration::{OpeningPlacement, Overshading};
+    let mut c = porch_square_controller();
+    c.select_opening_tool(OpeningToolKind::Window);
+    c.openings_pointer_down(4.0, 2.2, 0.5);
+    c.place_opening(
+        1.0,
+        1.2,
+        false,
+        false,
+        None,
+        None,
+        None,
+        WindowTypeChoice::default(),
+        Overshading::Average,
+        None,
+        true,
+        Vec::new(),
+    )
+    .expect("window places");
+    let id = c.current_record.as_ref().unwrap().id.clone();
+    c.flush_if_dirty().unwrap();
+    c.open_ber(&id).expect("reopen");
+    c.materialize();
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert_eq!(storey.windows.len(), 1, "the window survived the reload");
+    let w = &storey.windows[0];
+    let host = match &w.placement {
+        Some(OpeningPlacement::Wall { wall_id, .. }) => *wall_id,
+        other => panic!("expected a wall placement, got {other:?}"),
+    };
+    let wall = storey
+        .porch_walls
+        .regions
+        .iter()
+        .find(|r| r.id == host)
+        .expect("re-homed onto a LIVE porch wall after reopen");
+    let (origin, _, _, _) = wall.base_frame().unwrap();
+    assert!(
+        (origin.y - 2.0).abs() < 0.1,
+        "still on the porch's bottom inner edge (y≈2), got y={}",
+        origin.y
+    );
+    assert!(
+        wall.opes.windows.contains(&w.id),
+        "opes re-linked on the reloaded porch wall"
+    );
+}
+
+/// The elevation editor opens for a PORCH wall (Edit tool tap → elevation),
+/// lists its opening, and a drag repositions it along the porch wall — the
+/// exact outline-wall elevation flow on the porch host.
+#[test]
+fn elevation_editing_repositions_a_porch_wall_opening() {
+    use ber_model::ber::fenestration::{OpeningPlacement, Overshading};
+    let mut c = porch_square_controller();
+    c.select_opening_tool(OpeningToolKind::Window);
+    c.openings_pointer_down(4.0, 2.2, 0.5);
+    c.place_opening(
+        1.0,
+        1.2,
+        false,
+        false,
+        None,
+        None,
+        None,
+        WindowTypeChoice::default(),
+        Overshading::Average,
+        None,
+        true,
+        Vec::new(),
+    )
+    .expect("window places");
+    c.materialize();
+    // Edit tool: tapping the porch wall opens ITS elevation.
+    c.set_openings_tool(OpeningToolKind::Edit);
+    c.openings_pointer_down(4.0, 2.2, 0.5);
+    let wall_id = c
+        .elevation_wall()
+        .expect("the porch wall's elevation opened");
+    assert!(
+        c.current_record.as_ref().unwrap().data.storeys[0]
+            .porch_walls
+            .regions
+            .iter()
+            .any(|r| r.id == wall_id),
+        "the elevation host is the porch wall"
+    );
+    let elev = c.elevation_view().expect("the porch wall unrolls");
+    assert!(
+        (elev.wall_len_m - 4.0).abs() < 0.2,
+        "porch wall length ≈ 4 m (freehand-orthogonalized), got {}",
+        elev.wall_len_m
+    );
+    assert_eq!(elev.openings.len(), 1, "the window is listed");
+    let o = &elev.openings[0];
+    // Grab the opening at its centre and drag it 1 m along the wall.
+    c.elevation_pointer_down(o.along_m, o.sill_m + o.height_m / 2.0);
+    let target_along = (o.along_m - 1.0).max(0.6);
+    c.elevation_pointer_drag(target_along, o.sill_m + o.height_m / 2.0);
+    c.elevation_pointer_up();
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    match &storey.windows[0].placement {
+        Some(OpeningPlacement::Wall { along_m, .. }) => assert!(
+            (along_m - target_along).abs() < 0.05,
+            "the drag repositioned the window (got along={along_m})"
+        ),
+        other => panic!("expected a wall placement, got {other:?}"),
+    }
+}
+
+/// Deleting the porch removes ITS openings (the porch walls no longer derive,
+/// so they orphan-prune at the next resolve) without touching openings on the
+/// storey's OUTLINE walls.
+#[test]
+fn deleting_the_porch_prunes_its_openings_and_keeps_outline_ones() {
+    use ber_model::ber::fenestration::{OpeningPlacement, Overshading};
+    let mut c = porch_square_controller();
+    // One window on the porch inner wall…
+    c.select_opening_tool(OpeningToolKind::Window);
+    c.openings_pointer_down(4.0, 2.2, 0.5);
+    c.place_opening(
+        1.0,
+        1.2,
+        false,
+        false,
+        None,
+        None,
+        None,
+        WindowTypeChoice::default(),
+        Overshading::Average,
+        None,
+        true,
+        Vec::new(),
+    )
+    .expect("porch window places");
+    // …and one on the outline's bottom wall (y=0).
+    c.openings_pointer_down(8.0, -0.2, 0.5);
+    c.place_opening(
+        1.0,
+        1.2,
+        false,
+        false,
+        None,
+        None,
+        None,
+        WindowTypeChoice::default(),
+        Overshading::Average,
+        None,
+        true,
+        Vec::new(),
+    )
+    .expect("outline window places");
+    c.materialize();
+    assert_eq!(
+        c.current_record.as_ref().unwrap().data.storeys[0]
+            .windows
+            .len(),
+        2
+    );
+    c.delete_porch(0);
+    c.materialize();
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert!(
+        storey.porch_walls.regions.is_empty(),
+        "no porch → no porch walls"
+    );
+    assert_eq!(
+        storey.windows.len(),
+        1,
+        "the porch window orphan-pruned; the outline one survives"
+    );
+    let host = match &storey.windows[0].placement {
+        Some(OpeningPlacement::Wall { wall_id, .. }) => *wall_id,
+        other => panic!("expected a wall placement, got {other:?}"),
+    };
+    let wall = storey
+        .walls
+        .regions
+        .iter()
+        .find(|r| r.id == host)
+        .expect("the survivor sits on an OUTLINE wall");
+    let (origin, _, _, _) = wall.base_frame().unwrap();
+    assert!(
+        origin.y.abs() < 0.1,
+        "the outline window stayed on the bottom wall (y≈0), got y={}",
+        origin.y
+    );
+}
+
+/// FIELD-DB pin for the 17e15dc7 LIVE record (8 Ashgrove Hill, evening
+/// tablet DB): the assessor had PAINTED the old per-facet staircase pieces
+/// `Exposed`, so section recovery baked the obsolete staircase boundaries
+/// into `wall_sections` (five adjacent same-paint sections on the back wall)
+/// and every re-open regenerated + re-split the same nine-piece staircase —
+/// the sloped-profile derivation alone could not heal it. The AGREEMENT HEAL
+/// in `sections_from_wall_regions` coalesces those same-paint,
+/// same-construction sections at recovery, so opening the record now
+/// resolves the back wall line (y = 8.917) to exactly TWO pieces — the
+/// InterStorey piece tracing the fan profile and ONE Exposed remainder
+/// inheriting the agreed paint — and the field-rejected 2.36 × 1.35 window
+/// places on the remainder. Storey 0's side of the line keeps its genuine
+/// construction boundary (Extension2 tail vs Extension3) — the heal never
+/// dissolves a differing-attribution seam.
+///
+/// The DB lives OUTSIDE the repo (a local backup — deliberately not
+/// committed); when absent the test SKIPS cleanly, so CI stays green. The
+/// backup is never written: the test copies it to a temp dir first.
+#[test]
+fn field_db_17e15dc7_painted_staircase_heals_to_two_pieces_on_open() {
+    use ber_model::ber::structural::{WallExposure, WallRegion};
+    let src = "/home/anishrag/WORK/BER_backups/2026-07-19-8-ashgrove-hill/tablet-db-evening/\
+               bers.db";
+    if !std::path::Path::new(src).exists() {
+        eprintln!("field_db_17e15dc7: bers.db not present on this machine — skipping");
+        return;
+    }
+    let tmp = std::env::temp_dir().join("ber-test-17e15dc7-bers.db");
+    std::fs::copy(src, &tmp).expect("copy bers.db to temp");
+    for ext in ["-wal", "-shm"] {
+        let side = format!("{src}{ext}");
+        if std::path::Path::new(&side).exists() {
+            std::fs::copy(
+                &side,
+                std::env::temp_dir().join(format!("ber-test-17e15dc7-bers.db{ext}")),
+            )
+            .expect("copy sqlite sidecar to temp");
+        }
+    }
+    let mut c = AppController::new(crate::engine::open_db(tmp.to_str().unwrap()).unwrap());
+    let id: ber_model::ber::common::ItemId =
+        "17e15dc7-8f10-4e48-b2e6-bec35d6a4a7c".parse().unwrap();
+    c.open_ber(&id).expect("the live record opens");
+    c.set_current_storey(Some(1)).expect("first storey active");
+    c.materialize();
+
+    let line_walls = |c: &AppController, si: usize| -> Vec<WallRegion> {
+        c.current_record.as_ref().unwrap().data.storeys[si]
+            .walls
+            .regions
+            .iter()
+            .filter(|w| {
+                !w.polygon.exterior.is_empty()
+                    && w.polygon
+                        .exterior
+                        .iter()
+                        .all(|v| (v.y - 8.917).abs() < 5e-3)
+            })
+            .cloned()
+            .collect()
+    };
+    // Storey 1: the staircase healed to exactly two pieces.
+    let pieces = line_walls(&c, 1);
+    assert_eq!(
+        pieces.len(),
+        2,
+        "the painted staircase heals to covered piece + remainder on open"
+    );
+    let covered = pieces
+        .iter()
+        .find(|w| w.exposure == WallExposure::InterStorey)
+        .expect("one InterStorey piece");
+    let remainder = pieces
+        .iter()
+        .find(|w| w.exposure != WallExposure::InterStorey)
+        .expect("one remainder");
+    assert_eq!(
+        remainder.exposure,
+        WallExposure::Exposed,
+        "the remainder inherits the agreed paint"
+    );
+    // The covered top TRACES the fan (apex band at local ~0.349 falling to
+    // the wall base) — sloped, not a flat staircase step.
+    let top_zs: Vec<f64> = covered
+        .polygon
+        .exterior
+        .iter()
+        .filter(|v| v.z > -0.2)
+        .map(|v| v.z)
+        .collect();
+    let t_hi = top_zs.iter().fold(f64::NEG_INFINITY, |a, &z| a.max(z));
+    assert!(
+        t_hi > 0.3,
+        "the covered piece reaches the fan band top, got {t_hi}"
+    );
+    let (_, _, rlen, _) = remainder
+        .base_frame()
+        .expect("the remainder is a first-class wall");
+    assert!(rlen > 4.0, "remainder spans the junction, got {rlen}");
+
+    // Storey 0's side stays sane: three pieces, and the genuine
+    // construction-attribution boundary at x = 8.328 (Extension2 annex tail
+    // vs Extension3) survives the heal.
+    let s0_pieces = line_walls(&c, 0);
+    assert_eq!(s0_pieces.len(), 3, "storey 0's side is untouched");
+    let ber = &c.current_record.as_ref().unwrap().data;
+    let tail = s0_pieces
+        .iter()
+        .find(|w| w.exposure == WallExposure::Exposed)
+        .expect("the annex tail piece");
+    let buried = s0_pieces
+        .iter()
+        .find(|w| w.exposure == WallExposure::InterStorey)
+        .expect("the buried gable strip");
+    let phase = |cid| {
+        ber.wall_construction(cid)
+            .map(|cn| cn.base.construction_phase.clone())
+    };
+    assert_ne!(
+        phase(tail.construction_id),
+        phase(buried.construction_id),
+        "the differing-attribution seam is never dissolved"
+    );
+
+    // The field-rejected 2.36 × 1.35 window: place it (it never landed in
+    // the field) through the real path and it hosts on the remainder.
+    let s1 = &ber.storeys[1];
+    let already = s1
+        .windows
+        .iter()
+        .any(|w| (w.width_m - 2.36).abs() < 1e-3 && (w.height_m - 1.35).abs() < 1e-3);
+    let ids_before: Vec<ber_model::ber::common::ItemId> = s1.windows.iter().map(|w| w.id).collect();
+    if !already {
+        c.select_opening_tool(OpeningToolKind::Window);
+        c.openings_pointer_down(6.0, 9.05, 0.5);
+        c.place_opening(
+            2.36,
+            1.35,
+            false,
+            false,
+            None,
+            None,
+            None,
+            WindowTypeChoice::default(),
+            ber_model::ber::fenestration::Overshading::Average,
+            None,
+            true,
+            Vec::new(),
+        )
+        .expect("the 2.36 × 1.35 window places on the healed wall");
+        c.materialize();
+    }
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[1];
+    let w = storey
+        .windows
+        .iter()
+        .find(|w| {
+            (w.width_m - 2.36).abs() < 1e-3
+                && (w.height_m - 1.35).abs() < 1e-3
+                && (already || !ids_before.contains(&w.id))
+        })
+        .expect("the wide window exists");
+    let host_id = match &w.placement {
+        Some(ber_model::ber::fenestration::OpeningPlacement::Wall { wall_id, .. }) => *wall_id,
+        other => panic!("expected a wall placement, got {other:?}"),
+    };
+    let host = storey
+        .walls
+        .regions
+        .iter()
+        .find(|r| r.id == host_id)
+        .expect("host wall resolves");
+    assert_ne!(
+        host.exposure,
+        WallExposure::InterStorey,
+        "the window hosts on the labellable remainder"
+    );
+    assert!(
+        host.polygon
+            .exterior
+            .iter()
+            .all(|v| (v.y - 8.917).abs() < 5e-3),
+        "hosted on the back wall line"
+    );
+}
+
+/// The tappable-checklist invariant, asserted in one sweep: across EVERY row
+/// of all four phase checklists, a green row carries no reasons and a
+/// non-green row explains itself (non-empty reasons) — colour and explanation
+/// derive from the same per-storey reason lists, so they can never disagree.
+/// Swept over three fixtures: no record loaded, a dimensioned storey, and one
+/// with heights set + an oversized roof window.
+#[test]
+fn checklist_reasons_and_status_agree_on_every_row() {
+    let sweep = |c: &AppController, ctx: &str| {
+        let all = [
+            ("mapping", c.stage_a_checklist()),
+            ("structure", c.structure_checklist()),
+            ("objects", c.objects_checklist()),
+            ("final", c.final_details_checklist()),
+        ];
+        for (phase, items) in all {
+            for item in items {
+                assert_eq!(
+                    item.status == ChecklistStatus::AllStoreys,
+                    item.reasons.is_empty(),
+                    "{ctx}/{phase}/{}: status {:?} disagrees with reasons {:?}",
+                    item.label,
+                    item.status,
+                    item.reasons
+                );
+            }
+        }
+    };
+    // No record at all — every row red, every row explains why.
+    let empty = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    sweep(&empty, "no-record");
+    // A dimensioned storey (some rows green, most red).
+    let c = dimensioned_10x6_controller();
+    sweep(&c, "dimensioned");
+    // Heights set + an overhanging roof window (the Windows row goes red on
+    // geometry, Roof/exposure rows change state).
+    let c = overhanging_roof_window_controller();
+    sweep(&c, "roof-window");
+    // Two storeys with only the ground floor's height set, editing the ground
+    // floor — the invariant must also hold through YELLOW (`ThisStorey`) and
+    // the storey-name reason prefix, which single-storey fixtures never reach.
+    let c = two_storey_partial_controller();
+    sweep(&c, "two-storey");
+    let heights = c
+        .stage_a_checklist()
+        .into_iter()
+        .find(|i| i.label == "Heights")
+        .unwrap();
+    assert_eq!(
+        heights.status,
+        ChecklistStatus::ThisStorey,
+        "done on the current storey, missing on the other → yellow"
+    );
+    assert_eq!(
+        heights.reasons,
+        vec!["Storey 2: Ceiling height not set".to_string()],
+        "the reason names WHICH storey is missing its height"
+    );
+}
+
+/// Two storeys: the dimensioned 10×6 ground floor with its ceiling height set,
+/// plus a fresh empty "Storey 2" (no height, nothing drawn), with the editor
+/// back on the ground floor — the per-storey rollups' yellow (`ThisStorey`)
+/// configuration.
+fn two_storey_partial_controller() -> AppController {
+    let mut c = dimensioned_10x6_controller();
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.commit_to_ber().unwrap();
+    c.add_storey().unwrap();
+    c.set_current_storey(Some(0)).unwrap();
+    c
+}
+
+/// A dimensioned 10×6 storey with the ceiling height set (so ceiling regions
+/// resolve) and ONE roof window whose plan footprint hangs 0.14 m past the
+/// storey's west edge (centre 0.42 m from x=0, window 1.12 m wide → half-width
+/// 0.56 m). The window is the record's only one.
+fn overhanging_roof_window_controller() -> AppController {
+    use ber_model::ber::fenestration::{OpeningPlacement, Window, WindowShape};
+    let mut c = dimensioned_10x6_controller();
+    c.set_default_ceiling_height(2.4).unwrap();
+    // The height derive is deferred (`mark_dirty`) — resolve it so the
+    // ceiling regions exist before the window is placed on one.
+    c.commit_to_ber().unwrap();
+    let storey = &mut c.current_record.as_mut().unwrap().data.storeys[0];
+    let region_id = storey
+        .ceilings
+        .regions
+        .first()
+        .expect("ceiling resolved once the height is set")
+        .id;
+    storey.windows.push(Window {
+        id: ber_model::ber::common::ItemId::default(),
+        vertices: vec![],
+        width_m: 1.12,
+        height_m: 1.14,
+        window_type_id: ber_model::ber::common::ItemId::default(),
+        placement: Some(OpeningPlacement::Roof {
+            ceiling_region_id: region_id,
+            plan: (0.42, 3.0),
+        }),
+        wall_anchor: None,
+        assembly_id: None,
+        multi_storey: false,
+        shape: WindowShape::Rectangular,
+        overshading: Default::default(),
+        num_opes: None,
+    });
+    c
+}
+
+/// Motivating case for the tappable checklist: a roof window whose footprint
+/// overhangs its ceiling surface turns the Windows row red, and the row's
+/// reasons name the window's size, the overhang distance, and the edge — the
+/// same numbers `roof_window_overhangs` derives for the gate itself.
+#[test]
+fn windows_row_reasons_name_the_roof_window_overhang() {
+    let c = overhanging_roof_window_controller();
+    let items = c.stage_a_checklist();
+    let row = items.iter().find(|i| i.label == "Windows").unwrap();
+    assert_eq!(row.status, ChecklistStatus::Incomplete);
+    let overhang = row
+        .reasons
+        .iter()
+        .find(|r| r.contains("overhangs its roof surface"))
+        .unwrap_or_else(|| panic!("an overhang reason is listed: {:?}", row.reasons));
+    assert!(
+        overhang.contains("1.12 × 1.14 m"),
+        "names the window's size: {overhang}"
+    );
+    assert!(
+        overhang.contains("by 0.14 m"),
+        "names the overhang distance: {overhang}"
+    );
+    assert!(
+        overhang.contains("west edge"),
+        "names the overhanging edge: {overhang}"
+    );
+    // The count gate fails too (1 window < 4) — reported alongside, with the
+    // count, from the same core whose emptiness is `windows_complete`.
+    assert!(
+        row.reasons
+            .iter()
+            .any(|r| r.contains("Only 1 window recorded — a dwelling needs at least 4")),
+        "the under-four count reason is listed with its count: {:?}",
+        row.reasons
+    );
+}
+
+/// The <4-windows case on its own: with no windows at all the row explains
+/// the minimum, and once four exist (and nothing overhangs) the row is green
+/// with NO reasons.
+#[test]
+fn windows_row_reasons_name_the_count_shortfall() {
+    let c = dimensioned_10x6_controller();
+    let items = c.stage_a_checklist();
+    let row = items.iter().find(|i| i.label == "Windows").unwrap();
+    assert_eq!(row.status, ChecklistStatus::Incomplete);
+    assert!(
+        row.reasons
+            .iter()
+            .any(|r| r.contains("No windows recorded — a dwelling needs at least 4")),
+        "explains the four-window minimum: {:?}",
+        row.reasons
+    );
+}
+
+// ── 'Centre between 2 points' position pick ─────────────────────────────────
+// A whole-shape Translate position prompt (a drawn upper-storey outline over the
+// storey below) gains a two-tap "centre between two points" action alongside the
+// footprint Centre: tap two points (each snapped to the nearest vertex / wall)
+// and the shape's axis-extent midpoint lands on the two points' midpoint ON THE
+// PROMPT'S AXIS ONLY. Exact drawn coords shift slightly through the carve /
+// orthogonalize, so these read the ACTUAL extents rather than assume them.
+// Mirrors the roof-point tap-pick + position tests.
+
+/// Drive a freshly-carved upper outline through its length loop to the Translate
+/// position prompt. `stroke` is the upper box drawn over the 10×10 storey below.
+fn upper_box_at_position_prompt(stroke: &[(f32, f32)]) -> AppController {
+    let mut c = dimensioned_square_controller(); // storey 0 = 10×10
+    c.add_storey().unwrap();
+    c.apply_outline_world_inner(stroke, true).unwrap();
+    let mut guard = 0;
+    while c.dimensioning_active() && guard < 12 {
+        let prompt = c.document.dimensioning.current_prompt.clone().unwrap();
+        let (r, e) = c
+            .document
+            .floor_plan
+            .find_vertex(prompt.wall_start_vertex)
+            .unwrap();
+        let len = c.document.floor_plan.wall_length(r, e).unwrap();
+        c.apply_dimension(len).unwrap();
+        guard += 1;
+    }
+    assert!(guard < 12, "length loop didn't terminate");
+    c
+}
+
+fn cb_extent(c: &AppController, axis: ParameterAxis) -> (f32, f32) {
+    let coord = |p: &Point2f32| match axis {
+        ParameterAxis::X => p.x,
+        ParameterAxis::Y => p.y,
+    };
+    c.document
+        .floor_plan
+        .get_points()
+        .iter()
+        .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), p| {
+            (lo.min(coord(p)), hi.max(coord(p)))
+        })
+}
+
+/// A vertical (Y) Translate prompt: enter the pick, tap two points whose Y
+/// midpoint is 5 (with DELIBERATELY DIFFERENT X to prove X is ignored). The
+/// box's Y-extent midpoint lands on 5; X is unchanged; the Y axis is resolved;
+/// the height is preserved (rigid translate).
+#[test]
+fn centre_between_two_points_vertical_lands_on_y_midpoint_ignoring_x() {
+    // Full-width box y∈[2,5] over the 10×10 below: X pinned, Y free → Y prompt.
+    let mut c = upper_box_at_position_prompt(&[
+        (0.1, 2.0),
+        (9.9, 2.0),
+        (9.9, 5.0),
+        (0.1, 5.0),
+        (0.15, 2.05),
+    ]);
+    let ui = c.position_prompt_for_ui().expect("Y position prompt");
+    assert_eq!(ui.axis, ParameterAxis::Y);
+    assert!(ui.offers_centre, "the upper-outline slide offers Centre");
+    assert!(
+        ui.offers_centre_between,
+        "…and 'Centre between 2 points' on the same gate"
+    );
+    let (xlo0, xhi0) = cb_extent(&c, ParameterAxis::X); // full-width, must not move
+    let (ylo0, yhi0) = cb_extent(&c, ParameterAxis::Y);
+    let height = yhi0 - ylo0;
+
+    c.enter_centre_between_pick();
+    assert!(c.centre_between_picking());
+    // Tap 1 on the below LEFT wall (x=0) at y=4; tap 2 on the RIGHT wall (x=10)
+    // at y=6 — X differs (0 vs 10), Y midpoint = 5.
+    c.centre_between_tap(0.0, 4.0).unwrap();
+    assert!(c.centre_between_picking(), "still picking after tap 1");
+    c.centre_between_tap(10.0, 6.0).unwrap();
+
+    assert!(!c.centre_between_picking(), "applied on tap 2");
+    let (ylo, yhi) = cb_extent(&c, ParameterAxis::Y);
+    assert!(
+        ((ylo + yhi) / 2.0 - 5.0).abs() < 1e-3,
+        "Y-extent midpoint on 5 (got lo {ylo}, hi {yhi})"
+    );
+    assert!(
+        (yhi - ylo - height).abs() < 1e-3,
+        "height preserved (rigid)"
+    );
+    let (xlo, xhi) = cb_extent(&c, ParameterAxis::X);
+    assert!(
+        (xlo - xlo0).abs() < 1e-3 && (xhi - xhi0).abs() < 1e-3,
+        "X unchanged — the picked X was ignored"
+    );
+    assert!(c
+        .document
+        .dimensioning
+        .position_resolved_axes
+        .contains(&ParameterAxis::Y));
+    assert!(c.position_prompt_for_ui().is_none(), "prompt resolved");
+}
+
+/// A horizontal (X) Translate prompt: the analogue — tap two points whose X
+/// midpoint is 5 with DIFFERENT Y (ignored). Proves the free-X path (an upper
+/// outline whose X is not auto-pinned) works.
+#[test]
+fn centre_between_two_points_horizontal_lands_on_x_midpoint_ignoring_y() {
+    // Full-HEIGHT box x∈[2,5] over the below: Y pinned (top+bottom), X free.
+    let mut c = upper_box_at_position_prompt(&[
+        (2.0, 0.1),
+        (5.0, 0.1),
+        (5.0, 9.9),
+        (2.0, 9.9),
+        (2.05, 0.15),
+    ]);
+    let ui = c.position_prompt_for_ui().expect("X position prompt");
+    assert_eq!(ui.axis, ParameterAxis::X);
+    assert!(ui.offers_centre_between);
+    let (ylo0, yhi0) = cb_extent(&c, ParameterAxis::Y);
+    let (xlo0, xhi0) = cb_extent(&c, ParameterAxis::X);
+    let width = xhi0 - xlo0;
+
+    c.enter_centre_between_pick();
+    // Tap 1 on the below BOTTOM wall (y=0) at x=3; tap 2 on the TOP wall (y=10)
+    // at x=7 — Y differs (0 vs 10), X midpoint = 5.
+    c.centre_between_tap(3.0, 0.0).unwrap();
+    c.centre_between_tap(7.0, 10.0).unwrap();
+
+    let (xlo, xhi) = cb_extent(&c, ParameterAxis::X);
+    assert!(
+        ((xlo + xhi) / 2.0 - 5.0).abs() < 1e-3,
+        "X-extent midpoint on 5 (got lo {xlo}, hi {xhi})"
+    );
+    assert!((xhi - xlo - width).abs() < 1e-3, "width preserved");
+    let (ylo, yhi) = cb_extent(&c, ParameterAxis::Y);
+    assert!(
+        (ylo - ylo0).abs() < 1e-3 && (yhi - yhi0).abs() < 1e-3,
+        "Y unchanged — the picked Y was ignored"
+    );
+    assert!(c
+        .document
+        .dimensioning
+        .position_resolved_axes
+        .contains(&ParameterAxis::X));
+}
+
+/// Each tap snaps to a nearby vertex: a tap ~0.09 m off a box corner lands on
+/// the corner's exact coordinate (both axes snapped for the marker).
+#[test]
+fn centre_between_tap_snaps_to_nearby_vertex() {
+    let mut c = upper_box_at_position_prompt(&[
+        (0.1, 2.0),
+        (9.9, 2.0),
+        (9.9, 8.0),
+        (0.1, 8.0),
+        (0.15, 2.05),
+    ]);
+    assert_eq!(c.position_prompt_for_ui().unwrap().axis, ParameterAxis::Y);
+    // The ACTUAL box corner nearest the drawn bottom-left (0, 2).
+    let corner = *c
+        .document
+        .floor_plan
+        .get_points()
+        .iter()
+        .min_by(|a, b| {
+            let d = |p: &Point2f32| (p.x).hypot(p.y - 2.0);
+            d(a).total_cmp(&d(b))
+        })
+        .unwrap();
+    c.enter_centre_between_pick();
+    // Tap ~0.085 m diagonally off that corner.
+    c.centre_between_tap(corner.x + 0.06, corner.y + 0.06)
+        .unwrap();
+    let (fx, fy) = c
+        .centre_between_first_point()
+        .expect("first pick point placed");
+    assert!(
+        (fx as f32 - corner.x).abs() < 1e-3 && (fy as f32 - corner.y).abs() < 1e-3,
+        "snapped to the corner ({}, {}), got ({fx}, {fy})",
+        corner.x,
+        corner.y
+    );
+}
+
+/// Cancel mid-pick restores the open prompt with no geometry change.
+#[test]
+fn centre_between_cancel_mid_pick_changes_nothing() {
+    let mut c = upper_box_at_position_prompt(&[
+        (0.1, 2.0),
+        (9.9, 2.0),
+        (9.9, 5.0),
+        (0.1, 5.0),
+        (0.15, 2.05),
+    ]);
+    let before = c.document.floor_plan.get_points();
+    c.enter_centre_between_pick();
+    c.centre_between_tap(0.0, 4.0).unwrap(); // one tap, then cancel
+    assert!(c.centre_between_first_point().is_some());
+    c.cancel_centre_between_pick();
+    assert!(!c.centre_between_picking());
+    assert_eq!(
+        c.document.floor_plan.get_points(),
+        before,
+        "cancel moved nothing"
+    );
+    let ui = c.position_prompt_for_ui().expect("prompt still open");
+    assert_eq!(ui.axis, ParameterAxis::Y);
+    assert!(ui.offers_centre_between, "the action is still offered");
+}
+
+/// The existing footprint Centre (`centre_roof_position` → `center_current_position`)
+/// is unchanged by the new action: it centres the box within the BELOW footprint
+/// (midpoint 5 of [0,10]), height preserved.
+#[test]
+fn footprint_centre_still_centres_within_the_below_footprint() {
+    let mut c = upper_box_at_position_prompt(&[
+        (0.1, 2.0),
+        (9.9, 2.0),
+        (9.9, 5.0),
+        (0.1, 5.0),
+        (0.15, 2.05),
+    ]);
+    let (ylo0, yhi0) = cb_extent(&c, ParameterAxis::Y);
+    let height = yhi0 - ylo0;
+    c.centre_roof_position().expect("footprint centre applies");
+    let (ylo, yhi) = cb_extent(&c, ParameterAxis::Y);
+    assert!(
+        ((ylo + yhi) / 2.0 - 5.0).abs() < 1e-3,
+        "centred on the below mid-line y=5 (got lo {ylo}, hi {yhi})"
+    );
+    assert!((yhi - ylo - height).abs() < 1e-3, "height preserved");
+}
+
+/// Undo after a two-point centre reverts the translate (and restores the prompt).
+#[test]
+fn undo_after_centre_between_reverts_the_translate() {
+    let mut c = upper_box_at_position_prompt(&[
+        (0.1, 2.0),
+        (9.9, 2.0),
+        (9.9, 5.0),
+        (0.1, 5.0),
+        (0.15, 2.05),
+    ]);
+    let before = c.document.floor_plan.get_points();
+    let (ylo0, _) = cb_extent(&c, ParameterAxis::Y);
+    c.enter_centre_between_pick();
+    c.centre_between_tap(0.0, 4.0).unwrap();
+    c.centre_between_tap(10.0, 6.0).unwrap();
+    let (ylo, _) = cb_extent(&c, ParameterAxis::Y);
+    assert!((ylo - ylo0).abs() > 1e-2, "the box moved on Y");
+
+    c.undo().expect("undo");
+    assert_eq!(
+        c.document.floor_plan.get_points(),
+        before,
+        "geometry restored to the drawn position"
+    );
+    let ui = c.position_prompt_for_ui().expect("prompt restored");
+    assert_eq!(ui.axis, ParameterAxis::Y);
+}
+
+/// PAVILION per-side snapping (mirrors the dormer's, added to the flat-top
+/// path): a flat top drawn with its E/W sides within snap tolerance of the
+/// CONTAINING ceiling region's E/W walls pre-snaps FLUSH onto them, records an
+/// elective snap tag per side, and PINS both X sides — so the WIDTH prompt is
+/// SKIPPED (the width is the region's E-W span, the exact bug: 5.22 m, not the
+/// freehand 5.31 m), the FSM opening the DEPTH prompt directly. The un-pinned
+/// depth still asks. Uses a small view diagonal so the tolerance is the 0.15 m
+/// min clamp (unambiguous in/out of reach).
+#[test]
+fn pavilion_snaps_full_width_to_the_region_and_skips_the_width() {
+    let mut c = ceiling_apex_ready_controller(); // 10×10 flat ceiling region
+    c.set_view_world_diagonal_m(3.0); // snap tol → 0.15 m (min clamp)
+
+    // A FULL-WIDTH flat top: its west side 0.05 m off x=0, east 0.05 m off
+    // x=10 (both < 0.15 m), depth y∈[3,6] well clear of the N/S walls.
+    c.apply_roof_ridge_stroke_event(&[
+        (0.05, 3.0),
+        (5.0, 3.05),
+        (9.95, 3.0),
+        (9.90, 4.5),
+        (9.95, 6.0),
+        (5.0, 5.95),
+        (0.05, 6.0),
+        (0.10, 4.5),
+        (0.05, 3.1),
+    ]);
+    assert!(c.ceiling_rect_pending(), "closed stroke → the pavilion FSM");
+    // Both X sides snapped → two elective snap tags.
+    assert_eq!(
+        c.snap_overlay().len(),
+        2,
+        "both E/W sides snapped their whole side onto the region walls"
+    );
+    // …flush onto the region's E/W walls (x=0 and x=10).
+    let outline = c.pending_roof_rect_outline().expect("dashed overlay");
+    assert!(
+        (outline[0].0 - 0.0).abs() < 0.02,
+        "west side snapped to x=0, got {}",
+        outline[0].0
+    );
+    assert!(
+        (outline[1].0 - 10.0).abs() < 0.02,
+        "east side snapped to x=10, got {}",
+        outline[1].0
+    );
+    // X FULLY pinned → the WIDTH prompt is SKIPPED; the FSM opens the DEPTH.
+    assert_eq!(
+        c.ceiling_rect_length_pending(),
+        Some(ParameterAxis::Y),
+        "both E/W sides pinned → LenX skipped, straight to the depth (LenY)"
+    );
+
+    // Answer the depth; the pinned X axis's POSITION prompt (PosX) is SKIPPED —
+    // only PosY is asked, and the E/W edges stay flush on the region walls.
+    c.assign_roof_rect_length(2.0).expect("depth applies");
+    let ui = c.position_prompt_for_ui().expect("a position prompt is up");
+    assert_eq!(
+        ui.axis,
+        ParameterAxis::Y,
+        "PosX skipped (X pinned); only PosY is asked"
+    );
+    let outline = c.pending_roof_rect_outline().expect("overlay");
+    assert!(
+        (outline[0].0 - 0.0).abs() < 0.02 && (outline[1].0 - 10.0).abs() < 0.02,
+        "the pinned E/W edges are still on the region walls at the position stage"
+    );
+}
+
+/// A pavilion side drawn WELL INSIDE the region (beyond snap tolerance) does
+/// NOT pin and is still asked every prompt — the flat-top path with no
+/// reference in reach is byte-for-byte the old freehand pavilion.
+#[test]
+fn pavilion_side_beyond_tol_does_not_pin_and_still_prompts() {
+    let mut c = ceiling_apex_ready_controller();
+    c.set_view_world_diagonal_m(3.0); // snap tol → 0.15 m
+
+    // A flat top at x∈[2,8], y∈[3,6] — every side ≥ 2 m from a region wall,
+    // far beyond the 0.15 m tolerance.
+    c.apply_roof_ridge_stroke_event(&[
+        (2.0, 3.0),
+        (5.0, 2.95),
+        (8.0, 3.0),
+        (8.05, 4.5),
+        (8.0, 6.0),
+        (5.0, 6.05),
+        (2.0, 6.0),
+        (1.95, 4.5),
+        (2.0, 3.1),
+    ]);
+    assert!(c.ceiling_rect_pending(), "closed stroke → the pavilion FSM");
+    assert!(
+        c.snap_overlay().is_empty(),
+        "no region wall in reach → nothing snapped, no tag"
+    );
+    // The full un-pinned flow: WIDTH asked first (prefilled the drawn width).
+    assert_eq!(
+        c.ceiling_rect_length_pending(),
+        Some(ParameterAxis::X),
+        "no pins → the width is still asked"
+    );
+    c.assign_roof_rect_length(6.0).expect("width applies");
+    assert_eq!(c.ceiling_rect_length_pending(), Some(ParameterAxis::Y));
+    c.assign_roof_rect_length(3.0).expect("depth applies");
+    // Both positions asked (nothing pinned).
+    assert_eq!(
+        c.position_prompt_for_ui().expect("PosX").axis,
+        ParameterAxis::X,
+        "un-pinned pavilion still asks PosX"
+    );
+    c.apply_position_dimension(2.0).expect("PosX applies");
+    assert_eq!(
+        c.position_prompt_for_ui().expect("PosY").axis,
+        ParameterAxis::Y,
+        "un-pinned pavilion still asks PosY"
+    );
+}
+
+/// The fully-general case: a flat top whose FOUR sides all fall within tolerance
+/// of the region's four walls pins every side — both LENGTH prompts skipped
+/// (widths are the region spans) and both POSITION prompts skipped (the fitted
+/// coordinates stand), so the FSM lands straight on the HEIGHT stage with the
+/// flat top exactly filling the region.
+#[test]
+fn pavilion_all_four_sides_snap_to_fill_the_region() {
+    let mut c = ceiling_apex_ready_controller();
+    c.set_view_world_diagonal_m(3.0); // snap tol → 0.15 m
+
+    c.apply_roof_ridge_stroke_event(&[
+        (0.05, 0.05),
+        (5.0, 0.10),
+        (9.95, 0.05),
+        (9.90, 5.0),
+        (9.95, 9.95),
+        (5.0, 9.90),
+        (0.05, 9.95),
+        (0.10, 5.0),
+        (0.05, 0.15),
+    ]);
+    assert!(c.ceiling_rect_pending(), "closed stroke → the pavilion FSM");
+    assert_eq!(
+        c.snap_overlay().len(),
+        4,
+        "all four sides snapped onto the region walls"
+    );
+    // Both axes fully pinned → both LENGTH and both POSITION prompts skipped →
+    // straight to HEIGHT, the flat top exactly filling the region.
+    assert!(
+        c.ceiling_rect_height_pending(),
+        "all four sides pinned → LenX/LenY + PosX/PosY skipped, straight to height"
+    );
+    let outline = c.pending_roof_rect_outline().expect("overlay");
+    assert!(
+        (outline[0].0 - 0.0).abs() < 0.02
+            && (outline[0].1 - 0.0).abs() < 0.02
+            && (outline[2].0 - 10.0).abs() < 0.02
+            && (outline[2].1 - 10.0).abs() < 0.02,
+        "the flat top fills the region exactly, got {outline:?}"
+    );
+}
+
+/// Tap-to-unsnap on a pinned pavilion side: the flat top replays through
+/// `SnapAction::Pavilion`, re-fits UN-snapped (the E/W sides revert to their
+/// drawn coordinates, the pins gone) and the FSM re-opens at the WIDTH prompt.
+#[test]
+fn pavilion_tap_to_unsnap_reverts_a_pinned_side() {
+    let mut c = ceiling_apex_ready_controller();
+    c.set_view_world_diagonal_m(3.0); // snap tol → 0.15 m
+
+    let x0 = 0.05_f32;
+    let x1 = 9.95_f32;
+    c.apply_roof_ridge_stroke_event(&[
+        (x0, 3.0),
+        (5.0, 3.05),
+        (x1, 3.0),
+        (9.90, 4.5),
+        (x1, 6.0),
+        (5.0, 5.95),
+        (x0, 6.0),
+        (0.10, 4.5),
+        (x0, 3.1),
+    ]);
+    assert_eq!(c.snap_overlay().len(), 2, "both E/W sides snapped");
+    assert_eq!(
+        c.ceiling_rect_length_pending(),
+        Some(ParameterAxis::Y),
+        "X fully pinned → width skipped"
+    );
+
+    // Un-snap everything: the pavilion re-fits from the raw stroke with every
+    // snap disabled — the E/W sides revert to the drawn x0/x1 and the width is
+    // asked again.
+    c.unsnap_last();
+    assert!(
+        c.ceiling_rect_pending(),
+        "the re-fit re-opens the pavilion FSM"
+    );
+    let outline = c.pending_roof_rect_outline().expect("re-fit overlay");
+    assert!(
+        (outline[0].0 - x0 as f64).abs() < 0.02,
+        "un-snapped west side back on the drawn x0={x0}, got {}",
+        outline[0].0
+    );
+    assert!(
+        (outline[1].0 - x1 as f64).abs() < 0.02,
+        "un-snapped east side back on the drawn x1={x1}, got {}",
+        outline[1].0
+    );
+    assert_eq!(
+        c.ceiling_rect_length_pending(),
+        Some(ParameterAxis::X),
+        "un-snapped → back at the WIDTH prompt (LenX)"
+    );
+}
+
+/// On-surface attribute editing for a standalone DOOR (parity with wall
+/// windows): the elevation "Edit door…" opens the box prefilled from the door,
+/// and Apply resizes it AND sets its type name / kind / draught-stripped — all
+/// persisted, undoable, and surviving a save + reopen.
+#[test]
+fn editing_a_standalone_door_persists_and_survives_reopen() {
+    use ber_model::ber::fenestration::{DoorKind, OpeningPlacement, Overshading};
+    let mut c = dimensioned_square_controller();
+    c.set_default_ceiling_height(2.8).unwrap();
+    c.materialize();
+    // Place a plain solid door, draught-stripped.
+    c.select_opening_tool(OpeningToolKind::Door);
+    c.openings_pointer_down(5.0, -0.2, 0.5);
+    c.place_opening(
+        0.9,
+        2.0,
+        false,
+        false,
+        None,
+        None,
+        None,
+        WindowTypeChoice::default(),
+        Overshading::Average,
+        None,
+        true, // draught-stripped
+        Vec::new(),
+    )
+    .expect("door places");
+    c.materialize();
+    let (did, along) = {
+        let d = &c.current_record.as_ref().unwrap().data.storeys[0].doors[0];
+        assert_eq!(d.type_name, "Door");
+        assert_eq!(d.kind, Some(DoorKind::Solid));
+        assert_eq!(d.draught_stripped, Some(true));
+        let along = match &d.placement {
+            Some(OpeningPlacement::Wall { along_m, .. }) => *along_m,
+            other => panic!("expected a wall placement, got {other:?}"),
+        };
+        (d.id, along)
+    };
+    // Edit tool → the wall's elevation → select the door → Edit door….
+    c.set_openings_tool(OpeningToolKind::Edit);
+    c.openings_pointer_down(5.0, -0.2, 0.5);
+    assert!(c.elevation_wall().is_some(), "elevation opened");
+    c.elevation_pointer_down(along, 1.0); // inside the door (sill 0, h 2.0)
+    c.elevation_pointer_up();
+    c.start_edit_selected_door();
+    let p = c
+        .opening_fields_prompt(
+            DoorSidelightsMode::default(),
+            ber_model::ber::fenestration::ComplexWindowKind::default(),
+            ber_model::ber::fenestration::WindowTopShape::default(),
+        )
+        .expect("door edit box open");
+    let pre = p.door_edit.clone().expect("door prefill");
+    assert!((pre.width_m - 0.9).abs() < 1e-4, "prefilled width");
+    assert_eq!(pre.type_name, "Door", "prefilled type name");
+    assert_eq!(pre.kind, DoorKind::Solid, "prefilled kind");
+    assert!(pre.draught_stripped, "prefilled draught");
+    assert!(
+        p.edit.is_none(),
+        "a door edit does not use the window prefill"
+    );
+    // Apply: change size + type name + kind + draught.
+    c.apply_door_edit(
+        1.0,
+        2.1,
+        "Front door".to_string(),
+        DoorKind::HalfGlazed,
+        false,
+        Vec::new(),
+    )
+    .expect("door edit applies");
+    c.materialize();
+    {
+        let d = c.current_record.as_ref().unwrap().data.storeys[0]
+            .doors
+            .iter()
+            .find(|d| d.id == did)
+            .expect("door still there");
+        assert!((d.width_m - 1.0).abs() < 1e-4, "width resized");
+        assert!((d.height_m - 2.1).abs() < 1e-4, "height resized");
+        assert_eq!(d.type_name, "Front door", "type name set");
+        assert_eq!(d.kind, Some(DoorKind::HalfGlazed), "kind set");
+        assert_eq!(d.draught_stripped, Some(false), "draught cleared");
+    }
+    // Undoable like the other opening edits.
+    c.undo().expect("undo");
+    c.materialize();
+    {
+        let d = &c.current_record.as_ref().unwrap().data.storeys[0].doors[0];
+        assert_eq!(d.type_name, "Door", "undo reverts the retype");
+        assert_eq!(d.kind, Some(DoorKind::Solid), "undo reverts the kind");
+        assert!((d.width_m - 0.9).abs() < 1e-4, "undo reverts the resize");
+    }
+    c.redo().expect("redo");
+    c.materialize();
+    // Survives save + reopen.
+    let id = c.current_record.as_ref().unwrap().id.clone();
+    c.flush_if_dirty().unwrap();
+    c.open_ber(&id).expect("reopen");
+    c.materialize();
+    let d = &c.current_record.as_ref().unwrap().data.storeys[0].doors[0];
+    assert_eq!(d.type_name, "Front door", "type name survived the reload");
+    assert_eq!(
+        d.kind,
+        Some(DoorKind::HalfGlazed),
+        "kind survived the reload"
+    );
+    assert_eq!(d.draught_stripped, Some(false));
+    assert!((d.width_m - 1.0).abs() < 1e-4, "size survived the reload");
+}
+
+/// An assembly-member door (the panel of a door+sidelights composite) keeps its
+/// assembly flow — the standalone "Edit door…" refuses it, like a sidelight
+/// window is refused by the window edit.
+#[test]
+fn assembly_member_door_offers_no_edit() {
+    use ber_model::ber::openings::OpeningRef;
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    c.select_opening_tool(OpeningToolKind::DoorSidelights);
+    c.openings_pointer_down(5.0, -0.2, 0.5);
+    c.place_opening(
+        0.9,
+        2.0,
+        false,
+        false,
+        Some(DoorSidelightsPlacement::Detailed {
+            left: Some(0.4),
+            left_sill: None,
+            right: None,
+            right_sill: None,
+            transom: None,
+            transom_semicircular: false,
+        }),
+        None,
+        None,
+        WindowTypeChoice::default(),
+        ber_model::ber::fenestration::Overshading::Average,
+        None,
+        true,
+        Vec::new(),
+    )
+    .expect("door+sidelights places");
+    c.materialize();
+    let panel_id = c.current_record.as_ref().unwrap().data.storeys[0].doors[0].id;
+    assert!(
+        c.current_record.as_ref().unwrap().data.storeys[0].doors[0]
+            .assembly_id
+            .is_some(),
+        "the panel is an assembly member"
+    );
+    // Select the panel door directly and try to edit it — refused.
+    c.elevation_selection = Some(OpeningRef::Door(panel_id));
+    c.start_edit_selected_door();
+    assert!(
+        c.opening_edit.is_none(),
+        "an assembly-panel door offers no standalone edit"
+    );
+}
+
+/// On-surface attribute editing for a ROOF window (parity with wall windows):
+/// the plan "Edit roof window…" opens the box prefilled from the rooflight, and
+/// Apply resizes it (ceiling-plane, vertices re-derived) AND retypes /
+/// overshades / sets opes. A resize that makes the footprint OVERHANG its
+/// region is ACCEPTED — the Windows checklist flags it (never a hard reject).
+/// Undoable and survives a save + reopen.
+#[test]
+fn editing_a_roof_window_persists_and_a_size_that_overhangs_is_accepted() {
+    use ber_model::ber::fenestration::{
+        Frame, Glazing, OpeningPlacement, Overshading, Window, WindowShape,
+    };
+    let mut c = dimensioned_10x6_controller();
+    c.set_default_ceiling_height(2.4).unwrap();
+    // Resolve the ceiling regions so the rooflight has a host region.
+    c.commit_to_ber().unwrap();
+    let region_id = c.current_record.as_ref().unwrap().data.storeys[0]
+        .ceilings
+        .regions
+        .first()
+        .expect("ceiling resolved once the height is set")
+        .id;
+    // A small rooflight that FITS its ceiling region (0.42 − 0.15 > 0).
+    let wid = ber_model::ber::common::ItemId::default();
+    c.current_record.as_mut().unwrap().data.storeys[0]
+        .windows
+        .push(Window {
+            id: wid,
+            vertices: vec![],
+            width_m: 0.3,
+            height_m: 0.3,
+            window_type_id: ber_model::ber::common::ItemId::default(),
+            placement: Some(OpeningPlacement::Roof {
+                ceiling_region_id: region_id,
+                plan: (0.42, 3.0),
+            }),
+            wall_anchor: None,
+            assembly_id: None,
+            multi_storey: false,
+            shape: WindowShape::Rectangular,
+            overshading: Overshading::VeryLittle,
+            num_opes: None,
+        });
+    // Select it in the plan and open the roof-window edit box.
+    c.set_openings_tool(OpeningToolKind::Edit);
+    c.roof_window_sel = Some(wid);
+    c.start_edit_selected_roof_window();
+    let p = c
+        .opening_fields_prompt(
+            DoorSidelightsMode::default(),
+            ber_model::ber::fenestration::ComplexWindowKind::default(),
+            ber_model::ber::fenestration::WindowTopShape::default(),
+        )
+        .expect("roof edit box open");
+    assert_eq!(p.title, "Edit roof window");
+    assert!(p.full_span.is_none(), "no wall span for a rooflight");
+    assert!(p.window_top.is_none(), "no top tick for a rooflight");
+    assert!(
+        p.door_edit.is_none(),
+        "a roof window uses the window prefill"
+    );
+    let pre = p.edit.expect("roof prefill");
+    assert!((pre.width_m - 0.3).abs() < 1e-4, "prefilled width");
+    // Resize to a size that OVERHANGS the region (west by 0.14 m), and retype +
+    // overshade + set opes. The full_width/full_height/top args are ignored for
+    // a rooflight (the controller dispatches to the roof path).
+    c.apply_opening_edit(
+        1.12,
+        1.14,
+        false,
+        false,
+        None,
+        WindowTypeChoice::New {
+            glazing: Glazing::Triple,
+            frame: Frame::WoodUPVC,
+            year: 2015,
+            certified: true,
+            draught_stripped: true,
+            gap: vec![],
+            name: Some("Rooflight".to_string()),
+        },
+        Overshading::Heavy,
+        Some(2),
+        Vec::new(),
+    )
+    .expect("a rooflight resize is accepted even when it overhangs");
+    c.materialize();
+    {
+        let w = c.current_record.as_ref().unwrap().data.storeys[0]
+            .windows
+            .iter()
+            .find(|w| w.id == wid)
+            .expect("rooflight still there");
+        assert!((w.width_m - 1.12).abs() < 1e-4, "width resized");
+        assert!((w.height_m - 1.14).abs() < 1e-4, "height resized");
+        assert_eq!(w.overshading, Overshading::Heavy, "overshading retyped");
+        assert_eq!(w.num_opes, Some(2), "opes set");
+        assert_eq!(w.vertices.len(), 4, "vertices re-derived at resolve");
+    }
+    // The overhang now shows on the Windows checklist — accepted, not rejected.
+    let items = c.stage_a_checklist();
+    let row = items.iter().find(|i| i.label == "Windows").unwrap();
+    assert!(
+        row.reasons
+            .iter()
+            .any(|r| r.contains("overhangs its roof surface")
+                && r.contains("by 0.14 m")
+                && r.contains("west edge")),
+        "the resize-to-overhang is flagged by the checklist: {:?}",
+        row.reasons
+    );
+    // Undoable + survives reopen.
+    c.undo().expect("undo");
+    c.materialize();
+    assert!(
+        (c.current_record.as_ref().unwrap().data.storeys[0]
+            .windows
+            .iter()
+            .find(|w| w.id == wid)
+            .unwrap()
+            .width_m
+            - 0.3)
+            .abs()
+            < 1e-4,
+        "undo reverts the resize"
+    );
+    c.redo().expect("redo");
+    c.materialize();
+    let id = c.current_record.as_ref().unwrap().id.clone();
+    c.flush_if_dirty().unwrap();
+    c.open_ber(&id).expect("reopen");
+    c.materialize();
+    let w = &c.current_record.as_ref().unwrap().data.storeys[0].windows[0];
+    assert!(
+        (w.width_m - 1.12).abs() < 1e-4,
+        "resized rooflight survived the reload"
+    );
+    assert_eq!(
+        w.overshading,
+        Overshading::Heavy,
+        "overshading survived the reload"
+    );
+}
+
+/// Field regression (2026-07-19, 8 Ashgrove Hill, report 09d2f42b): setting a
+/// non-junction RISER wall Exposed must SURVIVE the materialize. The durable
+/// override was written to `StoreyDoc.riser_exposure` and stamped inside the
+/// per-storey resolve, but the cross-storey `derive_horizontal_exposure_all`
+/// tail runs `derive_inter_storey` AFTER that resolve — re-splitting the walls
+/// and resetting every riser to its derived `Unset` default — and risers were
+/// NOT re-stamped afterward (only floor/ceiling were). So the setting reverted
+/// on the next materialize and the assessor "couldn't set the riser Exposed".
+/// The fix re-stamps riser overrides after the derive; this pins that the left
+/// external riser at x[1.66, 4.35] (y = 8.917) stays Exposed post-materialize.
+#[test]
+fn field_09d2f42b_riser_exposed_survives_cross_storey_derive() {
+    let path = "/home/anishrag/WORK/BER_backups/2026-07-19-8-ashgrove-hill/\
+bug-reports/09d2f42b-b68c-4d2d-8eda-3731cbc80f62/state.json";
+    if !std::path::Path::new(path).exists() {
+        return; // field checkpoint not present in this clone — skip
+    }
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    assert!(c.load_checkpoint_from(path), "field checkpoint loads");
+
+    c.set_current_storey(Some(0)).unwrap();
+    c.commit_to_ber().unwrap();
+
+    // Select the left external riser (base edge x∈[1.66, 4.35] at y = 8.917) and
+    // paint it Exposed.
+    c.set_exposure_mode(true);
+    c.exposure_pointer_down(3.0, 8.917, 0.3);
+    assert!(
+        c.selected_riser.is_some(),
+        "the tap at (3.0, 8.917) selects the left external riser"
+    );
+    c.set_riser_exposure(WallExposure::Exposed);
+
+    // The riser at the target span — matched by base-edge midpoint.
+    let is_target = |a: (f64, f64), b: (f64, f64)| {
+        let (mx, my) = ((a.0 + b.0) * 0.5, (a.1 + b.1) * 0.5);
+        (mx - 3.0).abs() < 0.6 && (my - 8.917).abs() < 0.05
+    };
+    // In-memory (pre-materialize) the override is already visible.
+    let riser_exposure = |c: &AppController| {
+        c.riser_views()
+            .into_iter()
+            .find(|v| is_target(v.a, v.b))
+            .map(|v| v.exposure)
+    };
+    assert_eq!(
+        riser_exposure(&c),
+        Some(WallExposure::Exposed),
+        "the riser reads Exposed immediately after the assessor sets it"
+    );
+
+    // THE MATERIALIZE THAT REVERTED IT PRE-FIX: commit re-resolves storey 0, then
+    // refresh_all_storeys runs the cross-storey derive tail.
+    c.commit_to_ber().unwrap();
+    c.refresh_all_storeys();
+
+    // (a) via the RiserView surface the UI reads.
+    assert_eq!(
+        riser_exposure(&c),
+        Some(WallExposure::Exposed),
+        "the Exposed override SURVIVES the cross-storey derive (riser_views)"
+    );
+    // (b) directly on the record wall region — the DEAP-facing truth.
+    let region = c.current_record.as_ref().unwrap().data.storeys[0]
+        .walls
+        .regions
+        .iter()
+        .find(|r| {
+            r.base_edge()
+                .is_some_and(|(e0, e1)| is_target((e0.x, e0.y), (e1.x, e1.y)))
+        })
+        .expect("the external riser region is present in the record");
+    assert_eq!(
+        region.exposure,
+        WallExposure::Exposed,
+        "the record wall region for the external riser is Exposed after materialize"
+    );
+
+    // NON-REGRESSION on the same real riser: Clear reverts it to the derived
+    // default (Unset), and that reversion ALSO survives the cross-storey derive
+    // (the re-stamp is a no-op once the override is gone — it never re-applies a
+    // stale Exposed).
+    c.set_exposure_mode(true);
+    c.exposure_pointer_down(3.0, 8.917, 0.3);
+    assert!(
+        c.selected_riser.is_some(),
+        "re-select the same riser to clear it"
+    );
+    c.clear_riser_exposure();
+    c.commit_to_ber().unwrap();
+    c.refresh_all_storeys();
+    assert_eq!(
+        riser_exposure(&c),
+        Some(WallExposure::Unset),
+        "clearing the riser reverts it to Unset and stays cleared through the derive"
     );
 }

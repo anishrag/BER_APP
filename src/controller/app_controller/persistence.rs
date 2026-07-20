@@ -213,6 +213,7 @@ impl AppController {
         self.pending_new_storey = None;
         self.inherited_seed_pending.clear();
         self.living_area_mode = false;
+        self.porch_mode = false;
         self.exposure_mode = false;
         self.selected_exposure_wall = None;
         self.exposure_sel = None;
@@ -230,6 +231,7 @@ impl AppController {
         self.pending_ceiling_step = None;
         self.ceiling_point_mode = false;
         self.pending_roof_point = None;
+        self.pending_centre_between = None;
         self.continuation_tool = None;
         self.pending_ceiling_continuation = None;
         self.reset_ceiling_confirm = false;
@@ -320,6 +322,7 @@ impl AppController {
         self.pending_ceiling_step = None;
         self.ceiling_step_mode = false;
         self.pending_roof_point = None;
+        self.pending_centre_between = None;
         self.continuation_tool = None;
         self.pending_ceiling_continuation = None;
         self.reset_ceiling_confirm = false;
@@ -436,6 +439,75 @@ impl AppController {
         // pre-fix phase-induced split); the caller's re-resolve re-applies the
         // clean carve and re-stamps the exposures seeded just above.
         self.heal_phase_induced_roof_splits();
+        // Recompose ceilings that carry OUTLINE-EDIT SCARS (field report
+        // eddc2f3f): records saved before the in-flux-outline resolve gate baked
+        // a superseded cut line into their regions-as-truth ceilings.
+        self.heal_outline_edit_roof_scars();
+    }
+
+    /// MIGRATION self-heal for the in-flux-outline resolve gate (field report
+    /// eddc2f3f): records saved before the fix re-fit their regions-as-truth
+    /// ceilings against a MID-DIMENSIONING (or undone) outline, baking the
+    /// provisional cut line in as a permanent scar — an unjustified flat seam
+    /// with `Unset` sliver fills beside it, and wall tops tracing the stale
+    /// edges. Ceilings are regions-as-truth (`resolve_storey` keeps them
+    /// verbatim while the footprint is unchanged), so the scar survives every
+    /// reload on its own.
+    ///
+    /// Rebuild each SCARRED storey's ceilings from its durable declarative
+    /// inputs via [`recompose_ceilings`](Self::recompose_ceilings) — the same
+    /// repair shape as [`heal_phase_induced_roof_splits`]
+    /// (Self::heal_phase_induced_roof_splits); deliberate structure splits,
+    /// steps/dividers, apexes and dormers replay from their durable fields, the
+    /// scar (which no durable input produces) is dropped, and the caller's
+    /// re-resolve re-stamps the exposures seeded before this ran (the
+    /// containment fallback re-applies a painted exposure whose region ring the
+    /// recompose changed). The cross-storey derivation then re-splits and
+    /// re-stamps the `InterStorey` pieces.
+    ///
+    /// GUARDS: detection-gated (`Storey::ceilings_carry_outline_edit_scars`) so
+    /// a clean storey keeps its stored ceilings byte-identical (the
+    /// regions-as-truth reload fixpoint); phase-tagged storeys are skipped
+    /// (already recomposed by the phase heal just above); a storey whose
+    /// outline is still mid-dimensioning defers (its footprint is about to
+    /// move — the resolve gate holds its record steady until the loop
+    /// completes).
+    fn heal_outline_edit_roof_scars(&mut self) {
+        let n = self
+            .current_record
+            .as_ref()
+            .map(|r| r.data.storeys.len())
+            .unwrap_or(0)
+            .min(self.document.storeys.len());
+        for idx in 0..n {
+            if self.phase_regions.get(&idx).is_some_and(|v| !v.is_empty()) {
+                continue; // already recomposed by the phase heal
+            }
+            if !self
+                .document
+                .storeys
+                .get(idx)
+                .is_some_and(|sd| sd.measurements_complete())
+            {
+                continue; // outline in flux — defer to the resolve gate
+            }
+            let scarred = self
+                .current_record
+                .as_ref()
+                .and_then(|r| r.data.storeys.get(idx))
+                .is_some_and(|s| {
+                    s.ceiling_height_m.is_some()
+                        && !s.ceilings.regions.is_empty()
+                        && s.ceilings_carry_outline_edit_scars()
+                });
+            if scarred {
+                log::info!(
+                    "storey {idx}: outline-edit scar detected in stored ceilings — \
+                     recomposing from durable inputs"
+                );
+                self.recompose_ceilings(idx);
+            }
+        }
     }
 
     /// MIGRATION self-heal for the per-phase-zone roof fix: records saved before
@@ -808,8 +880,14 @@ impl AppController {
     /// whether it succeeded. Mirrors `open_ber`'s reconstruction. Called on
     /// startup when `BER_CHECKPOINT` is set.
     pub fn load_checkpoint(&mut self) -> bool {
-        let Some(loaded) = crate::engine::checkpoint::load(crate::engine::checkpoint::DEFAULT_PATH)
-        else {
+        self.load_checkpoint_from(crate::engine::checkpoint::DEFAULT_PATH)
+    }
+
+    /// DEV: [`load_checkpoint`](Self::load_checkpoint) from an explicit `path` —
+    /// lets tests replay a captured checkpoint / bug-report `state.json` (same
+    /// format) through the full open-BER reconstruction.
+    pub fn load_checkpoint_from(&mut self, path: &str) -> bool {
+        let Some(loaded) = crate::engine::checkpoint::load(path) else {
             return false;
         };
         let crate::engine::checkpoint::Loaded { ber, snapshot } = loaded;
@@ -873,6 +951,7 @@ impl AppController {
         self.pending_ceiling_step = None;
         self.ceiling_step_mode = false;
         self.pending_roof_point = None;
+        self.pending_centre_between = None;
         self.continuation_tool = None;
         self.pending_ceiling_continuation = None;
         self.reset_ceiling_confirm = false;
@@ -980,10 +1059,11 @@ impl AppController {
         let idx = self.current_storey_idx.unwrap_or(0);
         if self.outline_finalised() {
             // Outline is metric + fully dimensioned → keep its floors/walls,
-            // and persist only the living areas that are themselves done (the
-            // model owns the finalised-projection; `ensure_*` borrows
+            // and persist only the living areas / porches that are themselves
+            // done (the model owns the finalised-projection; `ensure_*` borrows
             // `out.data`, so resolve the id before the storey borrow below).
             let lists = self.document.finalised_living_area_lists();
+            let porch_lists = self.document.finalised_porch_lists();
             let floor_cid = out.data.ensure_floor_construction(
                 Default::default(),
                 Default::default(),
@@ -991,6 +1071,7 @@ impl AppController {
             );
             if let Some(storey) = out.data.storeys.get_mut(idx) {
                 storey.living_areas = FloorRegions::from_vertex_lists(lists, floor_cid);
+                storey.porches = FloorRegions::from_vertex_lists(porch_lists, floor_cid);
             }
         } else if let Some(storey) = out.data.storeys.get_mut(idx) {
             // Outline not finalised → persist no derived geometry yet (it's

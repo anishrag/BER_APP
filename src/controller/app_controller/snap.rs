@@ -30,6 +30,11 @@ pub(super) enum SnapAction {
     /// ITSELF (re-runs the fit + re-derives the pins under the forced policy),
     /// so replay must not rebuild the capture for it.
     Dormer { points: Vec<(f32, f32)> },
+    /// A PAVILION flat-top stroke in world coords, replayed through
+    /// `apply_roof_ridge_stroke_event` (which routes the closed stroke back to
+    /// `apply_pavilion_rect_stroke`). Self-capturing exactly like `Dormer`: its
+    /// entry point re-runs the fit + re-derives the pins under the forced policy.
+    Pavilion { points: Vec<(f32, f32)> },
 }
 
 /// Which sub-area carve flow a [`SnapAction::Subarea`] replays through — each
@@ -38,6 +43,11 @@ pub(super) enum SnapAction {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) enum SubareaFlow {
     LivingArea,
+    /// A porch carve — mirrors `LivingArea` exactly (same entry-point shape,
+    /// same shared `pending_cut` pick via `choose_cut_region`; the staged cut
+    /// carries this flow, so the replayed pick commits to the porch list
+    /// regardless of the restored mode flags).
+    Porch,
     PhaseRegion,
     StepRegion,
     /// A ceiling-step AREA stroke (closed loop / multi-side cut) under
@@ -210,6 +220,7 @@ impl AppController {
             SnapAction::Subarea { flow, points, pick } => {
                 match flow {
                     SubareaFlow::LivingArea => self.apply_living_area_stroke_event(points),
+                    SubareaFlow::Porch => self.apply_porch_stroke_event(points),
                     SubareaFlow::PhaseRegion => self.apply_phase_region_stroke_event(points),
                     SubareaFlow::StepRegion => self.apply_step_region_stroke_event(points),
                     SubareaFlow::CeilingStep => {
@@ -243,7 +254,9 @@ impl AppController {
                 // just made, via `record_subarea_pick`).
                 if let Some((x, y)) = pick {
                     match flow {
-                        SubareaFlow::LivingArea => self.choose_cut_region(*x, *y),
+                        SubareaFlow::LivingArea | SubareaFlow::Porch => {
+                            self.choose_cut_region(*x, *y)
+                        }
                         SubareaFlow::PhaseRegion => self.choose_phase_cut_region(*x, *y),
                         SubareaFlow::StepRegion | SubareaFlow::CeilingStep => {
                             self.choose_step_cut_region(*x, *y)
@@ -264,6 +277,15 @@ impl AppController {
                 self.pending_roof_rect = None;
                 self.pending_rect_is_dormer = false;
                 self.apply_dormer_stroke_event(points);
+                Ok(())
+            }
+            SnapAction::Pavilion { points } => {
+                // Clear any in-flight rect so the ridge entry's `ceiling_rect_pending`
+                // guard doesn't early-out, then re-run the closed-stroke fit under
+                // the forced policy — it re-derives the pins and re-captures itself.
+                self.pending_roof_rect = None;
+                self.pending_rect_is_dormer = false;
+                self.apply_roof_ridge_stroke_event(points);
                 Ok(())
             }
         };
@@ -292,7 +314,7 @@ impl AppController {
         self.dispatch_snap_action(&last.action);
         manip_plan::clear_snap_policy();
         // Re-capture so the action can be replayed again. Two shapes:
-        //  - A `Subarea` OR `Dormer` re-run captures ITSELF (its entry point
+        //  - A `Subarea`, `Dormer` OR `Pavilion` re-run captures ITSELF (its entry point
         //    drains the decisions into a fresh `LastSnapAction`, and a pick
         //    re-applied by the dispatch arm updates it via `record_subarea_pick`)
         //    — the thread-local is empty here, and the fresh capture is left
@@ -305,7 +327,7 @@ impl AppController {
         let decisions = manip_plan::take_snap_decisions();
         let self_capturing = matches!(
             last.action,
-            SnapAction::Subarea { .. } | SnapAction::Dormer { .. }
+            SnapAction::Subarea { .. } | SnapAction::Dormer { .. } | SnapAction::Pavilion { .. }
         );
         if !decisions.is_empty() && !self_capturing {
             self.last_snap_action = Some(LastSnapAction {

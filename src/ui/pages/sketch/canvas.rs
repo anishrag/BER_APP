@@ -1587,6 +1587,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     ui: &mut egui::Ui,
     view: &SketchView<'_>,
     touch: &mut TouchNav,
+    checklist_bubble: &mut Option<String>,
     on_event: &mut F,
 ) {
     let reviewing = view.review.is_some();
@@ -1620,6 +1621,12 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     let living_area_wall_labels: &[Vec<((f64, f64), (f64, f64), f32)>] =
         if view.cat_state.show_wall_lengths || dim_prompting {
             view.living_area_wall_labels
+        } else {
+            &[]
+        };
+    let porch_wall_labels: &[Vec<((f64, f64), (f64, f64), f32)>] =
+        if view.cat_state.show_wall_lengths || dim_prompting {
+            view.porch_wall_labels
         } else {
             &[]
         };
@@ -1664,7 +1671,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         }
         // Keep the phase signpost + checklist on top (the "Mark BER complete"
         // action lives in the Final checklist) — the takeover reserves room for it.
-        phase_signpost(ui, rect, view, on_event);
+        phase_signpost(ui, rect, view, checklist_bubble, on_event);
         return;
     }
 
@@ -1781,7 +1788,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     // The "Review ▸" entry + its ✓ are per-phase: Mapping uses its checklist
     // completeness / reviewed flag; Structure uses the whole-house attribution
     // completeness / its own reviewed flag.
-    let phase_bar_rect = phase_signpost(ui, rect, view, on_event);
+    let phase_bar_rect = phase_signpost(ui, rect, view, checklist_bubble, on_event);
 
     // View buttons (2D/3D toggle) in the top-right — but dropped BELOW the phase
     // signpost whenever the centred bar would reach their column, so they never
@@ -2096,6 +2103,22 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             view.living_area_polygons,
             living_area_wall_labels,
             view.active_living_area,
+        );
+
+        // Porch regions overlaid in violet with a "Porch" label (active
+        // brighter), with length labels on their known walls — the living
+        // areas' sibling overlay.
+        render::render_porches(
+            &painter,
+            rect,
+            ber,
+            current_storey_idx,
+            mode,
+            display,
+            vp,
+            view.porch_polygons,
+            porch_wall_labels,
+            view.active_porch,
         );
 
         // Pending cut: show both candidate regions to tap between.
@@ -2512,6 +2535,18 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 view.ceiling_apex_views,
                 view.pending_roof_point,
             );
+        }
+
+        // 'Centre between 2 points': the first placed (snapped) pick point as
+        // a filled marker so tap 2 has a visible anchor.
+        if let Some((wx, wy)) = view.centre_between_first {
+            if let Some(t) =
+                render::active_storey_transform(rect, ber, current_storey_idx, mode, vp)
+            {
+                let sp = t.apply(wx, wy);
+                painter.circle_filled(sp, 6.0, egui::Color32::from_rgb(255, 140, 0));
+                painter.circle_stroke(sp, 6.0, egui::Stroke::new(1.5, egui::Color32::WHITE));
+            }
         }
 
         // Tap-to-unfan fan-vertex markers (roof-point mode only — the
@@ -3093,6 +3128,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         && !view.dormer_mode
         && !view.partition_mode
         && !view.living_area_mode
+        && !view.porch_mode
         && view.current_phase != AssessmentPhase::Structure;
     if matches!(mode, SketchMode::Storey2D)
         && view.navigation
@@ -3207,6 +3243,23 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     world_x: wx,
                     world_y: wy,
                 }));
+            }
+        }
+    }
+
+    // 'Centre between 2 points' pick: while picking, a primary tap places a
+    // snapped point (tap 1) or centres the whole shape between the two (tap 2).
+    // Owns the tap ahead of the 2D drawing tools; the position prompt stays
+    // open behind it (the other tap gates already require no position prompt).
+    if view.centre_between_picking && matches!(mode, SketchMode::Storey2D) && !touch_nav_active {
+        if response.clicked_by(egui::PointerButton::Primary) {
+            if let Some(pos) = response.interact_pointer_pos() {
+                if let Some((wx, wy)) = screen_to_world(ber, current_storey_idx, rect, vp, pos) {
+                    on_event(UiEvent::Sketch(SketchEvent::CentreBetweenTap {
+                        world_x: wx,
+                        world_y: wy,
+                    }));
+                }
             }
         }
     }
@@ -3726,6 +3779,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             if let Some(len) = nearest_labelled_wall_length(
                 view.copy_wall_labels,
                 living_area_wall_labels,
+                porch_wall_labels,
                 wx,
                 wy,
                 tol_world,
@@ -4022,6 +4076,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         && !view.ceiling_point_pending
         && !view.ceiling_ridge_pending
         && !view.ceiling_rect_pending
+        && !view.centre_between_picking
         && !view.exposure_mode
         && !view.floor_exposure_mode
         && !view.ceiling_exposure_mode
@@ -4063,6 +4118,9 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 // (metre) space too, so it also needs world coords.
                 let living_area_draw =
                     view.living_area_mode && matches!(edit_tool, EditTools::DrawPerpWalls);
+                // A porch is drawn in the storey's (metre) space exactly like
+                // a living area.
+                let porch_draw = view.porch_mode && matches!(edit_tool, EditTools::DrawPerpWalls);
                 // Construction-phase tagging draws in the storey's
                 // metre space too (carve an area to assign a year).
                 let phase_draw = view.phase_mode && matches!(edit_tool, EditTools::DrawPerpWalls);
@@ -4087,6 +4145,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 // watermark predicate in render::render_ber).
                 let outline_on_watermark = matches!(edit_tool, EditTools::DrawPerpWalls)
                     && !view.living_area_mode
+                    && !view.porch_mode
                     && !view.phase_mode
                     && !view.step_mode
                     && !view.ceiling_step_mode
@@ -4097,6 +4156,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                         .and_then(|b| b.storeys.get(current_storey_idx?))
                         .is_some_and(|s| s.floors.regions.is_empty());
                 let needs_world = living_area_draw
+                    || porch_draw
                     || phase_draw
                     || step_draw
                     || ceiling_step_draw
@@ -4138,6 +4198,10 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                         // the exact variant by the active tool.
                         let event = if living_area_draw {
                             SketchEvent::LivingAreaStrokeWorld {
+                                points: world_points,
+                            }
+                        } else if porch_draw {
+                            SketchEvent::PorchStrokeWorld {
                                 points: world_points,
                             }
                         } else if phase_draw {
@@ -4668,13 +4732,14 @@ fn canvas_transform(
 /// carrying wall. Candidates are exactly the labels on screen during the
 /// dimension prompt: the generous `copy_wall_labels` set (settled outline +
 /// active in-flight shape, prompted wall already excluded upstream) plus
-/// the living areas' known walls — both as (start, end, length) in world
-/// coords. Used by the dimension-prompt tap-to-copy input; the caller
+/// the living areas' and porches' known walls — all as (start, end, length)
+/// in world coords. Used by the dimension-prompt tap-to-copy input; the caller
 /// applies the label's 2 dp rounding on insert, so what the assessor sees
 /// is what he gets.
 fn nearest_labelled_wall_length(
     copy_wall_labels: &[((f64, f64), (f64, f64), f32)],
     living_area_wall_labels: &[Vec<((f64, f64), (f64, f64), f32)>],
+    porch_wall_labels: &[Vec<((f64, f64), (f64, f64), f32)>],
     wx: f64,
     wy: f64,
     tol: f64,
@@ -4685,7 +4750,10 @@ fn nearest_labelled_wall_length(
             best = Some((d, len));
         }
     };
-    let flat = living_area_wall_labels.iter().flatten();
+    let flat = living_area_wall_labels
+        .iter()
+        .flatten()
+        .chain(porch_wall_labels.iter().flatten());
     for &(a, b, len) in copy_wall_labels.iter().chain(flat) {
         if len < 1e-3 {
             continue;
@@ -4925,27 +4993,31 @@ fn elevation_overlay<F: FnMut(UiEvent)>(
         egui::FontId::proportional(13.0),
         egui::Color32::from_gray(160),
     );
-    // "Edit window…" for the selected STANDALONE window (doors + assembly
-    // members keep their placement flow) — opens the attribute box prefilled.
-    let window_selected = elev.openings.iter().any(|o| {
-        o.selected
-            && matches!(
-                o.kind,
-                crate::controller::app_controller::OpeningViewKind::Window
-            )
-    });
-    if window_selected {
+    // "Edit window…" / "Edit door…" for the selected STANDALONE opening
+    // (assembly members — sidelights/transom/panel — are sized by their
+    // assembly and keep their placement flow). Opens the attribute box prefilled.
+    use crate::controller::app_controller::OpeningViewKind;
+    let edit_button = match elev.openings.iter().find(|o| o.selected).map(|o| o.kind) {
+        Some(OpeningViewKind::Window) => Some((
+            "Edit window…",
+            "Change this window's size, glazing type, or overshading",
+            SketchEvent::EditSelectedOpening,
+        )),
+        Some(OpeningViewKind::Door) => Some((
+            "Edit door…",
+            "Change this door's size, type, kind, or draught-stripped",
+            SketchEvent::EditSelectedDoor,
+        )),
+        _ => None,
+    };
+    if let Some((label, hint, event)) = edit_button {
         egui::Area::new(egui::Id::new("ber_elevation_edit_window"))
             .order(egui::Order::Foreground)
             .fixed_pos(rect.left_top() + egui::vec2(8.0, 30.0))
             .show(ui.ctx(), |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    if ui
-                        .button("Edit window…")
-                        .hint("Change this window's size, glazing type, or overshading")
-                        .clicked()
-                    {
-                        on_event(UiEvent::Sketch(SketchEvent::EditSelectedOpening));
+                    if ui.button(label).hint(hint).clicked() {
+                        on_event(UiEvent::Sketch(event));
                     }
                 });
             });
@@ -5075,6 +5147,7 @@ fn phase_signpost<F: FnMut(UiEvent)>(
     ui: &egui::Ui,
     rect: egui::Rect,
     view: &SketchView<'_>,
+    checklist_bubble: &mut Option<String>,
     on_event: &mut F,
 ) -> egui::Rect {
     let (show_review, reviewed) = match view.current_phase {
@@ -5105,6 +5178,7 @@ fn phase_signpost<F: FnMut(UiEvent)>(
         &view.checklist,
         show_review,
         review_label,
+        checklist_bubble,
     );
     if let Some(phase) = phase_clicked {
         on_event(UiEvent::Sketch(SketchEvent::SetAssessmentPhase(phase)));

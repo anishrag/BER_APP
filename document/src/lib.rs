@@ -44,24 +44,26 @@ pub use ceiling_step::{
 pub use debug::debug_dump_storey;
 /// Derive full per-wall exposure coverage — the shell's `commit_to_ber` uses it.
 pub use exposure::{
-    ceiling_exposure_complete, floor_exposure_complete, purge_shadowed_exposure_entries, range_at,
-    retract_legacy_party_rings, riser_key, surfaces_exposure_complete, wall_coverage,
-    wall_exposure_complete, RiserKey, RiserKind, RiserWall,
+    ceiling_exposure_complete, ceiling_exposure_reasons, floor_exposure_complete,
+    floor_exposure_reasons, purge_shadowed_exposure_entries, range_at, retract_legacy_party_rings,
+    riser_key, surfaces_exposure_complete, wall_coverage, wall_exposure_complete,
+    wall_exposure_reasons, RiserKey, RiserKind, RiserWall,
 };
 pub use phase::{
-    centroid_key, construction_phase_complete, inherited_phase_regions, phase_regions_from_floors,
-    phase_snap_segments, ring_centroid_key, stamp_ceiling_constructions, stamp_ceiling_phases,
-    stamp_floor_constructions, stamp_wall_constructions, stamp_wall_phases, CentroidKey,
-    PhaseRegion,
+    centroid_key, construction_phase_complete, construction_phase_reasons, inherited_phase_regions,
+    phase_regions_from_floors, phase_snap_segments, ring_centroid_key, stamp_ceiling_constructions,
+    stamp_ceiling_phases, stamp_floor_constructions, stamp_wall_constructions, stamp_wall_phases,
+    CentroidKey, PhaseRegion,
 };
 pub use position::{PositionOption, PositionPrompt, PositionPromptKind};
 pub use resolve::{
-    ensure_storey_constructions, living_area_ceiling_height, opening_wall_anchor,
-    relink_openings_after_derive, reseed_wall_anchors_on_load, resolve_storey, resolve_wall_anchor,
-    stamp_horizontal_exposure,
+    ensure_storey_constructions, living_area_ceiling_height, opening_porch_wall_anchor,
+    opening_wall_anchor, relink_openings_after_derive, reseed_porch_wall_anchors_on_load,
+    reseed_wall_anchors_on_load, resolve_porch_wall_anchor, resolve_storey, resolve_wall_anchor,
+    stamp_horizontal_exposure, stamp_riser_exposure,
 };
 pub use step::{inherited_step_regions, step_regions_from_floors, StepRegion};
-pub use windows::windows_complete;
+pub use windows::{windows_complete, windows_issues, WindowsIssue};
 
 use ber_model::ber::common::ConstructionPhase;
 use ber_model::ber::structural::{
@@ -185,6 +187,8 @@ pub enum ActiveShape {
     Outline,
     /// The living area at this index in `living_areas`.
     LivingArea(usize),
+    /// The porch at this index in `porches`.
+    Porch(usize),
     /// The in-flight construction-phase area being dimensioned (held in
     /// `phase_shape`). There's only ever one at a time, so no index.
     PhaseArea,
@@ -268,6 +272,13 @@ pub struct StoreyDoc {
     /// the outline. The most-recent is the one the tools edit; the largest is
     /// chosen as THE living area later, but all are kept.
     pub living_areas: Vec<ShapeSlot>,
+    /// Porch sub-shapes, drawn inside the storey the same way as a living
+    /// area. Each records its labelled region (label + area) only — porches
+    /// have no effect on resolve calculations yet; a later resolve-phase step
+    /// will decide inclusion/exclusion. `#[serde(default)]` so older document
+    /// snapshots (no `porches` key) still deserialize.
+    #[serde(default)]
+    pub porches: Vec<ShapeSlot>,
     /// The in-flight construction-phase area being dimensioned (a sub-shape, like
     /// a living area, but tagged with a phase at the end rather than kept).
     pub phase_shape: Option<ShapeSlot>,
@@ -648,6 +659,68 @@ impl StoreyDoc {
         self.living_areas.iter().any(ShapeSlot::finalised)
     }
 
+    /// The plan rings (world metres) of the porches that are themselves
+    /// FINALISED — the persist path keeps only completed sub-areas (an
+    /// in-progress one is still pixel/incomplete and must not reach the DB).
+    /// The metric projection of each finalised slot's outline. (Resolve, by
+    /// contrast, projects ALL porches — the active one still renders.) A
+    /// porch records its labelled region (label + area) only; a later
+    /// resolve-phase step will decide inclusion/exclusion.
+    pub fn finalised_porch_lists(&self) -> Vec<Vec<Point2f64>> {
+        self.porches
+            .iter()
+            .filter(|s| s.finalised())
+            .map(|s| s.floor_plan.get_points().into_iter().map(to_f64).collect())
+            .collect()
+    }
+
+    /// Every porch wall as a world-metre segment — the reference lines an
+    /// exposure section-handle drag snaps to where they meet the outline.
+    /// All porches count (an in-progress one still marks a real internal
+    /// boundary); empty when the storey has none.
+    pub fn porch_wall_segments(&self) -> Vec<[Point2f32; 2]> {
+        let mut segs = Vec::new();
+        for slot in &self.porches {
+            let ring = slot.floor_plan.get_points();
+            let n = ring.len();
+            for i in 0..n {
+                segs.push([ring[i], ring[(i + 1) % n]]);
+            }
+        }
+        segs
+    }
+
+    /// The INNER-boundary edges of every FINALISED porch — each porch ring
+    /// edge that does NOT run along the storey outline (classified by
+    /// [`manip_plan::FloorPlan::interior_cut_edges`], the established
+    /// edges-not-on-outline test), as world-metre segments. These are the
+    /// dwelling-side porch walls the resolve extrudes into
+    /// `Storey::porch_walls` so openings (the porch's front door) can be
+    /// recorded on them; a porch edge flush with the outline is already a
+    /// perimeter wall and is excluded. Only FINALISED porches contribute
+    /// (mirrors [`finalised_porch_lists`](Self::finalised_porch_lists) — an
+    /// in-progress porch is still pixel/incomplete and must not extrude).
+    pub fn finalised_porch_inner_edges(&self) -> Vec<[Point2f64; 2]> {
+        let mut edges = Vec::new();
+        for slot in self.porches.iter().filter(|s| s.finalised()) {
+            let ring = slot.floor_plan.get_points();
+            edges.extend(self.outline.floor_plan.interior_cut_edges(&ring));
+        }
+        edges
+    }
+
+    /// True when this storey has at least one FINALISED porch (reads the
+    /// EDITING model, so sync the active storey first). An in-progress (still
+    /// pixel / incomplete) porch does not count.
+    ///
+    /// No caller yet by design: the intended consumer is the resolve-phase
+    /// porch inclusion/exclusion step (agreed, not yet built) — a porch
+    /// currently records its labelled region only, and this is the gate that
+    /// step will read. Don't remove as dead API.
+    pub fn has_porch(&self) -> bool {
+        self.porches.iter().any(ShapeSlot::finalised)
+    }
+
     /// The AVAILABLE region of the outline — the outline MINUS `holes` (the
     /// already-drawn rings of the same kind, e.g. existing phase areas) — as
     /// world-metre rings. Reuses `subtract_all` (the same boolean the carve
@@ -679,6 +752,11 @@ impl StoreyDoc {
                     *s = slot;
                 }
             }
+            ActiveShape::Porch(i) => {
+                if let Some(s) = self.porches.get_mut(i) {
+                    *s = slot;
+                }
+            }
             ActiveShape::PhaseArea => self.phase_shape = Some(slot),
             ActiveShape::StepArea => self.step_shape = Some(slot),
         }
@@ -687,9 +765,49 @@ impl StoreyDoc {
     /// True when the storey outline is fully measured: a metre scale is set AND
     /// the dimensioning loop has nothing left to prompt for. Reads the outline
     /// SLOT (sync the active storey first — `materialize` does). An un-drawn or
-    /// un-scaled outline is not complete.
+    /// un-scaled outline is not complete. Exactly
+    /// [`measurements_reasons`](Self::measurements_reasons) finding nothing.
     pub fn measurements_complete(&self) -> bool {
-        self.outline.dimensioning.scale_set && self.outline.finalised()
+        self.measurements_reasons().is_empty()
+    }
+
+    /// Every reason [`measurements_complete`](Self::measurements_complete) is
+    /// false — empty exactly when it is true (`scale_set && finalised()`; an
+    /// empty outline plan is vacuously finalised, so the nothing-drawn case
+    /// only fires through the scale clause). Plain messages for the tappable
+    /// checklist row; no storey prefix (the controller adds the storey name).
+    pub fn measurements_reasons(&self) -> Vec<String> {
+        let mut reasons = Vec::new();
+        let dim = &self.outline.dimensioning;
+        if !dim.scale_set {
+            if self.outline.floor_plan.get_points().is_empty() {
+                reasons.push("No outline drawn yet".to_string());
+            } else {
+                reasons.push("Metre scale not set — enter the first wall measurement".to_string());
+            }
+        }
+        // `finalised()`, split into its two clauses so each gets its own reason.
+        if self
+            .outline
+            .floor_plan
+            .next_promptable_wall(&dim.known_params, &dim.skipped_walls)
+            .is_some()
+        {
+            reasons.push("Outline walls still to measure".to_string());
+        }
+        let unresolved = dim
+            .position_free_axes
+            .iter()
+            .filter(|a| !dim.position_resolved_axes.contains(a))
+            .count();
+        if unresolved > 1 {
+            reasons.push(format!(
+                "Storey position not confirmed yet ({unresolved} axes)"
+            ));
+        } else if unresolved == 1 {
+            reasons.push("Storey position not confirmed yet".to_string());
+        }
+        reasons
     }
 
     /// Load the active shape's slot into the live editing buffer.
@@ -697,6 +815,7 @@ impl StoreyDoc {
         let slot = match self.active {
             ActiveShape::Outline => self.outline.clone(),
             ActiveShape::LivingArea(i) => self.living_areas.get(i).cloned().unwrap_or_default(),
+            ActiveShape::Porch(i) => self.porches.get(i).cloned().unwrap_or_default(),
             ActiveShape::PhaseArea => self.phase_shape.clone().unwrap_or_default(),
             ActiveShape::StepArea => self.step_shape.clone().unwrap_or_default(),
         };
@@ -890,6 +1009,24 @@ impl StoreyDoc {
         self.edit_state = EditState::default();
     }
 
+    /// Append `slot` as a new porch and make it the active shape (loading it
+    /// into the live buffer, dropping any in-flight arc / edit cursor). A
+    /// porch records its labelled region (label + area) only; a later
+    /// resolve-phase step will decide inclusion/exclusion.
+    pub fn add_active_porch(&mut self, mut slot: ShapeSlot) {
+        // A porch's position is ACCEPTED as drawn — it is never
+        // position-prompted — so mark its free axes resolved; otherwise
+        // `finalised()` (which also requires the position resolved) would
+        // treat a fully-dimensioned interior porch as incomplete, breaking
+        // the `has_porch` gate.
+        slot.dimensioning.position_resolved_axes = slot.dimensioning.position_free_axes.clone();
+        self.porches.push(slot);
+        self.active = ActiveShape::Porch(self.porches.len() - 1);
+        self.load_active_into_buffer();
+        self.pending_arc = None;
+        self.edit_state = EditState::default();
+    }
+
     /// Make `slot` the in-flight phase area and the active shape (loading it into
     /// the live buffer, dropping any in-flight arc / edit cursor).
     pub fn begin_phase_area(&mut self, slot: ShapeSlot) {
@@ -1073,6 +1210,58 @@ mod tests {
         assert_eq!(lists[0], expected, "resolved floor is the ring verbatim");
     }
 
+    /// `measurements_reasons` names the missing step at each stage, and
+    /// `measurements_complete` is exactly `reasons.is_empty()` throughout.
+    #[test]
+    fn measurements_reasons_track_the_missing_steps() {
+        let equivalent = |doc: &StoreyDoc| {
+            assert_eq!(
+                doc.measurements_complete(),
+                doc.measurements_reasons().is_empty()
+            );
+        };
+        // Fresh storey: nothing drawn → the empty-plan branch of !scale_set.
+        let mut doc = StoreyDoc::default();
+        assert_eq!(doc.measurements_reasons(), vec!["No outline drawn yet"]);
+        equivalent(&doc);
+
+        // A drawn but un-scaled outline: scale reason + walls still promptable.
+        let ring = [p(0., 0.), p(6., 0.), p(6., 4.), p(0., 4.)];
+        doc.outline.floor_plan = FloorPlan::from_clean_ring(&ring).unwrap();
+        assert_eq!(
+            doc.measurements_reasons(),
+            vec![
+                "Metre scale not set — enter the first wall measurement",
+                "Outline walls still to measure"
+            ]
+        );
+        equivalent(&doc);
+
+        // Adopt the ring as finalised → complete, no reasons.
+        doc.adopt_finalised_outline(&ring).unwrap();
+        doc.sync_active();
+        assert!(doc.measurements_reasons().is_empty());
+        equivalent(&doc);
+
+        // One unresolved position axis → the position reason (no axis count);
+        // two → the count appears.
+        doc.outline.dimensioning.position_free_axes = vec![ParameterAxis::X];
+        assert_eq!(
+            doc.measurements_reasons(),
+            vec!["Storey position not confirmed yet"]
+        );
+        equivalent(&doc);
+        doc.outline.dimensioning.position_free_axes = vec![ParameterAxis::X, ParameterAxis::Y];
+        assert_eq!(
+            doc.measurements_reasons(),
+            vec!["Storey position not confirmed yet (2 axes)"]
+        );
+        equivalent(&doc);
+        doc.outline.dimensioning.position_resolved_axes = vec![ParameterAxis::X, ParameterAxis::Y];
+        assert!(doc.measurements_reasons().is_empty());
+        equivalent(&doc);
+    }
+
     /// A degenerate ring is rejected with `Err` and the storey is unchanged.
     #[test]
     fn adopt_finalised_outline_rejects_degenerate_rings() {
@@ -1120,6 +1309,127 @@ mod tests {
             floor_plan: plan,
         });
         assert!(doc.has_living_area(), "a finalised living area counts");
+    }
+
+    /// `has_porch` is true only when at least one porch is FINALISED: a fresh
+    /// storey has none, an in-progress (un-dimensioned) porch doesn't count,
+    /// and a finalised one flips it true.
+    #[test]
+    fn has_porch_requires_a_finalised_sub_area() {
+        let mut doc = StoreyDoc::default();
+        assert!(!doc.has_porch(), "fresh storey has none");
+
+        let plan =
+            FloorPlan::from_clean_ring(&[p(0., 0.), p(2., 0.), p(2., 2.), p(0., 2.)]).unwrap();
+        // A porch with NO known params is still mid-dimensioning →
+        // not finalised → doesn't count.
+        doc.porches.push(ShapeSlot {
+            floor_plan: plan.clone(),
+            dimensioning: DimensionState::default(),
+        });
+        assert!(!doc.has_porch(), "an un-dimensioned porch doesn't count");
+
+        // Mark every active param known → finalised → counts.
+        doc.porches.push(ShapeSlot {
+            dimensioning: DimensionState {
+                known_params: plan.all_active_params(),
+                scale_set: true,
+                ..Default::default()
+            },
+            floor_plan: plan,
+        });
+        assert!(doc.has_porch(), "a finalised porch counts");
+    }
+
+    /// An active `Porch` round-trips through `porches`: `add_active_porch`
+    /// checks the slot out into the live buffer (making it the active shape),
+    /// `sync_active` writes buffer changes back to the slot, and
+    /// `load_active_into_buffer` restores them. Only the FINALISED porch
+    /// reaches `finalised_porch_lists`; every porch wall reaches
+    /// `porch_wall_segments`.
+    #[test]
+    fn porch_round_trips_sync_and_load_through_porches() {
+        let plan =
+            FloorPlan::from_clean_ring(&[p(0., 0.), p(2., 0.), p(2., 2.), p(0., 2.)]).unwrap();
+        let mut doc = StoreyDoc::default();
+        doc.add_active_porch(ShapeSlot {
+            floor_plan: plan,
+            dimensioning: DimensionState::default(),
+        });
+        assert_eq!(doc.active, ActiveShape::Porch(0));
+        assert_eq!(doc.floor_plan.get_points().len(), 4, "slot checked out");
+        // In-progress: walls are still reference segments, but the persist
+        // list keeps finalised porches only.
+        assert_eq!(doc.porch_wall_segments().len(), 4);
+        assert!(doc.finalised_porch_lists().is_empty());
+
+        // Finalise in the live buffer, sync back → the change lands in the slot.
+        doc.dimensioning.scale_set = true;
+        doc.dimensioning.known_params = doc.floor_plan.all_active_params();
+        doc.sync_active();
+        assert!(doc.porches[0].dimensioning.scale_set);
+        assert_eq!(doc.finalised_porch_lists().len(), 1);
+
+        // Clobber the buffer, reload → the slot's state comes back.
+        doc.dimensioning = DimensionState::default();
+        doc.floor_plan = FloorPlan::default();
+        doc.load_active_into_buffer();
+        assert!(doc.dimensioning.scale_set);
+        assert_eq!(doc.floor_plan.get_points().len(), 4);
+    }
+
+    /// `finalised_porch_inner_edges` classifies a corner porch's ring: only
+    /// the edges NOT running along the outline (the dwelling-side boundary)
+    /// are returned, and only for FINALISED porches — an un-dimensioned porch
+    /// contributes nothing.
+    #[test]
+    fn finalised_porch_inner_edges_keeps_only_inner_edges() {
+        let outline =
+            FloorPlan::from_clean_ring(&[p(0., 0.), p(6., 0.), p(6., 6.), p(0., 6.)]).unwrap();
+        let mut doc = StoreyDoc::default();
+        doc.outline = ShapeSlot {
+            floor_plan: outline,
+            dimensioning: DimensionState::default(),
+        };
+        let porch_plan =
+            FloorPlan::from_clean_ring(&[p(0., 0.), p(2., 0.), p(2., 2.), p(0., 2.)]).unwrap();
+        // Un-dimensioned → contributes nothing.
+        doc.porches.push(ShapeSlot {
+            floor_plan: porch_plan.clone(),
+            dimensioning: DimensionState::default(),
+        });
+        assert!(doc.finalised_porch_inner_edges().is_empty());
+
+        // Finalised → exactly the two inner edges (through (2, 1) and (1, 2));
+        // the two outline-flush edges are excluded.
+        doc.porches[0].dimensioning.known_params = porch_plan.all_active_params();
+        let mut mids: Vec<(i64, i64)> = doc
+            .finalised_porch_inner_edges()
+            .iter()
+            .map(|[a, b]| {
+                (
+                    (((a.x + b.x) * 0.5) * 1000.0).round() as i64,
+                    (((a.y + b.y) * 0.5) * 1000.0).round() as i64,
+                )
+            })
+            .collect();
+        mids.sort_unstable();
+        assert_eq!(mids, vec![(1000, 2000), (2000, 1000)]);
+    }
+
+    /// An OLD document snapshot — serialized before `porches` existed, so the
+    /// key is absent — still deserializes (`#[serde(default)]`), with the
+    /// porch list empty.
+    #[test]
+    fn old_snapshot_without_porches_key_still_deserializes() {
+        let mut doc = Document::default();
+        doc.storeys[0].porches.push(ShapeSlot::default());
+        let mut json = serde_json::to_value(&doc).expect("snapshot serializes");
+        // Simulate the pre-porch snapshot: drop the key entirely.
+        let storey0 = json["storeys"][0].as_object_mut().unwrap();
+        assert!(storey0.remove("porches").is_some(), "key was present");
+        let loaded: Document = serde_json::from_value(json).expect("old snapshot loads");
+        assert!(loaded.storeys[0].porches.is_empty(), "defaults to empty");
     }
 
     /// `available_region_rings` returns the outline minus the holes: empty

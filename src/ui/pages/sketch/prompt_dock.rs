@@ -25,10 +25,11 @@ use ber_model::ber::structural::{CeilingExposure, FloorExposure};
 /// openings placement also don't count (they use the number box / top-right).
 pub(super) fn has_controls(view: &SketchView<'_>) -> bool {
     // Always-has-a-control flows (buttons / inputs / slider).
-    if view
-        .new_storey_prompt
-        .as_ref()
-        .is_some_and(|p| !p.thickness_pending)
+    if view.stroke_error.is_some()
+        || view
+            .new_storey_prompt
+            .as_ref()
+            .is_some_and(|p| !p.thickness_pending)
         || view.pending_redraw
         || view.curve_bulge.is_some()
         || view.vertex_drop_prompt.is_some()
@@ -104,6 +105,9 @@ pub(super) fn panel_persists(view: &SketchView<'_>) -> bool {
 /// Matches whichever control set [`render_controls`] shows; approximate when
 /// several are active at once (picks the primary).
 pub(super) fn panel_title(view: &SketchView<'_>) -> &'static str {
+    if view.stroke_error.is_some() {
+        return "Stroke rejected";
+    }
     if view.floor_exposure_mode {
         return "Floor exposures";
     }
@@ -167,6 +171,10 @@ pub(super) fn panel_title(view: &SketchView<'_>) -> &'static str {
 /// deliberately excludes terminal VALUES (e.g. the exposure picked), so applying
 /// one keeps the panel closed; changing the selection reopens it.
 pub(super) fn panel_token(view: &SketchView<'_>) -> String {
+    // Each rejection reopens the panel (a re-drawn stroke may fail differently).
+    if let Some(err) = view.stroke_error {
+        return format!("stroke-err-{err}");
+    }
     if view.floor_exposure_mode {
         return format!("fe-{}", view.floor_exposure_gate_pending);
     }
@@ -396,6 +404,18 @@ pub(super) fn render_controls<F: FnMut(UiEvent)>(
     view: &mut SketchView<'_>,
     on_event: &mut F,
 ) {
+    // An Extend/Trim rejection owns the dock until dismissed or the next
+    // stroke: the assessor must SEE why the outline didn't change (a silent
+    // drop cost the 8 Ashgrove Hill porch trim in the field).
+    if let Some(err) = view.stroke_error {
+        ui.horizontal_wrapped(|ui| {
+            ui.colored_label(egui::Color32::from_rgb(200, 60, 60), err);
+            if ui.button("Dismiss").clicked() {
+                on_event(UiEvent::Sketch(SketchEvent::ClearStrokeError));
+            }
+        });
+        return;
+    }
     // The floor-exposure tool spans the whole storey stack — it works on the
     // All tab too, so its toolbar renders BEFORE the "pick a storey" notice and
     // owns the dock while active.
@@ -578,6 +598,18 @@ pub(super) fn render_corner_actions<F: FnMut(UiEvent)>(
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.vertical(|ui| {
                     if openings_selection {
+                        // "Edit roof window…" for a plan-selected rooflight — the
+                        // roof analogue of the elevation's "Edit window…" (wall
+                        // openings edit from the elevation overlay instead).
+                        if !delete_confirm && view.roof_window_selected.is_some() {
+                            if ui
+                                .button("Edit roof window…")
+                                .hint("Change this rooflight's size, type, or overshading")
+                                .clicked()
+                            {
+                                on_event(UiEvent::Sketch(SketchEvent::EditSelectedRoofWindow));
+                            }
+                        }
                         if delete_confirm {
                             ui.label("Delete this window?");
                             ui.horizontal(|ui| {

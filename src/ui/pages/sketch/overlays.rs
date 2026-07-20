@@ -34,6 +34,7 @@ pub fn phase_bar(
     items: &[ChecklistItem],
     show_review: bool,
     review_label: &str,
+    bubble: &mut Option<String>,
 ) -> (Option<AssessmentPhase>, bool, Rect) {
     let phases = [
         (AssessmentPhase::Mapping, "Mapping"),
@@ -101,8 +102,13 @@ pub fn phase_bar(
                     ui.add_space(4.0);
                     egui::Frame::popup(ui.style()).show(ui, |ui| {
                         ui.set_max_width(260.0);
-                        review_clicked = checklist_body(ui, items, show_review, review_label);
+                        review_clicked =
+                            checklist_body(ui, items, show_review, review_label, bubble);
                     });
+                } else {
+                    // Collapsing the checklist takes any open reason bubble
+                    // with it (its anchor row is gone).
+                    *bubble = None;
                 }
             });
         });
@@ -252,22 +258,84 @@ pub fn highlight_caption(ui: &egui::Ui, rect: Rect, display: DisplayMode, counts
 /// each frame from `items`) + the legend + the Mapping "Review" button. Rendered
 /// inline under the phase bar when its triangle is expanded. Returns true if the
 /// review button was clicked.
+///
+/// Every NON-GREEN row is tappable (the whole row is the touch target): a first
+/// tap opens a bubble beside it listing the concrete unmet conditions (the
+/// row's `reasons` — derived from the SAME predicates as its colour); tapping
+/// the row again, another row, or anywhere else dismisses it. Green rows carry
+/// no reasons and aren't tappable. `bubble` (page state) holds the open row's
+/// label.
 fn checklist_body(
     ui: &mut egui::Ui,
     items: &[ChecklistItem],
     show_review: bool,
     review_label: &str,
+    bubble: &mut Option<String>,
 ) -> bool {
     if items.is_empty() {
+        *bubble = None;
         ui.label(RichText::new("Open a BER to track progress.").weak());
         return false;
     }
+    // A stale label (the row went green since, or the phase's rows changed)
+    // has no anchor — drop it before rendering.
+    if bubble
+        .as_ref()
+        .is_some_and(|l| !items.iter().any(|i| i.label == *l && !i.reasons.is_empty()))
+    {
+        *bubble = None;
+    }
     let mut review_clicked = false;
+    let mut row_tapped = false;
     for item in items {
-        ui.horizontal(|ui| {
-            status_dot(ui, item.status);
-            ui.label(item.label);
-        });
+        let explainable = !item.reasons.is_empty();
+        let open = bubble.as_deref() == Some(item.label);
+        let row_rect = ui
+            .horizontal(|ui| {
+                // Finger-sized row (this is a tablet app).
+                ui.set_min_height(26.0);
+                status_dot(ui, item.status);
+                ui.label(item.label);
+                if explainable {
+                    // Right-aligned "explains itself" affordance; also stretches
+                    // the row to the full panel width for a generous hit target.
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            RichText::new(if open { "×" } else { "?" })
+                                .size(13.0)
+                                .color(Color32::from_gray(150)),
+                        );
+                    });
+                }
+            })
+            .response
+            .rect;
+        if explainable {
+            let resp = ui.interact(
+                row_rect,
+                ui.id().with(("checklist_row", item.label)),
+                Sense::click(),
+            );
+            if resp
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .clicked()
+            {
+                row_tapped = true;
+                *bubble = if open {
+                    None
+                } else {
+                    Some(item.label.to_string())
+                };
+            }
+            if bubble.as_deref() == Some(item.label) {
+                let dismissed = reasons_bubble(ui, row_rect, item);
+                // A tap anywhere OUTSIDE the bubble dismisses it — unless the
+                // tap was a row toggle, which already decided the new state.
+                if dismissed && !row_tapped {
+                    *bubble = None;
+                }
+            }
+        }
     }
     ui.add_space(2.0);
     ui.separator();
@@ -281,6 +349,36 @@ fn checklist_body(
         }
     }
     review_clicked
+}
+
+/// The "why isn't this green" bubble anchored beside a checklist row: the row's
+/// concrete unmet conditions as bullet lines. Returns whether a click landed
+/// OUTSIDE the bubble this frame (the caller dismisses on it).
+fn reasons_bubble(ui: &egui::Ui, row_rect: Rect, item: &ChecklistItem) -> bool {
+    let area = egui::Area::new(ui.id().with(("checklist_bubble", item.label)))
+        .order(egui::Order::Tooltip)
+        .fixed_pos(row_rect.right_center() + egui::vec2(10.0, 0.0))
+        .pivot(Align2::LEFT_CENTER)
+        .constrain(true)
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style())
+                .stroke(Stroke::new(1.0, status_color(item.status)))
+                .show(ui, |ui| {
+                    ui.set_max_width(320.0);
+                    ui.label(RichText::new(item.label).strong().size(13.0));
+                    for reason in &item.reasons {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                RichText::new("•")
+                                    .color(status_color(item.status))
+                                    .size(13.0),
+                            );
+                            ui.label(RichText::new(reason).size(13.0));
+                        });
+                    }
+                });
+        });
+    area.response.clicked_elsewhere()
 }
 
 /// A filled circle in the item's status colour.

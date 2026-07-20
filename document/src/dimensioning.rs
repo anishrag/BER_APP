@@ -358,9 +358,9 @@ impl StoreyDoc {
                 // prompt's.
                 push_known(&self.floor_plan, &self.dimensioning.known_params, true);
             }
-            ActiveShape::LivingArea(_) => {
-                // The active living area's known walls are already labelled
-                // by the living-area path — add only the settled outline's
+            ActiveShape::LivingArea(_) | ActiveShape::Porch(_) => {
+                // The active living area's / porch's known walls are already
+                // labelled by its own path — add only the settled outline's
                 // confirmed walls.
                 push_known(
                     &self.outline.floor_plan,

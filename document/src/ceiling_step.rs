@@ -364,6 +364,38 @@ impl StoreyDoc {
             .map(|(c, vid, _)| (c, vid))
     }
 
+    /// The same-height DIVIDER cut segments of `steps` (the session
+    /// ceiling-step regions the shell owns) as world-metre snap segments —
+    /// each `is_divider()` region's interior split edge against the storey
+    /// outline's bounding box ([`manip_plan::interior_split_edge`], the same
+    /// geometry the canvas draws as the faint dashed divider). These are the
+    /// line references a sub-area stroke (the porch carve) pre-snaps onto so
+    /// a drawn edge lands exactly ON the "Divide ceiling" line. Real
+    /// height-step (non-divider) regions contribute nothing here — their
+    /// RISER base edges are already the shell's step-line references. Empty
+    /// when the outline is empty or no divider yields an interior edge.
+    pub fn ceiling_divider_segments(&self, steps: &[CeilingStepRegion]) -> Vec<[Point2f32; 2]> {
+        let Some(((ox0, oy0), (ox1, oy1))) = self.outline.floor_plan.bounding_box() else {
+            return Vec::new();
+        };
+        let bbox = ((ox0 as f64, oy0 as f64), (ox1 as f64, oy1 as f64));
+        steps
+            .iter()
+            .filter(|r| r.is_divider())
+            .filter_map(|r| {
+                let ring: Vec<(f64, f64)> =
+                    r.polygon.iter().map(|p| (p.x as f64, p.y as f64)).collect();
+                manip_plan::interior_split_edge(&ring, bbox)
+            })
+            .map(|((ax, ay), (bx, by))| {
+                [
+                    Point2f32::new(ax as f32, ay as f32),
+                    Point2f32::new(bx as f32, by as f32),
+                ]
+            })
+            .collect()
+    }
+
     /// Snap a ridge coordinate — the CROSS coordinate (on `axis`) or an EXTENT
     /// END (on the ALONG axis `axis.other()`, callers pass that axis directly) —
     /// onto the nearest parallel reference within `tol` (metres, viewport-relative),
@@ -884,6 +916,45 @@ mod tests {
         assert!(rect
             .snap_ceiling_step_line(ParameterAxis::X, 4.5, &[4.0], 0.2)
             .is_none());
+    }
+
+    /// `ceiling_divider_segments`: a same-height divider region yields its
+    /// interior split edge (the dashed-divider cut); a real height step and a
+    /// full-footprint (degenerate) region yield nothing; an empty outline
+    /// yields nothing at all.
+    #[test]
+    fn ceiling_divider_segments_returns_only_divider_cut_edges() {
+        let doc = storey_10x6();
+        // The left half of the 10×6 footprint as a delta-0 divider: its
+        // interior edge is the vertical cut at x = 4.
+        let divider = CeilingStepRegion {
+            polygon: vec![p(0., 0.), p(4., 0.), p(4., 6.), p(0., 6.)],
+            delta_m: 0.0,
+        };
+        // A REAL step over the right half: excluded (its riser is already a
+        // step-line reference elsewhere).
+        let step = CeilingStepRegion {
+            polygon: vec![p(4., 0.), p(10., 0.), p(10., 6.), p(4., 6.)],
+            delta_m: 0.3,
+        };
+        // A divider covering the whole footprint: degenerate, no interior edge.
+        let full = CeilingStepRegion {
+            polygon: vec![p(0., 0.), p(10., 0.), p(10., 6.), p(0., 6.)],
+            delta_m: 0.0,
+        };
+        let segs = doc.ceiling_divider_segments(&[divider.clone(), step, full]);
+        assert_eq!(segs.len(), 1, "only the divider's cut edge is returned");
+        let [a, b] = segs[0];
+        assert!((a.x - 4.0).abs() < 1e-4 && (b.x - 4.0).abs() < 1e-4);
+        let (lo, hi) = (a.y.min(b.y), a.y.max(b.y));
+        assert!(lo.abs() < 1e-4 && (hi - 6.0).abs() < 1e-4);
+
+        // No outline → nothing to bound the cut against.
+        assert!(StoreyDoc::default()
+            .ceiling_divider_segments(&[divider])
+            .is_empty());
+        // No steps at all → empty.
+        assert!(doc.ceiling_divider_segments(&[]).is_empty());
     }
 
     /// `region_line_coords` returns the CONSTANT coordinate of each axis-aligned

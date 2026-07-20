@@ -143,6 +143,7 @@ impl AppController {
                 option_idx: prompt.current_idx,
                 option_count: prompt.options.len(),
                 offers_centre: false,
+                offers_centre_between: false,
             });
         }
         // A pending roof point's per-axis question outranks the shape loop
@@ -175,6 +176,7 @@ impl AppController {
                 option_idx: prompt.current_idx,
                 option_count: prompt.options.len(),
                 offers_centre: false,
+                offers_centre_between: false,
             });
         }
         // A pending roof RIDGE's cross-coordinate question (question 1), same
@@ -202,6 +204,7 @@ impl AppController {
                 option_count: prompt.options.len(),
                 // The ridge's location stages offer the Centre suggestion.
                 offers_centre: true,
+                offers_centre_between: false,
             });
         }
         // The ridge's START question (question 2): the measured object is the
@@ -230,6 +233,7 @@ impl AppController {
                 option_idx: prompt.current_idx,
                 option_count: prompt.options.len(),
                 offers_centre: true,
+                offers_centre_between: false,
             });
         }
         // The roof RECT's position questions (PosX / PosY): the "area wall"
@@ -254,6 +258,7 @@ impl AppController {
                 option_idx: prompt.current_idx,
                 option_count: prompt.options.len(),
                 offers_centre: true,
+                offers_centre_between: false,
             });
         }
         if let Some(PendingCeilingRect::PosY { lo, len, prompt }) = self.pending_roof_rect.as_ref()
@@ -274,6 +279,7 @@ impl AppController {
                 option_idx: prompt.current_idx,
                 option_count: prompt.options.len(),
                 offers_centre: true,
+                offers_centre_between: false,
             });
         }
         let prompt = self
@@ -297,6 +303,10 @@ impl AppController {
             // prompt offers Centre (centre the box within the storey below); the
             // phase/step carve + `Wall`-kind prompts have no such reference.
             offers_centre: prompt.kind == PositionPromptKind::Translate
+                && self.document.position_reference_override.is_some(),
+            // The whole-shape slide offers 'Centre between 2 points' on the same
+            // gate — the only prompt with a whole shape to slide.
+            offers_centre_between: prompt.kind == PositionPromptKind::Translate
                 && self.document.position_reference_override.is_some(),
         })
     }
@@ -600,6 +610,125 @@ impl AppController {
         Ok(())
     }
 
+    // ── 'Centre between 2 points' pick ──────────────────────────────────────
+    // A two-tap sub-mode over an open whole-shape `Translate` position prompt:
+    // the assessor taps two points (each snapped to the nearest vertex /
+    // perpendicular edge across the outline, the position reference, and the
+    // active shape's plan), and the shape's axis-extent midpoint is centred on
+    // the two points' midpoint ON THE PROMPT'S AXIS ONLY. Model mutation lives
+    // in [`Document::center_current_position_between`]; this owns the pick
+    // state + the tap→snap resolution + the undo/persist workflow. The existing
+    // footprint-centre Centre ([`center_current_position`]) is unchanged.
+
+    /// True while the whole-shape `Translate` position prompt offers Centre —
+    /// the same gate as the UI's `offers_centre` for that prompt (a drawn
+    /// upper-storey outline positioned over the storey below). The
+    /// 'Centre between 2 points' action shares this gate.
+    fn centre_between_offered(&self) -> bool {
+        self.document
+            .dimensioning
+            .current_position_prompt
+            .as_ref()
+            .is_some_and(|p| p.kind == PositionPromptKind::Translate)
+            && self.document.position_reference_override.is_some()
+    }
+
+    /// True while the two-tap 'Centre between 2 points' pick is in flight (the
+    /// canvas routes taps to it and shows the placed marker + instruction).
+    pub fn centre_between_picking(&self) -> bool {
+        self.pending_centre_between.is_some()
+    }
+
+    /// The first placed pick point (world coords) for the provisional marker,
+    /// once tap 1 has landed. `None` before the first tap or when not picking.
+    pub fn centre_between_first_point(&self) -> Option<(f64, f64)> {
+        match self.pending_centre_between {
+            Some(CentreBetweenPick::Second { a }) => Some((a.x as f64, a.y as f64)),
+            _ => None,
+        }
+    }
+
+    /// Enter the two-tap 'Centre between 2 points' pick — armed only while a
+    /// whole-shape `Translate` position prompt is open (the button's gate);
+    /// no-op otherwise. The open document position prompt stays put behind it.
+    pub fn enter_centre_between_pick(&mut self) {
+        if self.centre_between_offered() {
+            self.pending_centre_between = Some(CentreBetweenPick::First);
+        }
+    }
+
+    /// Cancel an in-flight pick, restoring the open position prompt untouched
+    /// (no geometry change). No-op when not picking.
+    pub fn cancel_centre_between_pick(&mut self) {
+        self.pending_centre_between = None;
+    }
+
+    /// A canvas tap while the 'Centre between 2 points' pick is on: snap the
+    /// tapped point to the nearest vertex / perpendicular edge across the three
+    /// candidate plans, then advance — tap 1 places the first point; tap 2
+    /// centres the shape between the two (on the prompt's axis) through the same
+    /// undo/persist path as Centre. On a guardrail rejection the pick restarts
+    /// from the first tap and the message surfaces on the open prompt. No-op
+    /// when not picking.
+    pub fn centre_between_tap(&mut self, world_x: f32, world_y: f32) -> Result<(), String> {
+        let Some(pick) = self.pending_centre_between else {
+            return Ok(());
+        };
+        // The snap reads document.outline / position_reference / floor_plan,
+        // which are only synced to their slots on shape switches — flush the
+        // live buffer first (the roof-point tap's precedent).
+        self.sync_active();
+        let snapped = self.snap_centre_between_point(Point2f32::new(world_x, world_y));
+        match pick {
+            CentreBetweenPick::First => {
+                self.pending_centre_between = Some(CentreBetweenPick::Second { a: snapped });
+                Ok(())
+            }
+            CentreBetweenPick::Second { a } => {
+                let undo_snap = self.current_history_snapshot();
+                match self.document.center_current_position_between(a, snapped) {
+                    Ok(()) => {
+                        self.pending_centre_between = None;
+                        self.mark_dirty()?;
+                        self.push_history_snapshot(undo_snap);
+                        // Centring the last free axis finalises a drawn upper
+                        // outline — the shared position-apply tail.
+                        self.maybe_seed_inherited_levels();
+                        self.maybe_stage_structure_carve();
+                        self.maybe_stage_floor_exposure_carve();
+                        self.maybe_stage_ceiling_exposure_carve();
+                        Ok(())
+                    }
+                    Err(e) => {
+                        // Rejected (guardrail) — keep picking so the assessor can
+                        // re-tap; the message lands on the open prompt.
+                        self.pending_centre_between = Some(CentreBetweenPick::First);
+                        Err(e)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Snap a tapped world point onto the nearest vertex / perpendicular edge
+    /// across the three plans a centre-between pick may aim at — the storey
+    /// OUTLINE, the position REFERENCE footprint (the storey below, for an
+    /// upper outline), and the ACTIVE shape's own plan — at the ceiling-line
+    /// snap tolerance (the roof/ceiling POINT tap convention). Pure delegate to
+    /// [`manip_plan::snap_point_across_rings`].
+    fn snap_centre_between_point(&self, p: Point2f32) -> Point2f32 {
+        let tol = self.snap_tol_ceiling_line();
+        let outline = self.document.outline.floor_plan.get_points();
+        let reference = self.document.position_reference().get_points();
+        let active = self.document.floor_plan.get_points();
+        manip_plan::snap_point_across_rings(
+            &[outline.as_slice(), reference.as_slice(), active.as_slice()],
+            p,
+            tol,
+            tol,
+        )
+    }
+
     /// Apply the user's entered length for the current dimension prompt, then
     /// persist + snapshot for undo. The model mutation (scale / set / repair /
     /// guardrail / rollback) lives in [`Document::apply_dimension`]; this owns
@@ -714,6 +843,21 @@ pub struct PositionPromptUiData {
     /// roof-rect) location stages; the carve/step/point prompts have no
     /// owning area to centre within.
     pub offers_centre: bool,
+    /// True when the prompt offers 'Centre between 2 points' — a two-tap pick
+    /// that centres the WHOLE shape between two snapped points on this axis.
+    /// Set ONLY for a whole-shape `Translate` prompt (the drawn upper-storey
+    /// outline over the storey below); the roof/step/point/wall prompts have no
+    /// whole shape to slide, so it's `false` for them.
+    pub offers_centre_between: bool,
+}
+
+/// The in-flight 'Centre between 2 points' pick over an open whole-shape
+/// `Translate` position prompt: `First` awaits tap 1; `Second` holds tap 1's
+/// SNAPPED world point and awaits tap 2. Session-only, outside undo.
+#[derive(Debug, Clone, Copy)]
+pub enum CentreBetweenPick {
+    First,
+    Second { a: Point2f32 },
 }
 
 /// World-coord endpoints of the wall starting at `vid` in `plan`. `None` when

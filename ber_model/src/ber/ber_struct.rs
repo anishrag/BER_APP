@@ -20,6 +20,11 @@ pub struct IntakeDetails {
     pub property_type: String,
     pub heating_system: String,
     pub window_year: Option<Year>,
+    /// The client marked the window-installation year UNKNOWN (the Key-Details
+    /// "unknown" checkbox) — distinguishes a deliberate "don't know" from a
+    /// blank `window_year`. `#[serde(default)]` → `false` on older records.
+    #[serde(default)]
+    pub window_year_unknown: bool,
     pub door_year: Option<Year>,
     pub insulation_walls: bool,
     pub insulation_roof: bool,
@@ -27,6 +32,19 @@ pub struct IntakeDetails {
     pub insulation_notes: String,
     pub mprn: String,
     pub reason: String,
+    // --- On-site questions (assessor asks the client at the property, not from
+    // the booking form). `None` = not answered. Asked conditionally on Key
+    // Details; the answers feed the post-survey follow-up email (which evidence
+    // to request). `#[serde(default)]` keeps older records loading.
+    /// Insulation works present: can the builder provide a signed letter?
+    #[serde(default)]
+    pub builder_letter_possible: Option<bool>,
+    /// Extension present: is a letter from the architect available for it?
+    #[serde(default)]
+    pub architect_letter_extension: Option<bool>,
+    /// Recent (2010+) build: is an architect letter possible for the original build?
+    #[serde(default)]
+    pub architect_letter_original: Option<bool>,
 }
 
 /// One construction-PHASE zone of a storey, projected for the UI to tint and
@@ -316,6 +334,24 @@ impl Ber {
             .copied()
             .filter(|&s| self.photo_deferred(s))
             .filter(|&s| !self.photos.iter().any(|p| p.side == Some(s)))
+            .collect()
+    }
+
+    /// The REQUIRED external sides ([`ExternalSide::photo_required`] — Front +
+    /// Back) that still have neither a photo tagged with the side in
+    /// [`photos`](Self::photos) nor a deferral
+    /// ([`photo_deferred`](Self::photo_deferred)), in [`ExternalSide::ALL`]
+    /// order — the detailed core behind the "External photos" Mapping gate
+    /// (the gate is green exactly when this is empty), naming WHICH sides
+    /// block it for the tappable checklist row.
+    pub fn missing_external_photo_sides(&self) -> Vec<ExternalSide> {
+        ExternalSide::ALL
+            .iter()
+            .copied()
+            .filter(|s| s.photo_required())
+            .filter(|&side| {
+                !(self.photos.iter().any(|p| p.side == Some(side)) || self.photo_deferred(side))
+            })
             .collect()
     }
 
@@ -1461,5 +1497,30 @@ mod tests {
             old.deferred_photo_sides.is_empty(),
             "pre-field records load with nothing deferred"
         );
+    }
+
+    /// `missing_external_photo_sides` names exactly the REQUIRED sides the
+    /// External-photos gate still waits on: both required sides on an empty
+    /// record, minus a side once a photo tagged with it lands, minus a
+    /// deferrable side once it's deferred.
+    #[test]
+    fn missing_external_photo_sides_tracks_photos_and_deferrals() {
+        let mut ber = Ber::default();
+        assert_eq!(
+            ber.missing_external_photo_sides(),
+            vec![ExternalSide::Front, ExternalSide::Back],
+            "the required sides, in ALL order"
+        );
+
+        // A Front photo removes Front.
+        ber.photos.push(Photo {
+            side: Some(ExternalSide::Front),
+            ..Default::default()
+        });
+        assert_eq!(ber.missing_external_photo_sides(), vec![ExternalSide::Back]);
+
+        // Deferring Back (deferrable) counts as set for the gate.
+        ber.set_photo_deferred(ExternalSide::Back, true);
+        assert!(ber.missing_external_photo_sides().is_empty());
     }
 }

@@ -42,7 +42,8 @@ use crate::ui::widgets::HintExt;
 use crate::ui::widgets::{photo_button_pair, text_input, PhotoQuality};
 use ber_model::ber::common::ItemId;
 use ber_model::ber::fenestration::{
-    window_shape_area, window_shape_from_inputs, ComplexWindowKind, Frame, Glazing, Overshading,
+    window_shape_area, window_shape_from_inputs, ComplexWindowKind, DoorKind, Frame, Glazing,
+    Overshading, WindowTopShape,
 };
 use ber_model::ber::openings::SidelightLayout;
 
@@ -211,14 +212,16 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             // Photos are per-window, so a fresh placement starts with none (unlike
             // the window type / overshading, which persist across placements).
             view.pending_window_photos.clear();
-            // Edit mode ("Edit window"): seed the box from the window being
-            // edited — its size into the W/H fields, its shared type selected in
-            // the picker, its overshading. Once, per prompt (seq).
+            // Edit mode: seed the box from the opening being edited — its size
+            // into the W/H fields, plus its type-specific attributes. Once, per
+            // prompt (seq).
+            let fmt = |v: f32| {
+                let s = format!("{v:.3}");
+                s.trim_end_matches('0').trim_end_matches('.').to_string()
+            };
+            // A window (wall or roof): size + shared type + overshading + opes
+            // (+ the tickable top for a wall window).
             if let Some(edit) = prompt.edit {
-                let fmt = |v: f32| {
-                    let s = format!("{v:.3}");
-                    s.trim_end_matches('0').trim_end_matches('.').to_string()
-                };
                 *view.opening_width_input = fmt(edit.width_m);
                 *view.opening_height_input = fmt(edit.height_m);
                 *view.wt_existing_id = Some(edit.window_type_id);
@@ -227,6 +230,21 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     .num_opes
                     .map(|n| n.to_string())
                     .unwrap_or_else(|| "1".to_string());
+                // Seed the shaped-top tick from the window's stored shape (a
+                // complex/roof shape hides the tick — nothing to seed). Like the
+                // overshading seed above, this overwrites the pinned placement
+                // pick: the edited window's state becomes the "last used".
+                if let Some(top) = edit.top {
+                    view.cat_state.window_top_shape = top;
+                }
+            }
+            // A door: size + its type name / kind / draught-stripped flag.
+            if let Some(edit) = &prompt.door_edit {
+                *view.opening_width_input = fmt(edit.width_m);
+                *view.opening_height_input = fmt(edit.height_m);
+                *view.door_type_name_input = edit.type_name.clone();
+                *view.door_kind = edit.kind.clone();
+                *view.door_draught_stripped = edit.draught_stripped;
             }
         }
         // The toggles are captured into the Place event by value (the checkboxes
@@ -247,6 +265,13 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         // value into the Place event. A live area readout of the current dims is
         // shown as the box subtitle.
         let cx_kind = prompt.complex_window;
+        // The plain Window tool's shaped-top tick — `Some(settled pick)` when
+        // offered (plain Window placement, or editing a tickable window),
+        // captured by value into the Place / Apply events like `ds_mode`.
+        let win_top = prompt.window_top;
+        // While a shaped top is ticked, spell out the height semantics.
+        let top_note = matches!(win_top, Some(t) if t != WindowTopShape::Flat)
+            .then_some("Height = TOTAL at the centre (apex); width at the bottom");
         let cx_area_label = cx_kind.map(|kind| {
             let d = |s: &str| parse_dimension_expression(s).unwrap_or(0.0);
             let dims = [
@@ -305,15 +330,37 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         let overshading = *view.overshading;
         let num_opes = view.opening_num_opes.trim().parse::<u32>().ok();
         let door_draught_stripped = *view.door_draught_stripped;
+        // "Edit door" attributes, captured by value into the ApplyDoorEdit event.
+        let is_door_edit = prompt.door_edit.is_some();
+        let door_type_name = view.door_type_name_input.clone();
+        let door_kind = view.door_kind.clone();
         // Photos picked so far for this placement, captured by value into the
         // events (the photo button below adds to the list for a later frame).
         let photos = view.pending_window_photos.clone();
         let place_window_type = window_type.clone();
         let place_photos = photos.clone();
         // Edit mode: the primary action APPLIES the resize/retype to the
-        // existing window instead of placing a new one. Same fields, same
-        // window-type picker + gating — only the event differs.
-        let primary_action = if prompt.edit.is_some() {
+        // existing opening instead of placing a new one. A DOOR edit emits its
+        // own event (door type/kind/draught); a window (wall or roof) reuses
+        // ApplyOpeningEdit (the controller dispatches on what's being edited).
+        let primary_action = if is_door_edit {
+            let apply_photos = photos.clone();
+            Action::new_multi(
+                "Apply",
+                "Apply the new size / type to this door",
+                move |vs| {
+                    let g = |i: usize| vs.get(i).copied().flatten();
+                    SketchEvent::ApplyDoorEdit {
+                        width_m: g(0).unwrap_or(0.0),
+                        height_m: g(1).unwrap_or(0.0),
+                        type_name: door_type_name.clone(),
+                        kind: door_kind.clone(),
+                        draught_stripped: door_draught_stripped,
+                        photos: apply_photos.clone(),
+                    }
+                },
+            )
+        } else if prompt.edit.is_some() {
             let apply_window_type = window_type.clone();
             let apply_photos = photos.clone();
             Action::new_multi(
@@ -326,6 +373,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                         height_m: g(1).unwrap_or(0.0),
                         full_width,
                         full_height,
+                        window_top: win_top,
                         window_type: apply_window_type.clone(),
                         overshading,
                         num_opes,
@@ -386,6 +434,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     full_height,
                     door_sidelights,
                     complex_window,
+                    window_top: win_top,
                     window_type: place_window_type.clone(),
                     overshading,
                     num_opes,
@@ -646,6 +695,18 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         let existing_types = view.existing_window_types.clone();
         let offer_wt = prompt.offer_window_type;
         let mut picker = |ui: &mut egui::Ui| {
+            // "Edit door" box: the door has no window-type picker — instead it
+            // collects its own type name / kind / draught-stripped flag.
+            if is_door_edit {
+                ui.horizontal(|ui| {
+                    ui.label("type").hint("A name for this door type");
+                    text_input(ui, view.door_type_name_input, KEY, "Door");
+                });
+                door_kind_picker(ui, &mut *view.door_kind);
+                ui.checkbox(view.door_draught_stripped, "draught stripped");
+                window_photo_picker(ui, &mut *view.pending_window_photos, false);
+                return;
+            }
             if !offer_wt {
                 return;
             }
@@ -701,18 +762,22 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             .complex_window
             .is_some()
             .then_some(&mut view.cat_state.complex_window_kind);
+        // The shaped-top 3-way tick — plain Window placement, or editing a
+        // window whose shape is tickable. Persists on `CategoryUiState` like
+        // the complex-shape dropdown.
+        let win_top_toggle: Option<&mut WindowTopShape> = win_top
+            .is_some()
+            .then_some(&mut view.cat_state.window_top_shape);
         // Edit mode pre-fills the W/H with the window's current size — arm the
         // pristine guard (keyed per prompt seq) so the first key REPLACES the
         // prefill. Placements stay user-entered (no suggestion, never pristine).
-        let edit_token = prompt
-            .edit
-            .is_some()
+        let edit_token = (prompt.edit.is_some() || prompt.door_edit.is_some())
             .then(|| format!("edit-window-{}", prompt.seq));
         show_box_multi(
             ctx,
             rect,
             &title,
-            cx_area_label.as_deref().or(ds_full_note),
+            cx_area_label.as_deref().or(ds_full_note).or(top_note),
             error,
             &mut box_fields,
             &mut checks,
@@ -721,6 +786,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             &mut view.cat_state.input_mode_pinned,
             ds_mode_toggle,
             cx_kind_toggle,
+            win_top_toggle,
             view.laser,
             &mut picker,
             extra_valid,
@@ -889,6 +955,46 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             X => "Horizontal",
             Y => "Vertical",
         };
+        // 'Centre between 2 points' pick sub-mode: the canvas is taking two
+        // taps — swap the distance keypad for the instruction + a Cancel.
+        if view.centre_between_picking {
+            let dir_word = match p.axis {
+                X => "horizontally",
+                Y => "vertically",
+            };
+            let which = if view.centre_between_first.is_some() {
+                "Tap the SECOND point."
+            } else {
+                "Tap the FIRST point."
+            };
+            let title = "Centre between 2 points".to_string();
+            let sub = format!(
+                "Tap two points; the storey will centre between them {dir_word}. \
+                 {which} Each tap snaps to the nearest corner or wall."
+            );
+            let actions = vec![Action::new(
+                "Cancel",
+                "Stop picking and keep the position prompt",
+                |_| SketchEvent::CancelCentreBetween,
+            )
+            .bare()];
+            show_box(
+                ctx,
+                rect,
+                &title,
+                Some(&sub),
+                "",
+                view.position_error,
+                view.position_input,
+                &actions,
+                &mut view.cat_state.input_mode,
+                &mut view.cat_state.input_mode_pinned,
+                view.laser,
+                None,
+                on_event,
+            );
+            return;
+        }
         let title = format!("{direction} distance from the highlighted wall (m)");
         let mut actions = vec![
             Action::new("Apply", "Pin the area at exactly this distance", |v| {
@@ -906,6 +1012,16 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 Action::new("Centre", "Centre it within the available area", |_| {
                     SketchEvent::CentreRoofPosition
                 })
+                .bare(),
+            );
+        }
+        if p.offers_centre_between {
+            actions.push(
+                Action::new(
+                    "Centre between 2 points",
+                    "Tap two points; the storey centres between them on this axis",
+                    |_| SketchEvent::EnterCentreBetween,
+                )
                 .bare(),
             );
         }
@@ -1525,6 +1641,28 @@ fn overshading_picker(ui: &mut egui::Ui, overshading: &mut Overshading) {
     });
 }
 
+/// The door-kind dropdown for the "Edit door" box (`AssemblyPanel` is not
+/// offered — that kind is owned by the door+sidelights assembly flow).
+fn door_kind_picker(ui: &mut egui::Ui, kind: &mut DoorKind) {
+    let label = |k: &DoorKind| match k {
+        DoorKind::Solid => "Solid",
+        DoorKind::HalfGlazed => "Half-glazed",
+        DoorKind::FullyGlazed => "Fully glazed",
+        DoorKind::AssemblyPanel => "Assembly panel",
+    };
+    ui.horizontal(|ui| {
+        ui.label("kind");
+        egui::ComboBox::from_id_salt("door_edit_kind")
+            .selected_text(label(kind))
+            .show_ui(ui, |ui| {
+                for k in [DoorKind::Solid, DoorKind::HalfGlazed, DoorKind::FullyGlazed] {
+                    let t = label(&k);
+                    ui.selectable_value(kind, k, t);
+                }
+            });
+    });
+}
+
 /// Photo control for a window-type group in the placement box: thumbnails of the
 /// photos picked so far plus an "add photo" button (file dialog on desktop,
 /// camera on Android). The paths are attached to the window type on Place. At
@@ -1677,6 +1815,7 @@ fn show_box<F: FnMut(UiEvent)>(
         mode_pinned,
         None,
         None,
+        None,
         laser,
         &mut |_| {},
         true,
@@ -1708,6 +1847,9 @@ fn show_box_multi<F: FnMut(UiEvent)>(
     // The Complex-window shape dropdown, drawn under the toggles. `None` for
     // every other prompt.
     cx_kind: Option<&mut ComplexWindowKind>,
+    // The plain Window tool's Flat / Semi-circular / Pointed top tick, drawn
+    // with the other toggles. `None` for every other prompt.
+    win_top: Option<&mut WindowTopShape>,
     laser: &mut LaserSource,
     // Extra controls drawn in the box body, under the toggles and above the
     // keypad — e.g. the openings window-type picker. A no-op for most prompts.
@@ -1767,6 +1909,9 @@ fn show_box_multi<F: FnMut(UiEvent)>(
             }
             if let Some(cx_kind) = cx_kind {
                 complex_window_shape_dropdown(ui, cx_kind);
+            }
+            if let Some(top) = win_top {
+                window_top_toggle(ui, top);
             }
             if let Some(sub) = subtitle {
                 ui.label(RichText::new(sub).color(Color32::from_gray(170)));
@@ -2104,6 +2249,31 @@ fn door_sidelights_mode_toggle(ui: &mut egui::Ui, mode: &mut DoorSidelightsMode)
             .clicked()
         {
             *mode = DoorSidelightsMode::Detailed;
+        }
+    });
+    ui.separator();
+}
+
+/// The plain Window tool's shaped-top 3-way tick, under the input-mode toggle:
+/// Flat / Semi-circular top / Pointed top. Ticking fully determines the shape
+/// (semi-circle radius = width/2, pointed apex triangle height = width/2 — no
+/// extra dimensions; the entered height is the TOTAL at the centre). The
+/// choice persists on `CategoryUiState`, so it sticks across placements.
+fn window_top_toggle(ui: &mut egui::Ui, top: &mut WindowTopShape) {
+    ui.horizontal(|ui| {
+        for t in WindowTopShape::ALL {
+            let hint = match t {
+                WindowTopShape::Flat => "A plain rectangular window",
+                WindowTopShape::SemiCircular => {
+                    "Cap the window with a semicircle (radius = half the width); height is the total at the centre"
+                }
+                WindowTopShape::Pointed => {
+                    "Cap the window with a centred point (half the width tall); height is the total at the apex"
+                }
+            };
+            if ui.selectable_label(*top == t, t.label()).hint(hint).clicked() {
+                *top = t;
+            }
         }
     });
     ui.separator();
