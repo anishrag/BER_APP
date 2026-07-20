@@ -6,8 +6,10 @@
 
 use std::sync::{Arc, Mutex};
 
+use chrono::Datelike;
+
 use ber_model::ber::common::ItemId;
-use ber_model::ber::followup::{self, FollowUpPointId};
+use ber_model::ber::followup::{self, CustomPoint, FollowUpPointId};
 
 use super::AppController;
 
@@ -26,12 +28,20 @@ pub(super) struct PendingSend {
     pub(super) state: Arc<Mutex<FollowUpSendState>>,
 }
 
-/// One request-point row for the tab: the point, its label, and whether it's
-/// currently ticked.
+/// Identifies a tab row: a built-in catalogue point or a per-BER custom one.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FollowUpRowKey {
+    BuiltIn(FollowUpPointId),
+    Custom(ItemId),
+}
+
+/// One request-point row for the tab: its key, label, tick state, and whether
+/// it can be removed (custom points only).
 pub struct FollowUpPointRow {
-    pub id: FollowUpPointId,
-    pub label: &'static str,
+    pub key: FollowUpRowKey,
+    pub label: String,
     pub checked: bool,
+    pub removable: bool,
 }
 
 /// Everything the Follow-ups tab renders from.
@@ -63,12 +73,13 @@ impl AppController {
         self.poll_followup_send();
 
         let record = self.current_record.as_mut()?;
+        let reference_year = record.date_assessed.year().max(0) as u32;
         let ber = &mut record.data;
 
         let mut seeded = false;
         if !ber.followup.is_sent() && !ber.followup.initialized {
-            ber.followup.selected = followup::auto_selected(ber);
-            ber.followup.body = followup::assemble_draft(ber, &ber.followup.selected.clone());
+            ber.followup.selected = followup::auto_selected(ber, reference_year);
+            rebuild_followup_body(ber);
             ber.followup.initialized = true;
             seeded = true;
         }
@@ -79,14 +90,21 @@ impl AppController {
         let record = self.current_record.as_ref()?;
         let current_id = record.data.id.clone();
         let fu = &record.data.followup;
-        let points = followup::ALL_POINTS
+        let mut points: Vec<FollowUpPointRow> = followup::ALL_POINTS
             .into_iter()
             .map(|id| FollowUpPointRow {
-                id,
-                label: id.label(),
+                key: FollowUpRowKey::BuiltIn(id),
+                label: id.label().to_string(),
                 checked: fu.selected.contains(&id),
+                removable: false,
             })
             .collect();
+        points.extend(fu.custom.iter().map(|c| FollowUpPointRow {
+            key: FollowUpRowKey::Custom(c.id.clone()),
+            label: c.label.clone(),
+            checked: c.checked,
+            removable: true,
+        }));
         // A send is "in flight" for THIS tab only when the pending send is for
         // the record on screen (and still running).
         let sending = self.followup_send.as_ref().is_some_and(|p| {
@@ -107,9 +125,9 @@ impl AppController {
         })
     }
 
-    /// Toggle a request point on/off and rebuild the draft from the new
-    /// selection. No-op once sent. Persists.
-    pub fn toggle_followup_point(&mut self, id: FollowUpPointId) {
+    /// Toggle a request row (built-in or custom) on/off and rebuild the draft.
+    /// No-op once sent. Persists.
+    pub fn toggle_followup_point(&mut self, key: FollowUpRowKey) {
         let Some(record) = self.current_record.as_mut() else {
             return;
         };
@@ -117,12 +135,65 @@ impl AppController {
         if ber.followup.is_sent() {
             return;
         }
-        if let Some(pos) = ber.followup.selected.iter().position(|p| *p == id) {
-            ber.followup.selected.remove(pos);
-        } else {
-            ber.followup.selected.push(id);
+        match key {
+            FollowUpRowKey::BuiltIn(id) => {
+                if let Some(pos) = ber.followup.selected.iter().position(|p| *p == id) {
+                    ber.followup.selected.remove(pos);
+                } else {
+                    ber.followup.selected.push(id);
+                }
+            }
+            FollowUpRowKey::Custom(id) => {
+                if let Some(c) = ber.followup.custom.iter_mut().find(|c| c.id == id) {
+                    c.checked = !c.checked;
+                }
+            }
         }
-        ber.followup.body = followup::assemble_draft(ber, &ber.followup.selected.clone());
+        rebuild_followup_body(ber);
+        self.followup_send_error = None;
+        let _ = self.persist();
+    }
+
+    /// Add a per-BER custom request point (the tab's "+"), ticked, and rebuild
+    /// the draft. Ignores a blank label+content. No-op once sent. Persists.
+    pub fn add_followup_custom(&mut self, label: String, content: String) {
+        let Some(record) = self.current_record.as_mut() else {
+            return;
+        };
+        let ber = &mut record.data;
+        if ber.followup.is_sent() {
+            return;
+        }
+        if label.trim().is_empty() && content.trim().is_empty() {
+            return;
+        }
+        ber.followup.custom.push(CustomPoint {
+            id: ItemId::default(),
+            label: if label.trim().is_empty() {
+                "Custom request".to_string()
+            } else {
+                label
+            },
+            content,
+            checked: true,
+        });
+        rebuild_followup_body(ber);
+        self.followup_send_error = None;
+        let _ = self.persist();
+    }
+
+    /// Remove a custom request point and rebuild the draft. No-op once sent.
+    /// Persists.
+    pub fn remove_followup_custom(&mut self, id: ItemId) {
+        let Some(record) = self.current_record.as_mut() else {
+            return;
+        };
+        let ber = &mut record.data;
+        if ber.followup.is_sent() {
+            return;
+        }
+        ber.followup.custom.retain(|c| c.id != id);
+        rebuild_followup_body(ber);
         self.followup_send_error = None;
         let _ = self.persist();
     }
@@ -246,4 +317,11 @@ impl AppController {
             }
         }
     }
+}
+
+/// Rebuild the editable draft from the current selection + ticked custom points.
+fn rebuild_followup_body(ber: &mut ber_model::ber::ber_struct::Ber) {
+    let selected = ber.followup.selected.clone();
+    let custom = ber.followup.custom.clone();
+    ber.followup.body = followup::assemble_draft(ber, &selected, &custom);
 }

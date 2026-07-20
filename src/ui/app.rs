@@ -39,6 +39,9 @@ pub struct BerApp {
     /// resync (workspace entry / record switch).
     pub followups_body: String,
     followups_sig: Option<u64>,
+    /// Backing buffers for the "add a BER-specific request" fields.
+    followups_new_label: String,
+    followups_new_content: String,
 
     // Global bug-report overlay (available on every page but Splash).
     pub bug_report: BugReportState,
@@ -356,6 +359,8 @@ impl BerApp {
             sketch_state: SketchState::default(),
             followups_body: String::new(),
             followups_sig: None,
+            followups_new_label: String::new(),
+            followups_new_content: String::new(),
             bug_report: BugReportState::default(),
             last_seen_revision: 0,
             last_change_time: 0.0,
@@ -869,19 +874,24 @@ impl eframe::App for BerApp {
                             let view = controller.borrow_mut().followup_view();
                             if let Some(view) = view {
                                 // Resync the editable buffer from the (regenerated)
-                                // draft only when the SELECTION changes — a bitmask
-                                // of the ticks + the sent flag. Typing leaves the
-                                // bitmask untouched, so it doesn't clobber edits.
+                                // draft only when the request SET changes — a hash
+                                // over each row's (checked, label) plus the sent
+                                // flag. Adds/removes/toggles change it; typing in
+                                // the body doesn't, so edits aren't clobbered.
                                 let sig = {
-                                    let mut s = 0u64;
-                                    for (i, p) in view.points.iter().enumerate() {
-                                        if p.checked {
-                                            s |= 1 << i;
+                                    let mut s = 0xcbf2_9ce4_8422_2325u64;
+                                    let mix = |b: u8, s: &mut u64| {
+                                        *s ^= b as u64;
+                                        *s = s.wrapping_mul(0x0000_0100_0000_01b3);
+                                    };
+                                    for p in &view.points {
+                                        mix(p.checked as u8, &mut s);
+                                        for b in p.label.bytes() {
+                                            mix(b, &mut s);
                                         }
+                                        mix(0xff, &mut s); // row separator
                                     }
-                                    if view.sent {
-                                        s |= 1 << 63;
-                                    }
+                                    mix(view.sent as u8, &mut s);
                                     s
                                 };
                                 if self.followups_sig != Some(sig) {
@@ -892,13 +902,21 @@ impl eframe::App for BerApp {
                                     ui,
                                     &view,
                                     &mut self.followups_body,
+                                    &mut self.followups_new_label,
+                                    &mut self.followups_new_content,
                                     |event| {
                                         let mut c = controller.borrow_mut();
                                         match event {
-                                            FollowUpEvent::Toggle(id) => {
-                                                c.toggle_followup_point(id)
+                                            FollowUpEvent::Toggle(key) => {
+                                                c.toggle_followup_point(key)
                                             }
                                             FollowUpEvent::SetBody(b) => c.set_followup_body(b),
+                                            FollowUpEvent::AddCustom { label, content } => {
+                                                c.add_followup_custom(label, content)
+                                            }
+                                            FollowUpEvent::RemoveCustom(id) => {
+                                                c.remove_followup_custom(id)
+                                            }
                                             FollowUpEvent::Send => c.send_followup(),
                                         }
                                     },

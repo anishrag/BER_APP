@@ -1,22 +1,27 @@
 //! The "Follow ups" tab: the post-survey document/detail requests to send the
 //! client. Checkboxes (auto-ticked from the survey, freely overridable) drive an
 //! editable email draft; a one-shot "Send email" posts it to the client and
-//! moves the job to `details_requested`. All logic lives in the controller +
-//! `ber_model`; this page is a thin renderer over [`FollowUpView`].
+//! moves the job to `details_requested`. The assessor can also add per-BER
+//! custom requests via the "+". All logic lives in the controller + `ber_model`;
+//! this page is a thin renderer over [`FollowUpView`].
 
 use egui::{Color32, RichText, Ui};
 
-use ber_model::ber::followup::FollowUpPointId;
+use ber_model::ber::common::ItemId;
 
-use crate::controller::app_controller::FollowUpView;
+use crate::controller::app_controller::{FollowUpRowKey, FollowUpView};
 
 /// Intents raised by the Follow-ups tab.
 #[derive(Debug)]
 pub enum FollowUpEvent {
-    /// Tick/untick a request point (rebuilds the draft).
-    Toggle(FollowUpPointId),
+    /// Tick/untick a request row — built-in or custom (rebuilds the draft).
+    Toggle(FollowUpRowKey),
     /// The assessor edited the email body.
     SetBody(String),
+    /// Add a per-BER custom request point (label + email paragraph).
+    AddCustom { label: String, content: String },
+    /// Remove a custom request point.
+    RemoveCustom(ItemId),
     /// Send the request email (one-shot).
     Send,
 }
@@ -25,10 +30,16 @@ pub struct FollowUpsPage;
 
 impl FollowUpsPage {
     /// Render the tab. `body` is the editable draft buffer (kept in sync with the
-    /// view by the caller); the page edits it in place and emits `SetBody` on
-    /// change.
-    pub fn render<F>(ui: &mut Ui, view: &FollowUpView, body: &mut String, mut on_event: F)
-    where
+    /// view by the caller); `new_label`/`new_content` back the "add a request"
+    /// fields. The page emits events for every change.
+    pub fn render<F>(
+        ui: &mut Ui,
+        view: &FollowUpView,
+        body: &mut String,
+        new_label: &mut String,
+        new_content: &mut String,
+        mut on_event: F,
+    ) where
         F: FnMut(FollowUpEvent),
     {
         ui.heading("Follow ups");
@@ -73,11 +84,57 @@ impl FollowUpsPage {
         ui.label(RichText::new("Requests").strong());
         ui.add_space(2.0);
         for row in &view.points {
-            let mut checked = row.checked;
-            if ui.checkbox(&mut checked, row.label).changed() {
-                on_event(FollowUpEvent::Toggle(row.id));
-            }
+            ui.horizontal(|ui| {
+                let mut checked = row.checked;
+                if ui.checkbox(&mut checked, &row.label).changed() {
+                    on_event(FollowUpEvent::Toggle(row.key.clone()));
+                }
+                if row.removable {
+                    if let FollowUpRowKey::Custom(id) = &row.key {
+                        if ui
+                            .small_button("✕")
+                            .on_hover_text("Remove this custom request")
+                            .clicked()
+                        {
+                            on_event(FollowUpEvent::RemoveCustom(id.clone()));
+                        }
+                    }
+                }
+            });
         }
+
+        // Add a per-BER custom request.
+        ui.add_space(6.0);
+        ui.group(|ui| {
+            ui.label(RichText::new("Add a BER-specific request").strong());
+            ui.horizontal(|ui| {
+                ui.label("Label:");
+                ui.add(
+                    egui::TextEdit::singleline(new_label)
+                        .desired_width(240.0)
+                        .hint_text("e.g. Septic tank cert"),
+                );
+            });
+            ui.label(RichText::new("What to ask the client:").weak());
+            ui.add(
+                egui::TextEdit::multiline(new_content)
+                    .desired_width(f32::INFINITY)
+                    .desired_rows(3)
+                    .hint_text("The paragraph added to the email…"),
+            );
+            let can_add = !new_label.trim().is_empty() || !new_content.trim().is_empty();
+            if ui
+                .add_enabled(can_add, egui::Button::new("+ Add request"))
+                .clicked()
+            {
+                on_event(FollowUpEvent::AddCustom {
+                    label: new_label.clone(),
+                    content: new_content.clone(),
+                });
+                new_label.clear();
+                new_content.clear();
+            }
+        });
 
         ui.add_space(14.0);
         ui.label(RichText::new("Email to the client").strong());
