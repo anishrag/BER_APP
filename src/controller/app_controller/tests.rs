@@ -25478,3 +25478,55 @@ bug-reports/09d2f42b-b68c-4d2d-8eda-3731cbc80f62/state.json";
          (pre-fix it reverted to the default Uninitialised type)"
     );
 }
+
+/// Follow-ups one-shot lock, cross-record: a send fired for BER A must lock A
+/// (even after the assessor switched to BER B before it landed) and must NOT
+/// lock the record that happens to be current when the completion is polled.
+/// Regression for the misattributed-completion bug (poll stamped `current`).
+#[test]
+fn followup_send_completion_lands_on_the_originating_record() {
+    use super::followup::{FollowUpSendState, PendingSend};
+    use std::sync::{Arc, Mutex};
+
+    let date = chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+
+    // BER A becomes current and is persisted by create_ber.
+    let a = c.create_ber("A".to_string(), date);
+    let a_id = a.id.clone();
+
+    // Fire a (fake, already-completed) send bound to A.
+    c.followup_send = Some(PendingSend {
+        job_id: a_id.clone(),
+        state: Arc::new(Mutex::new(FollowUpSendState::Done)),
+    });
+
+    // The assessor switches to a brand-new BER B before the send is polled.
+    let b = c.create_ber("B".to_string(), date);
+    let b_id = b.id.clone();
+    assert_ne!(a_id, b_id);
+
+    // Poll while B is current.
+    c.poll_followup_send();
+
+    // B (current) must be untouched…
+    assert!(
+        c.current_record
+            .as_ref()
+            .unwrap()
+            .data
+            .followup
+            .sent_at
+            .is_none(),
+        "the current record was wrongly locked by another record's send"
+    );
+    // …and A must be locked in the DB.
+    let repo = BerRepository::new(&c.conn);
+    let a_loaded = repo.load(&a_id).unwrap();
+    assert!(
+        a_loaded.data.followup.sent_at.is_some(),
+        "the originating record was never locked — its Send button would re-arm"
+    );
+    // The send handle is consumed.
+    assert!(c.followup_send.is_none());
+}

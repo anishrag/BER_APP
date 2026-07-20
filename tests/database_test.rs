@@ -229,6 +229,7 @@ fn create_minimal_ber(id: ItemId) -> Ber {
         site_satellite_image: None,
         north_aligned: false,
         details_reviewed: false,
+        followup: Default::default(),
     }
 }
 

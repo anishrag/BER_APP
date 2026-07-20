@@ -7,6 +7,7 @@ use std::sync::mpsc::{channel, Receiver};
 use crate::controller::app_controller::{AppController, AssessmentPhase};
 use crate::ui::adapters::sketch_egui::pos2_to_point2f;
 use crate::ui::pages::events::{Page, Section, UiEvent};
+use crate::ui::pages::followups::{FollowUpEvent, FollowUpsPage};
 use crate::ui::pages::home::{HomeEvent, HomePage, HomeState};
 use crate::ui::pages::key_details::{KeyDetailsEvent, KeyDetailsPage, KeyDetailsState};
 use crate::ui::pages::sketch::{
@@ -32,6 +33,12 @@ pub struct BerApp {
     pub home_state: HomeState,
     pub key_details_state: KeyDetailsState,
     pub sketch_state: SketchState,
+    /// Follow-ups tab: the editable email-draft buffer, plus a signature of the
+    /// last-seen selection so the buffer resyncs when a checkbox toggle rebuilds
+    /// the draft (but not while the assessor is typing). `None` sig forces a
+    /// resync (workspace entry / record switch).
+    pub followups_body: String,
+    followups_sig: Option<u64>,
 
     // Global bug-report overlay (available on every page but Splash).
     pub bug_report: BugReportState,
@@ -347,6 +354,8 @@ impl BerApp {
             home_state: HomeState::default(),
             key_details_state: KeyDetailsState::default(),
             sketch_state: SketchState::default(),
+            followups_body: String::new(),
+            followups_sig: None,
             bug_report: BugReportState::default(),
             last_seen_revision: 0,
             last_change_time: 0.0,
@@ -622,6 +631,9 @@ impl BerApp {
             }
             None => KeyDetailsState::default(),
         };
+        // Force the Follow-ups draft buffer to resync from the freshly loaded
+        // record on its next render.
+        self.followups_sig = None;
     }
 
     /// Act on a Home-page intent (controller call + navigation + state
@@ -852,9 +864,49 @@ impl eframe::App for BerApp {
                                 }
                             });
                         }
-                        Section::MoreDetails => {
-                            ui.heading("More Details");
-                            ui.label("More details — coming soon.");
+                        Section::FollowUps => {
+                            let controller = self.app_controller.clone();
+                            let view = controller.borrow_mut().followup_view();
+                            if let Some(view) = view {
+                                // Resync the editable buffer from the (regenerated)
+                                // draft only when the SELECTION changes — a bitmask
+                                // of the ticks + the sent flag. Typing leaves the
+                                // bitmask untouched, so it doesn't clobber edits.
+                                let sig = {
+                                    let mut s = 0u64;
+                                    for (i, p) in view.points.iter().enumerate() {
+                                        if p.checked {
+                                            s |= 1 << i;
+                                        }
+                                    }
+                                    if view.sent {
+                                        s |= 1 << 63;
+                                    }
+                                    s
+                                };
+                                if self.followups_sig != Some(sig) {
+                                    self.followups_body = view.body.clone();
+                                    self.followups_sig = Some(sig);
+                                }
+                                FollowUpsPage::render(
+                                    ui,
+                                    &view,
+                                    &mut self.followups_body,
+                                    |event| {
+                                        let mut c = controller.borrow_mut();
+                                        match event {
+                                            FollowUpEvent::Toggle(id) => {
+                                                c.toggle_followup_point(id)
+                                            }
+                                            FollowUpEvent::SetBody(b) => c.set_followup_body(b),
+                                            FollowUpEvent::Send => c.send_followup(),
+                                        }
+                                    },
+                                );
+                            } else {
+                                ui.heading("Follow ups");
+                                ui.label("Load or create a BER first.");
+                            }
                         }
                         Section::Sketch => {
                             // Bring the resolved geometry current before the immutable borrow

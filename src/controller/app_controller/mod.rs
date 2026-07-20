@@ -34,6 +34,7 @@ mod editing;
 mod exposure;
 mod final_phase;
 mod floor_exposure;
+mod followup;
 mod living_areas;
 mod mapping_review;
 mod objects;
@@ -65,6 +66,7 @@ pub use exposure::{
     ExposureSelection, ExposureSnapKind, RiserView, SectionHandle, WallExposureView,
 };
 pub use floor_exposure::{FloorExposureRegionView, FloorExposureStoreyView};
+pub use followup::{FollowUpPointRow, FollowUpView};
 pub use phase_regions::PhaseDisplayRegion;
 pub use roof::{RoofContextRegion, RoofRegionView, RoofShape};
 // `ExposureSection` is re-exported above (the controller's public surface).
@@ -511,6 +513,19 @@ pub struct AppController {
     /// Optional background bug-report uploader (attached when sync config is
     /// present). Absent → reports still queue locally, upload on a later run.
     bug_uploader: Option<crate::engine::BugReportUploader>,
+    /// The cloud-config file path (`sync.json`), so the one-shot Follow-ups
+    /// "send" can reach the backend with the same config as the workers. Set
+    /// from `Paths` in `bootstrap`; a relative default keeps tests working.
+    sync_config_file: std::path::PathBuf,
+    /// In-flight follow-up "send email" call: the BER it was fired for (so a
+    /// completion lands on the RIGHT record even if the assessor navigated away
+    /// mid-send) plus the worker-thread state, polled each frame
+    /// (`poll_followup_send`). `None` when no send is running. See [`followup`].
+    followup_send: Option<followup::PendingSend>,
+    /// Transient message from the last follow-up send that DIDN'T succeed (no
+    /// cloud job / network error), tagged with the BER it belongs to so it only
+    /// shows on that record's tab. Cleared on a retry.
+    followup_send_error: Option<(ItemId, String)>,
     /// The staging path of an in-flight audio recording (`Some` between
     /// `start_bug_recording` and `finish_bug_report`/`cancel_bug_recording`).
     bug_recording_path: Option<std::path::PathBuf>,
@@ -728,6 +743,9 @@ impl AppController {
             photos_dir: std::path::PathBuf::from("photos"),
             bug_reports_dir: std::path::PathBuf::from("bug-reports"),
             bug_uploader: None,
+            sync_config_file: std::path::PathBuf::from("sync.json"),
+            followup_send: None,
+            followup_send_error: None,
             bug_recording_path: None,
             loader_engine: DataLoader::new(),
             sketch_engine: SketchEngine::new(),

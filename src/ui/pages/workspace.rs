@@ -31,7 +31,7 @@ pub fn workspace_chrome<F, B>(
             for (s, label) in [
                 (Section::KeyDetails, "Key Details"),
                 (Section::Sketch, "Sketch"),
-                (Section::MoreDetails, "More Details"),
+                (Section::FollowUps, "Follow ups"),
             ] {
                 if ui.selectable_label(section == s, label).clicked() && section != s {
                     on_event(UiEvent::NavigateTo(Page::Workspace(s)));
@@ -69,7 +69,7 @@ pub fn workspace_chrome<F, B>(
         // panel so an oversized keyboard can't squash the form into nothing.
         // On desktop the inset is always 0: full-height area, no scrollbar
         // when the content fits.
-        Section::KeyDetails | Section::MoreDetails => {
+        Section::KeyDetails | Section::FollowUps => {
             let inset = crate::ui::widgets::ime_inset_bottom_points(ctx);
             let avail = ui.available_height();
             let max_h = (avail - inset).max(avail * 0.4);

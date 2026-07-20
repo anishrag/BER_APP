@@ -176,6 +176,12 @@ pub struct Ber {
     /// `#[serde(default)]` so older records load as un-reviewed.
     #[serde(default)]
     pub details_reviewed: bool,
+    /// Post-survey client follow-up: which document/detail requests are ticked,
+    /// the editable email draft, and whether it's already been sent (one-shot).
+    /// Driven by the "Follow ups" tab. `#[serde(default)]` so older records load
+    /// with nothing requested.
+    #[serde(default)]
+    pub followup: crate::ber::followup::FollowUpRequest,
 }
 
 // Pure data helpers, optional

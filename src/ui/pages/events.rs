@@ -1,4 +1,5 @@
 // ui/events.rs
+use crate::ui::pages::followups::FollowUpEvent;
 use crate::ui::pages::home::HomeEvent;
 use crate::ui::pages::key_details::KeyDetailsEvent;
 use crate::ui::pages::sketch::SketchEvent;
@@ -19,7 +20,7 @@ pub enum Page {
 pub enum Section {
     KeyDetails,
     Sketch,
-    MoreDetails,
+    FollowUps,
 }
 
 impl Section {
@@ -27,8 +28,8 @@ impl Section {
     pub fn next(self) -> Option<Section> {
         match self {
             Section::KeyDetails => Some(Section::Sketch),
-            Section::Sketch => Some(Section::MoreDetails),
-            Section::MoreDetails => None,
+            Section::Sketch => Some(Section::FollowUps),
+            Section::FollowUps => None,
         }
     }
 }
@@ -44,4 +45,5 @@ pub enum UiEvent {
     Sketch(SketchEvent),
     Home(HomeEvent),
     KeyDetails(KeyDetailsEvent),
+    FollowUp(FollowUpEvent),
 }

@@ -1,4 +1,5 @@
 pub mod events;
+pub mod followups;
 pub mod home;
 pub mod key_details;
 pub mod sketch;

@@ -29,6 +29,9 @@ pub fn bootstrap(paths: &Paths) -> Rc<RefCell<AppController>> {
     let conn = engine::open_db(&db).expect("Failed to open database");
     let mut controller = AppController::new(conn);
     controller.set_photos_dir(paths.photos_dir());
+    // The Follow-ups tab's one-shot "send" reaches the backend with the same
+    // cloud config the sync/push workers use.
+    controller.set_sync_config_file(paths.sync_config_file());
     // Background writer (its own connection, WAL) so idle autosaves don't block
     // the UI on SQLite. If it can't spawn, fall back to synchronous saves.
     match engine::PersistenceWriter::spawn(db) {
