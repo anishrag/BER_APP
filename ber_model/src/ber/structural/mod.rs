@@ -105,6 +105,210 @@ mod tests {
         );
     }
 
+    // ── split_to_simple: self-touching (pinch) decomposition ────────────────
+    // (8 Ashgrove Hill first-floor ceiling: a buried InterStorey strip
+    // carried wall-to-wall left the exposed remainder as ONE self-touching
+    // ring with a zero-width neck at the wall.)
+
+    /// True if any exterior vertex coordinate repeats (a pinch / zero-width
+    /// neck) — the defect signature.
+    fn has_repeated_exterior_vertex(poly: &geo::Polygon<f64>) -> bool {
+        use geo::Coord;
+        let mut pts: Vec<Coord<f64>> = poly.exterior().0.clone();
+        if pts.len() > 1 && pts.first() == pts.last() {
+            pts.pop();
+        }
+        for i in 0..pts.len() {
+            for j in (i + 1)..pts.len() {
+                if (pts[i].x - pts[j].x).abs() <= 1e-9 && (pts[i].y - pts[j].y).abs() <= 1e-9 {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// THE FIELD RING (8 Ashgrove Hill): the exposed remainder `geo` emitted
+    /// for a wall-to-wall strip — ONE 10-vertex ring that walks the full west
+    /// wall (y[12.69,24.03], x=w) AND the strip's west edge (y[15.83,19.97],
+    /// same x), overlapping in a zero-width neck. `split_to_simple` must
+    /// decompose it into the TWO simple rectangles it really is (south + north)
+    /// with no repeated exterior vertex and the same total area.
+    #[test]
+    fn split_to_simple_decomposes_wall_to_wall_pinch() {
+        use geo::{Area, LineString, Polygon};
+        let w = 1.664965_f64;
+        // 10-vertex self-touching ring: south rect, up the zero-width neck,
+        // north rect, back down the neck subdivided on the outer west edge.
+        let pinched = Polygon::new(
+            LineString::from(vec![
+                (w, 12.69),   // 0  SW
+                (8.0, 12.69), // 1  SE
+                (8.0, 15.83), // 2
+                (w, 15.83),   // 3  neck bottom (also on outer west edge)
+                (w, 19.97),   // 4  up the neck
+                (8.0, 19.97), // 5
+                (8.0, 24.03), // 6
+                (w, 24.03),   // 7  NW
+                (w, 19.97),   // 8  REPEAT of 4 (outer west edge vertex)
+                (w, 15.83),   // 9  REPEAT of 3 (outer west edge vertex)
+            ]),
+            vec![],
+        );
+        assert!(
+            has_repeated_exterior_vertex(&pinched),
+            "the input ring is self-touching (the defect)"
+        );
+        let pieces = split_to_simple(&pinched);
+        assert_eq!(pieces.len(), 2, "the pinch decomposes into two regions");
+        for p in &pieces {
+            assert!(
+                !has_repeated_exterior_vertex(p),
+                "each output piece is simple (no zero-width neck)"
+            );
+            assert!(p.interiors().is_empty(), "no phantom hole introduced");
+        }
+        let total: f64 = pieces.iter().map(|p| p.unsigned_area()).sum();
+        let want = (8.0 - w) * (15.83 - 12.69) + (8.0 - w) * (24.03 - 19.97);
+        assert!(
+            (total - want).abs() < 1e-9,
+            "area conserved: south+north = {want}, got {total}"
+        );
+        // The two halves are the south and north bays (by y-extent).
+        use geo::BoundingRect;
+        let mut mids: Vec<f64> = pieces
+            .iter()
+            .map(|p| p.bounding_rect().unwrap().center().y)
+            .collect();
+        mids.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert!(
+            mids[0] < 15.83 && mids[1] > 19.97,
+            "one south bay, one north"
+        );
+    }
+
+    /// The end-to-end ceiling carve: a flat region with a full-width middle
+    /// strip removed, the strip edges exactly ON the region sides, splits into
+    /// exactly TWO simple regions — each keeping the source's construction_id,
+    /// exposure and plane (z) — with no self-touching ring anywhere.
+    #[test]
+    fn split_faces_coplanar_splits_wall_to_wall_strip_into_two() {
+        let cid = ItemId::default();
+        let z = 2.6;
+        let region = CeilingRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(
+                square(0.0, 0.0, 6.0, 12.0)
+                    .into_iter()
+                    .map(|p| Point3f64::new(p.x, p.y, z))
+                    .collect(),
+            ),
+            opes: Opes::default(),
+            construction_id: cid,
+            exposure: CeilingExposure::ExposedRoof,
+        };
+        let ceilings = CeilingRegions {
+            regions: vec![region],
+        };
+        // A full-width strip y[5,7], edges flush with x=0 and x=6.
+        let split = ceilings.split_faces_coplanar(&[square(0.0, 5.0, 6.0, 7.0)]);
+        // Two exposed remainders (south + north); the strip interior is the
+        // third piece, so at least the two remainders exist and none is
+        // self-touching.
+        assert!(
+            split.regions.len() >= 2,
+            "the carve yields separate remainders, got {}",
+            split.regions.len()
+        );
+        for r in &split.regions {
+            let p = Polygon::<f64>::from(r.polygon.clone());
+            assert!(
+                !has_repeated_exterior_vertex(&p),
+                "no region is self-touching after the split"
+            );
+            assert_eq!(r.construction_id, cid, "pieces keep the fabric link");
+            assert_eq!(
+                r.exposure,
+                CeilingExposure::ExposedRoof,
+                "pieces keep the source exposure"
+            );
+            for v in &r.polygon.exterior {
+                assert!((v.z - z).abs() < 1e-9, "z read from the source plane");
+            }
+        }
+        // The two EXPOSED remainders (y-centres in the north/south bays) sum to
+        // the region area minus the strip.
+        use geo::{Area, BoundingRect};
+        let remainders: Vec<&CeilingRegion> = split
+            .regions
+            .iter()
+            .filter(|r| {
+                let c = Polygon::<f64>::from(r.polygon.clone())
+                    .bounding_rect()
+                    .unwrap()
+                    .center()
+                    .y;
+                c < 5.0 || c > 7.0
+            })
+            .collect();
+        assert_eq!(remainders.len(), 2, "exactly two exposed remainders");
+        let area: f64 = remainders
+            .iter()
+            .map(|r| Polygon::<f64>::from(r.polygon.clone()).unsigned_area())
+            .sum();
+        assert!(
+            (area - (6.0 * 5.0 + 6.0 * 5.0)).abs() < 1e-6,
+            "remainders = region − strip = 60 m², got {area}"
+        );
+    }
+
+    /// NON-REGRESSION: the interior-hole (donut) decomposition still fires — a
+    /// rectangle with a strictly-interior hole splits into simple pieces whose
+    /// combined area is (rectangle − hole) and none of which carries a hole.
+    #[test]
+    fn split_to_simple_still_decomposes_interior_hole_donut() {
+        use geo::{Area, LineString, Polygon};
+        let outer = LineString::from(vec![(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)]);
+        let hole = LineString::from(vec![(3.0, 3.0), (7.0, 3.0), (7.0, 7.0), (3.0, 7.0)]);
+        let donut = Polygon::new(outer, vec![hole]);
+        let pieces = split_to_simple(&donut);
+        assert!(
+            pieces.len() >= 2,
+            "the donut decomposes, got {}",
+            pieces.len()
+        );
+        for p in &pieces {
+            assert!(p.interiors().is_empty(), "no piece keeps a hole");
+        }
+        let total: f64 = pieces.iter().map(|p| p.unsigned_area()).sum();
+        assert!(
+            (total - (100.0 - 16.0)).abs() < 1e-6,
+            "area = rect − hole = 84 m², got {total}"
+        );
+    }
+
+    /// NO SPURIOUS SPLIT: a strip that does NOT reach the far wall leaves a
+    /// genuine bridge (real width, no repeated vertex), so the remainder stays
+    /// ONE simple region — `split_to_simple` returns it unchanged.
+    #[test]
+    fn split_to_simple_keeps_connected_c_shape_as_one() {
+        use geo::bool_ops::BooleanOps;
+        use geo::{LineString, Polygon};
+        let poly = |ring: &[(f64, f64)]| Polygon::new(LineString::from(ring.to_vec()), vec![]);
+        let rect = poly(&[(0.0, 0.0), (6.0, 0.0), (6.0, 12.0), (0.0, 12.0)]);
+        // Notch from the west edge that stops well short of the east wall.
+        let notch = poly(&[(0.0, 5.0), (4.0, 5.0), (4.0, 7.0), (0.0, 7.0)]);
+        let c_shape = rect.difference(&notch);
+        assert_eq!(c_shape.0.len(), 1, "the notch leaves one connected C-shape");
+        let ring = &c_shape.0[0];
+        assert!(
+            !has_repeated_exterior_vertex(ring),
+            "a real bridge has no zero-width neck"
+        );
+        let pieces = split_to_simple(ring);
+        assert_eq!(pieces.len(), 1, "a connected bridge stays one region");
+    }
+
     // ── CeilingRegions::has_unjustified_flat_seams (field report eddc2f3f) ──
 
     /// The OUTLINE-EDIT SCAR fingerprint: two flat regions at the same height

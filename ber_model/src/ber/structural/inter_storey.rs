@@ -387,18 +387,24 @@ fn split_floors_intact(floors: FloorRegions, rings: &[Vec<Point2f64>]) -> FloorR
                 .polygon
                 .intersection(&cut)
                 .0
-                .into_iter()
+                .iter()
+                .flat_map(split_to_simple)
                 .filter(|p| !plan_piece_is_degenerate(p))
                 .collect();
             if inside_pieces.is_empty() {
                 next.push(region); // cut misses this region — keep it intact
                 continue;
             }
+            // A cut spanning the region wall-to-wall leaves the remainder as a
+            // self-touching ring with a zero-width neck; `split_to_simple`
+            // decomposes that pinch into two clean pieces (same fix as the
+            // ceiling `split_faces_coplanar`).
             let outside_pieces: Vec<Polygon<f64>> = region
                 .polygon
                 .difference(&cut)
                 .0
-                .into_iter()
+                .iter()
+                .flat_map(split_to_simple)
                 .filter(|p| !plan_piece_is_degenerate(p))
                 .collect();
             if outside_pieces.is_empty() {

@@ -1311,6 +1311,13 @@ pub(crate) fn split_to_simple(poly: &Polygon<f64>) -> Vec<Polygon<f64>> {
     use geo::bool_ops::BooleanOps;
     use geo::BoundingRect;
     if poly.interiors().is_empty() {
+        // A strip carved WALL-TO-WALL (its edge exactly on a region side)
+        // leaves a self-touching EXTERIOR ring with a zero-width neck — one
+        // vertex visited twice — and NO interior hole, so the donut path below
+        // never fires. Decompose it at the pinch into two simple loops.
+        if let Some(pieces) = split_exterior_pinch(poly) {
+            return pieces.iter().flat_map(split_to_simple).collect();
+        }
         return vec![poly.clone()];
     }
     let (Some(bbox), Some(hole)) = (poly.bounding_rect(), poly.interiors()[0].bounding_rect())
@@ -1345,6 +1352,74 @@ pub(crate) fn split_to_simple(poly: &Polygon<f64>) -> Vec<Polygon<f64>> {
         .flat_map(|half| poly.intersection(half).0)
         .flat_map(|piece| split_to_simple(&piece))
         .collect()
+}
+
+/// Decompose a SELF-TOUCHING exterior ring — a pinch / zero-width neck where a
+/// single vertex is visited twice — into the two loops that meet at that
+/// vertex. Returns `None` when the ring is already simple (no repeated vertex,
+/// as every well-formed boolean-op piece is) or when a clean two-loop split
+/// isn't found, so the caller keeps the input unchanged rather than emit
+/// garbage.
+///
+/// The pinch arises when a carved strip's edge lands EXACTLY on a region side
+/// (a strip spanning a bay wall-to-wall): `geo`'s `difference` then returns the
+/// exposed remainder as ONE ring that walks up the shared wall, across the
+/// strip, and back down the same wall — the up- and down-runs coincide in a
+/// zero-width neck pinned at the shared vertex. A simple polygon never repeats
+/// an exterior vertex, so a repeat is an unambiguous pinch signal.
+///
+/// Splitting at the pinch `v_a == v_b` (a < b) yields the inner loop `v[a..b]`
+/// and the outer loop `v[b..] ++ v[..a]`; both close back to the shared vertex.
+/// Each REAL loop is re-run through [`split_to_simple`] by the caller so a
+/// multiply-pinched ring fully decomposes. A loop that isn't a real polygon
+/// (< 3 vertices or sub-[`SLIVER_AREA_M2`] area) is the zero-width neck artefact
+/// of the pinch and is dropped, not returned — a real strip is still filtered
+/// by the caller's thickness guard, so dropping only the area-less neck here is
+/// safe. `None` when no pinch is found (the ring is already simple) or when
+/// NEITHER loop is real (a wholly degenerate ring), so the caller keeps the
+/// input unchanged rather than emit garbage.
+fn split_exterior_pinch(poly: &Polygon<f64>) -> Option<Vec<Polygon<f64>>> {
+    use geo::{Area, Coord};
+    // Open ring: drop the closing duplicate `geo` appends.
+    let mut pts: Vec<Coord<f64>> = poly.exterior().0.clone();
+    if pts.len() > 1 && pts.first() == pts.last() {
+        pts.pop();
+    }
+    let n = pts.len();
+    if n < 4 {
+        return None; // a triangle can't carry a meaningful pinch
+    }
+    // Pinch vertices are copied bit-for-bit through the boolean op (same shared
+    // corner), so an exact-equality match is the intent; a hair of tolerance
+    // guards f64 round-off without risking a false capture of distinct corners
+    // (real ring vertices are centimetres apart).
+    const EPS: f64 = 1e-9;
+    let same =
+        |p: &Coord<f64>, q: &Coord<f64>| (p.x - q.x).abs() <= EPS && (p.y - q.y).abs() <= EPS;
+    let mut pinch: Option<(usize, usize)> = None;
+    'outer: for a in 0..n {
+        for b in (a + 1)..n {
+            if same(&pts[a], &pts[b]) {
+                pinch = Some((a, b));
+                break 'outer;
+            }
+        }
+    }
+    let (a, b) = pinch?;
+    let inner: Vec<Coord<f64>> = pts[a..b].to_vec();
+    let mut outer: Vec<Coord<f64>> = pts[b..].to_vec();
+    outer.extend_from_slice(&pts[..a]);
+    let mk = |ring: Vec<Coord<f64>>| Polygon::new(LineString::new(ring), vec![]);
+    let real: Vec<Polygon<f64>> = [inner, outer]
+        .into_iter()
+        .filter(|ring| ring.len() >= 3)
+        .map(mk)
+        .filter(|p| p.unsigned_area() > SLIVER_AREA_M2)
+        .collect();
+    if real.is_empty() {
+        return None;
+    }
+    Some(real)
 }
 
 #[cfg(test)]
