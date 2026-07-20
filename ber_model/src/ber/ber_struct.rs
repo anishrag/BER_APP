@@ -50,6 +50,12 @@ pub struct IntakeDetails {
     /// records loading.
     #[serde(default)]
     pub builder_letter_works: Option<bool>,
+    /// Insulation works present: does the client have invoices/photos of the
+    /// works being done that show the materials used and the areas insulated?
+    /// (The 2-proof works-evidence fallback when no builder letter.)
+    /// `#[serde(default)]` keeps older records loading.
+    #[serde(default)]
+    pub works_evidence_available: Option<bool>,
 }
 
 /// One construction-PHASE zone of a storey, projected for the UI to tint and

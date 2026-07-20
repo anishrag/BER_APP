@@ -79,6 +79,7 @@ pub struct KeyDetailsState {
     pub architect_letter_extension: Option<bool>,
     pub architect_letter_original: Option<bool>,
     pub builder_letter_works: Option<bool>,
+    pub works_evidence_available: Option<bool>,
 }
 
 /// One extension row on the form: a descriptive nickname, a year, and the
@@ -220,6 +221,7 @@ impl KeyDetailsState {
             architect_letter_extension: intake.architect_letter_extension,
             architect_letter_original: intake.architect_letter_original,
             builder_letter_works: intake.builder_letter_works,
+            works_evidence_available: intake.works_evidence_available,
         }
     }
 }
@@ -277,6 +279,7 @@ fn collect_intake(state: &KeyDetailsState) -> IntakeDetails {
         architect_letter_extension: state.architect_letter_extension,
         architect_letter_original: state.architect_letter_original,
         builder_letter_works: state.builder_letter_works,
+        works_evidence_available: state.works_evidence_available,
     }
 }
 
@@ -516,6 +519,17 @@ impl KeyDetailsPage {
                             }
                         });
                         ui.end_row();
+
+                        ui.label(
+                            "Do they have invoices/photos of the works being done showing the \
+                             materials and the areas insulated?",
+                        );
+                        ui.horizontal(|ui| {
+                            if yes_no_buttons(ui, &mut state.works_evidence_available) {
+                                intake_changed = true;
+                            }
+                        });
+                        ui.end_row();
                     }
                     if has_extension {
                         ui.label("Is a letter from the architect available for the extension?");
@@ -747,12 +761,13 @@ mod tests {
         assert_eq!(collect_intake(&state), intake);
     }
 
-    /// The builder-letter-for-works on-site answer round-trips through intake
-    /// alongside the existing questions.
+    /// The builder-letter-for-works and works-evidence (invoices/photos) on-site
+    /// answers round-trip through intake alongside the existing questions.
     #[test]
     fn builder_letter_works_round_trips_through_intake() {
         let intake = IntakeDetails {
             builder_letter_works: Some(true),
+            works_evidence_available: Some(false),
             ..Default::default()
         };
         let state = KeyDetailsState::from_record(
@@ -764,6 +779,7 @@ mod tests {
             &intake,
         );
         assert_eq!(state.builder_letter_works, Some(true));
+        assert_eq!(state.works_evidence_available, Some(false));
         assert_eq!(collect_intake(&state), intake);
     }
 
