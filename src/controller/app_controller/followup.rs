@@ -78,6 +78,10 @@ impl AppController {
 
         let mut seeded = false;
         if !ber.followup.is_sent() && !ber.followup.initialized {
+            // Make sure the heating type reflects the placed objects before the
+            // survey-driven selection reads it (covers records surveyed before
+            // the object→heating sync existed).
+            ber.sync_heating_system_from_objects();
             ber.followup.selected = followup::auto_selected(ber, reference_year);
             rebuild_followup_body(ber);
             ber.followup.initialized = true;

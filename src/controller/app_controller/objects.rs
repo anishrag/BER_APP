@@ -315,8 +315,18 @@ impl AppController {
             obj.note = note.filter(|s| !s.trim().is_empty());
             obj.photos = stored;
             room.objects.push(obj);
+            self.resync_heating_from_objects();
             let _ = self.mark_dirty();
             self.push_history_snapshot(snap);
+        }
+    }
+
+    /// Reflect the placed boiler/heat-pump objects into the BER's
+    /// `heating_system` (see [`Ber::sync_heating_system_from_objects`]). Called
+    /// after any object add/remove so the field tracks the survey.
+    fn resync_heating_from_objects(&mut self) {
+        if let Some(record) = self.current_record.as_mut() {
+            record.data.sync_heating_system_from_objects();
         }
     }
 
@@ -327,6 +337,7 @@ impl AppController {
             let before = room.objects.len();
             room.objects.retain(|o| o.id != object_id);
             if room.objects.len() != before {
+                self.resync_heating_from_objects();
                 let _ = self.mark_dirty();
                 self.push_history_snapshot(snap);
             }
@@ -360,6 +371,7 @@ impl AppController {
             if self.active_object_room == Some(room_id) {
                 self.active_object_room = None;
             }
+            self.resync_heating_from_objects();
             let _ = self.mark_dirty();
             self.push_history_snapshot(snap);
         }

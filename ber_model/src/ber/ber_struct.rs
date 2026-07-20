@@ -320,6 +320,46 @@ impl Ber {
             .chain(self.attic_room.iter_mut())
     }
 
+    /// The primary heating type implied by the boiler/heat-pump OBJECTS placed
+    /// in the Objects phase (across every room + the attic). When more than one
+    /// is present the heat pump wins, then gas, then oil — the heat pump is the
+    /// BER-significant plant (and the one that drives a follow-up request).
+    /// `None` when no boiler/heat-pump object exists.
+    pub fn primary_boiler_heating(&self) -> Option<crate::ber::systems::HeatingSystemType> {
+        use crate::ber::objects::{BoilerFuel, ObjectKind};
+        use crate::ber::systems::HeatingSystemType;
+        let mut has_gas = false;
+        let mut has_oil = false;
+        for obj in self.object_rooms_iter().flat_map(|r| r.objects.iter()) {
+            match obj.kind {
+                ObjectKind::Boiler(BoilerFuel::HeatPump) => {
+                    return Some(HeatingSystemType::HeatPump)
+                }
+                ObjectKind::Boiler(BoilerFuel::Gas) => has_gas = true,
+                ObjectKind::Boiler(BoilerFuel::Oil) => has_oil = true,
+                _ => {}
+            }
+        }
+        if has_gas {
+            Some(HeatingSystemType::GasBoiler)
+        } else if has_oil {
+            Some(HeatingSystemType::OilBoiler)
+        } else {
+            None
+        }
+    }
+
+    /// Reflect the placed boiler/heat-pump objects into
+    /// [`heating_system.system_type`](crate::ber::systems::HeatingSystem). Set
+    /// from [`primary_boiler_heating`](Self::primary_boiler_heating); reset to
+    /// `Invalid` when no such object exists (nothing else populates this field).
+    /// Called by the shell after an object add/remove.
+    pub fn sync_heating_system_from_objects(&mut self) {
+        self.heating_system.system_type = self
+            .primary_boiler_heating()
+            .unwrap_or(crate::ber::systems::HeatingSystemType::Invalid);
+    }
+
     /// Whether `side`'s external photo is DEFERRED to the end of the
     /// assessment. `Front` is never deferred
     /// ([`ExternalSide::photo_deferrable`]) — a rogue stored `Front` entry is

@@ -349,11 +349,12 @@ pub fn assemble_draft(ber: &Ber, selected: &[FollowUpPointId], custom: &[CustomP
     } else {
         body.push_str(
             "To finish the assessment as accurately as possible, there are a few details I'd be \
-             grateful for your help with:\n\n",
+             grateful for your help with. If you could reply point by point it makes sure \
+             nothing gets missed:\n\n",
         );
-        for p in paragraphs {
-            body.push_str(&p);
-            body.push_str("\n\n");
+        // Number the points so the client can answer each one.
+        for (i, p) in paragraphs.iter().enumerate() {
+            body.push_str(&format!("{}. {}\n\n", i + 1, p));
         }
     }
     body.push_str(
@@ -444,6 +445,59 @@ mod tests {
         assert!(sel.contains(&FollowUpPointId::ExtensionBuildDate));
         let draft = assemble_draft(&ber, &sel, &[]);
         assert!(draft.contains("the Back extension"), "draft: {draft}");
+        // Points are numbered so the client can answer each one.
+        assert!(draft.contains("1. "), "draft: {draft}");
+    }
+
+    #[test]
+    fn heating_system_synced_from_boiler_objects() {
+        use crate::ber::objects::{BoilerFuel, BuildingObject, ObjectKind, ObjectRoom};
+        use crate::ber::systems::HeatingSystemType;
+        use domain::points::Point2f32;
+
+        // Heat pump object → HeatPump type → heat-pump follow-up.
+        let mut ber = ber_with_year(1990, true);
+        let mut room = ObjectRoom::new(Point2f32::new(0.0, 0.0));
+        room.objects.push(BuildingObject::new(
+            ObjectKind::Boiler(BoilerFuel::HeatPump),
+            1,
+        ));
+        ber.attic_room = Some(room);
+        ber.sync_heating_system_from_objects();
+        assert!(matches!(
+            ber.heating_system.system_type,
+            HeatingSystemType::HeatPump
+        ));
+        assert!(auto_selected(&ber, REF_YEAR).contains(&FollowUpPointId::HeatPumpData));
+
+        // Gas boiler object → GasBoiler type, and NO heat-pump follow-up.
+        let mut ber = ber_with_year(1990, true);
+        let mut room = ObjectRoom::new(Point2f32::new(0.0, 0.0));
+        room.objects
+            .push(BuildingObject::new(ObjectKind::Boiler(BoilerFuel::Gas), 1));
+        ber.attic_room = Some(room);
+        ber.sync_heating_system_from_objects();
+        assert!(matches!(
+            ber.heating_system.system_type,
+            HeatingSystemType::GasBoiler
+        ));
+        assert!(!auto_selected(&ber, REF_YEAR).contains(&FollowUpPointId::HeatPumpData));
+
+        // Both present → heat pump wins.
+        let mut ber = ber_with_year(1990, true);
+        let mut room = ObjectRoom::new(Point2f32::new(0.0, 0.0));
+        room.objects
+            .push(BuildingObject::new(ObjectKind::Boiler(BoilerFuel::Gas), 1));
+        room.objects.push(BuildingObject::new(
+            ObjectKind::Boiler(BoilerFuel::HeatPump),
+            1,
+        ));
+        ber.attic_room = Some(room);
+        ber.sync_heating_system_from_objects();
+        assert!(matches!(
+            ber.heating_system.system_type,
+            HeatingSystemType::HeatPump
+        ));
     }
 
     #[test]
