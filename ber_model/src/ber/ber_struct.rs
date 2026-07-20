@@ -45,6 +45,11 @@ pub struct IntakeDetails {
     /// Recent (2010+) build: is an architect letter possible for the original build?
     #[serde(default)]
     pub architect_letter_original: Option<bool>,
+    /// Works done in the house: is a letter from the BUILDER available for them?
+    /// (Asked below the architect questions.) `#[serde(default)]` keeps older
+    /// records loading.
+    #[serde(default)]
+    pub builder_letter_works: Option<bool>,
 }
 
 /// One construction-PHASE zone of a storey, projected for the UI to tint and

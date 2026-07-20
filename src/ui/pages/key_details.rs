@@ -54,6 +54,9 @@ pub struct KeyDetailsState {
     pub date_assessed: Option<NaiveDate>,
     /// Year the house was built (→ `ConstructionPhase::Original`).
     pub construction_year: String,
+    /// The "got proof" checkbox for the original build year — the assessor
+    /// found sufficient online proof, so the client needn't evidence the date.
+    pub construction_year_proof: bool,
     /// Extensions, in order added. Capped at 4 (one row per `Extension1..4`
     /// variant). Each has a user nickname ("Back extension") + a build year.
     pub extensions: Vec<ExtensionInput>,
@@ -75,6 +78,7 @@ pub struct KeyDetailsState {
     pub builder_letter_possible: Option<bool>,
     pub architect_letter_extension: Option<bool>,
     pub architect_letter_original: Option<bool>,
+    pub builder_letter_works: Option<bool>,
 }
 
 /// One extension row on the form: a descriptive nickname, a year, and the
@@ -99,6 +103,9 @@ pub struct ExtensionInput {
     /// While ticked the row commits the phase with the year UNKNOWN, which
     /// counts as answered (the phase is assignable, labelled "(unk)").
     pub year_unknown: bool,
+    /// The "got proof" checkbox: the assessor found sufficient online proof of
+    /// this extension's year, so the client needn't be asked to evidence it.
+    pub proof: bool,
 }
 
 impl ExtensionInput {
@@ -109,6 +116,7 @@ impl ExtensionInput {
             phase,
             last_valid_year: None,
             year_unknown: false,
+            proof: false,
         }
     }
 }
@@ -182,6 +190,7 @@ impl KeyDetailsState {
                     phase: v.clone(),
                     last_valid_year: year,
                     year_unknown: phases.year_is_unknown(v),
+                    proof: phases.has_year_proof(v),
                 }
             })
             .collect();
@@ -191,6 +200,7 @@ impl KeyDetailsState {
             eircode,
             date_assessed: Some(date_assessed),
             construction_year,
+            construction_year_proof: phases.has_year_proof(&ConstructionPhase::Original),
             extensions,
             property_type: intake.property_type.clone(),
             heating_system: intake.heating_system.clone(),
@@ -209,6 +219,7 @@ impl KeyDetailsState {
             builder_letter_possible: intake.builder_letter_possible,
             architect_letter_extension: intake.architect_letter_extension,
             architect_letter_original: intake.architect_letter_original,
+            builder_letter_works: intake.builder_letter_works,
         }
     }
 }
@@ -225,6 +236,7 @@ fn collect_construction_phases(state: &mut KeyDetailsState) -> ConstructionPhase
     if let Some(y) = parse_year(&state.construction_year) {
         phases.set_year(ConstructionPhase::Original, y);
     }
+    phases.set_year_proof(ConstructionPhase::Original, state.construction_year_proof);
     for ext in state.extensions.iter_mut() {
         if let Some(y) = parse_year(&ext.year) {
             ext.last_valid_year = Some(y);
@@ -236,6 +248,7 @@ fn collect_construction_phases(state: &mut KeyDetailsState) -> ConstructionPhase
             phases.set_year(ext.phase.clone(), y);
             phases.set_nickname(ext.phase.clone(), ext.nickname.clone());
         }
+        phases.set_year_proof(ext.phase.clone(), ext.proof);
     }
     phases
 }
@@ -263,6 +276,7 @@ fn collect_intake(state: &KeyDetailsState) -> IntakeDetails {
         builder_letter_possible: state.builder_letter_possible,
         architect_letter_extension: state.architect_letter_extension,
         architect_letter_original: state.architect_letter_original,
+        builder_letter_works: state.builder_letter_works,
     }
 }
 
@@ -319,9 +333,19 @@ impl KeyDetailsPage {
                 ui.end_row();
 
                 ui.label("Year of Construction:");
-                if metre_input(ui, &mut state.construction_year, 80.0, "e.g. 1985").changed {
-                    phases_changed = true;
-                }
+                ui.horizontal(|ui| {
+                    if metre_input(ui, &mut state.construction_year, 80.0, "e.g. 1985").changed {
+                        phases_changed = true;
+                    }
+                    // Assessor ticks this when there's sufficient online proof of
+                    // the date, so they needn't ask the client for documentation.
+                    if ui
+                        .checkbox(&mut state.construction_year_proof, "got proof")
+                        .changed()
+                    {
+                        phases_changed = true;
+                    }
+                });
                 ui.end_row();
             });
 
@@ -356,6 +380,9 @@ impl KeyDetailsPage {
                         ext.year.clear();
                         ext.last_valid_year = None;
                     }
+                    phases_changed = true;
+                }
+                if ui.checkbox(&mut ext.proof, "got proof").changed() {
                     phases_changed = true;
                 }
                 if ui.button("Remove").clicked() {
@@ -508,6 +535,15 @@ impl KeyDetailsPage {
                         });
                         ui.end_row();
                     }
+                    ui.label(
+                        "Is a letter from the builder available for the works done in the house?",
+                    );
+                    ui.horizontal(|ui| {
+                        if yes_no_buttons(ui, &mut state.builder_letter_works) {
+                            intake_changed = true;
+                        }
+                    });
+                    ui.end_row();
                 });
         }
 
@@ -709,6 +745,69 @@ mod tests {
         assert_eq!(state.architect_letter_extension, Some(false));
         assert_eq!(state.architect_letter_original, None);
         assert_eq!(collect_intake(&state), intake);
+    }
+
+    /// The builder-letter-for-works on-site answer round-trips through intake
+    /// alongside the existing questions.
+    #[test]
+    fn builder_letter_works_round_trips_through_intake() {
+        let intake = IntakeDetails {
+            builder_letter_works: Some(true),
+            ..Default::default()
+        };
+        let state = KeyDetailsState::from_record(
+            "test".to_string(),
+            String::new(),
+            String::new(),
+            NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+            &ConstructionPhases::default(),
+            &intake,
+        );
+        assert_eq!(state.builder_letter_works, Some(true));
+        assert_eq!(collect_intake(&state), intake);
+    }
+
+    /// The "got proof" checkbox round-trips per phase: the original year and
+    /// each extension carry their own proof flag through the record → form →
+    /// record trip, independently of the year value.
+    #[test]
+    fn year_proof_round_trips_per_phase() {
+        let mut phases = ConstructionPhases::default();
+        phases.set_year(ConstructionPhase::Original, 1990);
+        phases.set_year_proof(ConstructionPhase::Original, true);
+        // An extension with proof but its year still marked unknown.
+        phases.set_year_unknown(ConstructionPhase::Extension1);
+        phases.set_nickname(ConstructionPhase::Extension1, "Back".to_string());
+        phases.set_year_proof(ConstructionPhase::Extension1, true);
+        // A second extension WITHOUT proof.
+        phases.set_year(ConstructionPhase::Extension2, 2005);
+
+        let mut state = KeyDetailsState::from_record(
+            "test".to_string(),
+            String::new(),
+            String::new(),
+            NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+            &phases,
+            &IntakeDetails::default(),
+        );
+        assert!(state.construction_year_proof);
+        let ext1 = state
+            .extensions
+            .iter()
+            .find(|e| e.phase == ConstructionPhase::Extension1)
+            .unwrap();
+        assert!(ext1.proof);
+        let ext2 = state
+            .extensions
+            .iter()
+            .find(|e| e.phase == ConstructionPhase::Extension2)
+            .unwrap();
+        assert!(!ext2.proof);
+
+        let rebuilt = collect_construction_phases(&mut state);
+        assert!(rebuilt.has_year_proof(&ConstructionPhase::Original));
+        assert!(rebuilt.has_year_proof(&ConstructionPhase::Extension1));
+        assert!(!rebuilt.has_year_proof(&ConstructionPhase::Extension2));
     }
 
     /// The window-year "unknown" checkbox round-trips: ticking it commits

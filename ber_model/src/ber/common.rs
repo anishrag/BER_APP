@@ -157,6 +157,13 @@ pub struct ConstructionPhases {
     /// what the UI shows instead of "Extension 1". Optional per phase.
     #[serde(default)]
     pub nicknames: BTreeMap<ConstructionPhase, String>,
+    /// Per phase: the assessor found SUFFICIENT ONLINE PROOF of this phase's
+    /// build year (the Key-Details "got proof" checkbox), so the client needn't
+    /// be asked to evidence the date. A phase absent from the map (or `false`)
+    /// means no proof recorded. `#[serde(default)]` so older records load with
+    /// no proof flags.
+    #[serde(default)]
+    pub year_proof: BTreeMap<ConstructionPhase, bool>,
 }
 
 impl ConstructionPhases {
@@ -164,7 +171,23 @@ impl ConstructionPhases {
         Self {
             years,
             nicknames: BTreeMap::new(),
+            year_proof: BTreeMap::new(),
         }
+    }
+
+    /// Record whether the assessor has online proof of `phase`'s build year.
+    /// `false` removes the entry (keeps the map to only the proven phases).
+    pub fn set_year_proof(&mut self, phase: ConstructionPhase, proof: bool) {
+        if proof {
+            self.year_proof.insert(phase, true);
+        } else {
+            self.year_proof.remove(&phase);
+        }
+    }
+
+    /// True when the assessor has recorded online proof of `phase`'s year.
+    pub fn has_year_proof(&self, phase: &ConstructionPhase) -> bool {
+        self.year_proof.get(phase).copied().unwrap_or(false)
     }
 
     /// Set (or clear, if empty) the nickname for `phase`.
