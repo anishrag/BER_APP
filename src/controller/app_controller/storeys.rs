@@ -627,13 +627,26 @@ impl AppController {
             });
             self.elevation_wall = new_id;
         }
-        // Re-point the Structure selection + open edit session onto the
-        // re-derived regions by durable key. Without this, the stored ids go
+        // FINAL pass over every storey: stamp the assessor exposure maps onto
+        // the resolved regions, then run the cross-storey InterStorey
+        // derivation (it reads the neighbours' resolved geometry, so it must
+        // run after all per-storey resolves). This pass RE-SPLITS + RE-MINTS
+        // region ids again (junction floors/ceilings, roof-void walls), so the
+        // Structure re-point below must run AFTER it — otherwise the just-
+        // re-pointed ids would go stale a second time before the next read
+        // (the multi-storey bug: a group's ids dangle, and the NEXT keystroke's
+        // capture finds nothing → the group empties to 0). The all-storeys arm
+        // (`refresh_all_storeys_keeping_selection`) already re-points after its
+        // derive for the same reason.
+        self.derive_horizontal_exposure_all();
+        // Re-point the Structure selection + open edit session onto the FINAL
+        // (post-derive) regions by durable key. Without this, the stored ids go
         // stale on the very next resolve (walls/floors re-mint every time), so a
         // multi-group "Edit attributes" session would silently drop every edit
         // after the first (the apply itself triggers the re-resolve) and the
         // canvas shading would blank out. Group ids that no longer match (the
         // surface was carved away) drop out.
+        let record = self.current_record.as_ref().unwrap();
         let new_sel: std::collections::HashSet<ItemId> = record
             .data
             .storeys
@@ -645,7 +658,6 @@ impl AppController {
                     .collect()
             })
             .unwrap_or_default();
-        self.structure_selected = new_sel;
         let new_group_ids: Option<Vec<Vec<ItemId>>> =
             edit_struct_keys.as_ref().and_then(|groups| {
                 record.data.storeys.get(idx).map(|storey| {
@@ -660,6 +672,7 @@ impl AppController {
                         .collect()
                 })
             });
+        self.structure_selected = new_sel;
         if let Some(new_ids) = new_group_ids {
             if let Some(edit) = self.structure_edit.as_mut() {
                 for (g, ids) in edit.groups.iter_mut().zip(new_ids) {
@@ -667,11 +680,6 @@ impl AppController {
                 }
             }
         }
-        // FINAL pass over every storey: stamp the assessor exposure maps onto
-        // the resolved regions, then run the cross-storey InterStorey
-        // derivation (it reads the neighbours' resolved geometry, so it must
-        // run after all per-storey resolves).
-        self.derive_horizontal_exposure_all();
     }
 
     /// The ALL-STOREYS-tab arm of [`refresh_storey`](Self::refresh_storey):

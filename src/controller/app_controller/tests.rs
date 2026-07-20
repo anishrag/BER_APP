@@ -3820,6 +3820,111 @@ fn structure_selection_survives_re_resolve() {
     );
 }
 
+/// REPRO (bug 09d2f42b): in a multi-group ceiling "Edit attributes" session,
+/// typing a NAME into one group must not empty the OTHER groups. Each keystroke
+/// bumps the revision → re-resolve → the ceiling region ids re-mint; the edit
+/// groups must re-point onto the live regions every time, never going stale.
+#[test]
+fn ceiling_group_name_edit_does_not_empty_other_groups() {
+    use ber_model::ber::structural::{
+        CeilingConstructionType, CeilingExposure, ConstructionMakeup,
+    };
+    let path = "/home/anishrag/WORK/BER_backups/2026-07-19-8-ashgrove-hill/bug-reports/09d2f42b-b68c-4d2d-8eda-3731cbc80f62/state.json";
+    if !std::path::Path::new(path).exists() {
+        eprintln!("skip: checkpoint {path} absent");
+        return;
+    }
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    assert!(c.load_checkpoint_from(path), "checkpoint loaded");
+
+    c.set_current_storey(Some(0)).unwrap();
+    c.commit_to_ber().unwrap();
+    c.refresh_all_storeys();
+    c.set_current_phase(AssessmentPhase::Structure);
+    c.materialize();
+
+    // Select storey-0 ExposedRoof ceiling regions with plan area < 12 m²
+    // (excludes the one big conservatory piece; leaves back c4 + porch c6 +
+    // two small conservatory pieces = 4 regions).
+    let ids: Vec<ItemId> = {
+        let rec = c.current_record.as_ref().unwrap();
+        rec.data.storeys[0]
+            .ceilings
+            .regions
+            .iter()
+            .filter(|r| r.exposure == CeilingExposure::ExposedRoof && r.area() < 12.0)
+            .map(|r| r.id)
+            .collect()
+    };
+    assert_eq!(ids.len(), 4, "four small exposed-roof ceilings selected");
+    c.structure_selected = ids.iter().copied().collect();
+
+    c.begin_structure_edit();
+    let mut counts0: Vec<usize> = c
+        .structure_edit()
+        .expect("session opened")
+        .groups
+        .iter()
+        .map(|g| g.ids.len())
+        .collect();
+    counts0.sort_unstable();
+    assert_eq!(
+        counts0,
+        vec![1, 1, 2],
+        "three groups by phase/inferred-type"
+    );
+
+    for name in ["n", "ne", "new"] {
+        // Re-fetch the LIVE ids of the two-surface group each keystroke — the
+        // real UI edits the group by index and it is re-pointed between edits.
+        let g0 = c
+            .structure_edit()
+            .unwrap()
+            .groups
+            .iter()
+            .max_by_key(|g| g.ids.len())
+            .unwrap()
+            .clone();
+        c.set_ceiling_construction_for(
+            &g0.ids,
+            CeilingConstructionType::Uninitialised,
+            ConstructionMakeup::Tbd,
+            g0.phase.clone(),
+            Some(name.into()),
+        );
+        c.materialize();
+        let mut counts: Vec<usize> = c
+            .structure_edit()
+            .expect("session still open")
+            .groups
+            .iter()
+            .map(|g| g.ids.len())
+            .collect();
+        counts.sort_unstable();
+        assert_eq!(
+            counts,
+            vec![1, 1, 2],
+            "after typing {name:?} the other groups keep their surfaces"
+        );
+        // Every group id must resolve to a LIVE ceiling region.
+        let live: std::collections::HashSet<_> = c.current_record.as_ref().unwrap().data.storeys[0]
+            .ceilings
+            .regions
+            .iter()
+            .map(|r| r.id)
+            .collect();
+        assert!(
+            c.structure_edit()
+                .unwrap()
+                .groups
+                .iter()
+                .flat_map(|g| &g.ids)
+                .all(|id| live.contains(id)),
+            "after typing {name:?} every group id points at a live region"
+        );
+    }
+}
+
 /// Finishing an "Edit attributes" session (Done) DESELECTS everything — the
 /// selection halo must not linger on the just-attributed surfaces.
 #[test]
