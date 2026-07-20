@@ -451,7 +451,18 @@ pub fn add_wall_door(
         draught_stripped: None,
     });
     link_door(storey, wall_id, id);
-    redistribute_or_rollback(storey, wall_id, &[OpeningRef::Door(id)])?;
+    // Lift the door's sill onto the wall underside (a sloped inter-storey
+    // remainder base), or refuse if the door can't fit under the roofline there.
+    // A flat base leaves `sill_m` untouched (underside == base).
+    let dref = OpeningRef::Door(id);
+    match clamp_wall_sill(storey, wall_id, along_m, height_m, sill_m, false) {
+        Ok(clamped) => set_wall_opening_sill(storey, dref, clamped),
+        Err(e) => {
+            rollback_added(storey, wall_id, &[dref]);
+            return Err(e);
+        }
+    }
+    redistribute_or_rollback(storey, wall_id, &[dref])?;
     Ok(id)
 }
 
@@ -1291,25 +1302,18 @@ pub fn move_opening(
     let Some((wall_id, old_along, old_sill, assembly)) = wall_placement_of(storey, opening) else {
         return Ok(());
     };
-    // Clamp the dragged opening's TOP under the wall roofline at its new along
-    // (and its bottom at the floor). Lives HERE so every drag path — the review
-    // elevation AND the 2D placement view — shares one clamp via this single
-    // mutation, instead of each re-implementing it (only the review path did). A
-    // MULTI-STOREY window is exempt from the roofline cap (it spans up); only its
-    // floor is clamped.
+    // Clamp the dragged opening's TOP under the wall roofline and its BOTTOM
+    // onto the wall underside (the sloped base of an inter-storey remainder) at
+    // its new along. Lives HERE so every drag path — the review elevation AND
+    // the 2D placement view — shares one clamp via this single mutation, instead
+    // of each re-implementing it. A MULTI-STOREY window is exempt from the
+    // roofline cap (it spans up); its bottom still clears the underside. If the
+    // opening can't fit between the underside and the roofline, refuse (leave the
+    // storey untouched) rather than resize.
     let multi_storey = matches!(opening, OpeningRef::Window(id)
         if storey.windows.iter().any(|w| w.id == id && w.multi_storey));
-    let new_sill_m = if multi_storey {
-        new_sill_m.max(0.0)
-    } else {
-        let h = opening_height(storey, opening) as f64;
-        // `placeable_wall`: porch inner walls clamp like outline walls.
-        let max_sill = storey
-            .placeable_wall(wall_id)
-            .map(|r| r.max_sill_for(new_along_m as f64, h) as f32)
-            .unwrap_or(f32::INFINITY);
-        new_sill_m.clamp(0.0, max_sill.max(0.0))
-    };
+    let h = opening_height(storey, opening);
+    let new_sill_m = clamp_wall_sill(storey, wall_id, new_along_m, h, new_sill_m, multi_storey)?;
     let (d_along, d_sill) = (new_along_m - old_along, new_sill_m - old_sill);
     let shift = |p: &mut Option<OpeningPlacement>| {
         if let Some(OpeningPlacement::Wall {
@@ -1412,20 +1416,22 @@ pub fn resize_opening(
         }
     };
     set_size(storey, new_width_m, new_height_m);
-    // Keep a now-taller opening under the wall roofline by lowering its sill —
-    // the same clamp as `move_opening`; a multi-storey window is exempt (it
-    // spans up past the roofline by design).
+    // Keep a now-taller opening under the wall roofline (lower its sill) and its
+    // bottom on the wall underside — the same clamp as `move_opening`; a
+    // multi-storey window is exempt from the roofline cap (it spans up past it by
+    // design). If the taller opening can't fit between the underside and the
+    // roofline, refuse and restore the size below.
     let multi_storey = matches!(opening, OpeningRef::Window(id)
         if storey.windows.iter().any(|w| w.id == id && w.multi_storey));
-    if !multi_storey {
-        // `placeable_wall`: porch inner walls clamp like outline walls.
-        let max_sill = storey
-            .placeable_wall(wall_id)
-            .map(|r| r.max_sill_for(along as f64, new_height_m as f64) as f32)
-            .unwrap_or(f32::INFINITY);
-        let clamped = old_sill.clamp(0.0, max_sill.max(0.0));
-        if clamped != old_sill {
-            set_wall_opening_sill(storey, opening, clamped);
+    match clamp_wall_sill(storey, wall_id, along, new_height_m, old_sill, multi_storey) {
+        Ok(clamped) => {
+            if clamped != old_sill {
+                set_wall_opening_sill(storey, opening, clamped);
+            }
+        }
+        Err(e) => {
+            set_size(storey, old_w, old_h);
+            return Err(e);
         }
     }
     match redistribute_wall_openings_pinned(storey, wall_id, &[opening])
@@ -1473,20 +1479,20 @@ pub fn resize_opening_full_width(
             available_m: len,
         });
     }
-    // Keep the (possibly taller) opening under the roofline — same clamp as
-    // `resize_opening`; multi-storey windows span past it by design.
+    // Keep the (possibly taller) opening under the roofline and on the wall
+    // underside — same clamp as `resize_opening`; multi-storey windows span past
+    // the roofline by design. Sampled at the wall MIDPOINT (a full-width opening
+    // spans the whole wall); refuse if it can't fit vertically there.
     let multi_storey = matches!(opening, OpeningRef::Window(id)
         if storey.windows.iter().any(|w| w.id == id && w.multi_storey));
-    let sill = if multi_storey {
-        old_sill
-    } else {
-        // `placeable_wall`: porch inner walls clamp like outline walls.
-        let max_sill = storey
-            .placeable_wall(wall_id)
-            .map(|r| r.max_sill_for((len / 2.0) as f64, new_height_m as f64) as f32)
-            .unwrap_or(f32::INFINITY);
-        old_sill.clamp(0.0, max_sill.max(0.0))
-    };
+    let sill = clamp_wall_sill(
+        storey,
+        wall_id,
+        len / 2.0,
+        new_height_m,
+        old_sill,
+        multi_storey,
+    )?;
     let place = |placement: &mut Option<OpeningPlacement>| {
         if let Some(OpeningPlacement::Wall {
             along_m, sill_m, ..
@@ -1941,6 +1947,48 @@ fn redistribute_or_rollback(
     }
 }
 
+/// Clamp a requested `sill` into the wall's feasible VERTICAL band at
+/// `along_m` for an opening of `height_m`: at/above the wall UNDERSIDE
+/// ([`WallRegion::min_sill_for`] — the sloped-base floor) and at/below the
+/// roofline ([`WallRegion::max_sill_for`]). Returns the clamped sill, or
+/// `Err(WallTooShort)` when the band is EMPTY — the opening genuinely can't fit
+/// between the sloped underside and the roofline at that along (raising it to
+/// clear the base would push its top through the roof). This is the REFUSE (not
+/// resize) corollary of the size-preserving clamp. A `multi_storey` window is
+/// exempt from the roofline cap (it spans up past this storey's top) but still
+/// clears the underside. Returns `sill` unchanged when the wall is absent
+/// (best-effort, mirrors the pre-existing `unwrap_or(INFINITY)` fallbacks).
+fn clamp_wall_sill(
+    storey: &Storey,
+    wall_id: ItemId,
+    along_m: f32,
+    height_m: f32,
+    sill_m: f32,
+    multi_storey: bool,
+) -> Result<f32, OpeningError> {
+    // `placeable_wall`: porch inner walls clamp like outline walls.
+    let Some(r) = storey.placeable_wall(wall_id) else {
+        return Ok(sill_m);
+    };
+    let min_sill = r.min_sill_for(along_m as f64) as f32;
+    if multi_storey {
+        return Ok(sill_m.max(min_sill));
+    }
+    let max_sill = r.max_sill_for(along_m as f64, height_m as f64) as f32;
+    if min_sill > max_sill + 1e-4 {
+        // The opening can't fit between the underside and the roofline here:
+        // clearing the base would poke its top through the roof. Refuse with the
+        // same variant the horizontal placement path uses; the shell maps it to
+        // a user message. Fields carry the VERTICAL fit (needed vs available
+        // height above the base) rather than a span.
+        return Err(OpeningError::WallTooShort {
+            needed_m: min_sill + height_m,
+            available_m: max_sill + height_m,
+        });
+    }
+    Ok(sill_m.clamp(min_sill, max_sill.max(min_sill)))
+}
+
 /// Set a wall opening's sill directly (no redistribute).
 fn set_wall_opening_sill(storey: &mut Storey, opening: OpeningRef, sill: f32) {
     let set = |p: &mut Option<OpeningPlacement>| {
@@ -1980,12 +2028,17 @@ fn place_window_with_vertical_fallback(
     let (along, requested) = wall_placement_of(storey, new_ref)
         .map(|(_, a, s, _)| (a, s))
         .unwrap_or((0.0, 0.0));
-    let max_sill = storey
+    let (min_sill, max_sill) = storey
         .placeable_wall(wall_id)
-        .map(|r| r.max_sill_for(along as f64, height as f64) as f32)
-        .unwrap_or(0.0);
+        .map(|r| {
+            (
+                r.min_sill_for(along as f64) as f32,
+                r.max_sill_for(along as f64, height as f64) as f32,
+            )
+        })
+        .unwrap_or((0.0, 0.0));
     // Candidate sills, in preference order: the requested one, then stacked at the
-    // top of each existing opening (lowest first), then the floor.
+    // top of each existing opening (lowest first), then the underside (floor).
     let mut tops: Vec<f32> = wall_openings(storey, wall_id)
         .into_iter()
         .filter(|o| o.opening != new_ref)
@@ -1994,16 +2047,27 @@ fn place_window_with_vertical_fallback(
     tops.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let candidates = std::iter::once(requested)
         .chain(tops)
-        .chain(std::iter::once(0.0));
+        .chain(std::iter::once(min_sill));
+    // Default error is the VERTICAL fit: if the underside sits too high for
+    // every candidate (empty band → the loop body never runs), the shell still
+    // gets a real "needed X / available Y" (height above the base needed to
+    // clear the underside vs. what fits under the roofline), not 0/0. A
+    // horizontal failure below overwrites it with the redistribution's error.
     let mut last_err = OpeningError::WallTooShort {
-        needed_m: 0.0,
-        available_m: 0.0,
+        needed_m: min_sill + height,
+        available_m: max_sill.max(0.0) + height,
     };
     for sill in candidates {
-        if sill < -1e-4 || sill > max_sill + 1e-4 {
+        // Reject a candidate below the underside or above the roofline — on a
+        // sloped base `min_sill` is the underside floor, not 0.
+        if sill < min_sill - 1e-4 || sill > max_sill + 1e-4 {
             continue;
         }
-        set_wall_opening_sill(storey, new_ref, sill.clamp(0.0, max_sill));
+        set_wall_opening_sill(
+            storey,
+            new_ref,
+            sill.clamp(min_sill, max_sill.max(min_sill)),
+        );
         match redistribute_wall_openings(storey, wall_id) {
             Ok(()) => return Ok(()),
             Err(e) => last_err = e,
@@ -2283,7 +2347,16 @@ fn opening_vertices(
             let centre = (*along_m as f64).clamp(0.0, len);
             let left = (centre - half).clamp(0.0, len);
             let right = (centre + half).clamp(0.0, len);
-            let bottom = base_z + *sill_m as f64;
+            // Clamp the drawn BOTTOM up onto the wall UNDERSIDE at the opening's
+            // WORST-clearance edge (where the sloped base is HIGHEST across the
+            // span) — the mirror of the top cap below, which samples the roofline
+            // at both edges and takes the LOWEST. On a flat/level base the
+            // underside is `base_z`, so this is a no-op. Size is preserved (the
+            // placement/move/resize ops already RAISE the durable sill onto the
+            // underside); this is the rendering safety net so vertices never dip
+            // into the buried piece under a sloped remainder wall.
+            let underside = wall.base_z_at_along(left).max(wall.base_z_at_along(right));
+            let bottom = (base_z + *sill_m as f64).max(underside);
             // A multi-storey window may rise past THIS storey's roofline (it spans
             // up the same-type wall run) — so don't cap its top at the wall top.
             let top = if multi_storey {
@@ -2607,6 +2680,247 @@ mod tests {
         // cap = min(top_z_at_along(1.5)=2.375, top_z_at_along(2.5)=2.625) = 2.375.
         let top = storey.windows[0].vertices[2].2;
         assert!((top - 2.375).abs() < 1e-3, "clamped top = {top}");
+    }
+
+    /// A wall whose UNDERSIDE (base) rises linearly from z=0 at along 0 to
+    /// `rise` at along 8 — the sloped inter-storey-remainder base — under a flat
+    /// 2.4 m roofline. The mirror of the sloped-ROOF wall above.
+    fn sloped_base_storey(wid: ItemId, rise: f64) -> Storey {
+        Storey {
+            walls: WallRegions {
+                regions: vec![wall(
+                    wid,
+                    vec![
+                        p3(0.0, 0.0, 0.0),
+                        p3(8.0, 0.0, rise),
+                        p3(8.0, 0.0, 2.4),
+                        p3(0.0, 0.0, 2.4),
+                    ],
+                )],
+            },
+            ..Storey::default()
+        }
+    }
+
+    #[test]
+    fn min_sill_is_zero_on_a_flat_base() {
+        // Flat base: the underside is `base_z` everywhere, so the bottom clamp is
+        // inert and every opening path behaves byte-for-byte as before.
+        let wid = ItemId::default();
+        let storey = flat_wall_storey(wid);
+        let r = &storey.walls.regions[0];
+        assert_eq!(r.min_sill_for(0.0), 0.0);
+        assert_eq!(r.min_sill_for(2.0), 0.0);
+        assert_eq!(r.base_z_at_along(2.0), 0.0);
+    }
+
+    #[test]
+    fn derive_clamps_opening_bottom_onto_a_sloped_underside() {
+        // Underside rises 0 → 0.4 over the 8 m base. A window with sill 0 (its
+        // bottom would sit at base_z, BELOW the underside) is raised so its
+        // drawn bottom sits on the underside at its WORST (up-slope) edge — same
+        // width & height, the mirror of the roof top-cap test.
+        let wid = ItemId::default();
+        let mut storey = sloped_base_storey(wid, 0.4);
+        storey.windows.push(window(
+            ItemId::default(),
+            1.0,
+            1.0,
+            Some(OpeningPlacement::Wall {
+                wall_id: wid,
+                along_m: 6.0,
+                sill_m: 0.0,
+            }),
+        ));
+        derive_opening_vertices(&mut storey);
+        let v = &storey.windows[0].vertices;
+        // left=5.5 (underside 0.275), right=6.5 (underside 0.325) → bottom 0.325.
+        let bottom = v[0].2;
+        assert!(
+            (bottom - 0.325).abs() < 1e-4,
+            "bottom on the underside: {bottom}"
+        );
+        // Same width (span 5.5..6.5) and height (top = bottom + 1.0).
+        assert!((v[0].0 - 5.5).abs() < 1e-4 && (v[1].0 - 6.5).abs() < 1e-4);
+        assert!((v[2].2 - (bottom + 1.0)).abs() < 1e-4, "height preserved");
+    }
+
+    #[test]
+    fn wide_opening_clears_the_underside_at_its_worst_edge() {
+        // A 4 m-wide opening on the same slope: its bottom clamps to the HIGHEST
+        // underside across the span (its up-slope edge), not the centre.
+        let wid = ItemId::default();
+        let mut storey = sloped_base_storey(wid, 0.4);
+        storey.windows.push(window(
+            ItemId::default(),
+            4.0,
+            1.0,
+            Some(OpeningPlacement::Wall {
+                wall_id: wid,
+                along_m: 6.0,
+                sill_m: 0.0,
+            }),
+        ));
+        derive_opening_vertices(&mut storey);
+        // left=4 (underside 0.2), right=8 (underside 0.4) → worst edge 0.4.
+        let bottom = storey.windows[0].vertices[0].2;
+        assert!(
+            (bottom - 0.4).abs() < 1e-4,
+            "worst-edge underside: {bottom}"
+        );
+    }
+
+    #[test]
+    fn resize_refuses_when_the_opening_cannot_fit_over_a_steep_underside() {
+        // Underside rises to 1.6 over 8 m. Place a short window near the steep
+        // end (fits), then resize it taller so underside + height > roofline:
+        // the resize REFUSES (WallTooShort) and restores the size — never resizes
+        // the opening to fit.
+        let wid = ItemId::default();
+        let mut storey = sloped_base_storey(wid, 1.6);
+        add_wall_window(&mut storey, wid, 7.0, 1.0, 0.5, 1.4, ItemId::default())
+            .expect("a 0.5 m window fits under the roofline at along 7");
+        let r = OpeningRef::Window(storey.windows[0].id);
+        // min_sill(7) = 1.4; max_sill(7, 1.2) = 2.4 − 1.2 = 1.2 < 1.4 → refuse.
+        let err = resize_opening(&mut storey, r, 1.0, 1.2).unwrap_err();
+        assert!(matches!(err, OpeningError::WallTooShort { .. }), "{err:?}");
+        assert!(
+            (storey.windows[0].height_m - 0.5).abs() < 1e-6,
+            "height restored"
+        );
+    }
+
+    #[test]
+    fn placement_refuses_over_a_steep_underside() {
+        // Directly placing a window where it can't clear the underside AND stay
+        // under the roofline is refused, and rolls back (no window survives).
+        let wid = ItemId::default();
+        let mut storey = sloped_base_storey(wid, 1.6);
+        // along 8: underside 1.6, roofline 2.4, height 1.0 → 1.6 + 1.0 > 2.4.
+        let res = add_wall_window(&mut storey, wid, 8.0, 1.0, 1.0, 0.0, ItemId::default());
+        assert!(
+            matches!(res, Err(OpeningError::WallTooShort { .. })),
+            "{res:?}"
+        );
+        assert!(storey.windows.is_empty(), "rolled back");
+    }
+
+    #[test]
+    fn sloped_wall_opening_hole_sits_inside_the_wall_trapezoid() {
+        // The #7 target: a window placed at sill 0 is raised so its whole w×h
+        // rectangle sits INSIDE the wall trapezoid — bottom on/above the sloped
+        // underside, top under the roofline. Then subtracting the nominal w×h
+        // for the net area is legitimate (no part pokes past the underside into
+        // the buried piece below). Verified via the DERIVED vertices, not just
+        // the (sill-agnostic) net-area number.
+        let wid = ItemId::default();
+        let mut storey = sloped_base_storey(wid, 0.4);
+        let gross = storey.walls.regions[0].polygon.area();
+        add_wall_window(&mut storey, wid, 2.0, 1.0, 1.0, 0.0, ItemId::default())
+            .expect("the window fits");
+        // The durable sill was lifted onto the underside (min_sill(2.0) = 0.1).
+        let Some(OpeningPlacement::Wall { sill_m, .. }) = storey.windows[0].placement else {
+            panic!("wall placement");
+        };
+        assert!(
+            sill_m >= 0.1 - 1e-4,
+            "sill lifted onto the underside: {sill_m}"
+        );
+        // Every corner of the derived rectangle lies within the wall face: each
+        // bottom vertex on/above the underside at its own along, top under the
+        // 2.4 m roofline.
+        derive_opening_vertices(&mut storey);
+        let r = &storey.walls.regions[0];
+        let v = &storey.windows[0].vertices;
+        assert_eq!(v.len(), 4);
+        let origin = r.base_frame().unwrap().0;
+        for corner in v {
+            let along = ((corner.0 as f64 - origin.x).powi(2)
+                + (corner.1 as f64 - origin.y).powi(2))
+            .sqrt();
+            let underside = r.base_z_at_along(along);
+            assert!(
+                corner.2 as f64 >= underside - 1e-4,
+                "corner z {} below underside {underside} at along {along}",
+                corner.2
+            );
+            assert!(corner.2 as f64 <= 2.4 + 1e-4, "corner above roofline");
+        }
+        // With the hole confirmed inside the wall, the net area is a legitimate
+        // gross − w×h (no over-subtraction).
+        let net = wall_net_area(&storey, wid).unwrap();
+        assert!(
+            (net - (gross - 1.0)).abs() < 1e-4,
+            "net {net} vs {}",
+            gross - 1.0
+        );
+    }
+
+    #[test]
+    fn move_refused_over_a_steep_underside_leaves_the_storey_untouched() {
+        // Moving an opening to an along where it can't fit between the (steep,
+        // up-sloping) underside and the roofline REFUSES — and, because the
+        // clamp is checked BEFORE any mutation, size + sill + position are all
+        // exactly as they were.
+        let wid = ItemId::default();
+        let mut storey = sloped_base_storey(wid, 1.6);
+        // Feasible start: min_sill(2)=0.4, max_sill(2,1.0)=1.4 → sill 0.4 fits.
+        add_wall_window(&mut storey, wid, 2.0, 1.0, 1.0, 0.4, ItemId::default())
+            .expect("the window fits at along 2");
+        let r = OpeningRef::Window(storey.windows[0].id);
+        let before = storey.windows[0].clone();
+        // along 8: min_sill 1.6 > max_sill(8,1.0)=1.4 → can't fit → refuse.
+        let err = move_opening(&mut storey, r, 8.0, 0.5).unwrap_err();
+        assert!(matches!(err, OpeningError::WallTooShort { .. }), "{err:?}");
+        let after = &storey.windows[0];
+        assert_eq!(after.width_m, before.width_m, "width untouched");
+        assert_eq!(after.height_m, before.height_m, "height untouched");
+        assert_eq!(after.placement, before.placement, "along + sill untouched");
+    }
+
+    #[test]
+    fn multi_storey_window_clears_the_underside_but_not_the_roofline() {
+        // A multi-storey window on a sloped remainder is EXEMPT from the roofline
+        // cap (it spans up past this storey's top) yet still clears the sloped
+        // underside — its bottom is lifted to min_sill, its top rises freely.
+        let wid = ItemId::default();
+        let mut storey = sloped_base_storey(wid, 0.4);
+        let mut w = window(
+            ItemId::default(),
+            1.0,
+            3.0, // taller than the 2.4 m roofline — a genuine multi-storey span
+            Some(OpeningPlacement::Wall {
+                wall_id: wid,
+                along_m: 6.0,
+                sill_m: 0.0,
+            }),
+        );
+        w.multi_storey = true;
+        storey.windows.push(w);
+        let r = OpeningRef::Window(storey.windows[0].id);
+        // Requested sill 0 sits below the underside; min_sill(6)=0.3 lifts it.
+        move_opening(&mut storey, r, 6.0, 0.0).unwrap();
+        let Some(OpeningPlacement::Wall { sill_m, .. }) = storey.windows[0].placement else {
+            panic!("wall placement");
+        };
+        assert!(
+            (sill_m - 0.3).abs() < 1e-4,
+            "sill lifted onto the underside (min_sill), got {sill_m}"
+        );
+        // Derived top is NOT capped at 2.4: it rises the full 3.0 m above the
+        // (worst-edge) underside the bottom sits on.
+        derive_opening_vertices(&mut storey);
+        let v = &storey.windows[0].vertices;
+        let (bottom, top) = (v[0].2, v[2].2);
+        assert!(
+            bottom >= 0.3 - 1e-4,
+            "bottom on/above the underside: {bottom}"
+        );
+        assert!(top > 2.4 + 1e-3, "top rises past the roofline: {top}");
+        assert!(
+            (top - (bottom + 3.0)).abs() < 1e-3,
+            "full multi-storey height preserved above the sill"
+        );
     }
 
     #[test]

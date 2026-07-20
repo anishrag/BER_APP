@@ -171,6 +171,27 @@ impl WallRegion {
         (self.top_z_at_along(along_m) - base_z - height_m).max(0.0)
     }
 
+    /// The lowest sill (height above `base_z`) an opening may have at
+    /// along-distance `along_m` so its BOTTOM (= `base_z + sill`) sits at/above
+    /// the wall's UNDERSIDE ([`base_z_at_along`](Self::base_z_at_along)) there —
+    /// i.e. `base_z_at_along - base_z`, clamped to ≥ 0. The MIRROR of
+    /// [`max_sill_for`](Self::max_sill_for): where `max_sill_for` LOWERS a tall
+    /// opening to keep its top under the roofline, this RAISES an opening off a
+    /// SLOPED underside (a sloped inter-storey-split remainder wall, whose base
+    /// runs the neighbour roof profile) so it can't poke below the wall into the
+    /// buried piece beneath.
+    ///
+    /// 0 wherever the underside sits at/below `base_z` (`base_z` is the z at
+    /// `exterior[0]`) — so a FLAT base, and any span that steps/slopes DOWN from
+    /// the start, is unchanged from the pre-clamp behaviour. Where the base steps
+    /// or slopes UP from `exterior[0]` this is > 0, correctly raising a low-sill
+    /// opening off the higher underside (a window shouldn't sit below a stepped-up
+    /// floor); no existing test relied on the old under-floor placement there.
+    pub fn min_sill_for(&self, along_m: f64) -> f64 {
+        let base_z = self.base_frame().map(|(_, _, _, bz)| bz).unwrap_or(0.0);
+        (self.base_z_at_along(along_m) - base_z).max(0.0)
+    }
+
     /// The wall's TOP profile in wall-local coordinates: each vertex of the top
     /// polyline (`exterior[2..]`, running b→a per the vertex-order contract) as
     /// `(along, z)` — `along` projected onto the base direction from the base
@@ -245,6 +266,46 @@ impl WallRegion {
                 .fold(None, |m: Option<f64>, z| Some(m.map_or(z, |b| b.min(z))))
         })
         .unwrap_or(base_z)
+    }
+
+    /// The base/underside-profile z directly below the base point at
+    /// along-distance `d` (0..length) — the UNDERSIDE analogue of
+    /// [`top_z_at_along`](Self::top_z_at_along). Samples the BASE polyline
+    /// (`exterior[..top_start_index()]`, running `a`→`b` per the vertex-order
+    /// contract). At a vertical jump (a floor-step crossing — two base vertices
+    /// at one plan point) the HIGHER z is returned (mirroring the top's LOWER-z
+    /// rule), so an opening whose bottom clamps to this can never poke below the
+    /// underside. Falls back to `base_z` when `d` is out of the base's range.
+    /// For a FLAT base (`[a, b]`, one z) this is the constant `base_z`, so
+    /// [`min_sill_for`](Self::min_sill_for) is 0 and flat-wall behaviour is
+    /// unchanged; a stepped/sloped base returns the real per-along underside
+    /// (which `min_sill_for` then floors at 0 relative to `base_z`).
+    pub(crate) fn base_z_at_along(&self, d: f64) -> f64 {
+        let e = &self.polygon.exterior;
+        let Some((origin, (ux, uy), _len, base_z)) = self.base_frame() else {
+            return e.first().map(|v| v.z).unwrap_or(0.0);
+        };
+        let k = self.top_start_index();
+        // The base run is `exterior[..k]` (a→b); project each vertex to
+        // (along, z), the same unroll `top_z_at_along` applies to the top.
+        let bases: Vec<(f64, f64)> = e[..k.min(e.len())]
+            .iter()
+            .map(|v| ((v.x - origin.x) * ux + (v.y - origin.y) * uy, v.z))
+            .collect();
+        let mut best: Option<f64> = None;
+        for w in bases.windows(2) {
+            let ((a0, z0), (a1, z1)) = (w[0], w[1]);
+            let (lo, hi) = (a0.min(a1), a0.max(a1));
+            if d >= lo - 1e-9 && d <= hi + 1e-9 {
+                let z = if (a1 - a0).abs() < 1e-9 {
+                    z0.max(z1) // vertical jump → higher edge (worst clearance)
+                } else {
+                    z0 + (z1 - z0) * ((d - a0) / (a1 - a0))
+                };
+                best = Some(best.map_or(z, |b: f64| b.max(z)));
+            }
+        }
+        best.unwrap_or(base_z)
     }
 
     /// The wall's single TOP z when its top profile is FLAT (all top vertices

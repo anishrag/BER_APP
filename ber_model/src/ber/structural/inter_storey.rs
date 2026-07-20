@@ -2293,4 +2293,163 @@ mod tests {
         derive_all(&mut ber);
         assert_eq!(serde_json::to_string(&ber.storeys).unwrap(), once);
     }
+
+    // ── Gap pins: risers / multi-component profiles through the profile clip ──
+
+    /// A wall piece is a valid simple face: ≥ 3 vertices, a real (non-sliver)
+    /// area, and no two consecutive vertices coincide (a self-touching neck).
+    fn assert_piece_sane(w: &WallRegion) {
+        let e = &w.polygon.exterior;
+        assert!(e.len() >= 3, "piece has {} vertices", e.len());
+        assert!(
+            w.polygon.area() > MIN_SUBWALL_M * MIN_SUBWALL_M,
+            "degenerate piece area {}",
+            w.polygon.area()
+        );
+        let n = e.len();
+        for i in 0..n {
+            let (p, q) = (e[i], e[(i + 1) % n]);
+            let d = ((p.x - q.x).powi(2) + (p.y - q.y).powi(2) + (p.z - q.z).powi(2)).sqrt();
+            assert!(d > 1e-6, "piece self-touches at vertex {i}");
+        }
+    }
+
+    /// One ceiling region over `ring` whose z follows `zf(x)` — a sloped facet
+    /// for the profile-clip gap tests (mirrors `sloped_back_fixture`'s builder).
+    fn sloped_ceiling(ring: Vec<Point2f64>, zf: &dyn Fn(f64) -> f64) -> CeilingRegion {
+        CeilingRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(
+                ring.into_iter()
+                    .map(|p| Point3f64::new(p.x, p.y, zf(p.x)))
+                    .collect(),
+            ),
+            opes: Default::default(),
+            construction_id: ItemId::default(),
+            exposure: CeilingExposure::default(),
+        }
+    }
+
+    /// GAP PIN (risers vs a SLOPED neighbour): a RISER-shaped wall (a trapezoid,
+    /// not a full-height quad) backed by a sloped neighbour ceiling must go
+    /// through `clip_wall_by_band_profile` and come out a sane covered piece +
+    /// remainder — the riser analogue of
+    /// `sloped_neighbour_profile_cuts_wall_into_covered_slope_and_one_remainder`.
+    /// It exercises `process_wall` DIRECTLY so the sloped clip is guaranteed to
+    /// run (the assertions fail loudly if the band never engages).
+    #[test]
+    fn riser_face_against_a_sloped_neighbour_ceiling_splits_cleanly() {
+        // Riser: base along x∈[0,4] at y=2, z=0; top slopes (4,1.2)→(0,2.4).
+        let riser = WallRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(vec![
+                Point3f64::new(0.0, 2.0, 0.0),
+                Point3f64::new(4.0, 2.0, 0.0),
+                Point3f64::new(4.0, 2.0, 1.2),
+                Point3f64::new(0.0, 2.0, 2.4),
+            ]),
+            exposure: WallExposure::Exposed,
+            opes: Default::default(),
+            construction_id: ItemId::default(),
+        };
+        // Neighbour footprint straddles the base line; TENT ceiling peaking at
+        // x=2 (local z 1.6), falling to 1.0 at x=0 / x=4 — one continuous run.
+        let footprint = FloorRegions::new(square(0.0, 0.0, 4.0, 4.0), ItemId::default());
+        let fp = PlanFootprint::of(&footprint);
+        let bp_floors = FloorRegions::from_vertex_lists(fp.rings.clone(), ItemId::default());
+        let ceilings = CeilingRegions {
+            regions: vec![
+                sloped_ceiling(square(0.0, 0.0, 2.0, 4.0), &|x| 1.0 + 0.3 * x),
+                sloped_ceiling(square(2.0, 0.0, 4.0, 4.0), &|x| 2.2 - 0.3 * x),
+            ],
+        };
+        let nb = NeighbourBand {
+            fp: &fp,
+            bp_floors,
+            ceilings: &ceilings,
+            datum: 0.0,
+            band_lo: -1.0,
+        };
+        let mut out = Vec::new();
+        process_wall(riser, &nb, 0.0, 0, &mut out);
+        // The sloped profile cuts the riser into a covered piece + a remainder.
+        assert!(out.len() >= 2, "riser split into {} pieces", out.len());
+        let covered = out
+            .iter()
+            .filter(|w| w.exposure == WallExposure::InterStorey)
+            .count();
+        assert_eq!(covered, 1, "one covered piece under the sloped profile");
+        for w in &out {
+            assert_piece_sane(w);
+        }
+        // Areas conserve: the pieces sum to the riser's 7.2 m² face.
+        let sum: f64 = out.iter().map(|w| w.polygon.area()).sum();
+        assert!(
+            (sum - 7.2).abs() < 1e-3,
+            "areas sum to the riser face: {sum}"
+        );
+    }
+
+    /// GAP PIN (MULTI-COMPONENT profile): an M-profile neighbour ceiling — two
+    /// humps rising above the wall base with a valley dipping BELOW it between
+    /// them — covers the wall in TWO disjoint pieces, so the split emits N > 2
+    /// regions. The "exactly 2" contract only holds for a single hump; here the
+    /// result must still be sane (areas conserve, every piece valid).
+    #[test]
+    fn multi_component_profile_emits_more_than_two_sane_regions() {
+        // Wall base at z=1.0 (so the valley can dip below it), 8 m × 2.4 m tall.
+        let wall = WallRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(vec![
+                Point3f64::new(0.0, 2.0, 1.0),
+                Point3f64::new(8.0, 2.0, 1.0),
+                Point3f64::new(8.0, 2.0, 3.4),
+                Point3f64::new(0.0, 2.0, 3.4),
+            ]),
+            exposure: WallExposure::Exposed,
+            opes: Default::default(),
+            construction_id: ItemId::default(),
+        };
+        let footprint = FloorRegions::new(square(0.0, 0.0, 8.0, 4.0), ItemId::default());
+        let fp = PlanFootprint::of(&footprint);
+        let bp_floors = FloorRegions::from_vertex_lists(fp.rings.clone(), ItemId::default());
+        // z(x) = 0.5, 2.0, 0.8, 2.0, 0.5 at x = 0,2,4,6,8 — humps at x=2/6 (above
+        // the 1.0 base), valley at x=4 (0.8, below it). One continuous run.
+        let seg = |x0: f64, z0: f64, z1: f64| move |x: f64| z0 + (z1 - z0) * (x - x0) / 2.0;
+        let ceilings = CeilingRegions {
+            regions: vec![
+                sloped_ceiling(square(0.0, 0.0, 2.0, 4.0), &seg(0.0, 0.5, 2.0)),
+                sloped_ceiling(square(2.0, 0.0, 4.0, 4.0), &seg(2.0, 2.0, 0.8)),
+                sloped_ceiling(square(4.0, 0.0, 6.0, 4.0), &seg(4.0, 0.8, 2.0)),
+                sloped_ceiling(square(6.0, 0.0, 8.0, 4.0), &seg(6.0, 2.0, 0.5)),
+            ],
+        };
+        let nb = NeighbourBand {
+            fp: &fp,
+            bp_floors,
+            ceilings: &ceilings,
+            datum: 0.0,
+            band_lo: -1.0,
+        };
+        let mut out = Vec::new();
+        process_wall(wall, &nb, 0.0, 0, &mut out);
+        assert!(
+            out.len() >= 3,
+            "M-profile emits N>2 regions, got {}",
+            out.len()
+        );
+        let covered = out
+            .iter()
+            .filter(|w| w.exposure == WallExposure::InterStorey)
+            .count();
+        assert_eq!(covered, 2, "two disjoint covered humps, got {covered}");
+        for w in &out {
+            assert_piece_sane(w);
+        }
+        let sum: f64 = out.iter().map(|w| w.polygon.area()).sum();
+        assert!(
+            (sum - 19.2).abs() < 1e-3,
+            "areas sum to the wall face: {sum}"
+        );
+    }
 }
