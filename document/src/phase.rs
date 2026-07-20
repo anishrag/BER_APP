@@ -281,6 +281,19 @@ pub fn stamp_wall_constructions(ber: &mut Ber, idx: usize, doc: &crate::StoreyDo
     let plan = &doc.outline.floor_plan;
     let n = ber.storeys[idx].walls.regions.len();
     for i in 0..n {
+        // A wall/riser the cross-storey derive buried is `InterStorey` — the
+        // derivation's own stamp on an out-of-scope junction band (never an
+        // assessor surface). Re-homing a stored construction onto it would
+        // resurrect fabric onto a piece that's never offered/assessed, so skip
+        // it — mirroring how `stamp_riser_exposure` spares an `InterStorey`
+        // riser and how `inter_storey`'s wall-band reset drops its fabric. (No
+        // region is `InterStorey` during the PRE-derive call, so the guard is a
+        // no-op there and only bites on the post-derive re-stamp.)
+        if ber.storeys[idx].walls.regions[i].exposure
+            == ber_model::ber::structural::WallExposure::InterStorey
+        {
+            continue;
+        }
         let Some((e0, e1)) = ber.storeys[idx].walls.regions[i].base_edge() else {
             continue;
         };

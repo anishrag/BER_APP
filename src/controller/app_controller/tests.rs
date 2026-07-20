@@ -25296,3 +25296,80 @@ bug-reports/09d2f42b-b68c-4d2d-8eda-3731cbc80f62/state.json";
         "clearing the riser reverts it to Unset and stays cleared through the derive"
     );
 }
+
+/// Field regression (2026-07-19, 8 Ashgrove Hill, report 09d2f42b): the CONSTRUCTIONS
+/// analogue of the riser-exposure fix above. Assigning a wall CONSTRUCTION to a
+/// non-junction RISER wall must SURVIVE the materialize. The assignment is written
+/// durably to `StoreyDoc.riser_constructions` (keyed by base edge) and stamped by
+/// `stamp_wall_constructions` inside the per-storey resolve, but the cross-storey
+/// `derive_horizontal_exposure_all` tail runs `derive_inter_storey` / `derive_roof_voids`
+/// AFTER that stamp — re-splitting the walls and resetting each buried band's fabric —
+/// and constructions were NOT re-stamped afterward (only exposure + openings were). So
+/// the assessor-set construction reverted to the default on the next materialize. The
+/// fix re-stamps `stamp_wall_constructions` after the derive; this pins that the left
+/// external riser at x[1.66, 4.35] (y = 8.917) keeps its assigned construction.
+#[test]
+fn field_09d2f42b_riser_construction_survives_cross_storey_derive() {
+    use ber_model::ber::structural::{ConstructionMakeup, WallConstructionType};
+    let path = "/home/anishrag/WORK/BER_backups/2026-07-19-8-ashgrove-hill/\
+bug-reports/09d2f42b-b68c-4d2d-8eda-3731cbc80f62/state.json";
+    if !std::path::Path::new(path).exists() {
+        return; // field checkpoint not present in this clone — skip
+    }
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    assert!(c.load_checkpoint_from(path), "field checkpoint loads");
+
+    c.set_current_storey(Some(0)).unwrap();
+    c.commit_to_ber().unwrap();
+
+    // Select the left external riser (base edge x∈[1.66, 4.35] at y = 8.917) and
+    // paint it Exposed so it's an in-scope wall that takes a construction.
+    c.set_exposure_mode(true);
+    c.exposure_pointer_down(3.0, 8.917, 0.3);
+    let riser_id = c
+        .selected_riser
+        .expect("the tap at (3.0, 8.917) selects the left external riser");
+    c.set_riser_exposure(WallExposure::Exposed);
+
+    // Assign a distinctive construction (Timber) to THAT riser via the real
+    // structure-phase setter (keys it by base edge into `riser_constructions`).
+    c.set_wall_construction_for(
+        &[riser_id],
+        WallConstructionType::TimberConstruction,
+        ConstructionMakeup::Default,
+        ConstructionPhase::default(),
+        None,
+    );
+
+    // The riser at the target span — matched by base-edge midpoint.
+    let is_target = |a: (f64, f64), b: (f64, f64)| {
+        let (mx, my) = ((a.0 + b.0) * 0.5, (a.1 + b.1) * 0.5);
+        (mx - 3.0).abs() < 0.6 && (my - 8.917).abs() < 0.05
+    };
+    // The riser region's assigned construction TYPE (None if the region is gone).
+    let riser_construction_ty = |c: &AppController| -> Option<WallConstructionType> {
+        let ber = &c.current_record.as_ref().unwrap().data;
+        ber.storeys[0]
+            .walls
+            .regions
+            .iter()
+            .find(|r| {
+                r.base_edge()
+                    .is_some_and(|(e0, e1)| is_target((e0.x, e0.y), (e1.x, e1.y)))
+            })
+            .and_then(|r| ber.wall_construction(r.construction_id))
+            .map(|con| con.construction_type)
+    };
+
+    // THE MATERIALIZE THAT REVERTED IT PRE-FIX: commit re-resolves storey 0, then
+    // refresh_all_storeys runs the cross-storey derive tail (re-split + reset).
+    c.commit_to_ber().unwrap();
+    c.refresh_all_storeys();
+
+    assert_eq!(
+        riser_construction_ty(&c),
+        Some(WallConstructionType::TimberConstruction),
+        "the assigned riser construction SURVIVES the cross-storey derive \
+         (pre-fix it reverted to the default Uninitialised type)"
+    );
+}

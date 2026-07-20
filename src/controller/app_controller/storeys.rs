@@ -985,6 +985,17 @@ impl AppController {
                 &self.document.storeys[idx],
                 &mut record.data.storeys[idx],
             );
+            // RE-STAMP RISER/WALL CONSTRUCTIONS: `derive_inter_storey` /
+            // `derive_roof_voids` re-split the wall regions and reset each buried
+            // band's fabric — clobbering an assessor-assigned riser construction
+            // that the pre-derive `stamp_wall_constructions` set. Re-apply the
+            // durable overrides here (keyed by SurfaceRef / riser base edge) so an
+            // assigned construction is the LAST word — the construction analogue
+            // of the `stamp_riser_exposure` re-stamp just above. The stamp's own
+            // `InterStorey` guard skips a now-buried piece, so the derivation's
+            // junction classification stands and no stale fabric lands on it. Runs
+            // AFTER `stamp_riser_exposure` so the guard reads the final exposure.
+            document::stamp_wall_constructions(&mut record.data, idx, &self.document.storeys[idx]);
             document::relink_openings_after_derive(
                 &self.document.storeys[idx],
                 &mut record.data.storeys[idx],

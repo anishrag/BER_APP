@@ -4041,6 +4041,153 @@ mod tests {
         );
     }
 
+    /// The CONSTRUCTIONS analogue of
+    /// `stamp_riser_exposure_reapplies_after_derive_but_spares_interstorey`, and
+    /// the mechanism pin for the riser-construction fix (report 09d2f42b).
+    /// `stamp_wall_constructions` re-applies a durable assignment after the
+    /// cross-storey derive resets a wall to its default fabric:
+    ///   1. a RISER assignment (keyed by base edge) is restored — the field fix
+    ///      (the cross-storey derive cleared an assessor-set riser construction).
+    ///   2. a PERIMETER assignment (keyed by `SurfaceRef`) is restored too, and
+    ///      the re-stamp is IDEMPOTENT — the non-regression: the post-derive
+    ///      re-stamp doesn't clobber a correct perimeter/split-flank construction.
+    ///   3. a wall the derive buried (`WallExposure::InterStorey`) is SPARED —
+    ///      the guard keeps stale fabric off an out-of-scope junction band.
+    #[test]
+    fn stamp_wall_constructions_restores_riser_and_perimeter_but_spares_interstorey() {
+        use ber_model::ber::structural::{ConstructionMakeup, WallConstructionType};
+        let mut doc = square_doc(&[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(4.0, 0.0),
+            Point2f32::new(4.0, 4.0),
+            Point2f32::new(0.0, 4.0),
+        ]);
+        let steps = vec![crate::StepRegion {
+            polygon: vec![
+                Point2f32::new(0.0, 0.0),
+                Point2f32::new(2.0, 0.0),
+                Point2f32::new(2.0, 4.0),
+                Point2f32::new(0.0, 4.0),
+            ],
+            level_m: -0.3,
+        }];
+        let on_step_line = |r: &ber_model::ber::structural::WallRegion| {
+            let e = &r.polygon.exterior;
+            (e[0].x - 2.0).abs() < 1e-6 && (e[1].x - 2.0).abs() < 1e-6
+        };
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &[]);
+        ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &steps, &[]);
+
+        // Locate the RISER (on the step line) and a PERIMETER wall (base
+        // midpoint carries a SurfaceRef, NOT on the step line).
+        let riser_idx = ber.storeys[0]
+            .walls
+            .regions
+            .iter()
+            .position(on_step_line)
+            .expect("a riser resolves on the step line");
+        let plan = &doc.outline.floor_plan;
+        let (perim_idx, perim_ref) = ber.storeys[0]
+            .walls
+            .regions
+            .iter()
+            .enumerate()
+            .find_map(|(i, r)| {
+                if on_step_line(r) {
+                    return None;
+                }
+                let (e0, e1) = r.base_edge()?;
+                let mid =
+                    Point2f32::new(((e0.x + e1.x) * 0.5) as f32, ((e0.y + e1.y) * 0.5) as f32);
+                plan.surface_ref_at(mid, 0.05).map(|sref| (i, sref))
+            })
+            .expect("a perimeter wall carries a SurfaceRef");
+
+        // Durable assignments: Timber onto the riser (base-edge key), Cavity
+        // onto the perimeter wall (SurfaceRef key).
+        let (re0, re1) = ber.storeys[0].walls.regions[riser_idx].base_edge().unwrap();
+        let rkey = crate::riser_key(Point2f64::new(re0.x, re0.y), Point2f64::new(re1.x, re1.y));
+        doc.riser_constructions.insert(
+            rkey,
+            (
+                WallConstructionType::TimberConstruction,
+                ConstructionMakeup::Default,
+                ConstructionPhase::default(),
+                None,
+            ),
+        );
+        doc.wall_constructions.insert(
+            perim_ref,
+            (
+                WallConstructionType::CavityWall,
+                ConstructionMakeup::Default,
+                ConstructionPhase::default(),
+                None,
+            ),
+        );
+
+        // Simulate the cross-storey derive resetting EVERY wall to the default
+        // (Uninitialised) fabric, then run the post-derive re-stamp.
+        let def = ber.ensure_wall_construction(
+            WallConstructionType::default(),
+            ConstructionMakeup::default(),
+            ConstructionPhase::default(),
+        );
+        for r in &mut ber.storeys[0].walls.regions {
+            r.construction_id = def;
+        }
+        let ty = |ber: &Ber, i: usize| {
+            ber.wall_construction(ber.storeys[0].walls.regions[i].construction_id)
+                .unwrap()
+                .construction_type
+        };
+        crate::phase::stamp_wall_constructions(&mut ber, 0, &doc);
+        assert_eq!(
+            ty(&ber, riser_idx),
+            WallConstructionType::TimberConstruction,
+            "(1) the riser construction is restored after the derive reset"
+        );
+        assert_eq!(
+            ty(&ber, perim_idx),
+            WallConstructionType::CavityWall,
+            "(2) the perimeter construction is restored after the derive reset"
+        );
+
+        // Idempotent: a second re-stamp keeps both — no clobber.
+        let (rcid, pcid) = (
+            ber.storeys[0].walls.regions[riser_idx].construction_id,
+            ber.storeys[0].walls.regions[perim_idx].construction_id,
+        );
+        crate::phase::stamp_wall_constructions(&mut ber, 0, &doc);
+        assert_eq!(
+            ber.storeys[0].walls.regions[riser_idx].construction_id, rcid,
+            "the re-stamp is idempotent on the riser"
+        );
+        assert_eq!(
+            ber.storeys[0].walls.regions[perim_idx].construction_id, pcid,
+            "the re-stamp is idempotent on the perimeter wall"
+        );
+
+        // (3) The derive buries the riser (InterStorey) and resets its fabric;
+        // the re-stamp must SPARE it — no stale Timber onto a now-buried band.
+        // The perimeter wall (still in scope) is restored as before.
+        ber.storeys[0].walls.regions[riser_idx].exposure =
+            ber_model::ber::structural::WallExposure::InterStorey;
+        ber.storeys[0].walls.regions[riser_idx].construction_id = def;
+        crate::phase::stamp_wall_constructions(&mut ber, 0, &doc);
+        assert_eq!(
+            ty(&ber, riser_idx),
+            WallConstructionType::Uninitialised,
+            "(3) the buried InterStorey riser is spared — no stale fabric re-applied"
+        );
+        assert_eq!(
+            ty(&ber, perim_idx),
+            WallConstructionType::CavityWall,
+            "the in-scope perimeter wall is still restored alongside"
+        );
+    }
+
     /// A floor/ceiling horizontal-exposure override in the durable
     /// `floor_exposure`/`ceiling_exposure` tables (keyed by region centroid) is
     /// stamped onto the resolved `FloorRegion.exposure`/`CeilingRegion.exposure`
