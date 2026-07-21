@@ -83,6 +83,8 @@ impl ObjectCategory {
                 ObjectKind::Fan(FanType::Supply),
                 ObjectKind::Fan(FanType::Decentralized),
                 ObjectKind::Fan(FanType::Central),
+                ObjectKind::VentilationUnit(VentUnitKind::Mechanical),
+                ObjectKind::VentilationUnit(VentUnitKind::HeatRecovery),
             ],
             ObjectCategory::Light => vec![
                 ObjectKind::Light(LightKind::Led),
@@ -177,6 +179,16 @@ pub enum BoilerFuel {
     HeatPump,
 }
 
+/// The type of a whole-dwelling mechanical ventilation unit (the "dropdown"
+/// when placing a VentilationUnit object).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VentUnitKind {
+    /// Mechanical extract ventilation (MEV) — continuous extract, no heat recovery.
+    Mechanical,
+    /// Mechanical ventilation with heat recovery (MVHR).
+    HeatRecovery,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CylinderKind {
     Standard,
@@ -236,6 +248,13 @@ pub enum ObjectKind {
     /// An electric PANEL HEATER (a primary electric heat source). Groups under
     /// [`ObjectCategory::HeatingSystem`]; drives an `ElectricHeater` primary.
     PanelHeater,
+    /// A whole-house MECHANICAL VENTILATION unit (MEV / MVHR). Drives
+    /// [`ventilation_system.system_type`](crate::ber::systems::VentilationSystem)
+    /// via [`Ber::sync_ventilation_system_from_objects`](crate::ber::ber_struct::Ber::sync_ventilation_system_from_objects).
+    /// The pre-existing [`FanType::Central`] overlaps physically (also a
+    /// whole-dwelling unit) but does NOT drive the system type — it stays a
+    /// plain fan record.
+    VentilationUnit(VentUnitKind),
     Other(String),
 }
 
@@ -265,6 +284,7 @@ impl ObjectKind {
             | ObjectKind::Light(_)
             | ObjectKind::Radiator(_)
             | ObjectKind::PanelHeater
+            | ObjectKind::VentilationUnit(_)
             | ObjectKind::AtticHatch(_) => FirstInstanceRequired,
             // Free-text "Other" never forces a photo.
             ObjectKind::Other(_) => Optional,
@@ -296,7 +316,9 @@ impl ObjectKind {
     pub fn category(&self) -> ObjectCategory {
         match self {
             ObjectKind::Vent(_) => ObjectCategory::Vent,
-            ObjectKind::Fan(_) => ObjectCategory::Fan,
+            // A whole-house mechanical unit sits with the fans (it overlaps the
+            // Central fan physically); only VentilationUnit drives the system.
+            ObjectKind::Fan(_) | ObjectKind::VentilationUnit(_) => ObjectCategory::Fan,
             ObjectKind::Light(_) => ObjectCategory::Light,
             ObjectKind::Radiator(_) => ObjectCategory::Radiator,
             // Boiler + the heating controls all group under Heating system.
@@ -325,6 +347,8 @@ impl ObjectKind {
             ObjectKind::Fan(FanType::Supply) => "Supply",
             ObjectKind::Fan(FanType::Decentralized) => "Decentralized",
             ObjectKind::Fan(FanType::Central) => "Central unit",
+            ObjectKind::VentilationUnit(VentUnitKind::Mechanical) => "Mechanical extract (MEV)",
+            ObjectKind::VentilationUnit(VentUnitKind::HeatRecovery) => "Heat recovery (MVHR)",
             ObjectKind::Light(LightKind::Led) => "LED",
             ObjectKind::Light(LightKind::Halogen) => "Halogen",
             ObjectKind::Light(LightKind::Incandescent) => "Incandescent",
@@ -368,7 +392,8 @@ impl ObjectKind {
             | ObjectKind::WeatherCompensation
             | ObjectKind::Programmer
             | ObjectKind::HeatingZones
-            | ObjectKind::PanelHeater => self.subtype_label().to_string(),
+            | ObjectKind::PanelHeater
+            | ObjectKind::VentilationUnit(_) => self.subtype_label().to_string(),
             ObjectKind::Other(s) if !s.trim().is_empty() => s.clone(),
             ObjectKind::Other(_) => "Other".to_string(),
             _ => format!("{cat} ({})", self.subtype_label()),

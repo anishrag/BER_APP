@@ -454,6 +454,31 @@ impl Ber {
         self.heating_system.separate_hot_water = separate_hw;
     }
 
+    /// Reflect placed centralised ventilation units into `ventilation_system`.
+    /// Deterministic and idempotent: a unit present sets the mechanical type
+    /// (MVHR wins over MEV if both are placed); no unit → Natural. Fired by the
+    /// shell on object add/remove.
+    pub fn sync_ventilation_system_from_objects(&mut self) {
+        use crate::ber::objects::{ObjectKind, VentUnitKind};
+        use crate::ber::systems::VentilationSystemType;
+
+        let (mut mev, mut mvhr) = (false, false);
+        for obj in self.object_rooms_iter().flat_map(|r| r.objects.iter()) {
+            match obj.kind {
+                ObjectKind::VentilationUnit(VentUnitKind::HeatRecovery) => mvhr = true,
+                ObjectKind::VentilationUnit(VentUnitKind::Mechanical) => mev = true,
+                _ => {}
+            }
+        }
+        self.ventilation_system.system_type = if mvhr {
+            VentilationSystemType::MechanicalWithHeatRecovery
+        } else if mev {
+            VentilationSystemType::Mechanical
+        } else {
+            VentilationSystemType::Natural
+        };
+    }
+
     /// Whether `side`'s external photo is DEFERRED to the end of the
     /// assessment. `Front` is never deferred
     /// ([`ExternalSide::photo_deferrable`]) — a rogue stored `Front` entry is
@@ -1953,5 +1978,120 @@ mod tests {
             first.separate_hot_water,
             ber.heating_system.separate_hot_water
         );
+    }
+
+    // ---- Ventilation-system sync from placed objects ----
+
+    #[test]
+    fn vent_sync_no_unit_is_natural() {
+        use crate::ber::objects::{BoilerFuel, ObjectKind};
+        use crate::ber::systems::VentilationSystemType;
+        // A dwelling with heat-source objects but no ventilation unit → Natural.
+        let mut ber = ber_with_objects(vec![obj(ObjectKind::Boiler(BoilerFuel::Gas))]);
+        ber.sync_ventilation_system_from_objects();
+        assert!(matches!(
+            ber.ventilation_system.system_type,
+            VentilationSystemType::Natural
+        ));
+    }
+
+    #[test]
+    fn vent_sync_mechanical_unit() {
+        use crate::ber::objects::{ObjectKind, VentUnitKind};
+        use crate::ber::systems::VentilationSystemType;
+        let mut ber = ber_with_objects(vec![obj(ObjectKind::VentilationUnit(
+            VentUnitKind::Mechanical,
+        ))]);
+        ber.sync_ventilation_system_from_objects();
+        assert!(matches!(
+            ber.ventilation_system.system_type,
+            VentilationSystemType::Mechanical
+        ));
+    }
+
+    #[test]
+    fn vent_sync_heat_recovery_unit() {
+        use crate::ber::objects::{ObjectKind, VentUnitKind};
+        use crate::ber::systems::VentilationSystemType;
+        let mut ber = ber_with_objects(vec![obj(ObjectKind::VentilationUnit(
+            VentUnitKind::HeatRecovery,
+        ))]);
+        ber.sync_ventilation_system_from_objects();
+        assert!(matches!(
+            ber.ventilation_system.system_type,
+            VentilationSystemType::MechanicalWithHeatRecovery
+        ));
+    }
+
+    #[test]
+    fn vent_sync_mvhr_wins_over_mev() {
+        use crate::ber::objects::{ObjectKind, VentUnitKind};
+        use crate::ber::systems::VentilationSystemType;
+        let mut ber = ber_with_objects(vec![
+            obj(ObjectKind::VentilationUnit(VentUnitKind::Mechanical)),
+            obj(ObjectKind::VentilationUnit(VentUnitKind::HeatRecovery)),
+        ]);
+        ber.sync_ventilation_system_from_objects();
+        assert!(matches!(
+            ber.ventilation_system.system_type,
+            VentilationSystemType::MechanicalWithHeatRecovery
+        ));
+    }
+
+    #[test]
+    fn vent_sync_reverts_to_natural_when_unit_removed() {
+        use crate::ber::objects::{ObjectKind, VentUnitKind};
+        use crate::ber::systems::VentilationSystemType;
+        let mut ber = ber_with_objects(vec![obj(ObjectKind::VentilationUnit(
+            VentUnitKind::HeatRecovery,
+        ))]);
+        ber.sync_ventilation_system_from_objects();
+        assert!(matches!(
+            ber.ventilation_system.system_type,
+            VentilationSystemType::MechanicalWithHeatRecovery
+        ));
+        // Remove the unit → re-derivation lands back on Natural.
+        ber.attic_room.as_mut().unwrap().objects.clear();
+        ber.sync_ventilation_system_from_objects();
+        assert!(matches!(
+            ber.ventilation_system.system_type,
+            VentilationSystemType::Natural
+        ));
+    }
+
+    #[test]
+    fn vent_sync_is_idempotent() {
+        use crate::ber::objects::{ObjectKind, VentUnitKind};
+        use crate::ber::systems::VentilationSystemType;
+        let mut ber = ber_with_objects(vec![obj(ObjectKind::VentilationUnit(
+            VentUnitKind::Mechanical,
+        ))]);
+        ber.sync_ventilation_system_from_objects();
+        ber.sync_ventilation_system_from_objects();
+        assert!(matches!(
+            ber.ventilation_system.system_type,
+            VentilationSystemType::Mechanical
+        ));
+    }
+
+    /// Back-compat: a `ventilation_system` blob saved before the object-driven
+    /// wiring (no unit placed) still loads, and a sync yields Natural.
+    #[test]
+    fn legacy_ventilation_json_loads_and_syncs_natural() {
+        use crate::ber::systems::{VentilationSystem, VentilationSystemType};
+        let vs: VentilationSystem = serde_json::from_str(
+            r#"{"id":"00000000-0000-0000-0000-000000000000","system_type":"Natural","description":null}"#,
+        )
+        .expect("legacy VentilationSystem loads");
+        assert!(matches!(vs.system_type, VentilationSystemType::Natural));
+
+        // No unit objects → sync resolves to Natural.
+        let mut ber = ber_with_objects(vec![]);
+        ber.ventilation_system = vs;
+        ber.sync_ventilation_system_from_objects();
+        assert!(matches!(
+            ber.ventilation_system.system_type,
+            VentilationSystemType::Natural
+        ));
     }
 }

@@ -25798,3 +25798,48 @@ fn multiple_sources_prompt_primary_pick_and_preserve() {
         "the chosen primary survives a later object add",
     );
 }
+
+/// Placing a heat-recovery ventilation unit drives `ventilation_system` live;
+/// deleting it reverts to `Natural`. The controller resyncs on every add/remove.
+#[test]
+fn vent_unit_add_sets_system_type_delete_reverts() {
+    use ber_model::ber::objects::{ObjectKind, VentUnitKind};
+    use ber_model::ber::systems::VentilationSystemType;
+
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    c.objects_pointer_down(2.0, 2.0, 0.5);
+    let room = c.active_object_room().expect("a room opened");
+    c.add_object(
+        ObjectKind::VentilationUnit(VentUnitKind::HeatRecovery),
+        1,
+        None,
+        Vec::new(),
+    );
+    assert!(
+        matches!(
+            c.current_record
+                .as_ref()
+                .unwrap()
+                .data
+                .ventilation_system
+                .system_type,
+            VentilationSystemType::MechanicalWithHeatRecovery
+        ),
+        "adding an MVHR unit sets the mechanical-with-heat-recovery type",
+    );
+    let object_id = c.active_object_room_view().unwrap().objects[0].id;
+    c.delete_object(room, object_id);
+    assert!(
+        matches!(
+            c.current_record
+                .as_ref()
+                .unwrap()
+                .data
+                .ventilation_system
+                .system_type,
+            VentilationSystemType::Natural
+        ),
+        "removing the ventilation unit reverts to Natural",
+    );
+}

@@ -340,6 +340,7 @@ impl AppController {
             let new_id = obj.id;
             room.objects.push(obj);
             self.resync_heating_from_objects();
+            self.resync_ventilation_from_objects();
             // A recorded HeatingZones object raises the "how many zones?"
             // numeric prompt (item 3) — its answer lands in `controls.zones`.
             if is_zones {
@@ -359,6 +360,15 @@ impl AppController {
         }
     }
 
+    /// Reflect placed centralised ventilation units into the BER's
+    /// `ventilation_system` (see [`Ber::sync_ventilation_system_from_objects`]).
+    /// Fully deterministic re-derivation — called after any object add/remove.
+    fn resync_ventilation_from_objects(&mut self) {
+        if let Some(record) = self.current_record.as_mut() {
+            record.data.sync_ventilation_system_from_objects();
+        }
+    }
+
     /// Delete one object from a room (the Delete panel).
     pub fn delete_object(&mut self, room_id: ItemId, object_id: ItemId) {
         let snap = self.current_history_snapshot();
@@ -367,6 +377,7 @@ impl AppController {
             room.objects.retain(|o| o.id != object_id);
             if room.objects.len() != before {
                 self.resync_heating_from_objects();
+                self.resync_ventilation_from_objects();
                 self.reset_zones_if_no_heating_zones();
                 let _ = self.mark_dirty();
                 self.push_history_snapshot(snap);
@@ -402,6 +413,7 @@ impl AppController {
                 self.active_object_room = None;
             }
             self.resync_heating_from_objects();
+            self.resync_ventilation_from_objects();
             self.reset_zones_if_no_heating_zones();
             let _ = self.mark_dirty();
             self.push_history_snapshot(snap);
