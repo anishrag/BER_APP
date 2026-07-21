@@ -295,6 +295,8 @@ pub struct SketchState {
     pub object_count_input: String,
     pub object_note_input: String,
     pub object_other_name: String,
+    /// Zone-count entry buffer for the "how many heating zones?" prompt (item 3).
+    pub zone_input: String,
     /// Photos captured for the object being added, buffered PER KIND: OK for a
     /// kind commits (and clears) only that kind's buffer; switching kind parks
     /// the previous kind's photos — never dropped, never leaked into another
@@ -1494,6 +1496,7 @@ impl eframe::App for BerApp {
                                 active_object_room,
                                 object_review_view,
                                 objects_present,
+                                heating_zones_prompt_open,
                             ) = {
                                 let c = self.app_controller.borrow();
                                 if c.current_phase() == AssessmentPhase::Objects {
@@ -1508,9 +1511,10 @@ impl eframe::App for BerApp {
                                         c.active_object_room_view(),
                                         rv,
                                         c.has_object_rooms(),
+                                        c.heating_zones_prompt_open(),
                                     )
                                 } else {
-                                    (Vec::new(), Vec::new(), None, None, false)
+                                    (Vec::new(), Vec::new(), None, None, false, false)
                                 }
                             };
                             // Object kinds already recorded house-wide — lets the
@@ -1882,6 +1886,8 @@ impl eframe::App for BerApp {
                                 object_note_input: &mut self.sketch_state.object_note_input,
                                 object_other_name: &mut self.sketch_state.object_other_name,
                                 object_pending_photos: &mut self.sketch_state.object_pending_photos,
+                                heating_zones_prompt_open,
+                                zone_input: &mut self.sketch_state.zone_input,
                                 object_recorded_kinds: &object_recorded_kinds,
                                 object_auto_photo_for: &mut self.sketch_state.object_auto_photo_for,
                                 photo_annotator: &mut self.sketch_state.photo_annotator,
@@ -2900,6 +2906,29 @@ impl eframe::App for BerApp {
                                         }
                                         SketchEvent::DeleteObjectRoom(room) => {
                                             controller.borrow_mut().delete_object_room(room);
+                                        }
+                                        SketchEvent::SetObjectSeparateHwControl {
+                                            room,
+                                            object,
+                                            on,
+                                        } => {
+                                            controller
+                                                .borrow_mut()
+                                                .set_object_separate_hw_control(room, object, on);
+                                        }
+                                        SketchEvent::AssignHeatingZones(count) => {
+                                            controller.borrow_mut().confirm_heating_zones(count);
+                                        }
+                                        SketchEvent::CancelHeatingZones => {
+                                            controller.borrow_mut().cancel_heating_zones();
+                                        }
+                                        SketchEvent::AnswerPanelHeaterPrimary(yes) => {
+                                            controller
+                                                .borrow_mut()
+                                                .answer_panel_heater_primary(yes);
+                                        }
+                                        SketchEvent::PickPrimaryHeatSource(ty) => {
+                                            controller.borrow_mut().pick_primary_heat_source(ty);
                                         }
                                         SketchEvent::OpenObjectReview => {
                                             controller.borrow_mut().set_object_review_mode(true);

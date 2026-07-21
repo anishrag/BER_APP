@@ -871,6 +871,36 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         return;
     }
 
+    // ── Heating zones count (raised when a HeatingZones object is recorded) ──
+    if view.heating_zones_prompt_open {
+        let actions = vec![
+            Action::new("Set", "Record the number of heating zones", |v| {
+                SketchEvent::AssignHeatingZones(v.round().max(1.0) as u32)
+            })
+            .primary(),
+            Action::new("Skip", "Don't record a zone count", |_| {
+                SketchEvent::CancelHeatingZones
+            })
+            .bare(),
+        ];
+        show_box(
+            ctx,
+            rect,
+            "How many heating zones?",
+            None,
+            "e.g. 2",
+            None,
+            view.zone_input,
+            &actions,
+            &mut view.cat_state.input_mode,
+            &mut view.cat_state.input_mode_pinned,
+            view.laser,
+            None,
+            on_event,
+        );
+        return;
+    }
+
     // ── Thickness (new-storey flow's first stage) ───────────────────────────
     if view
         .new_storey_prompt

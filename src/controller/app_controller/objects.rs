@@ -8,6 +8,7 @@
 use super::*;
 use ber_model::ber::common::Evidence;
 use ber_model::ber::objects::{BuildingObject, ObjectCategory, ObjectKind, ObjectRoom};
+use ber_model::ber::systems::HeatingSystemType;
 use domain::points::Point2f32;
 
 /// A room pin for the plan overlay: where it is, its name, how many objects it
@@ -30,6 +31,13 @@ pub struct ObjectRowView {
     pub label: String,
     pub count: u32,
     pub photo_count: usize,
+    /// The object's kind — the pin dropdown shows the "separate control for
+    /// water & space" checkbox only on `Boiler`/`Programmer` rows.
+    pub kind: ObjectKind,
+    /// The "separate time/temperature control for water and space" flag
+    /// ([`BuildingObject::separate_hw_control`]); meaningful for Boiler /
+    /// Programmer, drives `HeatingSystem.separate_hot_water`.
+    pub separate_hw_control: bool,
 }
 
 /// The open room's details for the entry panel: its name, the objects recorded
@@ -80,6 +88,18 @@ pub struct ObjectReviewView {
     /// but hasn't recorded an attic object yet — blocks the confirm alongside
     /// [`unresolved_present`](Self::unresolved_present).
     pub attic_unresolved: bool,
+    /// Item 6 gate: no primary heat source is placed (no boiler AND no panel
+    /// heater). Blocks the confirm — the review shows "add the main heat
+    /// source" until one exists.
+    pub heating_source_missing: bool,
+    /// Item 4: the "is the house heated by panel heaters?" question is pending
+    /// (a panel heater but no boiler, unanswered this review). Blocks the
+    /// confirm until answered.
+    pub panel_heater_prompt: bool,
+    /// Item 5: the distinct primary heat-source candidates to pick between when
+    /// ≥2 are present and none has been chosen this review. Empty when there's
+    /// nothing to ask; while non-empty it blocks the confirm.
+    pub primary_pick_options: Vec<HeatingSystemType>,
 }
 
 impl AppController {
@@ -311,11 +331,20 @@ impl AppController {
             .collect();
         let snap = self.current_history_snapshot();
         if let Some(room) = self.object_room_mut(room_id) {
+            // Whether this is a HeatingZones record — captured before `kind` is
+            // moved so the zone-count prompt can be raised after the push.
+            let is_zones = matches!(kind, ObjectKind::HeatingZones);
             let mut obj = BuildingObject::new(kind, count);
             obj.note = note.filter(|s| !s.trim().is_empty());
             obj.photos = stored;
+            let new_id = obj.id;
             room.objects.push(obj);
             self.resync_heating_from_objects();
+            // A recorded HeatingZones object raises the "how many zones?"
+            // numeric prompt (item 3) — its answer lands in `controls.zones`.
+            if is_zones {
+                self.zone_prompt = Some(new_id);
+            }
             let _ = self.mark_dirty();
             self.push_history_snapshot(snap);
         }
@@ -338,6 +367,7 @@ impl AppController {
             room.objects.retain(|o| o.id != object_id);
             if room.objects.len() != before {
                 self.resync_heating_from_objects();
+                self.reset_zones_if_no_heating_zones();
                 let _ = self.mark_dirty();
                 self.push_history_snapshot(snap);
             }
@@ -372,6 +402,7 @@ impl AppController {
                 self.active_object_room = None;
             }
             self.resync_heating_from_objects();
+            self.reset_zones_if_no_heating_zones();
             let _ = self.mark_dirty();
             self.push_history_snapshot(snap);
         }
@@ -449,6 +480,8 @@ impl AppController {
                     label: o.kind.label(),
                     count: o.count,
                     photo_count: o.photos.len(),
+                    kind: o.kind.clone(),
+                    separate_hw_control: o.separate_hw_control,
                 })
                 .collect(),
             categories_present: room.categories_present(),
@@ -519,6 +552,9 @@ impl AppController {
             self.object_review_selected = 0;
             self.object_review_skipped.clear();
             self.object_review_attic_skipped = false;
+            // Re-offer the heating stage questions (items 4/5) each review.
+            self.panel_heater_asked = false;
+            self.heating_primary_asked = false;
             self.reset_view();
         }
     }
@@ -607,7 +643,10 @@ impl AppController {
     /// promised item must be added first (the UI disables the button too;
     /// this is the authoritative guard).
     pub fn confirm_objects_review(&mut self) {
-        if !self.unresolved_present_categories().is_empty() || self.attic_unresolved() {
+        if !self.unresolved_present_categories().is_empty()
+            || self.attic_unresolved()
+            || !self.heating_stage_ready()
+        {
             return;
         }
         if let Some(record) = self.current_record.as_mut() {
@@ -668,7 +707,153 @@ impl AppController {
             unresolved_present: self.unresolved_present_categories(),
             attic_prompt,
             attic_unresolved: self.attic_unresolved(),
+            heating_source_missing: self.heating_source_missing(),
+            panel_heater_prompt: self.panel_heater_prompt_pending(),
+            primary_pick_options: self.primary_pick_options(),
         })
+    }
+
+    // ── Heating-system wiring (items 2–6) ───────────────────────────────────
+
+    /// Set the "separate control for water & space" flag
+    /// ([`BuildingObject::separate_hw_control`]) on one object — a Boiler or
+    /// Programmer — and re-derive `heating_system` (item 2). The model owns the
+    /// derivation ([`Ber::sync_heating_system_from_objects`]); the controller
+    /// just flips the flag and sequences.
+    pub fn set_object_separate_hw_control(&mut self, room_id: ItemId, object_id: ItemId, on: bool) {
+        let snap = self.current_history_snapshot();
+        let mut changed = false;
+        if let Some(room) = self.object_room_mut(room_id) {
+            if let Some(obj) = room.objects.iter_mut().find(|o| o.id == object_id) {
+                if obj.separate_hw_control != on {
+                    obj.separate_hw_control = on;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.resync_heating_from_objects();
+            let _ = self.mark_dirty();
+            self.push_history_snapshot(snap);
+        }
+    }
+
+    /// Whether the "how many heating zones?" numeric prompt is open — raised
+    /// when a `HeatingZones` object is recorded (item 3). The number box reads
+    /// this.
+    pub fn heating_zones_prompt_open(&self) -> bool {
+        self.zone_prompt.is_some()
+    }
+
+    /// Record the zone count from the prompt into `heating_system.controls.zones`
+    /// (the sync deliberately doesn't own this field) and close the prompt.
+    /// Clamped to ≥1 — the prompt only opens once a zones object exists.
+    pub fn confirm_heating_zones(&mut self, count: u32) {
+        self.zone_prompt = None;
+        if let Some(record) = self.current_record.as_mut() {
+            record.data.heating_system.controls.zones = count.max(1);
+            let _ = self.mark_dirty();
+        }
+    }
+
+    /// Dismiss the heating-zones prompt without recording a count (leaves
+    /// `controls.zones` unchanged).
+    pub fn cancel_heating_zones(&mut self) {
+        self.zone_prompt = None;
+    }
+
+    /// After a heating-object removal, zero `controls.zones` once the LAST
+    /// `HeatingZones` object is gone — the sync doesn't own this field, so the
+    /// controller clears it here (item 3). No-op while any zones object remains.
+    fn reset_zones_if_no_heating_zones(&mut self) {
+        if !self.has_object_kind(|k| matches!(k, ObjectKind::HeatingZones)) {
+            if let Some(record) = self.current_record.as_mut() {
+                record.data.heating_system.controls.zones = 0;
+            }
+            self.zone_prompt = None;
+        }
+    }
+
+    /// Whether any recorded object (house-wide, attic included) matches `pred`.
+    fn has_object_kind(&self, pred: impl Fn(&ObjectKind) -> bool) -> bool {
+        self.current_record.as_ref().is_some_and(|r| {
+            r.data
+                .object_rooms_iter()
+                .flat_map(|room| room.objects.iter())
+                .any(|o| pred(&o.kind))
+        })
+    }
+
+    /// Item 6 gate: no primary heat source placed (no boiler AND no panel
+    /// heater). A chimney is secondary-only, so a chimney-only house still hits
+    /// this. `false` when no record is loaded (nothing to gate).
+    pub fn heating_source_missing(&self) -> bool {
+        self.current_record.is_some()
+            && !self.has_object_kind(|k| matches!(k, ObjectKind::Boiler(_)))
+            && !self.has_object_kind(|k| matches!(k, ObjectKind::PanelHeater))
+    }
+
+    /// Item 4: the "is the house heated by panel heaters?" question is pending —
+    /// a panel heater is placed with no boiler, unanswered this review. (The
+    /// sync provisionally makes a lone panel the electric primary; this question
+    /// confirms it — "no" leaves the panel as a secondary source.)
+    pub fn panel_heater_prompt_pending(&self) -> bool {
+        !self.panel_heater_asked
+            && self.has_object_kind(|k| matches!(k, ObjectKind::PanelHeater))
+            && !self.has_object_kind(|k| matches!(k, ObjectKind::Boiler(_)))
+    }
+
+    /// Answer the panel-heater question (item 4). "Yes" makes the electric panel
+    /// the primary (`ElectricHeater`, which the sync then preserves); "No"
+    /// leaves it as secondary. Either way the question is done for this review.
+    pub fn answer_panel_heater_primary(&mut self, yes: bool) {
+        self.panel_heater_asked = true;
+        if yes {
+            if let Some(record) = self.current_record.as_mut() {
+                record.data.heating_system.system_type = HeatingSystemType::ElectricHeater;
+                record.data.sync_heating_system_from_objects();
+                let _ = self.mark_dirty();
+            }
+        }
+    }
+
+    /// Item 5: the distinct primary heat-source candidates to choose between —
+    /// non-empty only when ≥2 are present and the assessor hasn't picked one
+    /// this review. Empty otherwise (no prompt).
+    pub fn primary_pick_options(&self) -> Vec<HeatingSystemType> {
+        if self.heating_primary_asked {
+            return Vec::new();
+        }
+        let Some(record) = self.current_record.as_ref() else {
+            return Vec::new();
+        };
+        let candidates = record.data.heating_source_candidates();
+        if candidates.len() >= 2 {
+            candidates
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Choose the primary heat source (item 5): set `system_type` to `ty` (the
+    /// sync preserves it and files the rest under `secondary_heating`) and mark
+    /// the pick done for this review.
+    pub fn pick_primary_heat_source(&mut self, ty: HeatingSystemType) {
+        self.heating_primary_asked = true;
+        if let Some(record) = self.current_record.as_mut() {
+            record.data.heating_system.system_type = ty;
+            record.data.sync_heating_system_from_objects();
+            let _ = self.mark_dirty();
+        }
+    }
+
+    /// Whether the heating stage is resolved enough to finish the Objects review:
+    /// a primary source exists (item 6) and the panel-heater / primary-pick
+    /// questions (items 4/5) are answered.
+    pub fn heating_stage_ready(&self) -> bool {
+        !self.heating_source_missing()
+            && !self.panel_heater_prompt_pending()
+            && self.primary_pick_options().is_empty()
     }
 }
 

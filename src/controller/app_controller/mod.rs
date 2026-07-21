@@ -422,6 +422,16 @@ pub struct AppController {
     /// Cleared each time the review opens; a "No, empty" persists on the
     /// record instead (`Ber.attic_no_items_confirmed`).
     object_review_attic_skipped: bool,
+    /// Phase-3 heating: the `HeatingZones` object awaiting its zone-count entry
+    /// (item 3). `Some` raises the "how many zones?" number box; the answer
+    /// lands in `heating_system.controls.zones`. Transient.
+    zone_prompt: Option<ItemId>,
+    /// Session flag: the "is the house heated by panel heaters?" question (item
+    /// 4) was answered this Objects review. Reset when the review opens.
+    panel_heater_asked: bool,
+    /// Session flag: the "which is the primary heat source?" pick (item 5) was
+    /// answered this Objects review. Reset when the review opens.
+    heating_primary_asked: bool,
     /// Phase-4 north-align: the satellite IMAGE's transient pan offset (canvas
     /// px) and zoom over the fixed plan. The image's ROTATION is the persisted
     /// `orientation_deg` (the plan's north). Pan/zoom are session-only.
@@ -807,6 +817,9 @@ impl AppController {
             object_review_selected: 0,
             object_review_skipped: std::collections::HashSet::new(),
             object_review_attic_skipped: false,
+            zone_prompt: None,
+            panel_heater_asked: false,
+            heating_primary_asked: false,
             north_img_offset: (0.0, 0.0),
             north_img_zoom: 1.0,
             show_ber_complete: false,

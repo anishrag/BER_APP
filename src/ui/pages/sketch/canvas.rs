@@ -5134,6 +5134,28 @@ fn object_pin_dropdown<F: FnMut(UiEvent)>(
                                 },
                             );
                         });
+                        // "Separate control for water & space" — shown only on
+                        // Boiler / Programmer rows; drives `separate_hot_water`.
+                        use ber_model::ber::objects::ObjectKind;
+                        if matches!(o.kind, ObjectKind::Boiler(_) | ObjectKind::Programmer) {
+                            let mut on = o.separate_hw_control;
+                            if ui
+                                .checkbox(
+                                    &mut on,
+                                    egui::RichText::new("Separate control for water & space")
+                                        .size(11.0),
+                                )
+                                .changed()
+                            {
+                                on_event(UiEvent::Sketch(
+                                    SketchEvent::SetObjectSeparateHwControl {
+                                        room: room.id,
+                                        object: o.id,
+                                        on,
+                                    },
+                                ));
+                            }
+                        }
                     }
                 }
             });
@@ -5443,8 +5465,14 @@ fn object_review_overlay<F: FnMut(UiEvent)>(
                 ui.separator();
                 // Confirm is blocked while a category flagged "there is one"
                 // — or the attic flagged as holding something — still has no
-                // recorded object (the controller refuses too).
-                let confirmable = orv.unresolved_present.is_empty() && !orv.attic_unresolved;
+                // recorded object, or the heating stage isn't resolved (no
+                // primary heat source / unanswered heating questions). The
+                // controller refuses too.
+                let confirmable = orv.unresolved_present.is_empty()
+                    && !orv.attic_unresolved
+                    && !orv.heating_source_missing
+                    && !orv.panel_heater_prompt
+                    && orv.primary_pick_options.is_empty();
                 if ui
                     .add_enabled(
                         confirmable,
@@ -5601,7 +5629,70 @@ fn object_review_overlay<F: FnMut(UiEvent)>(
                     .color(egui::Color32::from_rgb(220, 160, 80)),
             );
         }
+        // ── Heating stage (items 4/5/6) ──
+        // Item 6: no primary heat source placed — blocks finishing.
+        if orv.heating_source_missing {
+            ui.separator();
+            ui.label(
+                egui::RichText::new(
+                    "Add the main heat source (boiler or panel heater) before continuing",
+                )
+                .strong()
+                .color(egui::Color32::from_rgb(220, 160, 80)),
+            );
+        }
+        // Item 4: electric panel heater but no boiler — is it the primary?
+        if orv.panel_heater_prompt {
+            ui.separator();
+            ui.label(
+                egui::RichText::new("Is the house heated by panel heaters?")
+                    .strong()
+                    .size(15.0),
+            );
+            ui.horizontal(|ui| {
+                if ui.button("Yes — main heating").clicked() {
+                    on_event(UiEvent::Sketch(SketchEvent::AnswerPanelHeaterPrimary(true)));
+                }
+                if ui.button("No — secondary only").clicked() {
+                    on_event(UiEvent::Sketch(SketchEvent::AnswerPanelHeaterPrimary(
+                        false,
+                    )));
+                }
+            });
+        }
+        // Item 5: several primary heat sources present — which is the main one?
+        if !orv.primary_pick_options.is_empty() {
+            ui.separator();
+            ui.label(
+                egui::RichText::new("Which is the primary heat source?")
+                    .strong()
+                    .size(15.0),
+            );
+            ui.horizontal_wrapped(|ui| {
+                for ty in &orv.primary_pick_options {
+                    if ui.button(heating_type_label(ty)).clicked() {
+                        on_event(UiEvent::Sketch(SketchEvent::PickPrimaryHeatSource(
+                            ty.clone(),
+                        )));
+                    }
+                }
+            });
+        }
     });
+}
+
+/// A short display label for a heat-source type — the primary-pick buttons in
+/// the Objects review (item 5).
+fn heating_type_label(ty: &ber_model::ber::systems::HeatingSystemType) -> String {
+    use ber_model::ber::systems::HeatingSystemType as H;
+    match ty {
+        H::GasBoiler => "Gas boiler".to_string(),
+        H::OilBoiler => "Oil boiler".to_string(),
+        H::HeatPump => "Heat pump".to_string(),
+        H::ElectricHeater => "Panel heater".to_string(),
+        H::Other(s) => s.clone(),
+        H::Invalid => "Unknown".to_string(),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

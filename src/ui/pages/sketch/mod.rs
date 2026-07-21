@@ -48,6 +48,7 @@ use ber_model::ber::fenestration::{DoorKind, Frame, Glazing, Overshading, Window
 use ber_model::ber::final_details::{FloorKind, HeatingKind, WallFinish};
 use ber_model::ber::objects::{ObjectCategory, ObjectKind};
 use ber_model::ber::structural::{SurfaceCounts, WallExposure};
+use ber_model::ber::systems::HeatingSystemType;
 use domain::sketch::{DisplayMode, EditTools, SketchMode};
 use manip_plan::CollinearitySuggestion;
 use std::collections::HashSet;
@@ -736,6 +737,22 @@ pub enum SketchEvent {
     },
     /// Delete a whole object room pin (the Delete panel).
     DeleteObjectRoom(ItemId),
+    /// Toggle an object's "separate control for water & space" flag (item 2) —
+    /// shown on Boiler / Programmer rows; re-derives `heating_system`.
+    SetObjectSeparateHwControl {
+        room: ItemId,
+        object: ItemId,
+        on: bool,
+    },
+    /// Record the heating-zone count from the "how many zones?" prompt (item 3).
+    AssignHeatingZones(u32),
+    /// Dismiss the heating-zones prompt without recording a count.
+    CancelHeatingZones,
+    /// Answer the "is the house heated by panel heaters?" question (item 4):
+    /// `true` = yes (electric is primary), `false` = no (panel is secondary).
+    AnswerPanelHeaterPrimary(bool),
+    /// Choose the primary heat source when several are present (item 5).
+    PickPrimaryHeatSource(HeatingSystemType),
     /// Open / close the Objects REVIEW takeover (house-wide counts + 3D hotspots).
     OpenObjectReview,
     CloseObjectReview,
@@ -1596,6 +1613,11 @@ pub struct SketchView<'a> {
     pub object_note_input: &'a mut String,
     pub object_other_name: &'a mut String,
     pub object_pending_photos: &'a mut PendingObjectPhotos,
+    /// Whether the "how many heating zones?" numeric prompt is open (item 3) —
+    /// raised when a `HeatingZones` object is recorded. Read by the number box.
+    pub heating_zones_prompt_open: bool,
+    /// The zone-count entry buffer for that prompt.
+    pub zone_input: &'a mut String,
     /// Object kinds already recorded house-wide — the panel combines this with
     /// each kind's `photo_policy` to decide whether the next instance needs a
     /// photo (drives the auto-camera + OK gate). From `recorded_object_kinds`.

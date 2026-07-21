@@ -18153,9 +18153,16 @@ fn attic_bucket_and_review_question() {
     let mut c = dimensioned_square_controller();
     c.materialize();
 
-    // A normal room first, so the review has content.
+    // A normal room first, so the review has content. A gas boiler gives the
+    // house a primary heat source (else the item-6 heating gate blocks confirm).
     c.objects_pointer_down(2.0, 2.0, 0.5);
     c.add_object(ObjectKind::Thermostat, 1, None, Vec::new());
+    c.add_object(
+        ObjectKind::Boiler(ber_model::ber::objects::BoilerFuel::Gas),
+        1,
+        None,
+        Vec::new(),
+    );
     c.close_object_room();
 
     // Open the attic: created on demand, flagged for the UI, no plan pin and
@@ -25542,4 +25549,252 @@ fn followup_send_completion_lands_on_the_originating_record() {
     );
     // The send handle is consumed.
     assert!(c.followup_send.is_none());
+}
+
+// ── Heating-system wiring (objects → heating_system) ────────────────────────
+
+/// Placing a gas boiler drives `system_type` live (item 1); deleting it reverts
+/// to `Invalid`. The controller resyncs on every add/remove.
+#[test]
+fn gas_boiler_add_sets_system_type_delete_reverts() {
+    use ber_model::ber::objects::{BoilerFuel, ObjectKind};
+    use ber_model::ber::systems::HeatingSystemType;
+
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    c.objects_pointer_down(2.0, 2.0, 0.5);
+    let room = c.active_object_room().expect("a room opened");
+    c.add_object(ObjectKind::Boiler(BoilerFuel::Gas), 1, None, Vec::new());
+    assert_eq!(
+        c.current_record
+            .as_ref()
+            .unwrap()
+            .data
+            .heating_system
+            .system_type,
+        HeatingSystemType::GasBoiler,
+        "adding a gas boiler sets the primary system type",
+    );
+    // The add bumped the revision (persist pipeline picks it up).
+    let object_id = c.active_object_room_view().unwrap().objects[0].id;
+    c.delete_object(room, object_id);
+    assert_eq!(
+        c.current_record
+            .as_ref()
+            .unwrap()
+            .data
+            .heating_system
+            .system_type,
+        HeatingSystemType::Invalid,
+        "removing the only heat source reverts to Invalid",
+    );
+}
+
+/// Toggling a boiler's "separate control for water & space" sets
+/// `heating_system.separate_hot_water` (item 2).
+#[test]
+fn boiler_separate_hw_control_sets_separate_hot_water() {
+    use ber_model::ber::objects::{BoilerFuel, ObjectKind};
+
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    c.objects_pointer_down(2.0, 2.0, 0.5);
+    let room = c.active_object_room().expect("a room opened");
+    c.add_object(ObjectKind::Boiler(BoilerFuel::Gas), 1, None, Vec::new());
+    let object_id = c.active_object_room_view().unwrap().objects[0].id;
+    assert!(
+        !c.current_record
+            .as_ref()
+            .unwrap()
+            .data
+            .heating_system
+            .separate_hot_water,
+        "off by default",
+    );
+    c.set_object_separate_hw_control(room, object_id, true);
+    assert!(
+        c.current_record
+            .as_ref()
+            .unwrap()
+            .data
+            .heating_system
+            .separate_hot_water,
+        "toggling the flag drives separate_hot_water via the sync",
+    );
+    // The row view reflects it.
+    assert!(c.active_object_room_view().unwrap().objects[0].separate_hw_control);
+    c.set_object_separate_hw_control(room, object_id, false);
+    assert!(
+        !c.current_record
+            .as_ref()
+            .unwrap()
+            .data
+            .heating_system
+            .separate_hot_water,
+        "clearing it clears separate_hot_water",
+    );
+}
+
+/// Recording a HeatingZones object opens the zone prompt; confirming a count
+/// sets `controls.zones`, and removing the last HeatingZones clears it (item 3).
+#[test]
+fn heating_zones_prompt_sets_and_removal_clears_zones() {
+    use ber_model::ber::objects::ObjectKind;
+
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    c.objects_pointer_down(2.0, 2.0, 0.5);
+    let room = c.active_object_room().expect("a room opened");
+    c.add_object(ObjectKind::HeatingZones, 1, None, Vec::new());
+    assert!(
+        c.heating_zones_prompt_open(),
+        "zones object raises the prompt"
+    );
+    c.confirm_heating_zones(3);
+    assert!(!c.heating_zones_prompt_open(), "prompt closes on confirm");
+    assert_eq!(
+        c.current_record
+            .as_ref()
+            .unwrap()
+            .data
+            .heating_system
+            .controls
+            .zones,
+        3,
+        "the count lands in controls.zones",
+    );
+    // A later object add/remove must NOT wipe zones (the sync doesn't own it).
+    use ber_model::ber::objects::{BoilerFuel, ObjectKind as OK};
+    c.add_object(OK::Boiler(BoilerFuel::Oil), 1, None, Vec::new());
+    assert_eq!(
+        c.current_record
+            .as_ref()
+            .unwrap()
+            .data
+            .heating_system
+            .controls
+            .zones,
+        3,
+        "adding a boiler preserves the zone count",
+    );
+    // Removing the last HeatingZones clears zones.
+    let zones_id = c
+        .active_object_room_view()
+        .unwrap()
+        .objects
+        .iter()
+        .find(|o| matches!(o.kind, ObjectKind::HeatingZones))
+        .unwrap()
+        .id;
+    c.delete_object(room, zones_id);
+    assert_eq!(
+        c.current_record
+            .as_ref()
+            .unwrap()
+            .data
+            .heating_system
+            .controls
+            .zones,
+        0,
+        "removing the last zones object clears the count",
+    );
+}
+
+/// Item 6 gate: a chimney-only house has no primary heat source, so the Objects
+/// review can't be confirmed until a boiler or panel heater is added.
+#[test]
+fn heating_source_gate_blocks_review_until_boiler_or_panel() {
+    use ber_model::ber::objects::{ChimneyState, ObjectKind};
+
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    c.objects_pointer_down(2.0, 2.0, 0.5);
+    c.add_object(ObjectKind::Chimney(ChimneyState::Open), 1, None, Vec::new());
+    c.close_object_room();
+    assert!(
+        c.heating_source_missing(),
+        "chimney only → no primary source"
+    );
+    c.set_object_review_mode(true);
+    c.confirm_objects_review();
+    assert!(!c.objects_reviewed(), "review blocked while no heat source");
+
+    // Add a panel heater → the gate clears; answering the panel question then
+    // lets the review confirm.
+    c.objects_pointer_down(3.0, 3.0, 0.5);
+    c.add_object(ObjectKind::PanelHeater, 1, None, Vec::new());
+    c.close_object_room();
+    assert!(
+        !c.heating_source_missing(),
+        "panel heater satisfies the gate"
+    );
+    assert!(c.panel_heater_prompt_pending(), "panel + no boiler → ask");
+    c.answer_panel_heater_primary(true);
+    use ber_model::ber::systems::HeatingSystemType;
+    assert_eq!(
+        c.current_record
+            .as_ref()
+            .unwrap()
+            .data
+            .heating_system
+            .system_type,
+        HeatingSystemType::ElectricHeater,
+        "yes → electric is primary",
+    );
+    c.confirm_objects_review();
+    assert!(
+        c.objects_reviewed(),
+        "review confirms once heating is resolved"
+    );
+}
+
+/// Item 5: two distinct primary sources (gas boiler + heat pump) raise the
+/// primary-pick prompt; choosing one sets it and the sync preserves it.
+#[test]
+fn multiple_sources_prompt_primary_pick_and_preserve() {
+    use ber_model::ber::objects::{BoilerFuel, ObjectKind};
+    use ber_model::ber::systems::HeatingSystemType;
+
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    c.objects_pointer_down(2.0, 2.0, 0.5);
+    c.add_object(ObjectKind::Boiler(BoilerFuel::Gas), 1, None, Vec::new());
+    c.add_object(
+        ObjectKind::Boiler(BoilerFuel::HeatPump),
+        1,
+        None,
+        Vec::new(),
+    );
+    c.close_object_room();
+    c.set_object_review_mode(true);
+    let opts = c.primary_pick_options();
+    assert_eq!(opts.len(), 2, "two candidates to pick between");
+    c.pick_primary_heat_source(HeatingSystemType::GasBoiler);
+    assert_eq!(
+        c.current_record
+            .as_ref()
+            .unwrap()
+            .data
+            .heating_system
+            .system_type,
+        HeatingSystemType::GasBoiler,
+        "the chosen primary is set",
+    );
+    assert!(
+        c.primary_pick_options().is_empty(),
+        "pick answered this review"
+    );
+    // A later object add must NOT clobber the chosen primary (sync preserves it).
+    c.objects_pointer_down(6.0, 6.0, 0.5);
+    c.add_object(ObjectKind::Thermostat, 1, None, Vec::new());
+    assert_eq!(
+        c.current_record
+            .as_ref()
+            .unwrap()
+            .data
+            .heating_system
+            .system_type,
+        HeatingSystemType::GasBoiler,
+        "the chosen primary survives a later object add",
+    );
 }
