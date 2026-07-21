@@ -101,6 +101,16 @@ impl FollowUpsPage {
                     }
                 }
             });
+            // Per-extension sub-checks, indented under the Extension build-date row.
+            for sub in &row.sub_rows {
+                ui.horizontal(|ui| {
+                    ui.add_space(24.0);
+                    let mut checked = sub.checked;
+                    if ui.checkbox(&mut checked, &sub.label).changed() {
+                        on_event(FollowUpEvent::Toggle(sub.key.clone()));
+                    }
+                });
+            }
         }
 
         // Add a per-BER custom request.

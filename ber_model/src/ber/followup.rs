@@ -18,6 +18,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use super::ber_struct::Ber;
 use super::common::{ConstructionPhase, ItemId, Year};
+use super::structural::{ConstructionBase, ConstructionMakeup};
 use super::systems::HeatingSystemType;
 
 /// "Newer than N years old" window: an element built/installed in `year` is
@@ -49,10 +50,19 @@ pub enum FollowUpPointId {
     HeatPumpData,
     /// Combined airtightness test report + ACD (thermal-bridging) certification.
     AirtightnessAndAcd,
+    /// Hot water cylinder whose insulation couldn't be measured (factory-sealed)
+    /// — ask for an invoice / spec sheet / proof of supply date / label photo.
+    /// Manual tick (no reliable survey field flags "insulation unmeasurable").
+    WaterCylinder,
 }
 
+/// Base URL of the client-facing documentation hub on the website. Each point's
+/// [`doc_slug`] appends to this to give the "More details" link in the email.
+/// Must match the `/docs/<slug>` routes in BERwebsite (see `docPoints.js`).
+pub const DOC_BASE_URL: &str = "https://cannygreen.com/docs";
+
 /// Every built-in point, in the order the UI lists them.
-pub const ALL_POINTS: [FollowUpPointId; 10] = [
+pub const ALL_POINTS: [FollowUpPointId; 11] = [
     FollowUpPointId::HouseBuildDate,
     FollowUpPointId::ExtensionBuildDate,
     FollowUpPointId::BuilderUpgradeLetter,
@@ -63,6 +73,7 @@ pub const ALL_POINTS: [FollowUpPointId; 10] = [
     FollowUpPointId::SolarDocs,
     FollowUpPointId::HeatPumpData,
     FollowUpPointId::AirtightnessAndAcd,
+    FollowUpPointId::WaterCylinder,
 ];
 
 impl FollowUpPointId {
@@ -81,7 +92,35 @@ impl FollowUpPointId {
             SolarDocs => "solar_docs",
             HeatPumpData => "heat_pump_data",
             AirtightnessAndAcd => "airtightness_and_acd",
+            WaterCylinder => "water_cylinder",
         }
+    }
+
+    /// URL slug of this point's explainer page on the website
+    /// (`{DOC_BASE_URL}/{doc_slug}`). Kept in step with `docPoints.js` in
+    /// BERwebsite — these are the client-facing, hyphenated slugs (distinct from
+    /// [`slug`], the underscore checklist id sent to the backend).
+    pub fn doc_slug(self) -> &'static str {
+        use FollowUpPointId::*;
+        match self {
+            HouseBuildDate => "house-build-date",
+            ExtensionBuildDate => "extension-build-date",
+            BuilderUpgradeLetter => "builders-letter",
+            WorksEvidenceNoBuilder => "evidence-of-works",
+            CertifierNewbuildLetter => "certifiers-letter",
+            WindowDop => "window-documentation",
+            DoorDop => "door-documentation",
+            SolarDocs => "solar-panel-documents",
+            HeatPumpData => "heat-pump-documents",
+            AirtightnessAndAcd => "airtightness-and-thermal-bridging",
+            WaterCylinder => "hot-water-cylinder",
+        }
+    }
+
+    /// Full URL of this point's explainer page, for the email's "More details"
+    /// link.
+    pub fn doc_url(self) -> String {
+        format!("{DOC_BASE_URL}/{}", self.doc_slug())
     }
 
     /// Short label for the assessor's checkbox on the tab.
@@ -98,6 +137,7 @@ impl FollowUpPointId {
             SolarDocs => "Solar PV documentation",
             HeatPumpData => "Heat pump data (sign-off + datasheet)",
             AirtightnessAndAcd => "Airtightness report + ACD certification",
+            WaterCylinder => "Hot water cylinder (insulation unmeasurable)",
         }
     }
 
@@ -118,50 +158,63 @@ impl FollowUpPointId {
             SolarDocs => "Solar panel documents",
             HeatPumpData => "Heat pump documents",
             AirtightnessAndAcd => "Airtightness & thermal bridging",
+            WaterCylinder => "Hot water cylinder",
         }
     }
 
     /// The request paragraph for this point, with `[bracketed]` prompts where a
     /// value has to be filled in by hand and survey values substituted where we
     /// can (build years, extension names). Rendered into the editable draft.
-    pub fn render(self, ber: &Ber) -> String {
+    pub fn render(self, ber: &Ber, fu: &FollowUpRequest) -> String {
         use FollowUpPointId::*;
         match self {
-            HouseBuildDate => {
-                let believed = match ber
-                    .construction_phases
-                    .year_of(&ConstructionPhase::Original)
-                {
-                    Some(y) => format!(" (I believe around {y})"),
-                    None => String::new(),
+            HouseBuildDate => "Would you have any documentary evidence for the build date of the \
+                house? The build date is quite important — the age band sets the default \
+                insulation values for the parts of the house that can't be verified during the \
+                survey. If you have any document that evidences it, ideally a legal or \
+                conveyancing document, that would be ideal."
+                .to_string(),
+            ExtensionBuildDate => {
+                let (word, verb, pron, them) = if fu.extensions.len() == 1 {
+                    ("extension", "was", "it was", "it")
+                } else {
+                    ("extensions", "were", "they were", "them")
+                };
+                let bullets = fu
+                    .extensions
+                    .iter()
+                    .map(|p| format!("• {}", extension_name(ber, p)))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!(
+                    "Would you have any documentary evidence for when the following {word} {verb} \
+                     built? Without it I have to assume {pron} built along with the original house, \
+                     which usually gives {them} worse default values. A planning document, invoice \
+                     or dated photos would all be ideal.\n\n{bullets}"
+                )
+            }
+            BuilderUpgradeLetter => {
+                let bullets = builder_surface_groups(ber)
+                    .into_iter()
+                    .filter(|s| fu.builder_surfaces.contains(&s.id))
+                    .map(|s| format!("• {}", s.name))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let ufh = if has_underfloor_heating(ber) {
+                    "\n\nIf there's underfloor heating, it should also explicitly state which \
+                     layer the underfloor-heating pipes have been installed in."
+                } else {
+                    ""
                 };
                 format!(
-                    "Could you confirm the year the house was built{believed}? This date is \
-                     quite important — the age band determines the default insulation values \
-                     for parts of the house that can't be verified during the survey. If you \
-                     have any proof, ideally a legal or conveyancing document, that would be \
-                     best. Another option is a confirmation from ESB of the date they first \
-                     began supplying the house."
+                    "For the upgrade works, could you get a signed letter from the \
+                     builder/contractor on their headed paper, with the full property address, \
+                     confirming the works? It needs to include the full property address, the \
+                     signer's name and job title, and state the build-up of the upgraded elements \
+                     with the areas covered. We need this to mention the build-up of the following \
+                     surfaces:\n\n{bullets}{ufh}"
                 )
             }
-            ExtensionBuildDate => {
-                let which = extension_phrase(ber);
-                format!(
-                    "Could you also share the year {which} was built, along with any proof of \
-                     the date if you can find it? An invoice, planning document, dated photos or \
-                     similar would all help. Without proof I have to assume it was constructed \
-                     along with the original house, and the default values would be considerably \
-                     worse."
-                )
-            }
-            BuilderUpgradeLetter => "For the upgrade works, could you get a signed letter from \
-                [builder / contractor] on their headed paper confirming the works? It needs to \
-                include the full property address, the signer's name and job title, and state \
-                the build-up of the upgraded elements with the areas covered (e.g. [100mm PIR \
-                on all exterior walls]). To make it easier I can draft the letter with the \
-                details filled in — they'd just need to put it on their letterhead, check it \
-                against what was done, complete the highlighted parts and sign."
-                .to_string(),
             WorksEvidenceNoBuilder => "For the [works], since a letter from the builder isn't \
                 available, the SEAI require two independent proofs of the works instead. These \
                 can be: photos taken while the work was being done, and/or invoices, receipts or \
@@ -172,10 +225,7 @@ impl FollowUpPointId {
                 unfortunately can't be accepted by the SEAI — I would need documentation from \
                 the certifying architect, engineer or assigned certifier: as-built drawings \
                 signed off by them, or a signed letter confirming the build-ups as actually \
-                built and that they comply with the building regulations of the time. I can \
-                prepare a draft letter with the construction details already filled in — they'd \
-                just need to put it on their letterhead, verify it against what was built, \
-                complete the highlighted fields and sign."
+                built and that they comply with the building regulations of the time."
                 .to_string(),
             WindowDop => "For the windows, to use better-than-default values I would need two \
                 things: (1) the Declaration of Performance for the windows, showing the U-value \
@@ -218,33 +268,104 @@ impl FollowUpPointId {
                 aren't enough). It's worth checking with [architect / engineer / certifier] \
                 whether these exist for your house."
                 .to_string(),
+            WaterCylinder => "For the hot water cylinder, the insulation is sealed inside the \
+                casing, so I couldn't measure it during the survey. If you have the invoice or \
+                spec sheet — or any proof of when it was supplied or installed — could you send \
+                it on? A clear photo of the manufacturer's label on the cylinder also works \
+                (it usually shows the make, model and volume). This lets me use its actual \
+                figures instead of an age-based default, which is usually worse."
+                .to_string(),
         }
     }
 }
 
-/// Names the extension(s) still needing a dated proof, for the request line —
-/// e.g. "the Back extension", "the Back extension and the garage conversion",
-/// or a plain "the extension" when none are nicknamed.
-fn extension_phrase(ber: &Ber) -> String {
-    let names: Vec<String> = EXTENSION_PHASES
+/// The extension phases still needing a dated proof — defined but not
+/// year-proven. These are the sub-checks under the Extension build-date request;
+/// the client is asked about the ticked ones.
+pub fn candidate_extensions(ber: &Ber) -> Vec<ConstructionPhase> {
+    EXTENSION_PHASES
         .iter()
-        .filter(|p| ber.construction_phases.is_defined(p))
-        .filter(|p| !ber.construction_phases.has_year_proof(p))
-        .filter_map(|p| {
-            ber.construction_phases
-                .nickname_of(p)
-                .filter(|n| !n.trim().is_empty())
-                .map(|n| format!("the {n}"))
+        .filter(|p| {
+            ber.construction_phases.is_defined(p) && !ber.construction_phases.has_year_proof(p)
         })
-        .collect();
-    match names.len() {
-        0 => "the extension".to_string(),
-        1 => names[0].clone(),
-        _ => {
-            let (last, rest) = names.split_last().unwrap();
-            format!("{} and {}", rest.join(", "), last)
-        }
+        .cloned()
+        .collect()
+}
+
+/// Display name for an extension phase in the request — its nickname if given,
+/// otherwise the built-in name ("Extension 1").
+pub fn extension_name(ber: &Ber, phase: &ConstructionPhase) -> String {
+    ber.construction_phases
+        .nickname_of(phase)
+        .filter(|n| !n.trim().is_empty())
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| phase.default_name())
+}
+
+/// A surface group offered under the Builder's-letter request: its construction
+/// id, display name (the assessor's Structure label, else the type name), and
+/// whether to auto-tick it — original-house fabric whose build-up is specified
+/// (custom layers / added insulation) or declared unknown, i.e. something a
+/// builder's letter can evidence.
+pub struct SurfaceGroup {
+    pub id: ItemId,
+    pub name: String,
+    pub auto: bool,
+}
+
+fn surface_name(base: &ConstructionBase, type_label: &str) -> String {
+    base.name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| type_label.to_string())
+}
+
+/// Auto-tick a surface for the builder's letter when it's original-house fabric
+/// with a specified (photo-backed) build-up or a declared-unknown one.
+fn builder_auto(base: &ConstructionBase) -> bool {
+    base.construction_phase == ConstructionPhase::Original
+        && (base.construction_makeup.requires_photo()
+            || base.construction_makeup == ConstructionMakeup::Unknown)
+}
+
+/// Every wall/floor/ceiling construction group, for the Builder's-letter
+/// sub-checks — walls, then floors, then ceilings/roofs, each with a display
+/// name and the auto-tick flag.
+pub fn builder_surface_groups(ber: &Ber) -> Vec<SurfaceGroup> {
+    let mut out = Vec::new();
+    for w in &ber.wall_constructions {
+        out.push(SurfaceGroup {
+            id: w.base.id,
+            name: surface_name(&w.base, w.construction_type.label()),
+            auto: builder_auto(&w.base),
+        });
     }
+    for f in &ber.floor_constructions {
+        out.push(SurfaceGroup {
+            id: f.base.id,
+            name: surface_name(&f.base, f.construction_type.label()),
+            auto: builder_auto(&f.base),
+        });
+    }
+    for c in &ber.ceiling_constructions {
+        out.push(SurfaceGroup {
+            id: c.base.id,
+            name: surface_name(&c.base, c.construction_type.label()),
+            auto: builder_auto(&c.base),
+        });
+    }
+    out
+}
+
+/// Whether any storey has underfloor heating (drives the pipe-layer note in the
+/// builder's-letter request).
+pub fn has_underfloor_heating(ber: &Ber) -> bool {
+    ber.storeys
+        .iter()
+        .flat_map(|s| s.rooms.iter())
+        .any(|r| r.underfloor_heating)
 }
 
 /// The email subject.
@@ -367,21 +488,29 @@ fn default_true() -> bool {
 /// paragraph underneath — then a sign-off. Headings are wrapped in `**…**`
 /// markers, which the intake backend renders as bold in the HTML email and
 /// which read fine in the plain-text fallback / editable preview.
-pub fn assemble_draft(ber: &Ber, selected: &[FollowUpPointId], custom: &[CustomPoint]) -> String {
+pub fn assemble_draft(ber: &Ber, fu: &FollowUpRequest) -> String {
     let mut body = String::from(
         "Hi,\n\nThanks again for having me out to survey your home for the BER assessment.\n\n",
     );
-    // Each point is (heading, request paragraph).
-    let mut points: Vec<(String, String)> = ALL_POINTS
+    // Each point is (heading, request paragraph, optional "more details" URL).
+    // Built-in points link to their explainer page on the website; custom
+    // points have no page, so no link.
+    let mut points: Vec<(String, String, Option<String>)> = ALL_POINTS
         .into_iter()
-        .filter(|p| selected.contains(p))
-        .map(|p| (p.heading().to_string(), p.render(ber)))
+        .filter(|p| fu.selected.contains(p))
+        .map(|p| {
+            (
+                p.heading().to_string(),
+                p.render(ber, fu),
+                Some(p.doc_url()),
+            )
+        })
         .collect();
     points.extend(
-        custom
+        fu.custom
             .iter()
             .filter(|c| c.checked && !c.content.trim().is_empty())
-            .map(|c| (c.label.clone(), c.content.clone())),
+            .map(|c| (c.label.clone(), c.content.clone(), None)),
     );
 
     if points.is_empty() {
@@ -395,9 +524,19 @@ pub fn assemble_draft(ber: &Ber, selected: &[FollowUpPointId], custom: &[CustomP
              nothing gets missed:\n\n",
         );
         // Number the points so the client can answer each one: bold heading on
-        // the numbered line, then the full request underneath.
-        for (i, (heading, para)) in points.iter().enumerate() {
-            body.push_str(&format!("{}. **{}**\n{}\n\n", i + 1, heading, para));
+        // the numbered line, the full request underneath, then a "More details"
+        // link to the explainer page (rendered as a button in the HTML email).
+        for (i, (heading, para, url)) in points.iter().enumerate() {
+            match url {
+                Some(u) => body.push_str(&format!(
+                    "{}. **{}**\n{}\n[More details »]({})\n\n",
+                    i + 1,
+                    heading,
+                    para,
+                    u
+                )),
+                None => body.push_str(&format!("{}. **{}**\n{}\n\n", i + 1, heading, para)),
+            }
         }
     }
     body.push_str(
@@ -436,6 +575,15 @@ pub struct FollowUpRequest {
     pub initialized: bool,
     #[serde(default, deserialize_with = "lenient_points")]
     pub selected: Vec<FollowUpPointId>,
+    /// Extension phases ticked for the Extension build-date request (the
+    /// sub-checks). ExtensionBuildDate is in `selected` iff this is non-empty.
+    #[serde(default)]
+    pub extensions: Vec<ConstructionPhase>,
+    /// Construction group ids ticked for the Builder's-letter request (the
+    /// surface sub-checks). BuilderUpgradeLetter is in `selected` iff this is
+    /// non-empty.
+    #[serde(default)]
+    pub builder_surfaces: Vec<ItemId>,
     /// Per-BER custom request points added via the tab's "+".
     #[serde(default)]
     pub custom: Vec<CustomPoint>,
@@ -504,8 +652,13 @@ mod tests {
             .set_nickname(ConstructionPhase::Extension1, "Back extension".to_string());
         let sel = auto_selected(&ber, REF_YEAR);
         assert!(sel.contains(&FollowUpPointId::ExtensionBuildDate));
-        let draft = assemble_draft(&ber, &sel, &[]);
-        assert!(draft.contains("the Back extension"), "draft: {draft}");
+        let fu = FollowUpRequest {
+            selected: sel,
+            extensions: candidate_extensions(&ber),
+            ..Default::default()
+        };
+        let draft = assemble_draft(&ber, &fu);
+        assert!(draft.contains("• Back extension"), "draft: {draft}");
         // Numbered blocks with a bold heading, request paragraph underneath.
         // (House year is proven here, so the extension is the only point.)
         assert!(
@@ -632,7 +785,11 @@ mod tests {
                 checked: false,
             },
         ];
-        let draft = assemble_draft(&ber, &[], &custom);
+        let fu = FollowUpRequest {
+            custom,
+            ..Default::default()
+        };
+        let draft = assemble_draft(&ber, &fu);
         assert!(draft.contains("septic tank certificate"));
         assert!(!draft.contains("Should not appear"));
     }
@@ -653,6 +810,76 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&FollowUpPointId::AirtightnessAndAcd).unwrap(),
             "\"airtightness_and_acd\""
+        );
+    }
+
+    #[test]
+    fn every_point_has_a_hyphenated_doc_slug_and_matching_url() {
+        for p in ALL_POINTS {
+            let slug = p.doc_slug();
+            assert!(!slug.is_empty(), "{p:?} has an empty doc_slug");
+            // Client-facing slugs are hyphenated, not underscored (unlike slug()).
+            assert!(
+                !slug.contains('_') && !slug.contains(' '),
+                "{p:?} doc_slug not hyphenated: {slug}"
+            );
+            assert_eq!(p.doc_url(), format!("https://cannygreen.com/docs/{slug}"));
+        }
+    }
+
+    #[test]
+    fn draft_includes_more_details_link_for_builtin_points() {
+        let ber = ber_with_year(1990, false); // unproven → HouseBuildDate selected
+        let sel = auto_selected(&ber, REF_YEAR);
+        assert!(sel.contains(&FollowUpPointId::HouseBuildDate));
+        let fu = FollowUpRequest {
+            selected: sel,
+            ..Default::default()
+        };
+        let draft = assemble_draft(&ber, &fu);
+        assert!(
+            draft.contains("[More details »](https://cannygreen.com/docs/house-build-date)"),
+            "draft: {draft}"
+        );
+    }
+
+    #[test]
+    fn water_cylinder_is_manual_only_but_renders_with_link() {
+        // Even a recent house + heat pump doesn't auto-tick the cylinder.
+        let mut ber = ber_with_year(2018, true);
+        ber.heating_system.system_type = HeatingSystemType::HeatPump;
+        assert!(!auto_selected(&ber, REF_YEAR).contains(&FollowUpPointId::WaterCylinder));
+        // When manually ticked it renders with its heading + explainer link.
+        let fu = FollowUpRequest {
+            selected: vec![FollowUpPointId::WaterCylinder],
+            ..Default::default()
+        };
+        let draft = assemble_draft(&ber, &fu);
+        assert!(draft.contains("**Hot water cylinder**"), "draft: {draft}");
+        assert!(
+            draft.contains("https://cannygreen.com/docs/hot-water-cylinder"),
+            "draft: {draft}"
+        );
+    }
+
+    #[test]
+    fn custom_points_have_no_more_details_link() {
+        let ber = ber_with_year(1990, true);
+        let custom = vec![CustomPoint {
+            id: ItemId::default(),
+            label: "Septic tank cert".to_string(),
+            content: "Could you send the septic tank certificate?".to_string(),
+            checked: true,
+        }];
+        let fu = FollowUpRequest {
+            custom,
+            ..Default::default()
+        };
+        let draft = assemble_draft(&ber, &fu);
+        assert!(draft.contains("septic tank certificate"));
+        assert!(
+            !draft.contains("More details"),
+            "custom points have no explainer page: {draft}"
         );
     }
 }

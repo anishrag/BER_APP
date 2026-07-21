@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use chrono::Datelike;
 
-use ber_model::ber::common::ItemId;
+use ber_model::ber::common::{ConstructionPhase, ItemId};
 use ber_model::ber::followup::{self, CustomPoint, FollowUpPointId};
 
 use super::AppController;
@@ -32,6 +32,10 @@ pub(super) struct PendingSend {
 #[derive(Debug, Clone, PartialEq)]
 pub enum FollowUpRowKey {
     BuiltIn(FollowUpPointId),
+    /// A per-extension sub-check under the Extension build-date point.
+    ExtensionSub(ConstructionPhase),
+    /// A per-surface (construction group) sub-check under the Builder's-letter point.
+    SurfaceSub(ItemId),
     Custom(ItemId),
 }
 
@@ -42,6 +46,17 @@ pub struct FollowUpPointRow {
     pub label: String,
     pub checked: bool,
     pub removable: bool,
+    /// Per-extension sub-checks — populated only for the Extension build-date
+    /// row (one per extension still needing a date); empty for every other row.
+    pub sub_rows: Vec<FollowUpSubRow>,
+}
+
+/// A sub-check row: one extension under the Extension build-date request, so the
+/// assessor can ask about some extensions and not others.
+pub struct FollowUpSubRow {
+    pub key: FollowUpRowKey,
+    pub label: String,
+    pub checked: bool,
 }
 
 /// Everything the Follow-ups tab renders from.
@@ -83,6 +98,12 @@ impl AppController {
             // the object→heating sync existed).
             ber.sync_heating_system_from_objects();
             ber.followup.selected = followup::auto_selected(ber, reference_year);
+            ber.followup.extensions = followup::candidate_extensions(ber);
+            ber.followup.builder_surfaces = followup::builder_surface_groups(ber)
+                .into_iter()
+                .filter(|s| s.auto)
+                .map(|s| s.id)
+                .collect();
             rebuild_followup_body(ber);
             ber.followup.initialized = true;
             seeded = true;
@@ -92,15 +113,45 @@ impl AppController {
         }
 
         let record = self.current_record.as_ref()?;
-        let current_id = record.data.id.clone();
-        let fu = &record.data.followup;
+        let ber = &record.data;
+        let current_id = ber.id.clone();
+        let fu = &ber.followup;
+        let candidates = followup::candidate_extensions(ber);
+        let surfaces = followup::builder_surface_groups(ber);
         let mut points: Vec<FollowUpPointRow> = followup::ALL_POINTS
             .into_iter()
-            .map(|id| FollowUpPointRow {
-                key: FollowUpRowKey::BuiltIn(id),
-                label: id.label().to_string(),
-                checked: fu.selected.contains(&id),
-                removable: false,
+            .map(|id| {
+                // The Extension build-date and Builder's-letter points each show
+                // sub-checks (extensions / surface groups) so some can be asked
+                // about and others not.
+                let sub_rows = if id == FollowUpPointId::ExtensionBuildDate {
+                    candidates
+                        .iter()
+                        .map(|ph| FollowUpSubRow {
+                            key: FollowUpRowKey::ExtensionSub(ph.clone()),
+                            label: followup::extension_name(ber, ph),
+                            checked: fu.extensions.contains(ph),
+                        })
+                        .collect()
+                } else if id == FollowUpPointId::BuilderUpgradeLetter {
+                    surfaces
+                        .iter()
+                        .map(|s| FollowUpSubRow {
+                            key: FollowUpRowKey::SurfaceSub(s.id),
+                            label: s.name.clone(),
+                            checked: fu.builder_surfaces.contains(&s.id),
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                FollowUpPointRow {
+                    key: FollowUpRowKey::BuiltIn(id),
+                    label: id.label().to_string(),
+                    checked: fu.selected.contains(&id),
+                    removable: false,
+                    sub_rows,
+                }
             })
             .collect();
         points.extend(fu.custom.iter().map(|c| FollowUpPointRow {
@@ -108,6 +159,7 @@ impl AppController {
             label: c.label.clone(),
             checked: c.checked,
             removable: true,
+            sub_rows: Vec::new(),
         }));
         // A send is "in flight" for THIS tab only when the pending send is for
         // the record on screen (and still running).
@@ -139,12 +191,69 @@ impl AppController {
         if ber.followup.is_sent() {
             return;
         }
+        let candidates = followup::candidate_extensions(ber);
+        let auto_surfaces: Vec<ItemId> = followup::builder_surface_groups(ber)
+            .into_iter()
+            .filter(|s| s.auto)
+            .map(|s| s.id)
+            .collect();
         match key {
             FollowUpRowKey::BuiltIn(id) => {
-                if let Some(pos) = ber.followup.selected.iter().position(|p| *p == id) {
+                if id == FollowUpPointId::ExtensionBuildDate {
+                    // Parent: ticking selects all extensions still needing a date;
+                    // unticking clears them.
+                    if ber.followup.selected.contains(&id) {
+                        ber.followup.selected.retain(|p| *p != id);
+                        ber.followup.extensions.clear();
+                    } else {
+                        ber.followup.extensions = candidates;
+                        ber.followup.selected.push(id);
+                    }
+                } else if id == FollowUpPointId::BuilderUpgradeLetter {
+                    // Parent: ticking selects the auto-detected surfaces; unticking clears.
+                    if ber.followup.selected.contains(&id) {
+                        ber.followup.selected.retain(|p| *p != id);
+                        ber.followup.builder_surfaces.clear();
+                    } else {
+                        ber.followup.builder_surfaces = auto_surfaces;
+                        ber.followup.selected.push(id);
+                    }
+                } else if let Some(pos) = ber.followup.selected.iter().position(|p| *p == id) {
                     ber.followup.selected.remove(pos);
                 } else {
                     ber.followup.selected.push(id);
+                }
+            }
+            FollowUpRowKey::ExtensionSub(phase) => {
+                if let Some(pos) = ber.followup.extensions.iter().position(|p| *p == phase) {
+                    ber.followup.extensions.remove(pos);
+                } else {
+                    ber.followup.extensions.push(phase);
+                }
+                // Keep the parent point present iff at least one extension is ticked.
+                let has = !ber.followup.extensions.is_empty();
+                let sel = &mut ber.followup.selected;
+                let present = sel.contains(&FollowUpPointId::ExtensionBuildDate);
+                if has && !present {
+                    sel.push(FollowUpPointId::ExtensionBuildDate);
+                } else if !has && present {
+                    sel.retain(|p| *p != FollowUpPointId::ExtensionBuildDate);
+                }
+            }
+            FollowUpRowKey::SurfaceSub(id) => {
+                if let Some(pos) = ber.followup.builder_surfaces.iter().position(|s| *s == id) {
+                    ber.followup.builder_surfaces.remove(pos);
+                } else {
+                    ber.followup.builder_surfaces.push(id);
+                }
+                // Keep the parent point present iff at least one surface is ticked.
+                let has = !ber.followup.builder_surfaces.is_empty();
+                let sel = &mut ber.followup.selected;
+                let present = sel.contains(&FollowUpPointId::BuilderUpgradeLetter);
+                if has && !present {
+                    sel.push(FollowUpPointId::BuilderUpgradeLetter);
+                } else if !has && present {
+                    sel.retain(|p| *p != FollowUpPointId::BuilderUpgradeLetter);
                 }
             }
             FollowUpRowKey::Custom(id) => {
@@ -331,7 +440,6 @@ impl AppController {
 
 /// Rebuild the editable draft from the current selection + ticked custom points.
 fn rebuild_followup_body(ber: &mut ber_model::ber::ber_struct::Ber) {
-    let selected = ber.followup.selected.clone();
-    let custom = ber.followup.custom.clone();
-    ber.followup.body = followup::assemble_draft(ber, &selected, &custom);
+    let fu = ber.followup.clone();
+    ber.followup.body = followup::assemble_draft(ber, &fu);
 }
