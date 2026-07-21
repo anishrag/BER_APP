@@ -38,7 +38,7 @@ pub struct HistorySnapshot {
     /// Right / Left / Back) live on `Ber.photos`, not on a storey, so they're
     /// captured here so an external-photo add/replace/remove undoes. `None`
     /// when no record is loaded.
-    pub(super) photos: Option<Vec<ber_model::ber::common::Photo>>,
+    pub(super) photos: Option<Vec<ber_model::ber::common::Evidence>>,
 }
 
 impl AppController {

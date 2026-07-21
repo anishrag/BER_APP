@@ -360,13 +360,16 @@ impl<'a> BerRepository<'a> {
                         )
                     })?;
 
-                let data: Ber = serde_json::from_str(&json).map_err(|e| {
+                let mut data: Ber = serde_json::from_str(&json).map_err(|e| {
                     rusqlite::Error::FromSqlConversionFailure(
                         2,
                         rusqlite::types::Type::Text,
                         Box::new(e),
                     )
                 })?;
+                // Adopt any pre-refactor `final_details` blob into its new homes
+                // (thermal_mass_info + heating_system.distribution).
+                data.migrate_legacy();
 
                 Ok(BerRecord {
                     id: *id,

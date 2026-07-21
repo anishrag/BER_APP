@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::common::{ConstructionPhase, ConstructionPhases, ExternalSide, ItemId, Photo, Year};
+use super::common::{ConstructionPhase, ConstructionPhases, Evidence, ExternalSide, ItemId, Year};
 use super::fenestration::{Frame, Glazing, WindowNameSpecifics, WindowType};
 use super::structural::{
     CeilingApex, CeilingApexHint, CeilingConstruction, CeilingContinuation, CeilingRegions, Dormer,
@@ -106,7 +106,7 @@ pub struct Ber {
     pub thermal_mass_info: ThermalMassInfo,
     pub orientation_deg: f32,
     pub solar: Vec<SolarElements>,
-    pub photos: Vec<Photo>,
+    pub photos: Vec<Evidence>,
     /// External-photo sides whose shot the assessor DEFERRED to the end of
     /// the assessment (apartments: which unit is which is often only clear
     /// once you've been inside). A deferred side counts as SET for the
@@ -163,9 +163,15 @@ pub struct Ber {
     /// Recorded on confirm. `#[serde(default)]` so older records load as un-reviewed.
     #[serde(default)]
     pub objects_reviewed: bool,
-    /// Phase-4 ("Final") dropdown form: floor / wall-finish / heating details.
-    #[serde(default)]
-    pub final_details: crate::ber::final_details::FinalDetails,
+    /// LEGACY (deserialize-only) pre-refactor Phase-4 blob: floor / wall-finish
+    /// / heating used to live here. Now migrated on load into
+    /// [`thermal_mass_info`](Self::thermal_mass_info) (floor + wall finishes)
+    /// and [`heating_system.distribution`](crate::ber::systems::HeatingSystem)
+    /// (the heat emitter) by [`migrate_legacy`](Self::migrate_legacy), then
+    /// dropped. `skip_serializing` so new saves never emit it; `default` so new
+    /// records without the old key load fine.
+    #[serde(default, rename = "final_details", skip_serializing)]
+    pub legacy_final_details: Option<crate::ber::final_details::LegacyFinalDetails>,
     /// Phase-4 per-side sheltering (the [`crate::ber::common::ExternalSide`]s).
     #[serde(default)]
     pub sheltering: crate::ber::final_details::ShelteringBySide,
@@ -173,7 +179,7 @@ pub struct Ber {
     /// plan to true north. POPULATED EXTERNALLY (alongside address/eircode), not
     /// by this app — read-only here. `None` until provided.
     #[serde(default)]
-    pub site_satellite_image: Option<crate::ber::common::Photo>,
+    pub site_satellite_image: Option<crate::ber::common::Evidence>,
     /// Whether the assessor has aligned the plan to the satellite image and
     /// confirmed (Phase-4 north step "OK"). `#[serde(default)]`.
     #[serde(default)]
@@ -206,7 +212,7 @@ impl Ber {
         thumbnail_path: Option<String>,
     ) -> bool {
         let mut found = false;
-        let mut visit = |p: &mut Photo| {
+        let mut visit = |p: &mut Evidence| {
             if p.id == id {
                 p.file_path = file_path.clone();
                 p.thumbnail_path = thumbnail_path.clone();
@@ -266,8 +272,8 @@ impl Ber {
     /// Objects-phase building objects). NOT the site satellite image: that's
     /// populated externally and already lives in the cloud. The cloud push uses
     /// this to know what to upload.
-    pub fn all_photos(&self) -> Vec<&Photo> {
-        let mut out: Vec<&Photo> = Vec::new();
+    pub fn all_photos(&self) -> Vec<&Evidence> {
+        let mut out: Vec<&Evidence> = Vec::new();
         out.extend(self.photos.iter());
         out.extend(self.window_types.iter().flat_map(|t| t.photos.iter()));
         out.extend(
@@ -320,44 +326,112 @@ impl Ber {
             .chain(self.attic_room.iter_mut())
     }
 
-    /// The primary heating type implied by the boiler/heat-pump OBJECTS placed
-    /// in the Objects phase (across every room + the attic). When more than one
-    /// is present the heat pump wins, then gas, then oil — the heat pump is the
-    /// BER-significant plant (and the one that drives a follow-up request).
-    /// `None` when no boiler/heat-pump object exists.
-    pub fn primary_boiler_heating(&self) -> Option<crate::ber::systems::HeatingSystemType> {
+    /// The DISTINCT primary heat-source types implied by the placed OBJECTS
+    /// (across every room + the attic), in fixed PRECEDENCE order: heat pump,
+    /// gas boiler, oil boiler, electric (panel) heater. Each `Boiler(fuel)` maps
+    /// to its boiler type and each `PanelHeater` to `ElectricHeater`; the set is
+    /// deduplicated so re-syncs are deterministic. Chimneys are secondary-only
+    /// and are NOT included here. Empty when no primary heat-source object
+    /// exists.
+    pub fn heating_source_candidates(&self) -> Vec<crate::ber::systems::HeatingSystemType> {
         use crate::ber::objects::{BoilerFuel, ObjectKind};
         use crate::ber::systems::HeatingSystemType;
-        let mut has_gas = false;
-        let mut has_oil = false;
+        let (mut heat_pump, mut gas, mut oil, mut electric) = (false, false, false, false);
         for obj in self.object_rooms_iter().flat_map(|r| r.objects.iter()) {
             match obj.kind {
-                ObjectKind::Boiler(BoilerFuel::HeatPump) => {
-                    return Some(HeatingSystemType::HeatPump)
-                }
-                ObjectKind::Boiler(BoilerFuel::Gas) => has_gas = true,
-                ObjectKind::Boiler(BoilerFuel::Oil) => has_oil = true,
+                ObjectKind::Boiler(BoilerFuel::HeatPump) => heat_pump = true,
+                ObjectKind::Boiler(BoilerFuel::Gas) => gas = true,
+                ObjectKind::Boiler(BoilerFuel::Oil) => oil = true,
+                ObjectKind::PanelHeater => electric = true,
                 _ => {}
             }
         }
-        if has_gas {
-            Some(HeatingSystemType::GasBoiler)
-        } else if has_oil {
-            Some(HeatingSystemType::OilBoiler)
-        } else {
-            None
-        }
+        // Fixed precedence order → deterministic, deduplicated.
+        [
+            (heat_pump, HeatingSystemType::HeatPump),
+            (gas, HeatingSystemType::GasBoiler),
+            (oil, HeatingSystemType::OilBoiler),
+            (electric, HeatingSystemType::ElectricHeater),
+        ]
+        .into_iter()
+        .filter_map(|(present, ty)| present.then_some(ty))
+        .collect()
     }
 
-    /// Reflect the placed boiler/heat-pump objects into
-    /// [`heating_system.system_type`](crate::ber::systems::HeatingSystem). Set
-    /// from [`primary_boiler_heating`](Self::primary_boiler_heating); reset to
-    /// `Invalid` when no such object exists (nothing else populates this field).
-    /// Called by the shell after an object add/remove.
+    /// The primary heating type implied by the placed heat-source OBJECTS — the
+    /// highest-precedence candidate present (heat pump > gas > oil > electric).
+    /// `None` when no heat-source object exists.
+    pub fn primary_boiler_heating(&self) -> Option<crate::ber::systems::HeatingSystemType> {
+        self.heating_source_candidates().into_iter().next()
+    }
+
+    /// Reflect the placed heat-source objects and heating controls into
+    /// [`heating_system`](crate::ber::systems::HeatingSystem). Called by the
+    /// shell after an object add/remove. IDEMPOTENT: running it twice yields the
+    /// same result.
+    ///
+    /// - `system_type`: KEEP the current value if it's still one of the present
+    ///   candidates (preserves the assessor's "which is primary?" / electric
+    ///   choice across later object edits); else the precedence pick of the
+    ///   candidate set; else `Invalid`.
+    /// - `secondary_heating`: every distinct candidate type other than the
+    ///   chosen primary (fixed order), plus a single `Other("Chimney")` when any
+    ///   chimney object is present.
+    /// - `controls.programmer`: any `Programmer` object present.
+    /// - `controls.room_thermostat`: summed `count` over all `Thermostat`
+    ///   objects.
+    /// - `separate_hot_water`: any `Boiler` or `Programmer` object with
+    ///   `separate_hw_control` set.
+    ///
+    /// Does NOT touch `controls.zones` or `year_installed` (owned by the
+    /// controller's heating prompts, a later layer).
     pub fn sync_heating_system_from_objects(&mut self) {
-        self.heating_system.system_type = self
-            .primary_boiler_heating()
-            .unwrap_or(crate::ber::systems::HeatingSystemType::Invalid);
+        use crate::ber::objects::ObjectKind;
+        use crate::ber::systems::HeatingSystemType;
+
+        let candidates = self.heating_source_candidates();
+
+        // Keep the assessor's chosen primary when it's still present; otherwise
+        // the precedence pick; otherwise Invalid. Preservation is what makes the
+        // multi-source case idempotent.
+        let primary = if candidates.contains(&self.heating_system.system_type) {
+            self.heating_system.system_type.clone()
+        } else {
+            candidates
+                .first()
+                .cloned()
+                .unwrap_or(HeatingSystemType::Invalid)
+        };
+
+        // Scan the controls / chimney / separate-HW facts in one pass.
+        let (mut programmer, mut room_thermostat, mut chimney, mut separate_hw) =
+            (false, 0u32, false, false);
+        for obj in self.object_rooms_iter().flat_map(|r| r.objects.iter()) {
+            match &obj.kind {
+                ObjectKind::Programmer => {
+                    programmer = true;
+                    separate_hw |= obj.separate_hw_control;
+                }
+                ObjectKind::Boiler(_) => separate_hw |= obj.separate_hw_control,
+                ObjectKind::Thermostat => room_thermostat += obj.count,
+                ObjectKind::Chimney(_) => chimney = true,
+                _ => {}
+            }
+        }
+
+        // Secondary = distinct candidates minus the primary (fixed order), then
+        // a single chimney entry if any chimney is present.
+        let mut secondary: Vec<HeatingSystemType> =
+            candidates.into_iter().filter(|c| *c != primary).collect();
+        if chimney {
+            secondary.push(HeatingSystemType::Other("Chimney".to_string()));
+        }
+
+        self.heating_system.system_type = primary;
+        self.heating_system.secondary_heating = secondary;
+        self.heating_system.controls.programmer = programmer;
+        self.heating_system.controls.room_thermostat = room_thermostat;
+        self.heating_system.separate_hot_water = separate_hw;
     }
 
     /// Whether `side`'s external photo is DEFERRED to the end of the
@@ -416,6 +490,24 @@ impl Ber {
         Self {
             number_of_storeys: 1,
             ..Default::default()
+        }
+    }
+
+    /// Migrate pre-refactor records: the floor/wall finishes and heating used to
+    /// live in `final_details`; adopt them into their new homes if those are still
+    /// empty, then drop the legacy blob (not re-serialized).
+    pub fn migrate_legacy(&mut self) {
+        use crate::ber::final_details::HeatingKind;
+        if let Some(l) = self.legacy_final_details.take() {
+            if self.thermal_mass_info.is_unset() {
+                self.thermal_mass_info.floor = l.floor;
+                self.thermal_mass_info.internal_wall = l.internal_wall;
+                self.thermal_mass_info.external_wall = l.external_wall;
+                self.thermal_mass_info.separating_wall = l.separating_wall;
+            }
+            if self.heating_system.distribution == HeatingKind::Unset {
+                self.heating_system.distribution = l.heating;
+            }
         }
     }
 
@@ -1044,6 +1136,47 @@ mod tests {
         Point3f64::new(x, y, z)
     }
 
+    /// An OLD-shape record (floor/wall finishes + heating in `final_details`,
+    /// default `thermal_mass_info`) migrates those values into their new homes
+    /// on load, and the legacy blob is NOT re-serialized afterwards.
+    #[test]
+    fn migrate_legacy_adopts_final_details_and_drops_the_blob() {
+        use crate::ber::final_details::{FloorKind, HeatingKind, WallFinish};
+        // Build an old-shape blob: a default Ber's JSON (no `final_details`,
+        // since it's skip_serializing) with the legacy key injected.
+        let mut json = serde_json::to_value(Ber::default()).unwrap();
+        json.as_object_mut().unwrap().insert(
+            "final_details".to_string(),
+            serde_json::json!({
+                "floor": "Solid",
+                "internal_wall": "HardPlaster",
+                "separating_wall": "PlasterboardOnDotAndDab",
+                "external_wall": "PlasterboardOnDotAndDab",
+                "heating": "Radiators",
+            }),
+        );
+        let mut ber: Ber = serde_json::from_value(json).expect("old record loads");
+        assert!(ber.thermal_mass_info.is_unset(), "raw capture starts empty");
+        ber.migrate_legacy();
+        assert_eq!(
+            ber.thermal_mass_info.external_wall,
+            WallFinish::PlasterboardOnDotAndDab
+        );
+        assert_eq!(ber.thermal_mass_info.floor, FloorKind::Solid);
+        assert_eq!(ber.thermal_mass_info.internal_wall, WallFinish::HardPlaster);
+        assert_eq!(
+            ber.thermal_mass_info.separating_wall,
+            WallFinish::PlasterboardOnDotAndDab
+        );
+        assert_eq!(ber.heating_system.distribution, HeatingKind::Radiators);
+        // Re-serializing must NOT emit a `final_details` key (dropped on save).
+        let out = serde_json::to_value(&ber).unwrap();
+        assert!(
+            out.as_object().unwrap().get("final_details").is_none(),
+            "legacy blob is not re-serialized"
+        );
+    }
+
     /// The unfan toggle quantizes, matches within the epsilon (so a
     /// re-tap re-fans across the f32 round-trip), and reports the new state.
     #[test]
@@ -1515,7 +1648,7 @@ mod tests {
         assert!(!ber.photo_deferred(ExternalSide::Back));
 
         // A deferred side WITH a photo is no longer pending.
-        ber.photos.push(Photo {
+        ber.photos.push(Evidence {
             side: Some(ExternalSide::Left),
             ..Default::default()
         });
@@ -1570,7 +1703,7 @@ mod tests {
         );
 
         // A Front photo removes Front.
-        ber.photos.push(Photo {
+        ber.photos.push(Evidence {
             side: Some(ExternalSide::Front),
             ..Default::default()
         });
@@ -1579,5 +1712,214 @@ mod tests {
         // Deferring Back (deferrable) counts as set for the gate.
         ber.set_photo_deferred(ExternalSide::Back, true);
         assert!(ber.missing_external_photo_sides().is_empty());
+    }
+
+    // --- Heating-system sync from placed objects -------------------------
+
+    /// A `Ber` whose attic bucket holds the given objects — the simplest place
+    /// to hang heat-source objects for the sync tests.
+    fn ber_with_objects(objects: Vec<crate::ber::objects::BuildingObject>) -> Ber {
+        use crate::ber::objects::ObjectRoom;
+        let mut ber = Ber::default();
+        let mut room = ObjectRoom::new(domain::points::Point2f32::new(0.0, 0.0));
+        room.objects = objects;
+        ber.attic_room = Some(room);
+        ber
+    }
+
+    fn obj(kind: crate::ber::objects::ObjectKind) -> crate::ber::objects::BuildingObject {
+        crate::ber::objects::BuildingObject::new(kind, 1)
+    }
+
+    /// OLD-shape records (no `separate_hw_control` on a `BuildingObject`, no
+    /// `room_thermostat` on `HeatingControls`, no `secondary_heating` on
+    /// `HeatingSystem`) still deserialize — the new fields default.
+    #[test]
+    fn legacy_heating_json_loads_with_defaulted_new_fields() {
+        use crate::ber::objects::BuildingObject;
+        use crate::ber::systems::{HeatingControls, HeatingSystem};
+
+        let obj: BuildingObject =
+            serde_json::from_str(r#"{"id":"00000000-0000-0000-0000-000000000000","kind":{"Boiler":"Gas"},"count":1,"note":null,"photos":[]}"#)
+                .expect("legacy BuildingObject loads");
+        assert!(!obj.separate_hw_control);
+
+        let controls: HeatingControls =
+            serde_json::from_str(r#"{"programmer":true,"zones":2,"notes":null}"#)
+                .expect("legacy HeatingControls loads");
+        assert_eq!(controls.room_thermostat, 0);
+
+        let sys: HeatingSystem = serde_json::from_str(
+            r#"{"id":"00000000-0000-0000-0000-000000000000","system_type":"GasBoiler","description":"","year_installed":null,"controls":{"programmer":false,"zones":0,"notes":null},"separate_hot_water":false}"#,
+        )
+        .expect("legacy HeatingSystem loads");
+        assert!(sys.secondary_heating.is_empty());
+    }
+
+    #[test]
+    fn sync_single_gas_boiler() {
+        use crate::ber::objects::{BoilerFuel, ObjectKind};
+        use crate::ber::systems::HeatingSystemType;
+        let mut ber = ber_with_objects(vec![obj(ObjectKind::Boiler(BoilerFuel::Gas))]);
+        ber.sync_heating_system_from_objects();
+        assert_eq!(ber.heating_system.system_type, HeatingSystemType::GasBoiler);
+        assert!(ber.heating_system.secondary_heating.is_empty());
+    }
+
+    #[test]
+    fn sync_gas_and_heat_pump_precedence_and_secondary() {
+        use crate::ber::objects::{BoilerFuel, ObjectKind};
+        use crate::ber::systems::HeatingSystemType;
+        let mut ber = ber_with_objects(vec![
+            obj(ObjectKind::Boiler(BoilerFuel::Gas)),
+            obj(ObjectKind::Boiler(BoilerFuel::HeatPump)),
+        ]);
+        ber.sync_heating_system_from_objects();
+        assert_eq!(ber.heating_system.system_type, HeatingSystemType::HeatPump);
+        assert_eq!(
+            ber.heating_system.secondary_heating,
+            vec![HeatingSystemType::GasBoiler]
+        );
+    }
+
+    #[test]
+    fn sync_preserves_assessor_chosen_primary() {
+        use crate::ber::objects::{BoilerFuel, ObjectKind};
+        use crate::ber::systems::HeatingSystemType;
+        let mut ber = ber_with_objects(vec![
+            obj(ObjectKind::Boiler(BoilerFuel::Gas)),
+            obj(ObjectKind::Boiler(BoilerFuel::HeatPump)),
+        ]);
+        // Assessor already picked the gas boiler as primary.
+        ber.heating_system.system_type = HeatingSystemType::GasBoiler;
+        ber.sync_heating_system_from_objects();
+        assert_eq!(ber.heating_system.system_type, HeatingSystemType::GasBoiler);
+        assert_eq!(
+            ber.heating_system.secondary_heating,
+            vec![HeatingSystemType::HeatPump]
+        );
+    }
+
+    #[test]
+    fn sync_recomputes_after_boiler_removed() {
+        use crate::ber::objects::{BoilerFuel, ObjectKind};
+        use crate::ber::systems::HeatingSystemType;
+        // Gas chosen primary, then the gas boiler is removed leaving a heat pump.
+        let mut ber = ber_with_objects(vec![obj(ObjectKind::Boiler(BoilerFuel::HeatPump))]);
+        ber.heating_system.system_type = HeatingSystemType::GasBoiler;
+        ber.sync_heating_system_from_objects();
+        assert_eq!(ber.heating_system.system_type, HeatingSystemType::HeatPump);
+        assert!(ber.heating_system.secondary_heating.is_empty());
+
+        // Now remove every heat source → Invalid.
+        ber.attic_room.as_mut().unwrap().objects.clear();
+        ber.sync_heating_system_from_objects();
+        assert_eq!(ber.heating_system.system_type, HeatingSystemType::Invalid);
+        assert!(ber.heating_system.secondary_heating.is_empty());
+    }
+
+    #[test]
+    fn sync_panel_heater_only_is_electric() {
+        use crate::ber::objects::ObjectKind;
+        use crate::ber::systems::HeatingSystemType;
+        let mut ber = ber_with_objects(vec![obj(ObjectKind::PanelHeater)]);
+        ber.sync_heating_system_from_objects();
+        assert_eq!(
+            ber.heating_system.system_type,
+            HeatingSystemType::ElectricHeater
+        );
+        assert!(ber.heating_system.secondary_heating.is_empty());
+    }
+
+    #[test]
+    fn sync_chimney_becomes_secondary() {
+        use crate::ber::objects::{BoilerFuel, ChimneyState, ObjectKind};
+        use crate::ber::systems::HeatingSystemType;
+        let mut ber = ber_with_objects(vec![
+            obj(ObjectKind::Boiler(BoilerFuel::Gas)),
+            obj(ObjectKind::Chimney(ChimneyState::Open)),
+            // A second chimney must NOT double the secondary entry.
+            obj(ObjectKind::Chimney(ChimneyState::Closed)),
+        ]);
+        ber.sync_heating_system_from_objects();
+        assert_eq!(ber.heating_system.system_type, HeatingSystemType::GasBoiler);
+        assert_eq!(
+            ber.heating_system.secondary_heating,
+            vec![HeatingSystemType::Other("Chimney".to_string())]
+        );
+    }
+
+    #[test]
+    fn sync_programmer_and_thermostat_controls() {
+        use crate::ber::objects::{BoilerFuel, BuildingObject, ObjectKind};
+        let mut ber = ber_with_objects(vec![
+            obj(ObjectKind::Boiler(BoilerFuel::Gas)),
+            obj(ObjectKind::Programmer),
+            // Thermostat counts sum to 3 (2 + 1).
+            BuildingObject::new(ObjectKind::Thermostat, 2),
+            BuildingObject::new(ObjectKind::Thermostat, 1),
+        ]);
+        ber.sync_heating_system_from_objects();
+        assert!(ber.heating_system.controls.programmer);
+        assert_eq!(ber.heating_system.controls.room_thermostat, 3);
+    }
+
+    #[test]
+    fn sync_separate_hot_water_from_boiler_or_programmer() {
+        use crate::ber::objects::{BoilerFuel, ObjectKind};
+        // Boiler with the checkbox set → separate_hot_water true.
+        let mut boiler = obj(ObjectKind::Boiler(BoilerFuel::Gas));
+        boiler.separate_hw_control = true;
+        let mut ber = ber_with_objects(vec![boiler]);
+        ber.sync_heating_system_from_objects();
+        assert!(ber.heating_system.separate_hot_water);
+
+        // Programmer with the checkbox set → also true.
+        let mut prog = obj(ObjectKind::Programmer);
+        prog.separate_hw_control = true;
+        let mut ber = ber_with_objects(vec![obj(ObjectKind::Boiler(BoilerFuel::Gas)), prog]);
+        ber.sync_heating_system_from_objects();
+        assert!(ber.heating_system.separate_hot_water);
+
+        // Neither set → false.
+        let mut ber = ber_with_objects(vec![
+            obj(ObjectKind::Boiler(BoilerFuel::Gas)),
+            obj(ObjectKind::Programmer),
+        ]);
+        ber.sync_heating_system_from_objects();
+        assert!(!ber.heating_system.separate_hot_water);
+    }
+
+    #[test]
+    fn sync_is_idempotent() {
+        use crate::ber::objects::{BoilerFuel, BuildingObject, ChimneyState, ObjectKind};
+        let mut ber = ber_with_objects(vec![
+            obj(ObjectKind::Boiler(BoilerFuel::Gas)),
+            obj(ObjectKind::Boiler(BoilerFuel::HeatPump)),
+            obj(ObjectKind::PanelHeater),
+            obj(ObjectKind::Chimney(ChimneyState::Open)),
+            obj(ObjectKind::Programmer),
+            BuildingObject::new(ObjectKind::Thermostat, 2),
+        ]);
+        ber.sync_heating_system_from_objects();
+        let first = ber.heating_system.clone();
+        ber.sync_heating_system_from_objects();
+        assert_eq!(first.system_type, ber.heating_system.system_type);
+        assert_eq!(
+            first.secondary_heating,
+            ber.heating_system.secondary_heating
+        );
+        assert_eq!(
+            first.controls.programmer,
+            ber.heating_system.controls.programmer
+        );
+        assert_eq!(
+            first.controls.room_thermostat,
+            ber.heating_system.controls.room_thermostat
+        );
+        assert_eq!(
+            first.separate_hot_water,
+            ber.heating_system.separate_hot_water
+        );
     }
 }

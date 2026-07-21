@@ -229,6 +229,10 @@ impl AppController {
                 name: format!("Storey {}", n + 1),
                 ..Default::default()
             });
+            // Keep the dwelling storey count in step with the drawn storeys (it
+            // starts as an intake seed and would otherwise drift). Set-to-length
+            // rather than +=1 so it self-heals a pre-existing wrong count.
+            record.data.number_of_storeys = record.data.storeys.len() as i32;
             n
         };
         log::debug!(
@@ -372,6 +376,12 @@ impl AppController {
         // indexes them in parallel). The popped `Storey` carries its own
         // per-storey data (floor thickness, regions) with it.
         self.current_record.as_mut().unwrap().data.storeys.pop();
+        // Keep the dwelling storey count in step with the drawn storeys (see
+        // `add_storey`).
+        {
+            let data = &mut self.current_record.as_mut().unwrap().data;
+            data.number_of_storeys = data.storeys.len() as i32;
+        }
         let removed = self.document.remove_last_storey();
         debug_assert!(removed, "lock-step invariant: document had storey {k}");
         // Drop the deleted storey's session state (keyed by its index — with
@@ -1009,6 +1019,15 @@ impl AppController {
                 &mut record.data.storeys[idx],
                 &previous_walls[idx],
             );
+        }
+        // Orphaned constructions accumulate as walls are re-phased/reclassified.
+        // Only safe to prune once EVERY storey is dimensioned — an in-flux storey's
+        // stale regions would falsely orphan a construction (losing its photos).
+        // The find-or-create BASE SEED of each kind is preserved inside the prune
+        // (the resolve pipeline looks it up read-only even when a dimensioned
+        // storey transiently holds zero regions of a kind).
+        if !dimensioned.is_empty() && dimensioned.iter().all(|&d| d) {
+            record.data.prune_orphaned_constructions();
         }
     }
 

@@ -29,6 +29,7 @@ pub use pending_photos::{take_dismiss_commits, PendingObjectPhotos};
 use egui::epaint::PathStroke;
 use egui::Pos2;
 
+use crate::controller::app_controller::FinalDetails;
 use crate::controller::app_controller::{
     ActiveObjectRoomView, AssessmentPhase, ChecklistItem, ComplexWindowPlacement,
     DimensionPromptUiData, DoorSidelightsPlacement, EditDragPromptUiData, ElevationView,
@@ -44,7 +45,7 @@ use crate::ui::widgets::HintExt;
 use ber_model::ber::ber_struct::Ber;
 use ber_model::ber::common::{ConstructionPhase, ExternalSide, ItemId};
 use ber_model::ber::fenestration::{DoorKind, Frame, Glazing, Overshading, WindowTopShape};
-use ber_model::ber::final_details::{FinalDetails, FloorKind, HeatingKind, WallFinish};
+use ber_model::ber::final_details::{FloorKind, HeatingKind, WallFinish};
 use ber_model::ber::objects::{ObjectCategory, ObjectKind};
 use ber_model::ber::structural::{SurfaceCounts, WallExposure};
 use domain::sketch::{DisplayMode, EditTools, SketchMode};

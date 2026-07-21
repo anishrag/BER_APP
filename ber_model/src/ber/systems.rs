@@ -2,9 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::common::{ItemId, Photo, Year};
+use super::common::{Evidence, ItemId, Year};
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum HeatingSystemType {
     GasBoiler,
     OilBoiler,
@@ -19,6 +19,9 @@ pub enum HeatingSystemType {
 pub struct HeatingControls {
     pub programmer: bool,
     pub zones: u32,
+    /// Count of room thermostats recorded (summed from `Thermostat` objects).
+    #[serde(default)]
+    pub room_thermostat: u32,
     pub notes: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -29,6 +32,17 @@ pub struct HeatingSystem {
     pub year_installed: Option<Year>,
     pub controls: HeatingControls,
     pub separate_hot_water: bool,
+    /// The heat-EMITTER (distribution) type — radiators / underfloor / etc.
+    /// Migrated from the pre-refactor `FinalDetails::heating` (see
+    /// `Ber::migrate_legacy`). `#[serde(default)]` so older records load.
+    #[serde(default)]
+    pub distribution: crate::ber::final_details::HeatingKind,
+    /// Non-primary heat sources present in the dwelling (for the report) — the
+    /// distinct heat-source object types other than the primary `system_type`,
+    /// plus `Other("Chimney")` for any chimney. Synced from placed objects; see
+    /// [`Ber::sync_heating_system_from_objects`](crate::ber::ber_struct::Ber::sync_heating_system_from_objects).
+    #[serde(default)]
+    pub secondary_heating: Vec<HeatingSystemType>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -68,6 +82,6 @@ pub struct SolarElements {
     pub ceiling_element_id: ItemId,
     pub estimated_angle_degs: f32,
     pub estimated_direction: Direction,
-    pub photo: Option<Photo>,
+    pub photo: Option<Evidence>,
     pub description: Option<String>,
 }

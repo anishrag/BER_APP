@@ -465,31 +465,34 @@ mod tests {
 
     #[test]
     fn pending_photos_skips_pushed_and_missing_files() {
-        use ber_model::ber::common::Photo;
+        use ber_model::ber::common::Evidence;
         let existing = std::env::temp_dir().join(format!("ber_push_{}.jpg", std::process::id()));
         std::fs::write(&existing, b"jpg").unwrap();
 
         let mut ber = Ber::new();
-        let on_disk = Photo {
+        let on_disk = Evidence {
             id: Default::default(),
             file_path: existing.to_string_lossy().into_owned(),
             thumbnail_path: None,
             description: None,
             side: None,
+            content_type: None,
         };
-        let missing = Photo {
+        let missing = Evidence {
             id: Default::default(),
             file_path: "/nonexistent/gone.jpg".into(),
             thumbnail_path: None,
             description: None,
             side: None,
+            content_type: None,
         };
-        let already = Photo {
+        let already = Evidence {
             id: Default::default(),
             file_path: existing.to_string_lossy().into_owned(),
             thumbnail_path: None,
             description: None,
             side: None,
+            content_type: None,
         };
         let already_id = already.id.to_string();
         ber.photos = vec![on_disk.clone(), missing, already];

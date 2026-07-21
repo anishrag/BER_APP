@@ -3,7 +3,7 @@
 //! house-level fields on `Ber` (Layer 1) and persists; the UI renders the form /
 //! sheltered-sides / north-align steps and calls these.
 use super::*;
-use ber_model::ber::common::{ExternalSide, Photo};
+use ber_model::ber::common::{Evidence, ExternalSide};
 use ber_model::ber::final_details::{FloorKind, HeatingKind, ShelteringBySide, WallFinish};
 
 /// Which wall-finish field the form is setting.
@@ -12,6 +12,20 @@ pub enum WallFinishField {
     Internal,
     Separating,
     External,
+}
+
+/// The Phase-4 form values gathered for the UI. Post-refactor these no longer
+/// live in one model struct: floor + the three wall finishes come from
+/// `Ber::thermal_mass_info` (raw capture), and heating from
+/// `Ber::heating_system.distribution`. This is a read-only view assembled from
+/// both for the panel; the setters write back to the two homes.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FinalDetails {
+    pub floor: FloorKind,
+    pub internal_wall: WallFinish,
+    pub separating_wall: WallFinish,
+    pub external_wall: WallFinish,
+    pub heating: HeatingKind,
 }
 
 /// What the Final phase view is doing: showing the form (default), aligning the
@@ -42,11 +56,21 @@ impl AppController {
             .is_some_and(|r| r.data.details_reviewed)
     }
 
-    /// The Phase-4 form values (defaults when no record).
-    pub fn final_details(&self) -> ber_model::ber::final_details::FinalDetails {
+    /// The Phase-4 form values (defaults when no record) — assembled from the
+    /// raw `thermal_mass_info` capture and `heating_system.distribution`.
+    pub fn final_details(&self) -> FinalDetails {
         self.current_record
             .as_ref()
-            .map(|r| r.data.final_details)
+            .map(|r| {
+                let t = &r.data.thermal_mass_info;
+                FinalDetails {
+                    floor: t.floor,
+                    internal_wall: t.internal_wall,
+                    separating_wall: t.separating_wall,
+                    external_wall: t.external_wall,
+                    heating: r.data.heating_system.distribution,
+                }
+            })
             .unwrap_or_default()
     }
 
@@ -76,7 +100,7 @@ impl AppController {
 
     pub fn set_final_floor(&mut self, floor: FloorKind) {
         if let Some(r) = self.current_record.as_mut() {
-            r.data.final_details.floor = floor;
+            r.data.thermal_mass_info.floor = floor;
             let _ = self.mark_dirty();
         }
     }
@@ -84,9 +108,9 @@ impl AppController {
     pub fn set_final_wall_finish(&mut self, field: WallFinishField, finish: WallFinish) {
         if let Some(r) = self.current_record.as_mut() {
             match field {
-                WallFinishField::Internal => r.data.final_details.internal_wall = finish,
-                WallFinishField::Separating => r.data.final_details.separating_wall = finish,
-                WallFinishField::External => r.data.final_details.external_wall = finish,
+                WallFinishField::Internal => r.data.thermal_mass_info.internal_wall = finish,
+                WallFinishField::Separating => r.data.thermal_mass_info.separating_wall = finish,
+                WallFinishField::External => r.data.thermal_mass_info.external_wall = finish,
             }
             let _ = self.mark_dirty();
         }
@@ -94,7 +118,7 @@ impl AppController {
 
     pub fn set_final_heating(&mut self, heating: HeatingKind) {
         if let Some(r) = self.current_record.as_mut() {
-            r.data.final_details.heating = heating;
+            r.data.heating_system.distribution = heating;
             let _ = self.mark_dirty();
         }
     }
@@ -195,12 +219,13 @@ impl AppController {
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|_| path.to_string_lossy().to_string());
         if let Some(r) = self.current_record.as_mut() {
-            r.data.site_satellite_image = Some(Photo {
+            r.data.site_satellite_image = Some(Evidence {
                 id: ItemId::default(),
                 file_path,
                 thumbnail_path: None,
                 description: Some("Test satellite (practice)".to_string()),
                 side: None,
+                content_type: None,
             });
             let _ = self.mark_dirty();
         }

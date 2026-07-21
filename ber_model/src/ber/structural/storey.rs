@@ -889,23 +889,39 @@ fn ring_to_geo(ring: &[Point2f64]) -> Polygon<f64> {
     Polygon::new(LineString::from(coords), vec![])
 }
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
-pub enum ThermalMassCategoryEnum {
-    Low,
-    Medium,
-    High,
-    #[default]
-    Invalid,
-    Other(String),
-}
-
+/// Raw thermal-mass capture: the ground-floor construction kind plus the three
+/// wall finishes the assessor records. This is DELIBERATELY raw — turning these
+/// kinds into a Low/Medium/High thermal-mass category is the DEAP resolver's
+/// job, not the model's (see `BER_deap`). Field names mirror the pre-refactor
+/// `FinalDetails` so a load-time migration can adopt them 1:1.
+/// The four raw-capture fields take `#[serde(default)]` for two reasons: new
+/// records without a value load, AND pre-refactor records (which stored this
+/// struct under the old category-enum field names `floors`/`partition_walls`/
+/// …) still deserialize — those obsolete keys are ignored and the new fields
+/// start `Unset`. The real pre-refactor values lived in `final_details` and are
+/// adopted by [`Ber::migrate_legacy`](crate::ber::ber_struct::Ber::migrate_legacy).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ThermalMassInfo {
     pub id: ItemId,
-    pub floors: ThermalMassCategoryEnum,
-    pub partition_walls: ThermalMassCategoryEnum,
-    pub external_walls: ThermalMassCategoryEnum,
-    pub separating_walls: ThermalMassCategoryEnum,
+    #[serde(default)]
+    pub floor: crate::ber::final_details::FloorKind,
+    #[serde(default)]
+    pub internal_wall: crate::ber::final_details::WallFinish,
+    #[serde(default)]
+    pub external_wall: crate::ber::final_details::WallFinish,
+    #[serde(default)]
+    pub separating_wall: crate::ber::final_details::WallFinish,
+}
+
+impl ThermalMassInfo {
+    /// True when nothing has been captured yet (all four fields `Unset`).
+    pub fn is_unset(&self) -> bool {
+        use crate::ber::final_details::{FloorKind, WallFinish};
+        self.floor == FloorKind::Unset
+            && self.internal_wall == WallFinish::Unset
+            && self.external_wall == WallFinish::Unset
+            && self.separating_wall == WallFinish::Unset
+    }
 }
 
 #[cfg(test)]

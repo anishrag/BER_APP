@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::ber::ber_struct::Ber;
-use crate::ber::common::{ConstructionPhase, ItemId, Photo};
+use crate::ber::common::{ConstructionPhase, Evidence, ItemId};
 
 #[allow(unused_imports)]
 use super::*;
@@ -524,7 +524,7 @@ pub struct ConstructionBase {
     pub id: ItemId,
     pub construction_makeup: ConstructionMakeup,
     pub construction_phase: ConstructionPhase,
-    pub photos: Vec<Photo>,
+    pub photos: Vec<Evidence>,
     /// The assessor's editable label for this construction (shown as the group's
     /// name in the Structure editor). `None` falls back to "Group N". `alias`
     /// keeps records saved under the former field name `description` loadable.
@@ -1004,6 +1004,95 @@ impl Ber {
         out
     }
 
+    /// Drop wall/floor/ceiling constructions that NO region references — the dead
+    /// records left behind as walls are re-phased/reclassified/redrawn (find-or-
+    /// create mints a new construction and repoints the region, orphaning the old).
+    /// Returns the number dropped. CONSERVATIVE: the referenced set is a SUPERSET
+    /// gathered from every region collection that carries a construction_id, so a
+    /// still-referenced construction is never dropped. CALLER MUST ensure every
+    /// storey is fully resolved (measurements_complete) before calling — a storey
+    /// mid-dimensioning holds stale/empty regions, and a construction only
+    /// transiently unreferenced (with its classification + evidence photos) would
+    /// be lost. See the call site in the controller's cross-storey tail.
+    ///
+    /// The fully-default BASE SEED of each kind — the `(default type, default
+    /// make-up, default phase, unnamed)` find-or-create key that
+    /// `resolve_storey`/`recompose_ceilings` LOOK UP read-only — is ALWAYS kept,
+    /// even when momentarily unreferenced. `recompose_ceilings` reads the ceiling
+    /// seed WITHOUT re-ensuring it, so dropping it while a dimensioned storey
+    /// transiently holds zero ceiling regions (e.g. ceiling height not entered
+    /// yet) would strand the recompose (early return → no ceiling). Keeping the
+    /// three seeds is a harmless false-keep (the real accumulation is TYPED/PHASED
+    /// records, never the bare seed, which any unclassified surface references
+    /// anyway); dropping one breaks the derive pipeline.
+    pub fn prune_orphaned_constructions(&mut self) -> usize {
+        // Gather EVERY construction_id any region references, across all storeys
+        // and all region collections that carry one. ItemIds are UUID-unique, so
+        // a single combined set can't cross-keep between the three registries.
+        // Collections walked (the complete set of region carriers):
+        //   * placeable_wall_regions() — perimeter/riser `walls` AND porch inner
+        //     `porch_walls`, the full opening-placeable wall set.
+        //   * floors.regions, living_areas.regions, porches.regions — every
+        //     FloorRegion carrier (each FloorRegion has a construction_id).
+        //   * ceilings.regions — the CeilingRegion carrier.
+        let mut referenced: std::collections::HashSet<ItemId> = std::collections::HashSet::new();
+        for s in &self.storeys {
+            for w in s.placeable_wall_regions() {
+                referenced.insert(w.construction_id);
+            }
+            for f in s
+                .floors
+                .regions
+                .iter()
+                .chain(s.living_areas.regions.iter())
+                .chain(s.porches.regions.iter())
+            {
+                referenced.insert(f.construction_id);
+            }
+            for c in &s.ceilings.regions {
+                referenced.insert(c.construction_id);
+            }
+        }
+        // Never drop the base seed the resolve pipeline looks up read-only.
+        for id in [
+            self.wall_construction_id(Default::default(), Default::default(), Default::default()),
+            self.floor_construction_id(Default::default(), Default::default(), Default::default()),
+            self.ceiling_construction_id(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+            ),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            referenced.insert(id);
+        }
+
+        let walls_before = self.wall_constructions.len();
+        let floors_before = self.floor_constructions.len();
+        let ceilings_before = self.ceiling_constructions.len();
+
+        self.wall_constructions
+            .retain(|c| referenced.contains(&c.base.id));
+        self.floor_constructions
+            .retain(|c| referenced.contains(&c.base.id));
+        self.ceiling_constructions
+            .retain(|c| referenced.contains(&c.base.id));
+
+        let walls_dropped = walls_before - self.wall_constructions.len();
+        let floors_dropped = floors_before - self.floor_constructions.len();
+        let ceilings_dropped = ceilings_before - self.ceiling_constructions.len();
+        let total = walls_dropped + floors_dropped + ceilings_dropped;
+        if total > 0 {
+            log::info!(
+                "prune_orphaned_constructions: dropped {total} orphaned constructions \
+                 ({walls_dropped} wall, {floors_dropped} floor, {ceilings_dropped} ceiling)"
+            );
+        }
+        total
+    }
+
     /// The `(kind-tagged type, make-up, phase)` attributes of the `kind`
     /// construction named `name` (trimmed exact match), if any — lets the
     /// shell tell whether a rename that collided
@@ -1063,7 +1152,7 @@ impl Ber {
 
     /// Attach a `photo` to the `kind` construction `id` (its build-up photos).
     /// Find-by-id within the matching registry; no-op if it isn't there.
-    pub fn add_construction_photo(&mut self, kind: SurfaceKind, id: ItemId, photo: Photo) {
+    pub fn add_construction_photo(&mut self, kind: SurfaceKind, id: ItemId, photo: Evidence) {
         let base = match kind {
             SurfaceKind::Walls => self
                 .wall_constructions
@@ -1394,7 +1483,7 @@ mod tests {
             .unwrap()
             .base
             .photos
-            .push(Photo::default());
+            .push(Evidence::default());
         ber.storeys[0].walls.regions[1].construction_id = cid;
         assert!(ber
             .structure_incomplete_reasons(0, SurfaceKind::Walls)
@@ -1474,7 +1563,7 @@ mod tests {
         assert!(c.is_complete(), "declared-unknown needs no photo");
         c.insulation = Some(CeilingInsulation::ThicknessMm(150.0));
         assert!(!c.is_complete(), "a thickness needs a backing photo");
-        c.base.photos.push(Photo::default());
+        c.base.photos.push(Evidence::default());
         assert!(c.is_complete(), "thickness + photo completes");
     }
 
@@ -1493,7 +1582,7 @@ mod tests {
             };
             c.base.construction_makeup = makeup;
             if photo {
-                c.base.photos.push(Photo::default());
+                c.base.photos.push(Evidence::default());
             }
             c
         };
@@ -1604,7 +1693,7 @@ mod tests {
                 ..Default::default()
             };
             assert!(!base.build_up_done(), "{dp:?} without a photo is not done");
-            base.photos.push(Photo::default());
+            base.photos.push(Evidence::default());
             assert!(base.build_up_done(), "a backing photo completes {dp:?}");
         }
     }
@@ -1624,7 +1713,7 @@ mod tests {
             ..Default::default()
         };
         assert!(!base.build_up_done(), "no photo → not done");
-        base.photos.push(Photo::default());
+        base.photos.push(Evidence::default());
         assert!(base.build_up_done(), "a backing photo completes it");
 
         assert_eq!(
@@ -1785,5 +1874,259 @@ mod tests {
         // Unknown id → no-op (no panic, nothing changed elsewhere).
         ber.set_ceiling_insulation(ItemId::default(), Some(CeilingInsulation::Unknown));
         assert_eq!(ber.ceiling_construction(id).unwrap().insulation, None);
+    }
+
+    /// `prune_orphaned_constructions` drops exactly the wall/floor/ceiling
+    /// constructions no region references — including Uninitialised ones AND
+    /// typed constructions carrying evidence photos — while keeping every
+    /// referenced one, including a construction referenced ONLY by the second
+    /// storey (guards a per-storey scan bug). Idempotent on a second run.
+    #[test]
+    fn prune_orphaned_constructions_drops_only_unreferenced() {
+        use crate::ber::structural::{
+            CeilingRegions, FloorRegions, Storey, SurfaceKind, WallExposure, WallRegion,
+            WallRegions,
+        };
+        use domain::points::{Point2f64, Point3f64};
+
+        let mut ber = Ber::default();
+
+        // Referenced constructions (survivors).
+        let wall_cid_a = ber.ensure_wall_construction(
+            WallConstructionType::CavityWall,
+            ConstructionMakeup::Default,
+            ConstructionPhase::default(),
+        );
+        // Referenced ONLY by the second storey — guards a per-storey scan bug.
+        let wall_cid_b = ber.ensure_wall_construction(
+            WallConstructionType::FilledCavityWall,
+            ConstructionMakeup::Default,
+            ConstructionPhase::default(),
+        );
+        let floor_cid = ber.ensure_floor_construction(
+            FloorConstructionType::SolidFloor,
+            ConstructionMakeup::Default,
+            ConstructionPhase::default(),
+        );
+        let ceiling_cid = ber.ensure_ceiling_construction(
+            CeilingConstructionType::FlatRoof,
+            ConstructionMakeup::Default,
+            ConstructionPhase::default(),
+        );
+
+        // Orphans, never referenced by any region: some barely-classified (Tbd
+        // make-up on a real type), some typed WITH evidence photos — to prove
+        // even a photographed classification is dropped once nothing references
+        // it. Deliberately NON-default types, so none is the preserved base seed.
+        let orphan_wall_bare = ber.ensure_wall_construction(
+            WallConstructionType::TimberConstruction,
+            ConstructionMakeup::Tbd,
+            ConstructionPhase::default(),
+        );
+        let orphan_wall_photo = ber.ensure_wall_construction(
+            WallConstructionType::ICF,
+            ConstructionMakeup::Layers(vec![]),
+            ConstructionPhase::default(),
+        );
+        ber.add_construction_photo(SurfaceKind::Walls, orphan_wall_photo, Evidence::default());
+        let orphan_floor = ber.ensure_floor_construction(
+            FloorConstructionType::SuspendedFloor,
+            ConstructionMakeup::Layers(vec![]),
+            ConstructionPhase::default(),
+        );
+        ber.add_construction_photo(SurfaceKind::Floors, orphan_floor, Evidence::default());
+        let orphan_ceiling = ber.ensure_ceiling_construction(
+            CeilingConstructionType::SlopedInsOnRafter,
+            ConstructionMakeup::Tbd,
+            ConstructionPhase::default(),
+        );
+
+        assert_eq!(ber.wall_constructions.len(), 4);
+        assert_eq!(ber.floor_constructions.len(), 2);
+        assert_eq!(ber.ceiling_constructions.len(), 2);
+
+        let wall = |construction_id| WallRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(vec![
+                Point3f64::new(0.0, 0.0, 0.0),
+                Point3f64::new(1.0, 0.0, 0.0),
+                Point3f64::new(1.0, 0.0, 2.4),
+                Point3f64::new(0.0, 0.0, 2.4),
+            ]),
+            exposure: WallExposure::Exposed,
+            opes: Opes::default(),
+            construction_id,
+        };
+        let quad = vec![
+            Point2f64::new(0.0, 0.0),
+            Point2f64::new(2.0, 0.0),
+            Point2f64::new(2.0, 2.0),
+            Point2f64::new(0.0, 2.0),
+        ];
+
+        // Storey 0: a wall (wall_cid_a) + a floor (floor_cid).
+        let s0 = Storey {
+            walls: WallRegions {
+                regions: vec![wall(wall_cid_a)],
+            },
+            floors: FloorRegions::new(quad.clone(), floor_cid),
+            ..Storey::default()
+        };
+        // Storey 1: a wall referencing ONLY wall_cid_b + a ceiling (ceiling_cid).
+        let s1 = Storey {
+            walls: WallRegions {
+                regions: vec![wall(wall_cid_b)],
+            },
+            ceilings: CeilingRegions::new(
+                vec![
+                    Point3f64::new(0.0, 0.0, 2.4),
+                    Point3f64::new(2.0, 0.0, 2.4),
+                    Point3f64::new(2.0, 2.0, 2.4),
+                    Point3f64::new(0.0, 2.0, 2.4),
+                ],
+                ceiling_cid,
+            ),
+            ..Storey::default()
+        };
+        ber.storeys = vec![s0, s1];
+
+        let dropped = ber.prune_orphaned_constructions();
+        assert_eq!(dropped, 4, "two wall + one floor + one ceiling orphan");
+
+        let wall_ids: Vec<ItemId> = ber.wall_constructions.iter().map(|c| c.base.id).collect();
+        assert_eq!(wall_ids.len(), 2);
+        assert!(wall_ids.contains(&wall_cid_a));
+        assert!(
+            wall_ids.contains(&wall_cid_b),
+            "kept even though only storey 1 references it"
+        );
+        assert!(!wall_ids.contains(&orphan_wall_bare));
+        assert!(!wall_ids.contains(&orphan_wall_photo));
+
+        let floor_ids: Vec<ItemId> = ber.floor_constructions.iter().map(|c| c.base.id).collect();
+        assert_eq!(floor_ids, vec![floor_cid]);
+        let ceiling_ids: Vec<ItemId> = ber
+            .ceiling_constructions
+            .iter()
+            .map(|c| c.base.id)
+            .collect();
+        assert_eq!(ceiling_ids, vec![ceiling_cid]);
+        let _ = orphan_ceiling;
+
+        // Idempotent: a second prune drops nothing.
+        assert_eq!(ber.prune_orphaned_constructions(), 0);
+    }
+
+    /// A construction referenced ONLY via the extra region collections
+    /// (living areas, porches, porch inner walls) is KEPT — those carriers are
+    /// part of the referenced-set sweep, so nothing living there is falsely
+    /// orphaned.
+    #[test]
+    fn prune_keeps_constructions_referenced_via_extra_collections() {
+        use crate::ber::structural::{FloorRegions, Storey, WallExposure, WallRegion, WallRegions};
+        use domain::points::{Point2f64, Point3f64};
+
+        let mut ber = Ber::default();
+        let living_cid = ber.ensure_floor_construction(
+            FloorConstructionType::SolidFloor,
+            ConstructionMakeup::Default,
+            ConstructionPhase::default(),
+        );
+        let porch_floor_cid = ber.ensure_floor_construction(
+            FloorConstructionType::SuspendedFloor,
+            ConstructionMakeup::Default,
+            ConstructionPhase::default(),
+        );
+        let porch_wall_cid = ber.ensure_wall_construction(
+            WallConstructionType::CavityWall,
+            ConstructionMakeup::Default,
+            ConstructionPhase::default(),
+        );
+
+        let quad = vec![
+            Point2f64::new(0.0, 0.0),
+            Point2f64::new(2.0, 0.0),
+            Point2f64::new(2.0, 2.0),
+            Point2f64::new(0.0, 2.0),
+        ];
+
+        // NONE of these live in floors/walls/ceilings — only the extra carriers.
+        let s = Storey {
+            living_areas: FloorRegions::new(quad.clone(), living_cid),
+            porches: FloorRegions::new(quad.clone(), porch_floor_cid),
+            porch_walls: WallRegions {
+                regions: vec![WallRegion {
+                    id: ItemId::default(),
+                    polygon: Polygon3D::new(vec![
+                        Point3f64::new(0.0, 0.0, 0.0),
+                        Point3f64::new(1.0, 0.0, 0.0),
+                        Point3f64::new(1.0, 0.0, 2.4),
+                        Point3f64::new(0.0, 0.0, 2.4),
+                    ]),
+                    exposure: WallExposure::Unset,
+                    opes: Opes::default(),
+                    construction_id: porch_wall_cid,
+                }],
+            },
+            ..Storey::default()
+        };
+        ber.storeys = vec![s];
+
+        let dropped = ber.prune_orphaned_constructions();
+        assert_eq!(
+            dropped, 0,
+            "living-area / porch / porch-wall references all keep their constructions"
+        );
+        assert_eq!(ber.floor_constructions.len(), 2);
+        assert_eq!(ber.wall_constructions.len(), 1);
+    }
+
+    /// The fully-default BASE SEED of each kind — the `(default type, default
+    /// make-up, default phase)` find-or-create key `resolve_storey` /
+    /// `recompose_ceilings` look up read-only — is KEPT even with no region
+    /// referencing it, so a dimensioned storey that momentarily holds zero
+    /// regions of a kind doesn't strand the derive pipeline. A TYPED orphan
+    /// alongside it is still dropped.
+    #[test]
+    fn prune_preserves_the_base_seed_constructions() {
+        let mut ber = Ber::default();
+        let wall_seed = ber.ensure_wall_construction(
+            WallConstructionType::default(),
+            ConstructionMakeup::default(),
+            ConstructionPhase::default(),
+        );
+        let floor_seed = ber.ensure_floor_construction(
+            FloorConstructionType::default(),
+            ConstructionMakeup::default(),
+            ConstructionPhase::default(),
+        );
+        let ceiling_seed = ber.ensure_ceiling_construction(
+            CeilingConstructionType::default(),
+            ConstructionMakeup::default(),
+            ConstructionPhase::default(),
+        );
+        // A typed orphan that IS droppable (not a seed).
+        let typed_orphan = ber.ensure_wall_construction(
+            WallConstructionType::CavityWall,
+            ConstructionMakeup::Default,
+            ConstructionPhase::default(),
+        );
+
+        // No storeys / regions at all — everything is unreferenced.
+        let dropped = ber.prune_orphaned_constructions();
+        assert_eq!(dropped, 1, "only the typed orphan drops");
+        assert!(ber.wall_construction(wall_seed).is_some(), "wall seed kept");
+        assert!(
+            ber.floor_construction(floor_seed).is_some(),
+            "floor seed kept"
+        );
+        assert!(
+            ber.ceiling_construction(ceiling_seed).is_some(),
+            "ceiling seed kept"
+        );
+        assert!(
+            ber.wall_construction(typed_orphan).is_none(),
+            "the typed orphan is gone"
+        );
     }
 }

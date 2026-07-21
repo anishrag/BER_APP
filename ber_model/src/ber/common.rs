@@ -42,7 +42,7 @@ impl FromStr for ItemId {
 }
 
 /// Which elevation an external photo documents. An external photo is a
-/// [`Photo`] whose `side` is `Some(_)`; the four sides together make the
+/// [`Evidence`] whose `side` is `Some(_)`; the four sides together make the
 /// Mapping "External photos" checklist row complete.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ExternalSide {
@@ -96,12 +96,13 @@ impl ExternalSide {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct Photo {
+pub struct Evidence {
     pub id: ItemId,
-    pub file_path: String, // local path to the full-resolution image
+    pub file_path: String, // local path to the full-resolution evidence file
     /// Local path to a small downscaled preview, generated at attach time.
-    /// `None` for older photos (fall back to `file_path`); rendering the
-    /// full-res original as a thumbnail is slow and memory-heavy on a tablet.
+    /// Images only; `None` for documents (e.g. a PDF) and for older photos
+    /// (fall back to `file_path`) — rendering the full-res original as a
+    /// thumbnail is slow and memory-heavy on a tablet.
     #[serde(default)]
     pub thumbnail_path: Option<String>,
     pub description: Option<String>,
@@ -110,6 +111,47 @@ pub struct Photo {
     /// written before this field load with `None`.
     #[serde(default)]
     pub side: Option<ExternalSide>,
+    /// MIME type of the evidence file. `None` on legacy records and on all
+    /// tablet-captured photos, which are images — the effective type is then
+    /// inferred from the file extension (see [`Evidence::content_type`]). Set
+    /// explicitly (e.g. "application/pdf") for non-image evidence such as a
+    /// Declaration of Performance threaded in as a document.
+    #[serde(default)]
+    pub content_type: Option<String>,
+}
+
+impl Evidence {
+    /// The effective MIME type: the explicit `content_type` if set, otherwise
+    /// inferred from the `file_path` extension (the legacy / tablet path),
+    /// defaulting to JPEG. Mirrors the png/webp/svg/jpeg mapping used by the
+    /// uploader and the report renderer.
+    pub fn content_type(&self) -> &str {
+        if let Some(ct) = self.content_type.as_deref() {
+            if !ct.is_empty() {
+                return ct;
+            }
+        }
+        let ext = self
+            .file_path
+            .rsplit('.')
+            .next()
+            .map(str::to_ascii_lowercase)
+            .unwrap_or_default();
+        match ext.as_str() {
+            "png" => "image/png",
+            "webp" => "image/webp",
+            "svg" => "image/svg+xml",
+            "pdf" => "application/pdf",
+            _ => "image/jpeg",
+        }
+    }
+
+    /// Whether this evidence is a raster image (embeddable inline) as opposed to
+    /// a document (which callers should link rather than embed). Non-image
+    /// evidence has no `thumbnail_path`.
+    pub fn is_image(&self) -> bool {
+        self.content_type().starts_with("image/")
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Default, PartialOrd, Ord)]
@@ -345,7 +387,7 @@ pub struct Item {
     pub id: ItemId,
     pub name: String,
     pub item_type: ItemType,
-    pub photos: Vec<Photo>,
+    pub photos: Vec<Evidence>,
     pub description: Option<String>,
 }
 
@@ -360,15 +402,43 @@ mod tests {
 
     #[test]
     fn photo_side_round_trips() {
-        let photo = Photo {
+        let photo = Evidence {
             file_path: "front.jpg".to_string(),
             side: Some(ExternalSide::Right),
             ..Default::default()
         };
         let json = serde_json::to_string(&photo).unwrap();
-        let back: Photo = serde_json::from_str(&json).unwrap();
+        let back: Evidence = serde_json::from_str(&json).unwrap();
         assert_eq!(back.side, Some(ExternalSide::Right));
         assert_eq!(back.file_path, "front.jpg");
+    }
+
+    #[test]
+    fn photo_content_type_infers_and_overrides() {
+        // No explicit type, .jpg extension -> inferred JPEG, treated as image.
+        let jpg = Evidence {
+            file_path: "x.jpg".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(jpg.content_type(), "image/jpeg");
+        assert!(jpg.is_image());
+
+        // .png extension -> inferred PNG.
+        let png = Evidence {
+            file_path: "x.png".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(png.content_type(), "image/png");
+        assert!(png.is_image());
+
+        // Explicit content_type wins over the extension and marks a document.
+        let pdf = Evidence {
+            file_path: "dop.jpg".to_string(),
+            content_type: Some("application/pdf".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(pdf.content_type(), "application/pdf");
+        assert!(!pdf.is_image());
     }
 
     /// A record written BEFORE unknown years existed stored plain numbers —
@@ -429,7 +499,7 @@ mod tests {
     fn photo_side_defaults_to_none_for_old_records() {
         // A record serialized before `side` existed has no such key.
         let legacy = r#"{"id":"00000000-0000-0000-0000-000000000000","file_path":"x.jpg","description":null}"#;
-        let photo: Photo = serde_json::from_str(legacy).unwrap();
+        let photo: Evidence = serde_json::from_str(legacy).unwrap();
         assert_eq!(photo.side, None);
     }
 }

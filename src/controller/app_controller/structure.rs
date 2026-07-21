@@ -13,7 +13,7 @@
 //! and holds the transient selected set (app-shell interaction state — the
 //! regions live on the BER record, not the editing `Document`).
 use super::*;
-use ber_model::ber::common::{ConstructionPhase, Photo};
+use ber_model::ber::common::{ConstructionPhase, Evidence};
 use ber_model::ber::roof::InferredRoofType;
 use ber_model::ber::structural::{
     CeilingConstructionType, CeilingExposure, CeilingInsulation, ConstructionMakeup,
@@ -56,7 +56,7 @@ pub struct EditGroup {
     pub explicit_name: Option<String>,
     /// The group construction's attached photos (session copy, seeded from the
     /// construction; the photos view shows these and the camera button appends).
-    pub photos: Vec<Photo>,
+    pub photos: Vec<Evidence>,
     /// CEILINGS ONLY: the group's extra-insulation spec (session copy, seeded
     /// from the construction) — the combined "Default" dropdown in the
     /// ceiling attribute editor (unknown / a measured thickness). Always
@@ -800,7 +800,7 @@ impl AppController {
             SurfaceExposure,
             bool, // exposure_locked
             Option<String>,
-            Vec<Photo>,
+            Vec<Evidence>,
             Option<CeilingInsulation>, // ceilings only; None for walls/floors
             InferredRoofType,          // ceilings only; Unknown for walls/floors
         );
@@ -1161,7 +1161,7 @@ impl AppController {
         self.set_structure_group_attrs(group, ty, ConstructionMakeup::Layers(layers), phase);
     }
 
-    /// Copy a source image into the photo store and return a `Photo` pointing at
+    /// Copy a source image into the photo store and return a `Evidence` pointing at
     /// the stored copy. The MODULAR core every photo-attach site shares (file
     /// I/O lives here, not in the UI). `None` on an I/O failure.
     ///
@@ -1177,13 +1177,13 @@ impl AppController {
     /// If Android wrote a fast subsampled thumbnail beside the capture (the
     /// `<source>.thumb.jpg` convention — see `MainActivity.java`), it seeds a
     /// LIGHT preview until the job's own thumbnail lands; otherwise the preview
-    /// is the full copy. Returns the provisional `Photo` to attach to the model,
+    /// is the full copy. Returns the provisional `Evidence` to attach to the model,
     /// or `None` if even the fast copy fails.
     pub(super) fn ingest_photo(
         &self,
         source: &std::path::Path,
         quality: PhotoQuality,
-    ) -> Option<ber_model::ber::common::Photo> {
+    ) -> Option<ber_model::ber::common::Evidence> {
         std::fs::create_dir_all(&self.photos_dir).ok()?;
         // Canonicalize to an ABSOLUTE dir so the stored path loads as a
         // `file://` image regardless of the process's cwd.
@@ -1227,7 +1227,7 @@ impl AppController {
             }
             inflight.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
         });
-        Some(ber_model::ber::common::Photo {
+        Some(ber_model::ber::common::Evidence {
             id,
             file_path: provisional_path,
             thumbnail_path: provisional_thumb,
@@ -1235,6 +1235,7 @@ impl AppController {
             // Construction build-up photos have no elevation side (that's only
             // for the Mapping-phase external Front/Right/Left/Back photos).
             side: None,
+            content_type: None,
         })
     }
 
@@ -1414,7 +1415,7 @@ impl AppController {
 
     /// Attach a photo (from `source`) to a Structure group's construction(s) —
     /// the build-up floaty's camera button. Stores the file, then pushes the
-    /// `Photo` onto each of the group's (shared) constructions. Marks dirty.
+    /// `Evidence` onto each of the group's (shared) constructions. Marks dirty.
     pub fn add_group_photo(
         &mut self,
         group: usize,

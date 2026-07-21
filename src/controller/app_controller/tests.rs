@@ -3532,12 +3532,13 @@ fn rotate_external_photo_swaps_dimensions_and_undo_reverts() {
         .unwrap()
         .data
         .photos
-        .push(ber_model::ber::common::Photo {
+        .push(ber_model::ber::common::Evidence {
             id: ItemId::default(),
             file_path: src.to_string_lossy().into_owned(),
             thumbnail_path: None,
             description: None,
             side: Some(side),
+            content_type: None,
         });
 
     let stored_dims = |c: &AppController| -> (u32, u32) {
@@ -14733,14 +14734,14 @@ fn nhl_wall_is_out_of_structure_scope_for_select_and_completeness() {
 /// thickness with a backing photo) — true only when every attribute is set.
 #[test]
 fn structure_group_tick_predicate_matches_completeness() {
-    use ber_model::ber::common::Photo;
+    use ber_model::ber::common::Evidence;
     use ber_model::ber::structural::{
         CeilingConstructionType, CeilingExposure, CeilingInsulation, ConstructionMakeup,
         ConstructionType, SurfaceExposure, WallConstructionType, WallExposure,
     };
     let group = |ty: ConstructionType,
                  makeup: ConstructionMakeup,
-                 photos: Vec<Photo>,
+                 photos: Vec<Evidence>,
                  insulation: Option<CeilingInsulation>| EditGroup {
         ids: Vec::new(),
         ty,
@@ -14777,7 +14778,7 @@ fn structure_group_tick_predicate_matches_completeness() {
         !wall(W::CavityWall, M::Layers(vec![]), vec![]).is_complete(),
         "a specified custom stack needs a backing photo"
     );
-    assert!(wall(W::CavityWall, M::Layers(vec![]), vec![Photo::default()]).is_complete());
+    assert!(wall(W::CavityWall, M::Layers(vec![]), vec![Evidence::default()]).is_complete());
 
     // Ceilings: the insulation gate on top of type + build-up — demanded
     // exactly for the plain `Default` make-up (the combined "Default"
@@ -14807,7 +14808,7 @@ fn structure_group_tick_predicate_matches_completeness() {
     assert!(ceiling(
         M::Default,
         Some(CeilingInsulation::ThicknessMm(150.0)),
-        vec![Photo::default()]
+        vec![Evidence::default()]
     )
     .is_complete());
     // Non-`Default` make-ups answer the insulation question themselves — the
@@ -14821,7 +14822,7 @@ fn structure_group_tick_predicate_matches_completeness() {
         !ceiling(M::Layers(vec![]), None, vec![]).is_complete(),
         "a specified stack still needs its backing photo"
     );
-    assert!(ceiling(M::Layers(vec![]), None, vec![Photo::default()]).is_complete());
+    assert!(ceiling(M::Layers(vec![]), None, vec![Evidence::default()]).is_complete());
     assert!(
         !ceiling(
             M::DefaultPlus {
@@ -14840,7 +14841,7 @@ fn structure_group_tick_predicate_matches_completeness() {
             plasterboard: false
         },
         None,
-        vec![Photo::default()]
+        vec![Evidence::default()]
     )
     .is_complete());
 }
@@ -17647,7 +17648,7 @@ fn ber_completion_blocked_until_deferred_photos_captured() {
 /// placeholder — no per-frame retry, no thumbnail.
 #[test]
 fn external_photo_thumbnail_backfill() {
-    use ber_model::ber::common::{ExternalSide, Photo};
+    use ber_model::ber::common::{Evidence, ExternalSide};
     let mut c = dimensioned_square_controller();
     let tmp = std::env::temp_dir().join(format!("ber_ext_thumb_{}", ItemId::default().0));
     c.set_photos_dir(tmp.clone());
@@ -17658,13 +17659,19 @@ fn external_photo_thumbnail_backfill() {
     image::RgbImage::from_pixel(800, 600, image::Rgb([10, 20, 30]))
         .save(&img_path)
         .unwrap();
-    c.current_record.as_mut().unwrap().data.photos.push(Photo {
-        id: ItemId::default(),
-        file_path: img_path.to_string_lossy().into_owned(),
-        thumbnail_path: None,
-        description: None,
-        side: Some(ExternalSide::Front),
-    });
+    c.current_record
+        .as_mut()
+        .unwrap()
+        .data
+        .photos
+        .push(Evidence {
+            id: ItemId::default(),
+            file_path: img_path.to_string_lossy().into_owned(),
+            thumbnail_path: None,
+            description: None,
+            side: Some(ExternalSide::Front),
+            content_type: None,
+        });
 
     c.ensure_external_photo_thumbnail(ExternalSide::Front);
     let mut spins = 0;
@@ -17701,13 +17708,19 @@ fn external_photo_thumbnail_backfill() {
     // a second request spawns no job and the thumbnail stays absent.
     let bad_path = tmp.join("bad_back.jpg");
     std::fs::write(&bad_path, b"not-an-image").unwrap();
-    c.current_record.as_mut().unwrap().data.photos.push(Photo {
-        id: ItemId::default(),
-        file_path: bad_path.to_string_lossy().into_owned(),
-        thumbnail_path: None,
-        description: None,
-        side: Some(ExternalSide::Back),
-    });
+    c.current_record
+        .as_mut()
+        .unwrap()
+        .data
+        .photos
+        .push(Evidence {
+            id: ItemId::default(),
+            file_path: bad_path.to_string_lossy().into_owned(),
+            thumbnail_path: None,
+            description: None,
+            side: Some(ExternalSide::Back),
+            content_type: None,
+        });
     c.ensure_external_photo_thumbnail(ExternalSide::Back);
     spins = 0;
     while c.photos_processing() && spins < 2000 {

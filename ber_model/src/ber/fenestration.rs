@@ -3,7 +3,7 @@
 use manip_plan::SurfaceRef;
 use serde::{Deserialize, Serialize};
 
-use super::common::{ItemId, Photo, Year};
+use super::common::{Evidence, ItemId, Year};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub enum Glazing {
@@ -79,7 +79,7 @@ pub struct WindowType {
     #[serde(default)]
     pub draught_stripped: Option<bool>,
     pub specifics: WindowNameSpecifics,
-    pub photos: Vec<Photo>,
+    pub photos: Vec<Evidence>,
     pub notes: Option<String>,
 }
 
@@ -250,7 +250,7 @@ pub struct Door {
     pub type_name: String,
     /// DERIVED cache (see `Window::vertices`).
     pub vertices: Vec<(f32, f32, f32)>,
-    pub photos: Vec<Photo>,
+    pub photos: Vec<Evidence>,
     #[serde(default)]
     pub width_m: f32,
     #[serde(default)]

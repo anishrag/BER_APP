@@ -4,7 +4,7 @@
 //! and derives the UI-facing view data. All geometry/model mutation lives in the
 //! ber_model ops; this only sequences them.
 use super::*;
-use ber_model::ber::common::{ItemId, Photo};
+use ber_model::ber::common::{Evidence, ItemId};
 use ber_model::ber::fenestration::{
     window_shape_from_inputs, ComplexWindowKind, Door, DoorKind, Frame, Glazing, OpeningPlacement,
     Overshading, WallAnchor, Window, WindowShape, WindowTopShape,
@@ -1081,7 +1081,7 @@ impl AppController {
         // Store the picked photos into the photo store up front (needs `&self`,
         // before the mutable record borrow below); attached to the new window(s).
         // Each photo carries its own capture tier (dual hi/lo buttons).
-        let stored_photos: Vec<Photo> = photos
+        let stored_photos: Vec<Evidence> = photos
             .iter()
             .filter_map(|(p, quality)| self.ingest_photo(p, *quality))
             .collect();
@@ -1381,7 +1381,7 @@ impl AppController {
             return Ok(());
         };
         let undo_snap = self.current_history_snapshot();
-        let stored_photos: Vec<Photo> = photos
+        let stored_photos: Vec<Evidence> = photos
             .iter()
             .filter_map(|(p, quality)| self.ingest_photo(p, *quality))
             .collect();
@@ -1873,7 +1873,7 @@ impl AppController {
         };
         let undo_snap = self.current_history_snapshot();
         // Store picked photos up front (needs `&self`, before the record borrow).
-        let stored_photos: Vec<Photo> = photos
+        let stored_photos: Vec<Evidence> = photos
             .iter()
             .filter_map(|(p, quality)| self.ingest_photo(p, *quality))
             .collect();
@@ -1970,7 +1970,7 @@ impl AppController {
             return Ok(());
         };
         let undo_snap = self.current_history_snapshot();
-        let stored_photos: Vec<Photo> = photos
+        let stored_photos: Vec<Evidence> = photos
             .iter()
             .filter_map(|(p, quality)| self.ingest_photo(p, *quality))
             .collect();
@@ -2037,7 +2037,7 @@ impl AppController {
             return Ok(());
         };
         let undo_snap = self.current_history_snapshot();
-        let stored_photos: Vec<Photo> = photos
+        let stored_photos: Vec<Evidence> = photos
             .iter()
             .filter_map(|(p, quality)| self.ingest_photo(p, *quality))
             .collect();
@@ -2199,7 +2199,7 @@ fn tool_label(tool: OpeningToolKind) -> &'static str {
 /// files). Best-effort; missing files are ignored. A still-running background
 /// job for one of these finishes to a now-missing photo and cleans up its own
 /// produced files (see `apply_finished_photos`).
-fn discard_stored_photos(photos: &[Photo]) {
+fn discard_stored_photos(photos: &[Evidence]) {
     for p in photos {
         let _ = std::fs::remove_file(&p.file_path);
         if let Some(t) = &p.thumbnail_path {

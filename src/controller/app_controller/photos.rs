@@ -31,9 +31,9 @@ impl AppController {
     /// Attach (or replace) the external photo for `side` from a captured/picked
     /// `source` image. Recompresses + copies into the photo store via
     /// [`store_photo_file`](Self::store_photo_file) (`quality` is the capture
-    /// tier), tags the stored `Photo` with `side`, and REPLACES any existing
+    /// tier), tags the stored `Evidence` with `side`, and REPLACES any existing
     /// photo of that side in `Ber.photos` (re-shooting overwrites) — else pushes
-    /// a new external `Photo`. Snapshots for undo; `mark_dirty` re-derives.
+    /// a new external `Evidence`. Snapshots for undo; `mark_dirty` re-derives.
     /// No-op if there's no record or the store I/O fails.
     pub fn add_external_photo(
         &mut self,
@@ -97,12 +97,13 @@ impl AppController {
         let thumb_dest = dir.join(format!("{}_thumb.jpg", id.0));
         let thumbnail_path = Self::write_thumbnail(&dest, &thumb_dest)
             .then(|| thumb_dest.to_string_lossy().into_owned());
-        let photo = ber_model::ber::common::Photo {
+        let photo = ber_model::ber::common::Evidence {
             id,
             file_path: dest.to_string_lossy().into_owned(),
             thumbnail_path,
             description,
             side: Some(side),
+            content_type: None,
         };
         let undo_snap = self.current_history_snapshot();
         {
@@ -160,12 +161,13 @@ impl AppController {
         let thumb_dest = dir.join(format!("{}_thumb.jpg", id.0));
         let thumbnail_path = Self::write_thumbnail(&dest, &thumb_dest)
             .then(|| thumb_dest.to_string_lossy().into_owned());
-        let photo = ber_model::ber::common::Photo {
+        let photo = ber_model::ber::common::Evidence {
             id,
             file_path: dest.to_string_lossy().into_owned(),
             thumbnail_path,
             description,
             side: Some(side),
+            content_type: None,
         };
         let undo_snap = self.current_history_snapshot();
         {

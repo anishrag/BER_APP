@@ -38,7 +38,7 @@ pub use manip_plan::{Polygon3D, SplitLine3D};
 #[allow(unused_imports)]
 use {
     crate::ber::ber_struct::Ber,
-    crate::ber::common::{ConstructionPhase, Item, ItemId, Photo},
+    crate::ber::common::{ConstructionPhase, Evidence, Item, ItemId},
     crate::ber::fenestration::{Door, Window},
     domain::points::{
         point_on_ring_boundary, point_to_segment_distance, ring_centroid, segment_cross_param,
@@ -5029,7 +5029,7 @@ mod tests {
             !specified.is_complete(),
             "specified build-up without a photo is not done"
         );
-        specified.base.photos.push(Photo::default());
+        specified.base.photos.push(Evidence::default());
         assert!(specified.is_complete(), "a backing photo completes it");
 
         let mut default = WallConstruction {
@@ -5083,7 +5083,7 @@ mod tests {
             .unwrap()
             .base
             .photos
-            .push(Photo::default());
+            .push(Evidence::default());
         assert!(
             ber.structure_surfaces_complete(0, SurfaceKind::Walls),
             "a backing photo completes the kind"

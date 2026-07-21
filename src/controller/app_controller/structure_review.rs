@@ -282,7 +282,7 @@ fn ceiling_region_ids(data: &Ber, cid: ItemId) -> HashSet<ItemId> {
         .collect()
 }
 
-fn photo_views(photos: &[ber_model::ber::common::Photo]) -> Vec<PhotoView> {
+fn photo_views(photos: &[ber_model::ber::common::Evidence]) -> Vec<PhotoView> {
     photos
         .iter()
         .map(|p| PhotoView {

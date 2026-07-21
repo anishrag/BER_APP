@@ -4,8 +4,9 @@ use domain::points::Point2f64;
 use rusqlite::Connection;
 
 use ber_model::ber::ber_struct::Ber;
-use ber_model::ber::common::{ConstructionPhase, ConstructionPhases, ItemId, Photo};
-use ber_model::ber::structural::{FloorRegions, Storey, ThermalMassCategoryEnum, ThermalMassInfo};
+use ber_model::ber::common::{ConstructionPhase, ConstructionPhases, Evidence, ItemId};
+use ber_model::ber::final_details::{FloorKind, WallFinish};
+use ber_model::ber::structural::{FloorRegions, Storey, ThermalMassInfo};
 use ber_model::ber::systems::{
     Direction, HeatingControls, HeatingSystem, HeatingSystemType, SolarElements, VentilationSystem,
     VentilationSystemType,
@@ -114,10 +115,10 @@ fn test_ber_with_complex_structures() -> Result<()> {
     let mut ber = create_minimal_ber(id);
     ber.thermal_mass_info = ThermalMassInfo {
         id: ItemId::default(),
-        floors: ThermalMassCategoryEnum::Medium,
-        partition_walls: ThermalMassCategoryEnum::High,
-        external_walls: ThermalMassCategoryEnum::Medium,
-        separating_walls: ThermalMassCategoryEnum::Medium,
+        floor: FloorKind::Solid,
+        internal_wall: WallFinish::HardPlaster,
+        external_wall: WallFinish::PlasterboardOnDotAndDab,
+        separating_wall: WallFinish::HardPlaster,
     };
 
     repo.upsert(&BerRecord {
@@ -129,13 +130,10 @@ fn test_ber_with_complex_structures() -> Result<()> {
 
     let loaded = repo.load(&id)?;
 
+    assert_eq!(loaded.data.thermal_mass_info.floor, FloorKind::Solid);
     assert_eq!(
-        loaded.data.thermal_mass_info.floors,
-        ThermalMassCategoryEnum::Medium
-    );
-    assert_eq!(
-        loaded.data.thermal_mass_info.partition_walls,
-        ThermalMassCategoryEnum::High
+        loaded.data.thermal_mass_info.external_wall,
+        WallFinish::PlasterboardOnDotAndDab
     );
 
     Ok(())
@@ -191,9 +189,12 @@ fn create_minimal_ber(id: ItemId) -> Ber {
             controls: HeatingControls {
                 programmer: true,
                 zones: 2,
+                room_thermostat: 0,
                 notes: None,
             },
             separate_hot_water: true,
+            distribution: Default::default(),
+            secondary_heating: Vec::new(),
         },
         ventilation_system: VentilationSystem {
             id: ItemId::default(),
@@ -209,10 +210,10 @@ fn create_minimal_ber(id: ItemId) -> Ber {
         window_types: vec![],
         thermal_mass_info: ThermalMassInfo {
             id: ItemId::default(),
-            floors: ThermalMassCategoryEnum::Medium,
-            partition_walls: ThermalMassCategoryEnum::Medium,
-            external_walls: ThermalMassCategoryEnum::Medium,
-            separating_walls: ThermalMassCategoryEnum::Medium,
+            floor: FloorKind::Solid,
+            internal_wall: WallFinish::HardPlaster,
+            external_wall: WallFinish::HardPlaster,
+            separating_wall: WallFinish::HardPlaster,
         },
         orientation_deg: 0.0,
         solar: vec![],
@@ -224,7 +225,7 @@ fn create_minimal_ber(id: ItemId) -> Ber {
         attic_room: None,
         attic_no_items_confirmed: false,
         objects_reviewed: false,
-        final_details: Default::default(),
+        legacy_final_details: None,
         sheltering: Default::default(),
         site_satellite_image: None,
         north_aligned: false,
@@ -319,19 +320,21 @@ fn create_full_ber(id: ItemId) -> Ber {
     ];
 
     ber.photos = vec![
-        Photo {
+        Evidence {
             id: ItemId::default(),
             file_path: "assets/front.jpg".to_string(),
             thumbnail_path: None,
             description: Some("Front".to_string()),
             side: None,
+            content_type: None,
         },
-        Photo {
+        Evidence {
             id: ItemId::default(),
             file_path: "assets/living.jpg".to_string(),
             thumbnail_path: None,
             description: Some("Living".to_string()),
             side: None,
+            content_type: None,
         },
     ];
 

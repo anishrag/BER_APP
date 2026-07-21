@@ -106,13 +106,20 @@ impl HeatingKind {
     }
 }
 
-/// The Phase-4 dropdown form values (house-level).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct FinalDetails {
+/// Legacy pre-refactor shape: floor/wall finishes + heating used to live here.
+/// Kept only so old records still parse; migrated into ThermalMassInfo +
+/// HeatingSystem on load (see Ber::migrate_legacy), then dropped on next save.
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+pub struct LegacyFinalDetails {
+    #[serde(default)]
     pub floor: FloorKind,
+    #[serde(default)]
     pub internal_wall: WallFinish,
+    #[serde(default)]
     pub separating_wall: WallFinish,
+    #[serde(default)]
     pub external_wall: WallFinish,
+    #[serde(default)]
     pub heating: HeatingKind,
 }
 
@@ -249,12 +256,13 @@ mod tests {
         }
     }
 
-    /// A `FinalDetails` blob exactly as an OLD record stored it (before the
-    /// `InsulatedPlasterboard` variant existed) still loads unchanged.
+    /// A legacy `final_details` blob exactly as an OLD record stored it (the
+    /// pre-refactor shape) still parses into the `LegacyFinalDetails` carrier —
+    /// the raw material `Ber::migrate_legacy` adopts.
     #[test]
-    fn final_details_old_record_loads() {
+    fn legacy_final_details_old_record_loads() {
         let old = r#"{"floor":"Solid","internal_wall":"HardPlaster","separating_wall":"PlasterboardOnTimber","external_wall":"PlasterboardOnDotAndDab","heating":"Radiators"}"#;
-        let d: FinalDetails = serde_json::from_str(old).unwrap();
+        let d: LegacyFinalDetails = serde_json::from_str(old).unwrap();
         assert_eq!(d.floor, FloorKind::Solid);
         assert_eq!(d.internal_wall, WallFinish::HardPlaster);
         assert_eq!(d.separating_wall, WallFinish::PlasterboardOnTimber);

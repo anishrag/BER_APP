@@ -6,7 +6,7 @@
 //! so undo works; resolve preserves it via the storey clone). No re-resolve is
 //! needed — objects don't affect geometry.
 use super::*;
-use ber_model::ber::common::Photo;
+use ber_model::ber::common::Evidence;
 use ber_model::ber::objects::{BuildingObject, ObjectCategory, ObjectKind, ObjectRoom};
 use domain::points::Point2f32;
 
@@ -305,7 +305,7 @@ impl AppController {
             return;
         };
         // Store photos up front (needs `&self`) before the mutable borrow.
-        let stored: Vec<Photo> = photos
+        let stored: Vec<Evidence> = photos
             .iter()
             .filter_map(|(p, quality)| self.ingest_photo(p, *quality))
             .collect();

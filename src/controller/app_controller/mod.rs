@@ -115,7 +115,7 @@ pub use editing::{
     VertexDropPromptUiData, VertexMeasurement, VertexMeasurementKind, VertexMeasurementUiData,
     WallPositions,
 };
-pub use final_phase::{FinalMode, NorthImageView, WallFinishField};
+pub use final_phase::{FinalDetails, FinalMode, NorthImageView, WallFinishField};
 pub use history::HistorySnapshot;
 pub use mapping_review::ReviewView;
 pub use new_storey::NewStoreyPromptUiData;

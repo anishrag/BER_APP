@@ -24,7 +24,7 @@ use chrono::Utc;
 use serde::Deserialize;
 
 use ber_model::ber::ber_struct::{Ber, IntakeDetails};
-use ber_model::ber::common::{ConstructionPhase, ItemId, Photo};
+use ber_model::ber::common::{ConstructionPhase, Evidence, ItemId};
 
 use super::ber_repository::{BerRecord, BerRepository};
 
@@ -389,7 +389,11 @@ fn is_eircode_solid(w: &str) -> bool {
         && w.bytes().all(|c| c.is_ascii_alphanumeric())
 }
 
-fn download_satellite(client: &SyncClient, photos_dir: &Path, url: &str) -> anyhow::Result<Photo> {
+fn download_satellite(
+    client: &SyncClient,
+    photos_dir: &Path,
+    url: &str,
+) -> anyhow::Result<Evidence> {
     let bytes = client.download(url)?;
     std::fs::create_dir_all(photos_dir)?;
     // Canonicalize so the stored path loads as a `file://` image regardless of
@@ -398,12 +402,13 @@ fn download_satellite(client: &SyncClient, photos_dir: &Path, url: &str) -> anyh
     let photo_id = ItemId::default();
     let file_path = dir.join(format!("{}_satellite.jpg", photo_id.0));
     std::fs::write(&file_path, &bytes)?;
-    Ok(Photo {
+    Ok(Evidence {
         id: photo_id,
         file_path: file_path.to_string_lossy().into_owned(),
         thumbnail_path: None,
         description: Some("Site satellite image (from intake)".into()),
         side: None,
+        content_type: None,
     })
 }
 

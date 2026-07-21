@@ -12,7 +12,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::ber::common::{ItemId, Photo};
+use crate::ber::common::{Evidence, ItemId};
 use domain::points::Point2f32;
 
 /// Top-level object category — what the assessor picks first. Most have a
@@ -97,6 +97,7 @@ impl ObjectCategory {
                 ObjectKind::Boiler(BoilerFuel::Oil),
                 ObjectKind::Boiler(BoilerFuel::Gas),
                 ObjectKind::Boiler(BoilerFuel::HeatPump),
+                ObjectKind::PanelHeater,
                 ObjectKind::Programmer,
                 ObjectKind::HeatingZones,
                 ObjectKind::Thermostat,
@@ -232,6 +233,9 @@ pub enum ObjectKind {
     /// Evidence that the heating is ZONED (e.g. a photo of the zone valves /
     /// wiring centre). Groups under [`ObjectCategory::HeatingSystem`].
     HeatingZones,
+    /// An electric PANEL HEATER (a primary electric heat source). Groups under
+    /// [`ObjectCategory::HeatingSystem`]; drives an `ElectricHeater` primary.
+    PanelHeater,
     Other(String),
 }
 
@@ -260,6 +264,7 @@ impl ObjectKind {
             | ObjectKind::Fan(FanType::Extract | FanType::Supply)
             | ObjectKind::Light(_)
             | ObjectKind::Radiator(_)
+            | ObjectKind::PanelHeater
             | ObjectKind::AtticHatch(_) => FirstInstanceRequired,
             // Free-text "Other" never forces a photo.
             ObjectKind::Other(_) => Optional,
@@ -299,7 +304,8 @@ impl ObjectKind {
             | ObjectKind::Thermostat
             | ObjectKind::WeatherCompensation
             | ObjectKind::Programmer
-            | ObjectKind::HeatingZones => ObjectCategory::HeatingSystem,
+            | ObjectKind::HeatingZones
+            | ObjectKind::PanelHeater => ObjectCategory::HeatingSystem,
             ObjectKind::WaterCylinder(_) => ObjectCategory::WaterCylinder,
             ObjectKind::Chimney(_) => ObjectCategory::Chimney,
             ObjectKind::AtticHatch(_) => ObjectCategory::AtticHatch,
@@ -329,6 +335,7 @@ impl ObjectKind {
             ObjectKind::Boiler(BoilerFuel::HeatPump) => "Heat pump",
             ObjectKind::Programmer => "Programmer",
             ObjectKind::HeatingZones => "Heating zones",
+            ObjectKind::PanelHeater => "Panel heater",
             ObjectKind::Thermostat => "Thermostat",
             ObjectKind::WeatherCompensation => "Weather compensation",
             ObjectKind::WaterCylinder(CylinderKind::Standard) => "Standard",
@@ -360,7 +367,8 @@ impl ObjectKind {
             | ObjectKind::Thermostat
             | ObjectKind::WeatherCompensation
             | ObjectKind::Programmer
-            | ObjectKind::HeatingZones => self.subtype_label().to_string(),
+            | ObjectKind::HeatingZones
+            | ObjectKind::PanelHeater => self.subtype_label().to_string(),
             ObjectKind::Other(s) if !s.trim().is_empty() => s.clone(),
             ObjectKind::Other(_) => "Other".to_string(),
             _ => format!("{cat} ({})", self.subtype_label()),
@@ -377,7 +385,12 @@ pub struct BuildingObject {
     /// How many of this object at this location (e.g. 5 radiators, 8 downlights).
     pub count: u32,
     pub note: Option<String>,
-    pub photos: Vec<Photo>,
+    pub photos: Vec<Evidence>,
+    /// The "separate time/temperature control for water and space" checkbox —
+    /// meaningful only for `Boiler` and `Programmer` objects; drives
+    /// `HeatingSystem.separate_hot_water`.
+    #[serde(default)]
+    pub separate_hw_control: bool,
 }
 
 impl BuildingObject {
@@ -388,6 +401,7 @@ impl BuildingObject {
             count: count.max(1),
             note: None,
             photos: Vec::new(),
+            separate_hw_control: false,
         }
     }
 }
@@ -522,6 +536,7 @@ mod tests {
                 "Oil boiler",
                 "Gas boiler",
                 "Heat pump",
+                "Panel heater",
                 "Programmer",
                 "Heating zones",
                 "Thermostat",
