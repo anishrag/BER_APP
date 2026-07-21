@@ -84,7 +84,7 @@ impl FollowUpPointId {
         }
     }
 
-    /// Short label for the checkbox.
+    /// Short label for the assessor's checkbox on the tab.
     pub fn label(self) -> &'static str {
         use FollowUpPointId::*;
         match self {
@@ -98,6 +98,26 @@ impl FollowUpPointId {
             SolarDocs => "Solar PV documentation",
             HeatPumpData => "Heat pump data (sign-off + datasheet)",
             AirtightnessAndAcd => "Airtightness report + ACD certification",
+        }
+    }
+
+    /// Short, client-facing heading for the request block in the email — plain
+    /// English (no jargon like "DoP"/"ACD"), 2–3 words. Rendered bold above the
+    /// request paragraph. Distinct from [`label`], which is the assessor's
+    /// internal checkbox text.
+    pub fn heading(self) -> &'static str {
+        use FollowUpPointId::*;
+        match self {
+            HouseBuildDate => "House build date",
+            ExtensionBuildDate => "Extension build date",
+            BuilderUpgradeLetter => "Builder's letter",
+            WorksEvidenceNoBuilder => "Evidence of works",
+            CertifierNewbuildLetter => "Certifier's letter",
+            WindowDop => "Window documentation",
+            DoorDop => "Door documentation",
+            SolarDocs => "Solar panel documents",
+            HeatPumpData => "Heat pump documents",
+            AirtightnessAndAcd => "Airtightness & thermal bridging",
         }
     }
 
@@ -343,24 +363,28 @@ fn default_true() -> bool {
 
 /// Assemble the editable email body for the selected built-in points (catalogue
 /// order) followed by the ticked custom points (their order). A greeting +
-/// intro, each point as its own paragraph, then a sign-off.
+/// intro, each point as a numbered block — a bold heading then its request
+/// paragraph underneath — then a sign-off. Headings are wrapped in `**…**`
+/// markers, which the intake backend renders as bold in the HTML email and
+/// which read fine in the plain-text fallback / editable preview.
 pub fn assemble_draft(ber: &Ber, selected: &[FollowUpPointId], custom: &[CustomPoint]) -> String {
     let mut body = String::from(
         "Hi,\n\nThanks again for having me out to survey your home for the BER assessment.\n\n",
     );
-    let mut paragraphs: Vec<String> = ALL_POINTS
+    // Each point is (heading, request paragraph).
+    let mut points: Vec<(String, String)> = ALL_POINTS
         .into_iter()
         .filter(|p| selected.contains(p))
-        .map(|p| p.render(ber))
+        .map(|p| (p.heading().to_string(), p.render(ber)))
         .collect();
-    paragraphs.extend(
+    points.extend(
         custom
             .iter()
             .filter(|c| c.checked && !c.content.trim().is_empty())
-            .map(|c| c.content.clone()),
+            .map(|c| (c.label.clone(), c.content.clone())),
     );
 
-    if paragraphs.is_empty() {
+    if points.is_empty() {
         body.push_str(
             "I have everything I need for now — I'll be in touch if anything else comes up.\n\n",
         );
@@ -370,9 +394,10 @@ pub fn assemble_draft(ber: &Ber, selected: &[FollowUpPointId], custom: &[CustomP
              grateful for your help with. If you could reply point by point it makes sure \
              nothing gets missed:\n\n",
         );
-        // Number the points so the client can answer each one.
-        for (i, p) in paragraphs.iter().enumerate() {
-            body.push_str(&format!("{}. {}\n\n", i + 1, p));
+        // Number the points so the client can answer each one: bold heading on
+        // the numbered line, then the full request underneath.
+        for (i, (heading, para)) in points.iter().enumerate() {
+            body.push_str(&format!("{}. **{}**\n{}\n\n", i + 1, heading, para));
         }
     }
     body.push_str(
@@ -481,8 +506,12 @@ mod tests {
         assert!(sel.contains(&FollowUpPointId::ExtensionBuildDate));
         let draft = assemble_draft(&ber, &sel, &[]);
         assert!(draft.contains("the Back extension"), "draft: {draft}");
-        // Points are numbered so the client can answer each one.
-        assert!(draft.contains("1. "), "draft: {draft}");
+        // Numbered blocks with a bold heading, request paragraph underneath.
+        // (House year is proven here, so the extension is the only point.)
+        assert!(
+            draft.contains("1. **Extension build date**\n"),
+            "draft: {draft}"
+        );
     }
 
     #[test]
