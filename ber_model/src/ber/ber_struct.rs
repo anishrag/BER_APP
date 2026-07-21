@@ -365,6 +365,23 @@ impl Ber {
         self.heating_source_candidates().into_iter().next()
     }
 
+    /// The heat sources eligible to be the PRIMARY heating system. Boilers
+    /// always qualify; an electric PANEL heater qualifies only once AFFIRMED —
+    /// i.e. `system_type` is already `ElectricHeater`, set by the shell's
+    /// "is the house heated by panel heaters?" answer. So a lone unaffirmed
+    /// panel yields no primary candidate (the heat-source gate then blocks),
+    /// and a panel alongside a boiler is left to `secondary_heating`. Panels
+    /// still appear in [`heating_source_candidates`](Self::heating_source_candidates),
+    /// which drives the secondary list.
+    pub fn primary_heating_candidates(&self) -> Vec<crate::ber::systems::HeatingSystemType> {
+        use crate::ber::systems::HeatingSystemType;
+        let affirmed = self.heating_system.system_type == HeatingSystemType::ElectricHeater;
+        self.heating_source_candidates()
+            .into_iter()
+            .filter(|c| *c != HeatingSystemType::ElectricHeater || affirmed)
+            .collect()
+    }
+
     /// Reflect the placed heat-source objects and heating controls into
     /// [`heating_system`](crate::ber::systems::HeatingSystem). Called by the
     /// shell after an object add/remove. IDEMPOTENT: running it twice yields the
@@ -389,15 +406,18 @@ impl Ber {
         use crate::ber::objects::ObjectKind;
         use crate::ber::systems::HeatingSystemType;
 
-        let candidates = self.heating_source_candidates();
+        let all_sources = self.heating_source_candidates();
+        let primary_candidates = self.primary_heating_candidates();
 
-        // Keep the assessor's chosen primary when it's still present; otherwise
-        // the precedence pick; otherwise Invalid. Preservation is what makes the
-        // multi-source case idempotent.
-        let primary = if candidates.contains(&self.heating_system.system_type) {
+        // Keep the assessor's chosen primary when it's still a candidate;
+        // otherwise the precedence pick; otherwise Invalid. Preservation is what
+        // makes the multi-source case idempotent. A panel heater counts here
+        // only once affirmed (see `primary_heating_candidates`), so a lone
+        // unaffirmed panel resolves to Invalid and the shell's gate blocks.
+        let primary = if primary_candidates.contains(&self.heating_system.system_type) {
             self.heating_system.system_type.clone()
         } else {
-            candidates
+            primary_candidates
                 .first()
                 .cloned()
                 .unwrap_or(HeatingSystemType::Invalid)
@@ -422,7 +442,7 @@ impl Ber {
         // Secondary = distinct candidates minus the primary (fixed order), then
         // a single chimney entry if any chimney is present.
         let mut secondary: Vec<HeatingSystemType> =
-            candidates.into_iter().filter(|c| *c != primary).collect();
+            all_sources.into_iter().filter(|c| *c != primary).collect();
         if chimney {
             secondary.push(HeatingSystemType::Other("Chimney".to_string()));
         }
@@ -1819,10 +1839,22 @@ mod tests {
     }
 
     #[test]
-    fn sync_panel_heater_only_is_electric() {
+    fn sync_lone_panel_needs_affirmation() {
         use crate::ber::objects::ObjectKind;
         use crate::ber::systems::HeatingSystemType;
+        // A lone panel heater is NOT auto-promoted to primary — it stays
+        // unresolved (so the shell's heat-source gate blocks) and is listed as a
+        // secondary source until the assessor affirms it.
         let mut ber = ber_with_objects(vec![obj(ObjectKind::PanelHeater)]);
+        ber.sync_heating_system_from_objects();
+        assert_eq!(ber.heating_system.system_type, HeatingSystemType::Invalid);
+        assert_eq!(
+            ber.heating_system.secondary_heating,
+            vec![HeatingSystemType::ElectricHeater]
+        );
+        // Once affirmed (system_type set to ElectricHeater by the "yes" answer),
+        // the sync preserves it and it is no longer secondary.
+        ber.heating_system.system_type = HeatingSystemType::ElectricHeater;
         ber.sync_heating_system_from_objects();
         assert_eq!(
             ber.heating_system.system_type,

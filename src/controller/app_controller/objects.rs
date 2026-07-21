@@ -787,16 +787,25 @@ impl AppController {
     /// Item 6 gate: no primary heat source placed (no boiler AND no panel
     /// heater). A chimney is secondary-only, so a chimney-only house still hits
     /// this. `false` when no record is loaded (nothing to gate).
+    /// No PRIMARY heating is resolved (`system_type == Invalid`) and no heating
+    /// question is currently pending — the state where the review must block and
+    /// the "add the main heat source" message shows. Covers both "nothing
+    /// placed" and "a panel heater was declined as the main heating" (item 4
+    /// "No" → the panel is secondary, so there's still no primary).
     pub fn heating_source_missing(&self) -> bool {
-        self.current_record.is_some()
-            && !self.has_object_kind(|k| matches!(k, ObjectKind::Boiler(_)))
-            && !self.has_object_kind(|k| matches!(k, ObjectKind::PanelHeater))
+        let Some(record) = self.current_record.as_ref() else {
+            return false;
+        };
+        record.data.heating_system.system_type
+            == ber_model::ber::systems::HeatingSystemType::Invalid
+            && !self.panel_heater_prompt_pending()
+            && self.primary_pick_options().is_empty()
     }
 
     /// Item 4: the "is the house heated by panel heaters?" question is pending —
-    /// a panel heater is placed with no boiler, unanswered this review. (The
-    /// sync provisionally makes a lone panel the electric primary; this question
-    /// confirms it — "no" leaves the panel as a secondary source.)
+    /// a panel heater is placed with no boiler, unanswered this review. A panel
+    /// is not a primary heat source until this is answered "yes"; "no" leaves it
+    /// as a secondary source (and the heat-source gate keeps blocking).
     pub fn panel_heater_prompt_pending(&self) -> bool {
         !self.panel_heater_asked
             && self.has_object_kind(|k| matches!(k, ObjectKind::PanelHeater))
@@ -804,16 +813,21 @@ impl AppController {
     }
 
     /// Answer the panel-heater question (item 4). "Yes" makes the electric panel
-    /// the primary (`ElectricHeater`, which the sync then preserves); "No"
-    /// leaves it as secondary. Either way the question is done for this review.
+    /// the primary (`ElectricHeater`, which the sync then preserves). "No" means
+    /// the panel isn't the main heating: drop any provisional electric primary
+    /// so the sync files the panel under `secondary_heating` and the heat-source
+    /// gate blocks until a real primary is recorded. Either way the question is
+    /// done for this review.
     pub fn answer_panel_heater_primary(&mut self, yes: bool) {
         self.panel_heater_asked = true;
-        if yes {
-            if let Some(record) = self.current_record.as_mut() {
+        if let Some(record) = self.current_record.as_mut() {
+            if yes {
                 record.data.heating_system.system_type = HeatingSystemType::ElectricHeater;
-                record.data.sync_heating_system_from_objects();
-                let _ = self.mark_dirty();
+            } else if record.data.heating_system.system_type == HeatingSystemType::ElectricHeater {
+                record.data.heating_system.system_type = HeatingSystemType::Invalid;
             }
+            record.data.sync_heating_system_from_objects();
+            let _ = self.mark_dirty();
         }
     }
 
@@ -827,7 +841,9 @@ impl AppController {
         let Some(record) = self.current_record.as_ref() else {
             return Vec::new();
         };
-        let candidates = record.data.heating_source_candidates();
+        // Only genuine PRIMARY candidates (boilers, plus an affirmed panel) —
+        // an unaffirmed panel is secondary, never offered as a primary choice.
+        let candidates = record.data.primary_heating_candidates();
         if candidates.len() >= 2 {
             candidates
         } else {
