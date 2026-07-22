@@ -50,10 +50,13 @@ pub enum FollowUpPointId {
     HeatPumpData,
     /// Combined airtightness test report + ACD (thermal-bridging) certification.
     AirtightnessAndAcd,
+    /// Hot water cylinder whose model couldn't be read during the survey — ask
+    /// for the make/model number + proof (label photo, invoice, spec sheet).
+    /// Manual tick.
+    WaterCylinderModel,
     /// Hot water cylinder whose insulation couldn't be measured (factory-sealed)
-    /// — ask for an invoice / spec sheet / proof of supply date / label photo.
-    /// Manual tick (no reliable survey field flags "insulation unmeasurable").
-    WaterCylinder,
+    /// — ask for documentation / an invoice proving the supply date. Manual tick.
+    WaterCylinderInsulation,
 }
 
 /// Base URL of the client-facing documentation hub on the website. Each point's
@@ -62,7 +65,7 @@ pub enum FollowUpPointId {
 pub const DOC_BASE_URL: &str = "https://cannygreen.com/docs";
 
 /// Every built-in point, in the order the UI lists them.
-pub const ALL_POINTS: [FollowUpPointId; 11] = [
+pub const ALL_POINTS: [FollowUpPointId; 12] = [
     FollowUpPointId::HouseBuildDate,
     FollowUpPointId::ExtensionBuildDate,
     FollowUpPointId::BuilderUpgradeLetter,
@@ -73,7 +76,8 @@ pub const ALL_POINTS: [FollowUpPointId; 11] = [
     FollowUpPointId::SolarDocs,
     FollowUpPointId::HeatPumpData,
     FollowUpPointId::AirtightnessAndAcd,
-    FollowUpPointId::WaterCylinder,
+    FollowUpPointId::WaterCylinderModel,
+    FollowUpPointId::WaterCylinderInsulation,
 ];
 
 impl FollowUpPointId {
@@ -92,7 +96,8 @@ impl FollowUpPointId {
             SolarDocs => "solar_docs",
             HeatPumpData => "heat_pump_data",
             AirtightnessAndAcd => "airtightness_and_acd",
-            WaterCylinder => "water_cylinder",
+            WaterCylinderModel => "water_cylinder_model",
+            WaterCylinderInsulation => "water_cylinder_insulation",
         }
     }
 
@@ -113,7 +118,8 @@ impl FollowUpPointId {
             SolarDocs => "solar-panel-documents",
             HeatPumpData => "heat-pump-documents",
             AirtightnessAndAcd => "airtightness-and-thermal-bridging",
-            WaterCylinder => "hot-water-cylinder",
+            WaterCylinderModel => "hot-water-cylinder",
+            WaterCylinderInsulation => "hot-water-cylinder",
         }
     }
 
@@ -137,7 +143,8 @@ impl FollowUpPointId {
             SolarDocs => "Solar PV documentation",
             HeatPumpData => "Heat pump data (sign-off + datasheet)",
             AirtightnessAndAcd => "Airtightness report + ACD certification",
-            WaterCylinder => "Hot water cylinder (insulation unmeasurable)",
+            WaterCylinderModel => "Cylinder model (couldn't read on unit)",
+            WaterCylinderInsulation => "Cylinder insulation (unmeasurable)",
         }
     }
 
@@ -158,7 +165,8 @@ impl FollowUpPointId {
             SolarDocs => "Solar panel documents",
             HeatPumpData => "Heat pump documents",
             AirtightnessAndAcd => "Airtightness & thermal bridging",
-            WaterCylinder => "Hot water cylinder",
+            WaterCylinderModel => "Cylinder model",
+            WaterCylinderInsulation => "Cylinder insulation",
         }
     }
 
@@ -215,32 +223,57 @@ impl FollowUpPointId {
                      surfaces:\n\n{bullets}{ufh}"
                 )
             }
-            WorksEvidenceNoBuilder => "For the [works], since a letter from the builder isn't \
-                available, the SEAI require two independent proofs of the works instead. These \
-                can be: photos taken while the work was being done, and/or invoices, receipts or \
-                emails for the materials — ideally showing the site address and the product \
-                used. If you can dig out two of these, that will cover the evidence requirements."
+            WorksEvidenceNoBuilder => {
+                let bullets = builder_surface_groups(ber)
+                    .into_iter()
+                    .filter(|s| fu.builder_surfaces.contains(&s.id))
+                    .map(|s| format!("• {}", s.name))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!(
+                    "Since a letter from the builder isn't available, the SEAI require two \
+                     independent proofs instead. We need this for the following works:\n\n\
+                     {bullets}\n\nFor each, any two of these can work: photos taken while the work \
+                     was being done, and/or invoices, receipts or emails for the materials — \
+                     ideally showing the site address and the product used. If you can dig out \
+                     two, that can cover the evidence requirements."
+                )
+            }
+            CertifierNewbuildLetter => {
+                let fallback = match latest_extension_year(ber) {
+                    Some(y) => format!(
+                        " If this isn't available it wouldn't make much of a difference — I'd \
+                         still be able to use default values from {y} for the extension, which \
+                         should be quite good."
+                    ),
+                    None => String::new(),
+                };
+                format!(
+                    "For the new extension elements, a letter from the builder unfortunately \
+                     can't be accepted by the SEAI — I'd need documentation from the certifying \
+                     architect, engineer or assigned certifier: as-built drawings signed off by \
+                     them, or a signed letter confirming the build-ups as actually built and that \
+                     they comply with the building regulations of the time.{fallback}"
+                )
+            }
+            WindowDop => "For the windows, to use better-than-default values I'd need two \
+                things:\n\n\
+                (1) the Declaration of Performance for the windows, showing the U-value and \
+                solar transmittance — [window supplier] should be able to provide this if you \
+                contact them (I need the standard certified product document, not one generated \
+                specifically for your house; NSAI WEP or BFRC certification also works).\n\n\
+                (2) something linking that model to your house — an invoice, order confirmation \
+                or email from the supplier listing the models supplied to your address.\n\n\
+                If it's not available it's no problem — the default values for the age of the \
+                house are reasonable, so it won't hurt the rating much."
                 .to_string(),
-            CertifierNewbuildLetter => "For the [new-build elements], letters from builders \
-                unfortunately can't be accepted by the SEAI — I would need documentation from \
-                the certifying architect, engineer or assigned certifier: as-built drawings \
-                signed off by them, or a signed letter confirming the build-ups as actually \
-                built and that they comply with the building regulations of the time."
-                .to_string(),
-            WindowDop => "For the windows, to use better-than-default values I would need two \
-                things: (1) the Declaration of Performance for the windows, showing the U-value \
-                and solar transmittance — [window supplier] should be able to provide this if \
-                you contact them (I need the standard certified product document, not one \
-                generated specifically for your house; NSAI WEP or BFRC certification also \
-                works); and (2) something linking that model to your house — an invoice, order \
-                confirmation or email from the supplier listing the models supplied to your \
-                address."
-                .to_string(),
-            DoorDop => "For the [front / back] door, similarly, I would need: (1) its \
-                Declaration of Performance showing the U-value — available from [door supplier] \
-                if you don't have it; and (2) proof of the model installed at your address, such \
-                as an invoice or order confirmation. If there's a sticker or marking on the door \
-                itself showing the make/model, a photo of that would also help."
+            DoorDop => "For the [front / back] door, to use better-than-default values I'd need \
+                two things:\n\n\
+                (1) its Declaration of Performance showing the U-value — [door supplier] should \
+                be able to provide this if you don't have it.\n\n\
+                (2) proof of the model installed at your address, such as an invoice or order \
+                confirmation. If there's a sticker or marking on the door itself showing the \
+                make/model, a photo of that would also help."
                 .to_string(),
             SolarDocs => "Could you send me any documentation you have for the solar panels? The \
                 best document is the Declaration of Works from the installer, as it has \
@@ -249,31 +282,30 @@ impl FollowUpPointId {
                 installed at the house would work. Without documentation I have to assume \
                 default panels, which understates the benefit."
                 .to_string(),
-            HeatPumpData => "For the heat pump, could you check if you have: (1) the Designer / \
-                Installer sign-off sheet from [installer] — any heat pump installed after 2015 \
-                (and all grant installations) should have one, and it contains values like the \
-                design flow temperature that usually give a better rating than the defaults; and \
+            HeatPumpData => "For the heat pump, could you check if you have:\n\n\
+                (1) the Designer / Installer sign-off sheet from [installer] — any heat pump \
+                installed after 2015 (and all grant installations) should have one, and it \
+                contains values like the design flow temperature that usually give a better \
+                rating than the defaults.\n\n\
                 (2) the Ecodesign label / technical datasheet for [heat pump make/model] — the \
                 manufacturer is required to provide this, and it shows the tested efficiency \
-                figures I need. If you can't find them, I'm happy to contact the installer \
-                directly on your behalf."
+                figures I need."
                 .to_string(),
-            AirtightnessAndAcd => "As the house is relatively new, two pieces of documentation \
-                would let me improve the rating if they exist: (1) an airtightness (air \
-                permeability) test report — new builds usually have one, and a measured result \
-                almost always beats the default; and (2) evidence the house was built to the \
-                Acceptable Construction Details for thermal bridging — construction drawings \
-                showing the junctions, a schedule of junctions, and a signed confirmation from a \
-                registered architect, chartered engineer or building surveyor (drawings alone \
-                aren't enough). It's worth checking with [architect / engineer / certifier] \
-                whether these exist for your house."
+            AirtightnessAndAcd => "Some newer houses have had an airtightness (air permeability) \
+                test done, or are certified as built to the Acceptable Construction Details \
+                standard for thermal bridging. If either of those documents exists for the house, \
+                could you let me know so I can include it in the BER? These aren't always \
+                available — I just wanted to check in case you have them."
                 .to_string(),
-            WaterCylinder => "For the hot water cylinder, the insulation is sealed inside the \
-                casing, so I couldn't measure it during the survey. If you have the invoice or \
-                spec sheet — or any proof of when it was supplied or installed — could you send \
-                it on? A clear photo of the manufacturer's label on the cylinder also works \
-                (it usually shows the make, model and volume). This lets me use its actual \
-                figures instead of an age-based default, which is usually worse."
+            WaterCylinderModel => "For the hot water cylinder, I couldn't make out the model \
+                details on it during the survey. Would you have the make and model number — or an \
+                invoice, spec sheet, or a photo of the manufacturer's label showing it? That lets \
+                me identify the exact cylinder rather than fall back to a default."
+                .to_string(),
+            WaterCylinderInsulation => "For the hot water cylinder, I couldn't measure the \
+                insulation thickness, as it's sealed inside the casing. Would you have any \
+                documentation for it, or even an invoice showing when it was supplied? That lets \
+                me use its actual figures instead of an age-based default, which is usually worse."
                 .to_string(),
         }
     }
@@ -357,6 +389,17 @@ pub fn builder_surface_groups(ber: &Ber) -> Vec<SurfaceGroup> {
         });
     }
     out
+}
+
+/// The most recent KNOWN build year among the defined extensions — the "latest
+/// extension" year cited in the certifier-letter fallback. `None` when no
+/// extension has a known year.
+fn latest_extension_year(ber: &Ber) -> Option<Year> {
+    EXTENSION_PHASES
+        .iter()
+        .filter(|p| ber.construction_phases.is_defined(p))
+        .filter_map(|p| ber.construction_phases.year_of(p))
+        .max()
 }
 
 /// Whether any storey has underfloor heating (drives the pipe-layer note in the
@@ -540,8 +583,8 @@ pub fn assemble_draft(ber: &Ber, fu: &FollowUpRequest) -> String {
         }
     }
     body.push_str(
-        "If anything's tricky to track down, just let me know and we can work through it \
-         together.\n\nMany thanks,\nAnish",
+        "If anything's tricky to track down, just send on whatever you can \
+         find.\n\nMany thanks,\nAnish",
     );
     body
 }
@@ -848,14 +891,21 @@ mod tests {
         // Even a recent house + heat pump doesn't auto-tick the cylinder.
         let mut ber = ber_with_year(2018, true);
         ber.heating_system.system_type = HeatingSystemType::HeatPump;
-        assert!(!auto_selected(&ber, REF_YEAR).contains(&FollowUpPointId::WaterCylinder));
-        // When manually ticked it renders with its heading + explainer link.
+        assert!(!auto_selected(&ber, REF_YEAR).contains(&FollowUpPointId::WaterCylinderModel));
+        assert!(
+            !auto_selected(&ber, REF_YEAR).contains(&FollowUpPointId::WaterCylinderInsulation)
+        );
+        // When manually ticked both render with their heading + explainer link.
         let fu = FollowUpRequest {
-            selected: vec![FollowUpPointId::WaterCylinder],
+            selected: vec![
+                FollowUpPointId::WaterCylinderModel,
+                FollowUpPointId::WaterCylinderInsulation,
+            ],
             ..Default::default()
         };
         let draft = assemble_draft(&ber, &fu);
-        assert!(draft.contains("**Hot water cylinder**"), "draft: {draft}");
+        assert!(draft.contains("**Cylinder model**"), "draft: {draft}");
+        assert!(draft.contains("**Cylinder insulation**"), "draft: {draft}");
         assert!(
             draft.contains("https://cannygreen.com/docs/hot-water-cylinder"),
             "draft: {draft}"

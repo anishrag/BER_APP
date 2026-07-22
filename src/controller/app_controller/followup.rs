@@ -124,7 +124,12 @@ impl AppController {
                 // The Extension build-date and Builder's-letter points each show
                 // sub-checks (extensions / surface groups) so some can be asked
                 // about and others not.
-                let sub_rows = if id == FollowUpPointId::ExtensionBuildDate {
+                let checked = fu.selected.contains(&id);
+                // Sub-checks show only under a ticked parent (so the shared
+                // surface sub-checks appear under whichever works route is active).
+                let sub_rows = if !checked {
+                    Vec::new()
+                } else if id == FollowUpPointId::ExtensionBuildDate {
                     candidates
                         .iter()
                         .map(|ph| FollowUpSubRow {
@@ -133,7 +138,9 @@ impl AppController {
                             checked: fu.extensions.contains(ph),
                         })
                         .collect()
-                } else if id == FollowUpPointId::BuilderUpgradeLetter {
+                } else if id == FollowUpPointId::BuilderUpgradeLetter
+                    || id == FollowUpPointId::WorksEvidenceNoBuilder
+                {
                     surfaces
                         .iter()
                         .map(|s| FollowUpSubRow {
@@ -148,7 +155,7 @@ impl AppController {
                 FollowUpPointRow {
                     key: FollowUpRowKey::BuiltIn(id),
                     label: id.label().to_string(),
-                    checked: fu.selected.contains(&id),
+                    checked,
                     removable: false,
                     sub_rows,
                 }
@@ -209,8 +216,11 @@ impl AppController {
                         ber.followup.extensions = candidates;
                         ber.followup.selected.push(id);
                     }
-                } else if id == FollowUpPointId::BuilderUpgradeLetter {
-                    // Parent: ticking selects the auto-detected surfaces; unticking clears.
+                } else if id == FollowUpPointId::BuilderUpgradeLetter
+                    || id == FollowUpPointId::WorksEvidenceNoBuilder
+                {
+                    // Parent (either works route): ticking selects the
+                    // auto-detected surfaces; unticking clears them.
                     if ber.followup.selected.contains(&id) {
                         ber.followup.selected.retain(|p| *p != id);
                         ber.followup.builder_surfaces.clear();
@@ -246,14 +256,13 @@ impl AppController {
                 } else {
                     ber.followup.builder_surfaces.push(id);
                 }
-                // Keep the parent point present iff at least one surface is ticked.
-                let has = !ber.followup.builder_surfaces.is_empty();
-                let sel = &mut ber.followup.selected;
-                let present = sel.contains(&FollowUpPointId::BuilderUpgradeLetter);
-                if has && !present {
-                    sel.push(FollowUpPointId::BuilderUpgradeLetter);
-                } else if !has && present {
-                    sel.retain(|p| *p != FollowUpPointId::BuilderUpgradeLetter);
+                // Sub-checks only show under a ticked parent, so when the last
+                // surface is unticked, drop whichever works route is present.
+                if ber.followup.builder_surfaces.is_empty() {
+                    ber.followup.selected.retain(|p| {
+                        *p != FollowUpPointId::BuilderUpgradeLetter
+                            && *p != FollowUpPointId::WorksEvidenceNoBuilder
+                    });
                 }
             }
             FollowUpRowKey::Custom(id) => {
