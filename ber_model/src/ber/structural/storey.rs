@@ -69,6 +69,18 @@ pub struct Storey {
     /// decision), never `Exposed`. `#[serde(default)]` so older records load.
     #[serde(default)]
     pub porch_walls: WallRegions,
+    /// On-site porch CONFIRMED-ABSENT answers (no separating door / no fixed
+    /// heating), keyed by each porch's [`PorchKey`] — the capture-side record
+    /// behind the DEAP Table 2.2 facts that would otherwise rest on absence
+    /// of evidence. Only negatives live here (a positive answer is recorded
+    /// as the real door/object it asserts); see [`PorchCheck`]. Asked at the
+    /// end of the Objects round and re-askable whenever a record is
+    /// reopened; consumed by `porch_facts`/`derive_porch_exclusions`.
+    /// `#[serde(default)]` so older records load.
+    ///
+    /// [`PorchKey`]: crate::ber::fenestration::PorchKey
+    #[serde(default)]
+    pub porch_checks: Vec<PorchCheck>,
     /// Default ceiling height in metres above this storey's floor datum.
     /// `None` until the assessor enters it — gates 3D viewing; when `Some`,
     /// resolve derives the default ceiling regions and extrudes walls to it.

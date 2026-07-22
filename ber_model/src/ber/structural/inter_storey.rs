@@ -27,7 +27,7 @@ use super::*;
 /// exposure derivation (`document/src/exposure.rs` `CONTAINMENT_TOL_M`).
 /// Storeys are sketched separately, so a wall base / region boundary meant to
 /// coincide with the neighbour footprint can sit a few cm off it.
-const CONTAINMENT_TOL_M: f64 = 0.05;
+pub(crate) const CONTAINMENT_TOL_M: f64 = 0.05;
 
 /// How far INSIDE the neighbour footprint the band-top plan sample is nudged
 /// off the wall base line (m). Falls back to a tenth of this when the
@@ -286,14 +286,14 @@ pub fn derive_inter_storey(ber: &mut Ber, dimensioned: &[bool]) {
 
 /// A neighbour storey's plan footprint: the UNION of its floor regions as
 /// simple exterior rings (+ prebuilt `geo` polygons for containment tests).
-struct PlanFootprint {
+pub(crate) struct PlanFootprint {
     /// Open rings (no closing duplicate), one per union piece.
-    rings: Vec<Vec<Point2f64>>,
+    pub(crate) rings: Vec<Vec<Point2f64>>,
     polys: Vec<Polygon<f64>>,
 }
 
 impl PlanFootprint {
-    fn of(floors: &FloorRegions) -> Self {
+    pub(crate) fn of(floors: &FloorRegions) -> Self {
         use geo::bool_ops::BooleanOps;
         use geo::Area;
         let mut acc = MultiPolygon::<f64>(Vec::new());
@@ -326,19 +326,19 @@ impl PlanFootprint {
         Self { rings, polys }
     }
 
-    fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.rings.is_empty()
     }
 
     /// `p` strictly inside any footprint piece (boundary excluded).
-    fn contains(&self, p: Point2f64) -> bool {
+    pub(crate) fn contains(&self, p: Point2f64) -> bool {
         let gp = GeoPoint::new(p.x, p.y);
         self.polys.iter().any(|poly| poly.contains(&gp))
     }
 
     /// `p` inside any piece, or within `tol` of any piece's boundary — the
     /// "on/inside the footprint" test for a wall base sample.
-    fn contains_within(&self, p: Point2f64, tol: f64) -> bool {
+    pub(crate) fn contains_within(&self, p: Point2f64, tol: f64) -> bool {
         if self.contains(p) {
             return true;
         }
@@ -353,7 +353,7 @@ impl PlanFootprint {
 
     /// The plan ring is fully contained in one footprint piece
     /// (conservative full containment, [`CONTAINMENT_TOL_M`]).
-    fn contains_ring(&self, ring: &[Point2f64]) -> bool {
+    pub(crate) fn contains_ring(&self, ring: &[Point2f64]) -> bool {
         self.rings
             .iter()
             .any(|outer| ring_within_ring(ring, outer, CONTAINMENT_TOL_M))
@@ -369,7 +369,7 @@ impl PlanFootprint {
 /// inside/outside pieces copying `construction_id` / `level_m` / `exposure`
 /// (fresh ids). DERIVED-ONLY: the rings are never pushed into
 /// `Storey::floor_splits`.
-fn split_floors_intact(floors: FloorRegions, rings: &[Vec<Point2f64>]) -> FloorRegions {
+pub(crate) fn split_floors_intact(floors: FloorRegions, rings: &[Vec<Point2f64>]) -> FloorRegions {
     use geo::bool_ops::BooleanOps;
     let mut regions = floors.regions;
     for ring in rings {
@@ -429,7 +429,7 @@ fn split_floors_intact(floors: FloorRegions, rings: &[Vec<Point2f64>]) -> FloorR
 }
 
 /// A floor region's exterior plan ring, open (closing duplicate dropped).
-fn floor_plan_ring(r: &FloorRegion) -> Vec<Point2f64> {
+pub(crate) fn floor_plan_ring(r: &FloorRegion) -> Vec<Point2f64> {
     let mut pts: Vec<Point2f64> = r
         .polygon
         .exterior()
@@ -471,6 +471,18 @@ fn floor_plan_ring(r: &FloorRegion) -> Vec<Point2f64> {
 /// caller's clear pass. Idempotent: with no `InterStorey` stamp it is a no-op.
 /// [`resolve_storey`]: (document crate)
 fn coalesce_inter_storey_ceiling_cuts(ceilings: CeilingRegions) -> CeilingRegions {
+    coalesce_stamped_ceiling_cuts(ceilings, CeilingExposure::InterStorey)
+}
+
+/// The stamp-generic core of [`coalesce_inter_storey_ceiling_cuts`]: reverses
+/// a prior derived ceiling split whose buried side carries `stamp` — shared
+/// with the porch-exclusion derivation, whose cuts carry
+/// [`CeilingExposure::Irrelevant`] instead (same accumulate-on-re-derive
+/// hazard, same fixpoint contract).
+pub(crate) fn coalesce_stamped_ceiling_cuts(
+    ceilings: CeilingRegions,
+    stamp: CeilingExposure,
+) -> CeilingRegions {
     use geo::bool_ops::BooleanOps;
     use geo::Area;
     // NOISE ABSORBER: fuses a BURIED piece with the EXPOSED remainder it was
@@ -496,7 +508,7 @@ fn coalesce_inter_storey_ceiling_cuts(ceilings: CeilingRegions) -> CeilingRegion
                 // trace): the fuse restores the exposed side's construction
                 // either way.
                 let nil = ItemId::nil();
-                let buried_cid = if ra.exposure == CeilingExposure::InterStorey {
+                let buried_cid = if ra.exposure == stamp {
                     ra.construction_id
                 } else {
                     rb.construction_id
@@ -511,8 +523,8 @@ fn coalesce_inter_storey_ceiling_cuts(ceilings: CeilingRegions) -> CeilingRegion
                 if (za - zb).abs() > Z_EPS_M {
                     continue; // a real ceiling step between them
                 }
-                let a_is = ra.exposure == CeilingExposure::InterStorey;
-                let b_is = rb.exposure == CeilingExposure::InterStorey;
+                let a_is = ra.exposure == stamp;
+                let b_is = rb.exposure == stamp;
                 if a_is == b_is {
                     continue; // both buried, or neither — not a cut edge to reverse
                 }

@@ -2329,6 +2329,7 @@ impl AppController {
             Some(WallExposure::NonHeatLoss) => " (Non-heat-loss wall)",
             Some(WallExposure::Ground) => " (ground-contact wall)",
             Some(WallExposure::InterStorey) => " (inter-storey wall)",
+            Some(WallExposure::Irrelevant) => " (excluded-porch wall)",
             Some(WallExposure::Unset) => " (unclassified wall)",
             None => "",
         }

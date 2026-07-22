@@ -57,6 +57,26 @@ pub struct ActiveObjectRoomView {
     pub is_attic: bool,
 }
 
+/// Which porch fact a pending review question asks about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PorchQuestion {
+    /// "Is there a door between the house and the porch?"
+    SeparatingDoor,
+    /// "Any fixed heating in the porch?" (radiator / UFH / storage heater —
+    /// asked because underfloor heating has no pinnable object, so absence
+    /// of pins proves nothing).
+    FixedHeating,
+}
+
+/// One pending porch question in the Objects review.
+pub struct PorchPromptView {
+    pub storey_idx: usize,
+    pub key: ber_model::ber::fenestration::PorchKey,
+    /// e.g. "porch 1 (Ground floor)".
+    pub label: String,
+    pub question: PorchQuestion,
+}
+
 /// One row in the Objects review: an object kind's house-wide total.
 pub struct ObjectTotalView {
     pub label: String,
@@ -88,6 +108,16 @@ pub struct ObjectReviewView {
     /// but hasn't recorded an attic object yet — blocks the confirm alongside
     /// [`unresolved_present`](Self::unresolved_present).
     pub attic_unresolved: bool,
+    /// The next pending porch question (DEAP Table 2.2 evidence still
+    /// missing), asked after the absence + attic prompts. `None` when every
+    /// porch is decided or deferred.
+    pub porch_prompt: Option<PorchPromptView>,
+    /// Pending porch questions (incl. the current one).
+    pub porch_remaining: usize,
+    /// Porch questions deferred this review ("Yes — I'll record it") whose
+    /// promised door/heater still isn't recorded — blocks the confirm
+    /// alongside [`unresolved_present`](Self::unresolved_present).
+    pub porch_unresolved: Vec<String>,
     /// Item 6 gate: no primary heat source is placed (no boiler AND no panel
     /// heater). Blocks the confirm — the review shows "add the main heat
     /// source" until one exists.
@@ -564,6 +594,7 @@ impl AppController {
             self.object_review_selected = 0;
             self.object_review_skipped.clear();
             self.object_review_attic_skipped = false;
+            self.porch_review_skipped.clear();
             // Re-offer the heating stage questions (items 4/5) each review.
             self.panel_heater_asked = false;
             self.heating_primary_asked = false;
@@ -626,6 +657,142 @@ impl AppController {
                 .is_none_or(|r| attic_is_empty(&r.data))
     }
 
+    // ── Porch checks (DEAP Table 2.2 evidence) ──────────────────────────
+
+    /// Every PENDING porch question: a fully-protruding porch (the only kind
+    /// Table 2.2 can exclude — within-line / corner porches are always
+    /// included, so nothing needs asking) whose separating-door or
+    /// fixed-heating fact has neither positive evidence nor a
+    /// confirmed-absent answer, minus the ones deferred this review.
+    pub fn pending_porch_questions(&self) -> Vec<PorchPromptView> {
+        use ber_model::ber::structural::porch_facts;
+        let Some(record) = self.current_record.as_ref() else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for (idx, s) in record.data.storeys.iter().enumerate() {
+            for (i, porch) in s.porches.regions.iter().enumerate() {
+                let facts = porch_facts(s, porch);
+                if !facts.fully_protruding {
+                    continue;
+                }
+                let label = if s.porches.regions.len() == 1 {
+                    format!("the porch ({})", storey_display_name(s, idx))
+                } else {
+                    format!("porch {} ({})", i + 1, storey_display_name(s, idx))
+                };
+                let mut push = |question: PorchQuestion| {
+                    if !self.porch_review_skipped.contains(&(idx, facts.key, question)) {
+                        out.push(PorchPromptView {
+                            storey_idx: idx,
+                            key: facts.key,
+                            label: label.clone(),
+                            question,
+                        });
+                    }
+                };
+                if facts.separating_door.is_none() {
+                    push(PorchQuestion::SeparatingDoor);
+                }
+                if facts.heated.is_none() {
+                    push(PorchQuestion::FixedHeating);
+                }
+            }
+        }
+        out
+    }
+
+    /// Confirm a porch fact ABSENT ("No — open access" / "No — unheated"):
+    /// record the durable [`PorchCheck`] and re-run the exposure derivation so
+    /// a now-decided porch stamps its geometry immediately.
+    ///
+    /// [`PorchCheck`]: ber_model::ber::structural::PorchCheck
+    pub fn confirm_porch_absent(
+        &mut self,
+        storey_idx: usize,
+        key: ber_model::ber::fenestration::PorchKey,
+        question: PorchQuestion,
+    ) {
+        let mut changed = false;
+        if let Some(record) = self.current_record.as_mut() {
+            if let Some(storey) = record.data.storeys.get_mut(storey_idx) {
+                let check = match storey.porch_checks.iter_mut().find(|c| c.key == key) {
+                    Some(c) => c,
+                    None => {
+                        storey
+                            .porch_checks
+                            .push(ber_model::ber::structural::PorchCheck {
+                                key,
+                                ..Default::default()
+                            });
+                        storey.porch_checks.last_mut().expect("just pushed")
+                    }
+                };
+                let flag = match question {
+                    PorchQuestion::SeparatingDoor => &mut check.door_confirmed_absent,
+                    PorchQuestion::FixedHeating => &mut check.heating_confirmed_absent,
+                };
+                if !*flag {
+                    *flag = true;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            // A decided porch re-stamps its exposures (Irrelevant /
+            // SemiExposed) in the same derive tail the storey pipeline uses.
+            self.derive_horizontal_exposure_all();
+            let _ = self.mark_dirty();
+        }
+    }
+
+    /// Defer a porch question this review ("Yes — I'll record it"): the
+    /// promised door/heater must actually be recorded before the review can
+    /// confirm (see [`porch_unresolved_labels`](Self::porch_unresolved_labels)).
+    /// Session-only, like [`skip_object_absent`](Self::skip_object_absent).
+    pub fn skip_porch_check(
+        &mut self,
+        storey_idx: usize,
+        key: ber_model::ber::fenestration::PorchKey,
+        question: PorchQuestion,
+    ) {
+        self.porch_review_skipped.insert((storey_idx, key, question));
+    }
+
+    /// Deferred porch questions whose promised evidence STILL isn't recorded
+    /// — "porch door (Ground floor)" etc. Blocks the review confirm.
+    pub fn porch_unresolved_labels(&self) -> Vec<String> {
+        use ber_model::ber::structural::porch_facts;
+        let Some(record) = self.current_record.as_ref() else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for (idx, key, question) in &self.porch_review_skipped {
+            let Some(s) = record.data.storeys.get(*idx) else {
+                continue;
+            };
+            let still_pending = s.porches.regions.iter().any(|p| {
+                let facts = porch_facts(s, p);
+                facts.key == *key
+                    && match question {
+                        PorchQuestion::SeparatingDoor => facts.separating_door.is_none(),
+                        PorchQuestion::FixedHeating => facts.heated.is_none(),
+                    }
+            });
+            if still_pending {
+                out.push(match question {
+                    PorchQuestion::SeparatingDoor => {
+                        format!("porch door ({})", storey_display_name(s, *idx))
+                    }
+                    PorchQuestion::FixedHeating => {
+                        format!("porch heater ({})", storey_display_name(s, *idx))
+                    }
+                });
+            }
+        }
+        out
+    }
+
     /// Categories the assessor asserted are PRESENT during this review ("No —
     /// there is one") that still have zero recorded objects house-wide. The
     /// assertion is a promise to add the item: while any remain, the review
@@ -658,6 +825,8 @@ impl AppController {
         if !self.unresolved_present_categories().is_empty()
             || self.attic_unresolved()
             || !self.heating_stage_ready()
+            || !self.pending_porch_questions().is_empty()
+            || !self.porch_unresolved_labels().is_empty()
         {
             return;
         }
@@ -710,6 +879,7 @@ impl AppController {
         let attic_prompt = attic_is_empty(data)
             && !data.attic_no_items_confirmed
             && !self.object_review_attic_skipped;
+        let porch_pending = self.pending_porch_questions();
         Some(ObjectReviewView {
             totals,
             selected,
@@ -719,6 +889,9 @@ impl AppController {
             unresolved_present: self.unresolved_present_categories(),
             attic_prompt,
             attic_unresolved: self.attic_unresolved(),
+            porch_remaining: porch_pending.len(),
+            porch_prompt: porch_pending.into_iter().next(),
+            porch_unresolved: self.porch_unresolved_labels(),
             heating_source_missing: self.heating_source_missing(),
             panel_heater_prompt: self.panel_heater_prompt_pending(),
             primary_pick_options: self.primary_pick_options(),
@@ -886,6 +1059,16 @@ impl AppController {
 }
 
 /// Whether the attic bucket holds no objects (no bucket, or an empty one).
+/// A storey's display name for porch-question labels — its recorded name,
+/// falling back to "storey N".
+fn storey_display_name(s: &Storey, idx: usize) -> String {
+    if s.name.trim().is_empty() {
+        format!("storey {}", idx + 1)
+    } else {
+        s.name.clone()
+    }
+}
+
 fn attic_is_empty(data: &Ber) -> bool {
     data.attic_room
         .as_ref()

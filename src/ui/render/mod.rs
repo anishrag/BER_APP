@@ -1376,7 +1376,7 @@ pub fn render_wall_exposure(
         // (`sections_from_wall_regions` skips it) and the controller's riser
         // views exclude InterStorey risers. Kept exhaustive — grey, the
         // ghost/unclassified read.
-        WallExposure::InterStorey => grey,
+        WallExposure::InterStorey | WallExposure::Irrelevant => grey,
     };
     // Point at distance `d` (metres) along wall a→b of length `len`, in screen.
     let along = |a: (f64, f64), b: (f64, f64), len: f32, d: f32| {

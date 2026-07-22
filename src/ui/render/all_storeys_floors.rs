@@ -28,7 +28,7 @@ fn exposure_color(e: FloorExposure) -> egui::Color32 {
         // UNREACHABLE in practice: the controller's `floor_exposure_view`
         // filters derived InterStorey floors out of this worklist. Kept
         // exhaustive — grey, the ghost/unclassified read.
-        FloorExposure::InterStorey => style::UNSET_WALL,
+        FloorExposure::InterStorey | FloorExposure::Irrelevant => style::UNSET_WALL,
     }
 }
 

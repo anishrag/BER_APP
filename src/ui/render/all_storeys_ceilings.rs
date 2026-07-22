@@ -30,7 +30,7 @@ fn exposure_color(e: CeilingExposure) -> egui::Color32 {
         // UNREACHABLE in practice: the controller's `ceiling_exposure_view`
         // filters derived InterStorey ceilings out of this worklist. Kept
         // exhaustive — grey, the ghost/unclassified read.
-        CeilingExposure::InterStorey => style::UNSET_WALL,
+        CeilingExposure::InterStorey | CeilingExposure::Irrelevant => style::UNSET_WALL,
     }
 }
 

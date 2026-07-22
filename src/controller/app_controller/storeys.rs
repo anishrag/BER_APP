@@ -941,7 +941,7 @@ impl AppController {
     /// derivation splits leaves its openings unlinked in every
     /// post-materialize record (dead opening drag, empty `opes`, pruned on
     /// reload).
-    fn derive_horizontal_exposure_all(&mut self) {
+    pub(super) fn derive_horizontal_exposure_all(&mut self) {
         // Junction gate for the cross-storey `derive_inter_storey`: a storey is
         // eligible only when its outline is fully dimensioned
         // (`measurements_complete` — metre scale set AND nothing left to
@@ -990,6 +990,13 @@ impl AppController {
         // knee wall inside the eaves void). Derived fresh each tail, like the
         // inter-storey pass it composes with.
         ber_model::ber::structural::derive_roof_voids(&mut record.data);
+        // Porch exclusions: DEAP Table 2.2 verdicts applied to the derived
+        // geometry (`Irrelevant` / `SemiExposed` stamps). AFTER the
+        // inter-storey pass — an excluded porch overrides the InterStorey
+        // stamps over its footprint — and BEFORE the openings re-link below,
+        // because it splits perimeter walls at porch corners and openings
+        // must re-home onto the sub-walls.
+        ber_model::ber::structural::derive_porch_exclusions(&mut record.data, &dimensioned);
         for idx in 0..n {
             // RE-STAMP RISERS: `derive_inter_storey` / `derive_roof_voids` above
             // re-derive and re-split the wall regions, resetting each riser to

@@ -384,17 +384,20 @@ impl SurfaceExposure {
             SurfaceExposure::Wall(WallExposure::NonHeatLoss) => "Non heat loss",
             SurfaceExposure::Wall(WallExposure::Ground) => "Ground",
             SurfaceExposure::Wall(WallExposure::InterStorey) => "Inter-storey",
+            SurfaceExposure::Wall(WallExposure::Irrelevant) => "Irrelevant",
             SurfaceExposure::Wall(WallExposure::Unset) => "Unset",
             SurfaceExposure::Floor(FloorExposure::Ground) => "Ground",
             SurfaceExposure::Floor(FloorExposure::Exposed) => "Exposed",
             SurfaceExposure::Floor(FloorExposure::SemiExposed) => "Semi-exposed",
             SurfaceExposure::Floor(FloorExposure::NonHeatLoss) => "Non heat loss",
             SurfaceExposure::Floor(FloorExposure::InterStorey) => "Inter-storey",
+            SurfaceExposure::Floor(FloorExposure::Irrelevant) => "Irrelevant",
             SurfaceExposure::Floor(FloorExposure::Unset) => "Unset",
             SurfaceExposure::Ceiling(CeilingExposure::ExposedRoof) => "Exposed roof",
             SurfaceExposure::Ceiling(CeilingExposure::Party) => "Party",
             SurfaceExposure::Ceiling(CeilingExposure::Unheated) => "Unheated",
             SurfaceExposure::Ceiling(CeilingExposure::InterStorey) => "Inter-storey",
+            SurfaceExposure::Ceiling(CeilingExposure::Irrelevant) => "Irrelevant",
             SurfaceExposure::Ceiling(CeilingExposure::Unset) => "Unset",
         }
     }
@@ -418,6 +421,14 @@ pub enum WallExposure {
     /// and clears it on every re-derive; setters targeting it are no-ops.
     /// Excluded from heat-loss area at DEAP export.
     InterStorey,
+    /// DERIVED: this surface belongs to an EXCLUDED unheated space (a porch
+    /// ruled out of the assessment — DEAP Table 2.2) and sits OUTSIDE the
+    /// dwelling's assessment boundary entirely. Distinct from `NonHeatLoss`
+    /// (a party/internal element whose area still belongs to the dwelling):
+    /// an `Irrelevant` surface contributes to NO heat-loss, area or volume
+    /// aggregate. Never assessor-set — `derive_porch_exclusions` stamps and
+    /// clears it on every re-derive.
+    Irrelevant,
 }
 
 impl WallExposure {
@@ -430,7 +441,10 @@ impl WallExposure {
     /// [`Storey::surface_at`](super::Storey::surface_at) and friends).
     /// `Unset` stays IN scope — an unclassified wall must still be reachable.
     pub fn in_structure_scope(self) -> bool {
-        !matches!(self, WallExposure::NonHeatLoss | WallExposure::InterStorey)
+        !matches!(
+            self,
+            WallExposure::NonHeatLoss | WallExposure::InterStorey | WallExposure::Irrelevant
+        )
     }
 }
 
@@ -456,6 +470,12 @@ pub enum FloorExposure {
     /// and clears it on every re-derive; setters targeting it are no-ops.
     /// Excluded from heat-loss area at DEAP export.
     InterStorey,
+    /// DERIVED: this surface belongs to an EXCLUDED unheated space (see
+    /// [`WallExposure::Irrelevant`]) — e.g. the floor slab of an excluded
+    /// porch. Outside the assessment boundary: no heat loss, no floor area,
+    /// no volume. Never assessor-set — `derive_porch_exclusions` stamps and
+    /// clears it on every re-derive.
+    Irrelevant,
 }
 
 impl FloorExposure {
@@ -470,7 +490,7 @@ impl FloorExposure {
     pub fn in_structure_scope(self) -> bool {
         !matches!(
             self,
-            FloorExposure::NonHeatLoss | FloorExposure::InterStorey
+            FloorExposure::NonHeatLoss | FloorExposure::InterStorey | FloorExposure::Irrelevant
         )
     }
 }
@@ -497,6 +517,12 @@ pub enum CeilingExposure {
     /// and clears it on every re-derive; setters targeting it are no-ops.
     /// Excluded from heat-loss area at DEAP export.
     InterStorey,
+    /// DERIVED: this surface belongs to an EXCLUDED unheated space (see
+    /// [`WallExposure::Irrelevant`]) — e.g. the roof/ceiling over an excluded
+    /// porch. Outside the assessment boundary: no heat loss, no area. Never
+    /// assessor-set — `derive_porch_exclusions` stamps and clears it on
+    /// every re-derive.
+    Irrelevant,
 }
 
 impl CeilingExposure {
@@ -510,7 +536,10 @@ impl CeilingExposure {
     /// repaint the classification), but the Structure phase neither selects,
     /// counts, suggests nor reviews them. `Unset` stays IN scope.
     pub fn in_structure_scope(self) -> bool {
-        !matches!(self, CeilingExposure::Party | CeilingExposure::InterStorey)
+        !matches!(
+            self,
+            CeilingExposure::Party | CeilingExposure::InterStorey | CeilingExposure::Irrelevant
+        )
     }
 }
 

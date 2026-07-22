@@ -321,7 +321,7 @@ impl AppController {
             };
             (dwelling_status(&reasons), reasons)
         };
-        vec![
+        let mut items = vec![
             ChecklistItem::new(
                 "Rooms recorded",
                 row(rooms, "No room pins dropped yet — tap a room to place one"),
@@ -330,7 +330,46 @@ impl AppController {
                 "Objects recorded",
                 row(objects, "No objects recorded in any room yet"),
             ),
-        ]
+        ];
+        // Porch checks: red while any porch's DEAP Table 2.2 verdict is still
+        // UNDECIDED (separating door / fixed heating unanswered). The row only
+        // appears when the record has porches — most houses have none.
+        {
+            use ber_model::ber::structural::{porch_facts, PorchVerdict};
+            let has_porches = record
+                .data
+                .storeys
+                .iter()
+                .any(|s| !s.porches.regions.is_empty());
+            if has_porches {
+                let mut reasons = Vec::new();
+                for (i, s) in record.data.storeys.iter().enumerate() {
+                    for (pi, p) in s.porches.regions.iter().enumerate() {
+                        let facts = porch_facts(s, p);
+                        if facts.verdict() == PorchVerdict::Undecided {
+                            let mut missing = Vec::new();
+                            if facts.separating_door.is_none() {
+                                missing.push("separating door?");
+                            }
+                            if facts.heated.is_none() {
+                                missing.push("fixed heating?");
+                            }
+                            reasons.push(format!(
+                                "Porch {} on storey {}: {} — answer in the Objects review",
+                                pi + 1,
+                                i + 1,
+                                missing.join(" ")
+                            ));
+                        }
+                    }
+                }
+                items.push(ChecklistItem::new(
+                    "Porch checks",
+                    (dwelling_status(&reasons), reasons),
+                ));
+            }
+        }
+        items
     }
 
     /// Roll a per-storey reason list (over the EDITING model plus the durable

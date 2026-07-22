@@ -392,6 +392,9 @@ fn draw_wall_region(
         // it further. Only reachable in the SINGLE-storey view (the stack view
         // skips InterStorey regions before this fn).
         WallExposure::InterStorey => style::UNSET_WALL,
+        // Excluded-porch surface — outside the assessment boundary; same grey
+        // base as the other derived-inert class, ghosted below.
+        WallExposure::Irrelevant => style::UNSET_WALL,
     };
     let color = color_for(DisplayMode::Walls, display_mode, base);
     // A SELECTED wall region's face is SHADED (keeping its exposure colour) so
@@ -402,7 +405,8 @@ fn draw_wall_region(
     // ghost in EVERY view it reaches (the single-storey view — the stack skips
     // it): present-but-inert, never a paint target.
     let internal = ((fade_internal && region.exposure == WallExposure::NonHeatLoss)
-        || region.exposure == WallExposure::InterStorey)
+        || region.exposure == WallExposure::InterStorey
+        || region.exposure == WallExposure::Irrelevant)
         && !selected.contains(&region.id);
     if selected.contains(&region.id) {
         fill_polygon(painter, &pts, style::highlight_fill(base));

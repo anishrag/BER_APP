@@ -122,6 +122,7 @@ pub use new_storey::NewStoreyPromptUiData;
 use new_storey::{NewStoreyStage, PendingNewStorey};
 pub use objects::{
     ActiveObjectRoomView, ObjectPinView, ObjectReviewView, ObjectRowView, ObjectTotalView,
+    PorchPromptView, PorchQuestion,
 };
 pub use openings::{
     ComplexWindowPlacement, DoorEditPrefill, DoorSidelightsMode, DoorSidelightsPlacement,
@@ -417,6 +418,11 @@ pub struct AppController {
     /// the session. Cleared each time the review opens. (A "Yes" persists on the
     /// record instead — `Ber.objects_no_items_confirmed`.)
     object_review_skipped: std::collections::HashSet<ber_model::ber::objects::ObjectCategory>,
+    /// Porch questions the assessor deferred THIS review ("Yes — I'll record
+    /// it"): the promised door/heater must be recorded before the review can
+    /// confirm. Session-only, like `object_review_skipped`.
+    porch_review_skipped:
+        std::collections::HashSet<(usize, ber_model::ber::fenestration::PorchKey, PorchQuestion)>,
     /// The attic counterpart of `object_review_skipped`: "Anything in the
     /// attic?" answered "Yes — there is" this session (they'll go add it).
     /// Cleared each time the review opens; a "No, empty" persists on the
@@ -816,6 +822,7 @@ impl AppController {
             object_review_mode: false,
             object_review_selected: 0,
             object_review_skipped: std::collections::HashSet::new(),
+            porch_review_skipped: std::collections::HashSet::new(),
             object_review_attic_skipped: false,
             zone_prompt: None,
             panel_heater_asked: false,

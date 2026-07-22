@@ -5604,6 +5604,48 @@ fn object_review_overlay<F: FnMut(UiEvent)>(
                     on_event(UiEvent::Sketch(SketchEvent::SkipAtticAbsent));
                 }
             });
+        } else if let Some(pp) = orv.porch_prompt.as_ref() {
+            // Porch checks (DEAP Table 2.2): the two facts that would
+            // otherwise rest on absence of evidence. Asked only for a porch
+            // that protrudes beyond the wall line — the only kind DEAP can
+            // exclude.
+            use crate::controller::app_controller::PorchQuestion;
+            ui.separator();
+            let (question, no_label) = match pp.question {
+                PorchQuestion::SeparatingDoor => (
+                    format!("Is there a door between the house and {}?", pp.label),
+                    "No — open access",
+                ),
+                PorchQuestion::FixedHeating => (
+                    format!(
+                        "Any fixed heating in {} (radiator / UFH / storage heater)?",
+                        pp.label
+                    ),
+                    "No — unheated",
+                ),
+            };
+            ui.label(egui::RichText::new(question).strong().size(15.0));
+            ui.horizontal(|ui| {
+                if ui.button(no_label).clicked() {
+                    on_event(UiEvent::Sketch(SketchEvent::ConfirmPorchAbsent(
+                        pp.storey_idx,
+                        pp.key,
+                        pp.question,
+                    )));
+                }
+                if ui.button("Yes — I'll record it").clicked() {
+                    on_event(UiEvent::Sketch(SketchEvent::SkipPorchCheck(
+                        pp.storey_idx,
+                        pp.key,
+                        pp.question,
+                    )));
+                }
+            });
+            ui.label(
+                egui::RichText::new(format!("{} porch check(s) left", orv.porch_remaining))
+                    .size(11.0)
+                    .color(egui::Color32::from_gray(150)),
+            );
         } else {
             ui.separator();
             ui.label(
@@ -5613,7 +5655,10 @@ fn object_review_overlay<F: FnMut(UiEvent)>(
         }
         // Flagged-present categories (or the attic) with no object yet:
         // confirm stays disabled until each promised item is actually added.
-        if !orv.unresolved_present.is_empty() || orv.attic_unresolved {
+        if !orv.unresolved_present.is_empty()
+            || orv.attic_unresolved
+            || !orv.porch_unresolved.is_empty()
+        {
             let mut names = orv
                 .unresolved_present
                 .iter()
@@ -5622,6 +5667,7 @@ fn object_review_overlay<F: FnMut(UiEvent)>(
             if orv.attic_unresolved {
                 names.push("attic item".to_string());
             }
+            names.extend(orv.porch_unresolved.iter().cloned());
             let names = names.join(", ");
             ui.label(
                 egui::RichText::new(format!("Add the {names} you flagged before finishing"))
@@ -6039,7 +6085,7 @@ fn partition_exposure_color(e: WallExposure) -> egui::Color32 {
         // and every setter refuses InterStorey (it's the derivation's stamp,
         // and a partitioned wall's 2-D regions aren't derivation targets).
         // Kept exhaustive — grey, the ghost/unclassified read.
-        WallExposure::InterStorey => style::UNSET_WALL,
+        WallExposure::InterStorey | WallExposure::Irrelevant => style::UNSET_WALL,
     }
 }
 

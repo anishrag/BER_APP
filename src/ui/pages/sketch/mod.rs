@@ -762,6 +762,20 @@ pub enum SketchEvent {
     ConfirmObjectAbsent(ObjectCategory),
     /// Review absence prompt: skip this category for now (there is one to add).
     SkipObjectAbsent(ObjectCategory),
+    /// Review porch prompt: confirm the asked fact ABSENT (no separating
+    /// door / no fixed heating) for the porch named by (storey, key).
+    ConfirmPorchAbsent(
+        usize,
+        ber_model::ber::fenestration::PorchKey,
+        crate::controller::app_controller::PorchQuestion,
+    ),
+    /// Review porch prompt: there IS one (door/heater) — they'll record it;
+    /// blocks the review's confirm until they do.
+    SkipPorchCheck(
+        usize,
+        ber_model::ber::fenestration::PorchKey,
+        crate::controller::app_controller::PorchQuestion,
+    ),
     /// Review attic prompt: confirm the attic really holds nothing.
     ConfirmAtticAbsent,
     /// Review attic prompt: there IS something in the attic (they'll add it —

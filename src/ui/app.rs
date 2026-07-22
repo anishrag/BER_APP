@@ -2951,6 +2951,14 @@ impl eframe::App for BerApp {
                                         SketchEvent::OpenAtticRoom => {
                                             attic_open_request.set(true);
                                         }
+                                        SketchEvent::ConfirmPorchAbsent(idx, key, q) => {
+                                            controller
+                                                .borrow_mut()
+                                                .confirm_porch_absent(idx, key, q);
+                                        }
+                                        SketchEvent::SkipPorchCheck(idx, key, q) => {
+                                            controller.borrow_mut().skip_porch_check(idx, key, q);
+                                        }
                                         SketchEvent::ConfirmAtticAbsent => {
                                             controller.borrow_mut().confirm_attic_absent();
                                         }
