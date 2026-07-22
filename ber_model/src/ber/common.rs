@@ -95,7 +95,7 @@ impl ExternalSide {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct Evidence {
     pub id: ItemId,
     pub file_path: String, // local path to the full-resolution evidence file
@@ -215,6 +215,13 @@ pub struct ConstructionPhases {
     /// `#[serde(default)]` so older records load with none.
     #[serde(default)]
     pub year_evidence: BTreeMap<ConstructionPhase, Vec<Evidence>>,
+    /// Per phase: `true` when the phase came from the CLIENT'S BOOKING — its
+    /// build year was given at booking, so the Letter of Engagement (populated
+    /// from the booking) evidences it. A phase added by the assessor during the
+    /// survey is absent/`false`: the LoE says nothing about it, so it carries no
+    /// LoE proof. `#[serde(default)]` so older records load with none.
+    #[serde(default)]
+    pub booking_sourced: BTreeMap<ConstructionPhase, bool>,
 }
 
 impl ConstructionPhases {
@@ -224,6 +231,21 @@ impl ConstructionPhases {
             nicknames: BTreeMap::new(),
             year_proof: BTreeMap::new(),
             year_evidence: BTreeMap::new(),
+            booking_sourced: BTreeMap::new(),
+        }
+    }
+
+    /// True when `phase` came from the booking (and so is LoE-backed).
+    pub fn is_booking_sourced(&self, phase: &ConstructionPhase) -> bool {
+        self.booking_sourced.get(phase).copied().unwrap_or(false)
+    }
+
+    /// Mark whether `phase` came from the booking. `false` clears the entry.
+    pub fn set_booking_sourced(&mut self, phase: ConstructionPhase, sourced: bool) {
+        if sourced {
+            self.booking_sourced.insert(phase, true);
+        } else {
+            self.booking_sourced.remove(&phase);
         }
     }
 

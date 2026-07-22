@@ -280,6 +280,10 @@ fn collect_intake(state: &KeyDetailsState) -> IntakeDetails {
         architect_letter_original: state.architect_letter_original,
         builder_letter_works: state.builder_letter_works,
         works_evidence_available: state.works_evidence_available,
+        // Linked by BERintake from the signed LoE, not entered on this form.
+        // TODO: preserve any existing ber.intake.letter_of_engagement here once
+        // the LoE sync lands — rebuilding intake from the form must not wipe it.
+        letter_of_engagement: None,
     }
 }
 

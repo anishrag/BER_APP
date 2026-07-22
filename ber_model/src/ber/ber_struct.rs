@@ -56,6 +56,13 @@ pub struct IntakeDetails {
     /// `#[serde(default)]` keeps older records loading.
     #[serde(default)]
     pub works_evidence_available: Option<bool>,
+    /// The client's signed Letter of Engagement, linked by BERintake once
+    /// signed (`file_path` holds its S3 URL; `content_type` "application/pdf").
+    /// Populated from the booking, so it evidences the build years the client
+    /// gave — the first proof for every booking-sourced construction phase
+    /// (see [`Ber::attach_loe_to_booking_phases`]). `None` until one exists.
+    #[serde(default)]
+    pub letter_of_engagement: Option<Evidence>,
 }
 
 /// One construction-PHASE zone of a storey, projected for the UI to tint and
@@ -198,6 +205,36 @@ pub struct Ber {
 
 // Pure data helpers, optional
 impl Ber {
+    /// Attach the client's Letter of Engagement as build-year proof on every
+    /// booking-sourced construction phase (idempotent). The LoE is populated
+    /// from the booking, so it evidences the build years the client gave — it
+    /// counts as the first of the two proofs each such phase needs. Phases the
+    /// assessor added during the survey aren't covered by the LoE and are left
+    /// untouched. No-op when there is no LoE. Keyed by the LoE's `file_path`
+    /// (its URL) so re-running never double-attaches.
+    pub fn attach_loe_to_booking_phases(&mut self) {
+        let Some(loe) = self.intake.letter_of_engagement.clone() else {
+            return;
+        };
+        let phases: Vec<ConstructionPhase> = self
+            .construction_phases
+            .booking_sourced
+            .iter()
+            .filter(|(_, &sourced)| sourced)
+            .map(|(p, _)| p.clone())
+            .collect();
+        for phase in phases {
+            let already = self
+                .construction_phases
+                .year_evidence_of(&phase)
+                .iter()
+                .any(|e| e.file_path == loe.file_path);
+            if !already {
+                self.construction_phases.add_year_evidence(phase, loe.clone());
+            }
+        }
+    }
+
     /// Update a stored photo's file paths by `id`, wherever it lives in the
     /// model (external photos, window types, wall/floor/ceiling constructions,
     /// doors, and Objects-phase building objects). Returns `true` if a photo

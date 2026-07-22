@@ -180,6 +180,8 @@ fn create_minimal_ber(id: ItemId) -> Ber {
                 .collect(),
             nicknames: Default::default(),
             year_proof: Default::default(),
+            year_evidence: Default::default(),
+            booking_sourced: Default::default(),
         },
         heating_system: HeatingSystem {
             id: ItemId::default(),
@@ -246,6 +248,8 @@ fn create_full_ber(id: ItemId) -> Ber {
         .collect(),
         nicknames: Default::default(),
         year_proof: Default::default(),
+        year_evidence: Default::default(),
+        booking_sourced: Default::default(),
     };
 
     // Shared floor construction the ground-floor region points at.
