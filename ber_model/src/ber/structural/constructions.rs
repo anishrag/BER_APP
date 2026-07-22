@@ -1241,6 +1241,7 @@ impl Ber {
                 .regions
                 .iter()
                 .filter(|r| r.exposure.in_structure_scope())
+                .chain(storey.structure_porch_walls())
                 .filter(|r| {
                     self.wall_construction(r.construction_id)
                         .map_or(true, |c| !c.is_complete())
@@ -1349,10 +1350,9 @@ impl Ber {
             // used: (type set, base build-up state, insulation answered).
             let attrs: Option<(bool, &ConstructionBase, bool)> = match kind {
                 SurfaceKind::Walls => storey
-                    .walls
-                    .regions
-                    .iter()
-                    .find(|r| r.id == id)
+                    // `placeable_wall` spans perimeter AND porch inner walls —
+                    // an incomplete id can be either.
+                    .placeable_wall(id)
                     .and_then(|r| self.wall_construction(r.construction_id))
                     .map(|c| (c.construction_type.is_set(), &c.base, true)),
                 SurfaceKind::Floors => storey

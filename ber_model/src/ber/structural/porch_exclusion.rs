@@ -891,6 +891,54 @@ mod tests {
             .all(|r| r.exposure == WallExposure::NonHeatLoss));
     }
 
+    /// The Structure-phase porch exception: a porch inner wall is OUT of
+    /// structure scope while its verdict is pending (`Unset` — unlike a
+    /// normal wall, where Unset stays reachable) and while the porch is
+    /// included (`NonHeatLoss`), and enters scope — selectable, counted,
+    /// flagged incomplete — exactly when the exclusion derive stamps it
+    /// `SemiExposed`.
+    #[test]
+    fn porch_wall_enters_structure_scope_only_when_semi_exposed() {
+        use crate::ber::structural::SurfaceKind;
+        let mut ber = porch_house();
+        let wall_id = ber.storeys[0].porch_walls.regions[0].id;
+        let walls_before = ber.storeys[0].surface_counts().walls;
+
+        // Undecided → Unset → out of scope, uncounted.
+        derive_porch_exclusions(&mut ber, &[true]);
+        let s = &ber.storeys[0];
+        assert!(!s.surface_in_structure_scope(SurfaceKind::Walls, wall_id));
+        assert_eq!(s.surface_counts().walls, walls_before);
+        assert!(!ber
+            .incomplete_surface_ids(0, SurfaceKind::Walls)
+            .contains(&wall_id));
+
+        // Heated → Included → NonHeatLoss → still out of scope.
+        let mut room = ObjectRoom::new(Point2f32::new(5.0, -0.75));
+        room.objects
+            .push(BuildingObject::new(ObjectKind::Radiator(RadiatorTrv::WithTrv), 1));
+        ber.storeys[0].object_rooms.push(room);
+        derive_porch_exclusions(&mut ber, &[true]);
+        assert!(!ber.storeys[0].surface_in_structure_scope(SurfaceKind::Walls, wall_id));
+
+        // Excluded → SemiExposed → in scope, counted, and needing attribution.
+        ber.storeys[0].object_rooms.clear();
+        ber.storeys[0].doors.push(separating_door());
+        confirm_unheated(&mut ber);
+        derive_porch_exclusions(&mut ber, &[true]);
+        let s = &ber.storeys[0];
+        assert!(s.surface_in_structure_scope(SurfaceKind::Walls, wall_id));
+        assert_eq!(s.surface_kind_of(wall_id), Some(SurfaceKind::Walls));
+        assert!(s.is_porch_wall(wall_id));
+        assert!(s.surface_ids(SurfaceKind::Walls).contains(&wall_id));
+        assert!(s.surface_counts().walls > walls_before);
+        assert!(
+            ber.incomplete_surface_ids(0, SurfaceKind::Walls)
+                .contains(&wall_id),
+            "an unattributed semi-exposed porch wall must show in completeness"
+        );
+    }
+
     /// A first storey extends over the excluded ground-floor porch: after the
     /// inter-storey pass stamps the junction, the porch derive re-stamps the
     /// overlap SemiExposed (a floor over an unheated space) and the ceiling

@@ -298,6 +298,28 @@ pub fn stamp_wall_constructions(ber: &mut Ber, idx: usize, doc: &crate::StoreyDo
             ber.storeys[idx].walls.regions[i].construction_id = cid;
         }
     }
+    // PORCH INNER WALLS: attribution keys by quantized base edge (the riser
+    // path — a porch inner edge is off the outline, so it has no SurfaceRef)
+    // and lands in `doc.riser_constructions` via the same setter. Stamped
+    // regardless of current exposure: this runs before the porch-exclusion
+    // derive, and the construction must already be in place when the wall
+    // flips SemiExposed (and it's harmless while the wall is out of scope).
+    let n = ber.storeys[idx].porch_walls.regions.len();
+    for i in 0..n {
+        let Some((e0, e1)) = ber.storeys[idx].porch_walls.regions[i].base_edge() else {
+            continue;
+        };
+        let key = crate::riser_key(Point2f64::new(e0.x, e0.y), Point2f64::new(e1.x, e1.y));
+        if let Some((ty, makeup, phase, name)) = doc.riser_constructions.get(&key) {
+            let cid = ber.ensure_wall_construction_named(
+                *ty,
+                makeup.clone(),
+                phase.clone(),
+                name.as_deref(),
+            );
+            ber.storeys[idx].porch_walls.regions[i].construction_id = cid;
+        }
+    }
 }
 
 /// Apply each FLOOR region's ASSIGNED construction (type + make-up + phase, from

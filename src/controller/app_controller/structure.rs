@@ -314,13 +314,17 @@ impl AppController {
             return out;
         };
         for (idx, storey) in record.data.storeys.iter().enumerate() {
-            for r in &storey.walls.regions {
+            for r in storey
+                .walls
+                .regions
+                .iter()
                 // Out-of-scope walls (non-heat-loss / inter-storey) don't
                 // participate in the Structure phase — a construction referenced
-                // only by them isn't offered as an existing group.
-                if !r.exposure.in_structure_scope() {
-                    continue;
-                }
+                // only by them isn't offered as an existing group. Semi-exposed
+                // porch inner walls DO participate (structure_porch_walls).
+                .filter(|r| r.exposure.in_structure_scope())
+                .chain(storey.structure_porch_walls())
+            {
                 if let Some(c) = record.data.wall_construction(r.construction_id) {
                     if c.is_complete() {
                         add(
@@ -407,7 +411,11 @@ impl AppController {
                 let mut risers = Vec::new();
                 for r in ids
                     .iter()
-                    .filter_map(|id| storey.walls.regions.iter().find(|r| r.id == *id))
+                    // `placeable_wall` spans perimeter AND porch inner walls; a
+                    // porch wall's base midpoint is off the outline, so it falls
+                    // through `surface_ref_at` to the riser-key branch — its
+                    // durable construction home is `riser_constructions`.
+                    .filter_map(|id| storey.placeable_wall(*id))
                 {
                     let Some((e0, e1)) = r.base_edge() else {
                         continue;
@@ -814,25 +822,36 @@ impl AppController {
                 .find_map(|(i, s)| s.surface_kind_of(id).map(|k| (i, s, k)))?;
             match kind {
                 SurfaceKind::Walls => {
-                    let r = storey.walls.regions.iter().find(|r| r.id == id)?;
+                    let porch = storey.is_porch_wall(id);
+                    let r = storey.placeable_wall(id)?;
                     // Out-of-scope walls (non-heat-loss / inter-storey) never form
                     // a group. The selection paths already skip them
                     // (`WallExposure::in_structure_scope`); this catches a stale
                     // id whose wall was repainted out of scope since selection.
-                    if !r.exposure.in_structure_scope() {
+                    // Porch inner walls use the narrower porch rule: in scope
+                    // only once the exclusion derive stamped them SemiExposed.
+                    if porch {
+                        if r.exposure != WallExposure::SemiExposed {
+                            return None;
+                        }
+                    } else if !r.exposure.in_structure_scope() {
                         return None;
                     }
                     // A perimeter wall whose recovered VertexId is face-partitioned
                     // is locked; a riser (no perimeter match) is never locked. The
-                    // partition state lives on the wall's OWN storey doc.
-                    let locked = document
-                        .storeys
-                        .get(idx)
-                        .and_then(|doc| {
-                            doc.recover_wall_region_span(r)
-                                .map(|(vid, ..)| doc.is_wall_partitioned(vid))
-                        })
-                        .unwrap_or(false);
+                    // partition state lives on the wall's OWN storey doc. A PORCH
+                    // wall's exposure is derivation-owned, so its group locks the
+                    // exposure control the same way (the durable exposure write
+                    // path can't reach porch walls regardless).
+                    let locked = porch
+                        || document
+                            .storeys
+                            .get(idx)
+                            .and_then(|doc| {
+                                doc.recover_wall_region_span(r)
+                                    .map(|(vid, ..)| doc.is_wall_partitioned(vid))
+                            })
+                            .unwrap_or(false);
                     let (ty, makeup, phase, name, photos) =
                         match record.data.wall_construction(r.construction_id) {
                             Some(c) => (
@@ -2317,12 +2336,7 @@ impl AppController {
                 document::RiserKind::Ceiling => " (ceiling-step riser)".into(),
             };
         }
-        let exposure = storey
-            .walls
-            .regions
-            .iter()
-            .find(|w| w.id == *first)
-            .map(|w| w.exposure);
+        let exposure = storey.placeable_wall(*first).map(|w| w.exposure);
         match exposure {
             Some(WallExposure::Exposed) => " (Exposed wall)",
             Some(WallExposure::SemiExposed) => " (Semi-exposed wall)",

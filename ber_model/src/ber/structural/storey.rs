@@ -358,13 +358,13 @@ impl Storey {
     /// after the outline is finalised (walls/ceilings/floors are re-derived by
     /// `document::resolve_storey`).
     ///
-    /// `porch_walls` are deliberately EXCLUDED (here and in every wall
-    /// aggregator over `walls.regions`): a porch inner wall is recordable
-    /// geometry only — it enters no calculation or Structure-phase count
-    /// until the resolve-phase porch inclusion/exclusion step lands.
+    /// `porch_walls` join the walls count ONLY once stamped `SemiExposed`
+    /// (an excluded porch's dwelling-side heat-loss boundary — see
+    /// [`structure_porch_walls`](Self::structure_porch_walls)); until the
+    /// porch verdict lands they are recordable geometry only.
     pub fn surface_counts(&self) -> SurfaceCounts {
         SurfaceCounts {
-            walls: self.walls.regions.len(),
+            walls: self.walls.regions.len() + self.structure_porch_walls().count(),
             ceilings: self.ceilings.regions.len(),
             floors: self.floors.regions.len(),
         }
@@ -404,6 +404,7 @@ impl Storey {
                 .regions
                 .iter()
                 .filter(|r| r.exposure.in_structure_scope())
+                .chain(self.structure_porch_walls())
                 .filter_map(|r| {
                     let e = &r.polygon.exterior;
                     if e.len() < 2 {
@@ -456,6 +457,7 @@ impl Storey {
                 .regions
                 .iter()
                 .filter(|r| r.exposure.in_structure_scope())
+                .chain(self.structure_porch_walls())
                 .filter(|r| match r.base_midpoint() {
                     Some(m) => {
                         point_on_ring_boundary(region_ring, m.x, m.y, WALL_ON_BOUNDARY_TOL_M)
@@ -494,7 +496,16 @@ impl Storey {
                 .regions
                 .iter()
                 .find(|r| r.id == id)
-                .is_some_and(|r| r.exposure.in_structure_scope()),
+                .map(|r| r.exposure.in_structure_scope())
+                .unwrap_or_else(|| {
+                    // The porch exception: a porch inner wall is in scope
+                    // ONLY once stamped SemiExposed (see structure_porch_walls).
+                    self.porch_walls
+                        .regions
+                        .iter()
+                        .find(|r| r.id == id)
+                        .is_some_and(|r| r.exposure == WallExposure::SemiExposed)
+                }),
             SurfaceKind::Floors => self
                 .floors
                 .regions
@@ -524,6 +535,7 @@ impl Storey {
             .regions
             .iter()
             .filter(|r| r.exposure.in_structure_scope())
+            .chain(self.structure_porch_walls())
             .filter(|r| {
                 r.base_midpoint().is_some_and(|m| {
                     point_to_segment_distance(m.x, m.y, a.x, a.y, b.x, b.y)
@@ -708,7 +720,9 @@ impl Storey {
     /// selection (walls + floors + ceilings) recover each id's kind. `None` when no
     /// region of any kind has that id.
     pub fn surface_kind_of(&self, id: ItemId) -> Option<SurfaceKind> {
-        if self.walls.regions.iter().any(|r| r.id == id) {
+        if self.walls.regions.iter().any(|r| r.id == id)
+            || self.porch_walls.regions.iter().any(|r| r.id == id)
+        {
             Some(SurfaceKind::Walls)
         } else if self.ceilings.regions.iter().any(|r| r.id == id) {
             Some(SurfaceKind::Ceilings)
@@ -730,6 +744,7 @@ impl Storey {
                 .regions
                 .iter()
                 .filter(|r| r.exposure.in_structure_scope())
+                .chain(self.structure_porch_walls())
                 .map(|r| r.id)
                 .collect(),
             SurfaceKind::Ceilings => self
@@ -813,6 +828,29 @@ impl Storey {
             .iter()
             .find(|r| r.id == id)
             .map(|r| r.level_m)
+    }
+
+    /// The porch INNER walls the STRUCTURE phase sees: only those the porch
+    /// exclusion derivation stamped `SemiExposed` (an excluded porch's
+    /// dwelling-side boundary — now a real heat-loss wall needing
+    /// attribution). `Unset` (verdict pending) and `NonHeatLoss` (included
+    /// porch — internal partition) stay out. Note the porch EXCEPTION to the
+    /// normal scope rule: for perimeter walls `Unset` is in scope (an
+    /// unclassified wall must stay reachable), but a porch wall's exposure is
+    /// DERIVATION-owned (`derive_porch_exclusions`), so `Unset` here means
+    /// "verdict pending" and must not demand attribution it may never need.
+    pub fn structure_porch_walls(&self) -> impl Iterator<Item = &WallRegion> {
+        self.porch_walls
+            .regions
+            .iter()
+            .filter(|r| r.exposure == WallExposure::SemiExposed)
+    }
+
+    /// Whether `id` is a porch INNER wall (any exposure state). The Structure
+    /// editor locks the exposure control for these — exposure is
+    /// derivation-owned, never assessor-set.
+    pub fn is_porch_wall(&self, id: ItemId) -> bool {
+        self.porch_walls.regions.iter().any(|r| r.id == id)
     }
 
     /// Every wall region an OPENING can be hosted on — the perimeter/riser

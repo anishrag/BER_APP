@@ -48,6 +48,7 @@ fn structure_id_for_key(storey: &Storey, kind: SurfaceKind, key: SurfaceKey) -> 
             .walls
             .regions
             .iter()
+            .chain(storey.porch_walls.regions.iter())
             .find(|r| wall_key(r) == Some((k, z)))
             .map(|r| r.id),
         (SurfaceKind::Floors, SurfaceKey::Area(k)) => storey
@@ -80,12 +81,7 @@ impl AppController {
         let storey = self.current_record.as_ref()?.data.storeys.get(idx)?;
         match kind {
             SurfaceKind::Walls => {
-                let (e0, e1) = storey
-                    .walls
-                    .regions
-                    .iter()
-                    .find(|r| r.id == id)?
-                    .base_edge()?;
+                let (e0, e1) = storey.placeable_wall(id)?.base_edge()?;
                 Some(SurfaceKey::Wall(
                     document::riser_key(
                         domain::points::Point2f64::new(e0.x, e0.y),
