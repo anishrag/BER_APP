@@ -86,8 +86,17 @@ impl AppController {
     /// Set the BER's construction phases (house + extension years). These are the
     /// only phases the assessor can later assign to an area; captured on the
     /// Key Details form. No-op when no BER is loaded. Persists.
-    pub fn set_construction_phases(&mut self, phases: ConstructionPhases) {
+    pub fn set_construction_phases(&mut self, mut phases: ConstructionPhases) {
         if let Some(record) = self.current_record.as_mut() {
+            // Booking provenance is set at seed time (from the booking), not on
+            // the Key Details form — which rebuilds the phases from scratch. Carry
+            // it across the rebuild for every phase that still exists.
+            let prev = std::mem::take(&mut record.data.construction_phases.booking_sourced);
+            for (phase, sourced) in prev {
+                if sourced && phases.years.contains_key(&phase) {
+                    phases.set_booking_sourced(phase, true);
+                }
+            }
             record.data.construction_phases = phases;
         }
         let _ = self.persist();
@@ -133,8 +142,14 @@ impl AppController {
 
     /// Set the loaded BER's client-intake staging fields (Key Details form). No-op
     /// when no BER is loaded. Persists (same write-through pattern as above).
-    pub fn set_intake(&mut self, intake: IntakeDetails) {
+    pub fn set_intake(&mut self, mut intake: IntakeDetails) {
         if let Some(record) = self.current_record.as_mut() {
+            // The Letter of Engagement is linked by BERintake, not entered on the
+            // Key Details form — carry it across a form rebuild rather than
+            // dropping it. (Only if the incoming intake doesn't already carry one.)
+            if intake.letter_of_engagement.is_none() {
+                intake.letter_of_engagement = record.data.intake.letter_of_engagement.take();
+            }
             record.data.intake = intake;
         }
         let _ = self.persist();

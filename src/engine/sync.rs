@@ -120,6 +120,11 @@ struct BerSeed {
     mprn: Option<String>,
     #[serde(default)]
     reason: Option<String>,
+    /// Link to the client's signed Letter of Engagement (S3 URL), if signed.
+    /// The LoE is populated from the booking, so it evidences the booking-sourced
+    /// build years — the first proof for those phases.
+    #[serde(rename = "loeUrl", default)]
+    loe_url: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -261,9 +266,14 @@ fn import_one(
     // extension takes the next Extension1..4 variant, with its description as
     // the row nickname. A description with no year designates the phase with the
     // year "unknown", matching how the form itself commits such a row.
+    // Every phase seeded here came from the CLIENT'S BOOKING, so it's marked
+    // booking-sourced: the Letter of Engagement (also from the booking) is proof
+    // of its build year. Phases the assessor adds later on the tablet are not.
     if let Some(y) = seed.construction_year {
         ber.construction_phases
             .set_year(ConstructionPhase::Original, y);
+        ber.construction_phases
+            .set_booking_sourced(ConstructionPhase::Original, true);
     }
     let ext_phases = [
         ConstructionPhase::Extension1,
@@ -278,6 +288,7 @@ fn import_one(
             None if has_desc => ber.construction_phases.set_year_unknown(phase.clone()),
             None => continue,
         }
+        ber.construction_phases.set_booking_sourced(phase.clone(), true);
         if let Some(desc) = &ext.description {
             if !desc.is_empty() {
                 ber.construction_phases.set_nickname(phase, desc.clone());
@@ -299,6 +310,13 @@ fn import_one(
         insulation_notes: ins.notes.unwrap_or_default(),
         mprn: seed.mprn.unwrap_or_default(),
         reason: seed.reason.unwrap_or_default(),
+        // The signed Letter of Engagement, if the client has signed one.
+        letter_of_engagement: seed.loe_url.map(|url| Evidence {
+            file_path: url,
+            description: Some("Letter of Engagement".to_string()),
+            content_type: Some("application/pdf".to_string()),
+            ..Default::default()
+        }),
         // On-site question answers are never seeded by the booking form.
         ..Default::default()
     };
