@@ -368,8 +368,14 @@ impl<'a> BerRepository<'a> {
                     )
                 })?;
                 // Adopt any pre-refactor `final_details` blob into its new homes
-                // (thermal_mass_info + heating_system.distribution).
+                // (thermal_mass_info + heating_system.distribution), then
+                // reconcile the object-driven systems so a record surveyed
+                // before those syncs existed fills its heating/ventilation on
+                // load rather than reading stale/`Invalid` (idempotent; the
+                // heating sync preserves a still-valid assessor choice).
                 data.migrate_legacy();
+                data.sync_heating_system_from_objects();
+                data.sync_ventilation_system_from_objects();
 
                 Ok(BerRecord {
                     id: *id,
