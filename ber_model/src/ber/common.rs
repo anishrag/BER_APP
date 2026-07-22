@@ -206,6 +206,15 @@ pub struct ConstructionPhases {
     /// no proof flags.
     #[serde(default)]
     pub year_proof: BTreeMap<ConstructionPhase, bool>,
+    /// Per phase: evidence artifacts backing the chosen build year — the
+    /// screenshots the office captures while confirming the age (historical
+    /// maps, aerial imagery, planning records, TABULA reference sheets), each
+    /// with a description. Distinct from [`year_proof`], which is merely a
+    /// "proof exists" flag; this holds the actual documents the report later
+    /// reproduces. A phase absent from the map has no evidence.
+    /// `#[serde(default)]` so older records load with none.
+    #[serde(default)]
+    pub year_evidence: BTreeMap<ConstructionPhase, Vec<Evidence>>,
 }
 
 impl ConstructionPhases {
@@ -214,6 +223,31 @@ impl ConstructionPhases {
             years,
             nicknames: BTreeMap::new(),
             year_proof: BTreeMap::new(),
+            year_evidence: BTreeMap::new(),
+        }
+    }
+
+    /// Evidence backing `phase`'s build year, in attach order (empty if none).
+    pub fn year_evidence_of(&self, phase: &ConstructionPhase) -> &[Evidence] {
+        self.year_evidence
+            .get(phase)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Attach one evidence item to `phase`'s build year.
+    pub fn add_year_evidence(&mut self, phase: ConstructionPhase, evidence: Evidence) {
+        self.year_evidence.entry(phase).or_default().push(evidence);
+    }
+
+    /// Remove the evidence item with `id` from `phase` (no-op if absent);
+    /// drops the phase's entry once its last item is gone.
+    pub fn remove_year_evidence(&mut self, phase: &ConstructionPhase, id: ItemId) {
+        if let Some(v) = self.year_evidence.get_mut(phase) {
+            v.retain(|e| e.id != id);
+            if v.is_empty() {
+                self.year_evidence.remove(phase);
+            }
         }
     }
 
