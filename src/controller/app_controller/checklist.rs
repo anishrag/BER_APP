@@ -345,7 +345,7 @@ impl AppController {
                 let mut reasons = Vec::new();
                 for (i, s) in record.data.storeys.iter().enumerate() {
                     for (pi, p) in s.porches.regions.iter().enumerate() {
-                        let facts = porch_facts(s, p);
+                        let facts = porch_facts(&record.data, i, p);
                         if facts.verdict() == PorchVerdict::Undecided {
                             let mut missing = Vec::new();
                             if facts.separating_door.is_none() {

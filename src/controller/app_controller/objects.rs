@@ -672,7 +672,7 @@ impl AppController {
         let mut out = Vec::new();
         for (idx, s) in record.data.storeys.iter().enumerate() {
             for (i, porch) in s.porches.regions.iter().enumerate() {
-                let facts = porch_facts(s, porch);
+                let facts = porch_facts(&record.data, idx, porch);
                 if !facts.fully_protruding {
                     continue;
                 }
@@ -772,7 +772,7 @@ impl AppController {
                 continue;
             };
             let still_pending = s.porches.regions.iter().any(|p| {
-                let facts = porch_facts(s, p);
+                let facts = porch_facts(&record.data, *idx, p);
                 facts.key == *key
                     && match question {
                         PorchQuestion::SeparatingDoor => facts.separating_door.is_none(),

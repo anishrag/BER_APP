@@ -241,50 +241,132 @@ fn classified_edge_runs(
 /// are the continuing front wall). Corner porches (two inner runs,
 /// Fig 4.18), within-line lobbies (Fig 4.16) and partially-within porches
 /// (L-shaped inner boundary, Fig 4.19) all fail this and stay included.
-fn fully_protruding(storey: &Storey, ring: &[Point2f64], footprint: &PlanFootprint) -> bool {
-    let runs = classified_edge_runs(ring, footprint);
-    let inner: Vec<&Vec<[Point2f64; 2]>> = runs
+/// The SEPARABILITY test, per the assessor's rule: a porch protrudes
+/// ENTIRELY beyond the line of the external wall iff REMOVING it would
+/// reduce the overall footprint of the house — the union of EVERY storey's
+/// floor plan — by exactly the porch's own area. Since the porch is carved
+/// out of its own storey's outline, that reduces to: NO OTHER storey's
+/// footprint covers any of the porch (a first floor set back to the porch's
+/// back wall confirms the building line; a first floor OVER the porch means
+/// it sits inside the building volume). A small overlap fraction is
+/// tolerated — the upper storey's inner wall face and the porch's drawn
+/// back boundary differ by a wall thickness.
+///
+/// One DEAP guard on top: a FLUSH porch — every outer edge collinear with
+/// the outline's continuation at its attachment points (the recessed
+/// entrance lobby of Figure 4.16, the corner notch of Figure 4.18) — is
+/// within the line of the building envelope and NEVER separable, even
+/// though deleting it would also shrink the footprint by its area.
+fn fully_protruding(ber: &Ber, storey_idx: usize, ring: &[Point2f64]) -> bool {
+    use geo::bool_ops::BooleanOps;
+    use geo::Area;
+    let Some(storey) = ber.storeys.get(storey_idx) else {
+        return false;
+    };
+    let footprint = PlanFootprint::of(&storey.floors);
+    let runs = classified_edge_runs(ring, &footprint);
+    let flush_edges: Vec<[Point2f64; 2]> = runs
+        .iter()
+        .filter(|(flush, _)| *flush)
+        .flat_map(|(_, r)| r.iter().copied())
+        .collect();
+    let inner_edges: Vec<[Point2f64; 2]> = runs
         .iter()
         .filter(|(flush, _)| !flush)
-        .map(|(_, r)| r)
+        .flat_map(|(_, r)| r.iter().copied())
         .collect();
-    if inner.len() != 1 {
-        return false;
+    if flush_edges.is_empty() || inner_edges.is_empty() {
+        return false; // degenerate: no outdoor face, or no dwelling-side wall
     }
-    // The single straight inner boundary: its infinite line, porch on one side.
-    let run = inner[0];
-    let a = run.first().unwrap()[0];
-    let b = run.last().unwrap()[1];
-    let d = Point2f64::new(b.x - a.x, b.y - a.y);
-    let len = d.x.hypot(d.y);
-    if len < 1e-9 {
-        return false;
-    }
-    let side = |p: Point2f64| ((p.x - a.x) * d.y - (p.y - a.y) * d.x) / len;
+
+    // ── The footprint-reduction rule: no other storey covers the porch. ──
     let porch_poly = super::ring_to_poly(ring);
-    let centre = ring_centroid_key(ring);
-    let porch_side = side(Point2f64::new(
-        centre.0 as f64 / 1000.0,
-        centre.1 as f64 / 1000.0,
-    ));
-    if porch_side.abs() <= CONTAINMENT_TOL_M {
-        return false; // degenerate porch — centroid on its own boundary line
+    let porch_area = porch_poly.unsigned_area();
+    if porch_area < 1e-6 {
+        return false;
     }
-    // Every floors vertex outside the porch must NOT sit on the porch's side
-    // of the line (the dwelling remainder stays behind the wall line).
-    for r in &storey.floors.regions {
-        for v in floor_plan_ring(r) {
-            let s = side(v);
-            if s.abs() <= CONTAINMENT_TOL_M || s.signum() != porch_side.signum() {
+    for (j, other) in ber.storeys.iter().enumerate() {
+        if j == storey_idx {
+            continue;
+        }
+        let fp = PlanFootprint::of(&other.floors);
+        let mut overlap = 0.0;
+        for outer in &fp.rings {
+            let poly = super::ring_to_poly(outer);
+            overlap += porch_poly
+                .intersection(&poly)
+                .0
+                .iter()
+                .map(|p| p.unsigned_area())
+                .sum::<f64>();
+        }
+        // Tolerate the wall-thickness sliver where the upper storey's inner
+        // face sits just behind the porch's drawn back boundary; anything
+        // more means the building extends over the porch.
+        if overlap > 0.05 * porch_area {
+            return false;
+        }
+    }
+
+    // ── The flush guard (Figures 4.16 / 4.18). ──
+    // Attachment vertices: where the porch's boundary changes class.
+    let n = ring.len();
+    let mut class = Vec::with_capacity(n);
+    for i in 0..n {
+        let (a, b) = (ring[i], ring[(i + 1) % n]);
+        let mid = Point2f64::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0);
+        class.push(footprint.rings.iter().any(|outer| {
+            let m = outer.len();
+            (0..m).any(|j| {
+                let (p, q) = (outer[j], outer[(j + 1) % m]);
+                point_to_segment_distance(mid.x, mid.y, p.x, p.y, q.x, q.y) <= CONTAINMENT_TOL_M
+            })
+        }));
+    }
+    let attachments: Vec<Point2f64> = (0..n)
+        .filter(|&i| class[i] != class[(i + 1) % n])
+        .map(|i| ring[(i + 1) % n])
+        .collect();
+    // Continuation lines: outline edges incident to an attachment vertex that
+    // are NOT part of the porch's own outdoor span.
+    let mut continuations: Vec<[Point2f64; 2]> = Vec::new();
+    for outer in &footprint.rings {
+        let m = outer.len();
+        for j in 0..m {
+            let (p, q) = (outer[j], outer[(j + 1) % m]);
+            let incident = attachments
+                .iter()
+                .any(|v| point_to_segment_distance(v.x, v.y, p.x, p.y, q.x, q.y) <= CONTAINMENT_TOL_M);
+            if !incident {
                 continue;
             }
-            let gp = GeoPoint::new(v.x, v.y);
-            if !porch_poly.contains(&gp) && !point_on_ring(ring, v, CONTAINMENT_TOL_M) {
-                return false;
+            let mid = Point2f64::new((p.x + q.x) / 2.0, (p.y + q.y) / 2.0);
+            let on_porch_flush = flush_edges.iter().any(|e| {
+                point_to_segment_distance(mid.x, mid.y, e[0].x, e[0].y, e[1].x, e[1].y)
+                    <= CONTAINMENT_TOL_M
+            });
+            if !on_porch_flush {
+                continuations.push([p, q]);
             }
         }
     }
-    true
+    let on_line = |p: Point2f64, l: &[Point2f64; 2]| {
+        let d = Point2f64::new(l[1].x - l[0].x, l[1].y - l[0].y);
+        let len = d.x.hypot(d.y);
+        if len < 1e-9 {
+            return false;
+        }
+        (((p.x - l[0].x) * d.y - (p.y - l[0].y) * d.x) / len).abs() <= CONTAINMENT_TOL_M
+    };
+    let all_flush_on_continuations = !continuations.is_empty()
+        && flush_edges.iter().all(|e| {
+            continuations
+                .iter()
+                .any(|l| on_line(e[0], l) && on_line(e[1], l))
+        });
+    // Every outdoor face continues the existing facade lines → the porch is
+    // within the line of the building envelope → never separable.
+    !all_flush_on_continuations
 }
 
 /// `p` within `tol` of any segment of `ring`.
@@ -296,12 +378,14 @@ fn point_on_ring(ring: &[Point2f64], p: Point2f64, tol: f64) -> bool {
     })
 }
 
-/// Derive the three Table 2.2 facts for one porch of `storey` from the
-/// captured record (pins, door anchors, on-site checks, plan geometry).
-pub fn porch_facts(storey: &Storey, porch: &FloorRegion) -> PorchFacts {
+/// Derive the three Table 2.2 facts for one porch on storey `storey_idx`
+/// from the captured record (pins, door anchors, on-site checks, plan
+/// geometry — the protrusion test reads EVERY storey's footprint, per the
+/// separability rule on [`fully_protruding`]).
+pub fn porch_facts(ber: &Ber, storey_idx: usize, porch: &FloorRegion) -> PorchFacts {
+    let storey = &ber.storeys[storey_idx];
     let ring = porch_ring(porch);
     let key = ring_centroid_key(&ring);
-    let footprint = PlanFootprint::of(&storey.floors);
     let poly = super::ring_to_poly(&ring);
 
     // Heated: a fixed heat emitter pinned inside the porch region.
@@ -342,7 +426,7 @@ pub fn porch_facts(storey: &Storey, porch: &FloorRegion) -> PorchFacts {
         key,
         heated,
         separating_door,
-        fully_protruding: fully_protruding(storey, &ring, &footprint),
+        fully_protruding: fully_protruding(ber, storey_idx, &ring),
     }
 }
 
@@ -353,7 +437,7 @@ pub fn porch_verdicts(ber: &Ber) -> Vec<(usize, PorchFacts, PorchVerdict)> {
     let mut out = Vec::new();
     for (i, s) in ber.storeys.iter().enumerate() {
         for porch in &s.porches.regions {
-            let facts = porch_facts(s, porch);
+            let facts = porch_facts(ber, i, porch);
             let verdict = facts.verdict();
             out.push((i, facts, verdict));
         }
@@ -410,7 +494,7 @@ pub fn derive_porch_exclusions(ber: &mut Ber, dimensioned: &[bool]) {
             .regions
             .iter()
             .map(|p| {
-                let facts = porch_facts(&ber.storeys[i], p);
+                let facts = porch_facts(ber, i, p);
                 (porch_ring(p), facts.verdict())
             })
             .collect();
@@ -722,22 +806,49 @@ mod tests {
     }
 
     /// The Figure 4.17 bump porch derives `fully_protruding`; a Figure 4.18
-    /// corner porch (two inner edges) does not.
+    /// corner-notch porch (its outdoor faces flush with the continuing
+    /// facades) does not; and a porch UNDER an upper storey is inside the
+    /// building volume — removing it would not shrink the overall footprint
+    /// — so it is never separable.
     #[test]
     fn protrusion_geometry() {
         let ber = porch_house();
-        let facts = porch_facts(&ber.storeys[0], &ber.storeys[0].porches.regions[0]);
+        let facts = porch_facts(&ber, 0, &ber.storeys[0].porches.regions[0]);
         assert!(facts.fully_protruding, "bump porch protrudes entirely");
 
+        // Corner notch (4.18): flush faces continue the facades → included.
         let cid = ItemId::default();
         let mut corner = Storey {
             floors: FloorRegions::new(square(0.0, 0.0, 10.0, 8.0), cid),
             ..Storey::default()
         };
         corner.porches = FloorRegions::new(square(0.0, 0.0, 2.0, 1.5), cid);
-        let facts = porch_facts(&corner, &corner.porches.regions[0]);
+        let mut corner_ber = Ber::default();
+        corner_ber.storeys.push(corner);
+        let facts = porch_facts(&corner_ber, 0, &corner_ber.storeys[0].porches.regions[0]);
         assert!(!facts.fully_protruding, "corner porch is within the line");
         assert_eq!(facts.verdict(), PorchVerdict::Included);
+
+        // Bump porch with a first floor OVER it: covered → not separable.
+        let mut covered = porch_house();
+        let upper = Storey {
+            floors: FloorRegions::new(
+                vec![
+                    Point2f64::new(0.0, -1.5),
+                    Point2f64::new(10.0, -1.5),
+                    Point2f64::new(10.0, 8.0),
+                    Point2f64::new(0.0, 8.0),
+                ],
+                ItemId::default(),
+            ),
+            ..Storey::default()
+        };
+        covered.storeys.push(upper);
+        let facts = porch_facts(&covered, 0, &covered.storeys[0].porches.regions[0]);
+        assert!(
+            !facts.fully_protruding,
+            "a porch under the first floor is inside the building volume"
+        );
     }
 
     /// Door recorded + heating confirmed absent + protruding → EXCLUDED, and
@@ -939,50 +1050,108 @@ mod tests {
         );
     }
 
-    /// A first storey extends over the excluded ground-floor porch: after the
-    /// inter-storey pass stamps the junction, the porch derive re-stamps the
-    /// overlap SemiExposed (a floor over an unheated space) and the ceiling
-    /// below it Irrelevant.
+    /// The Ashgrove shape: an L-plan house whose first floor is SET BACK to
+    /// the porch's back wall — the porch nestles single-storey in the L's
+    /// setback with an L-shaped dwelling-side boundary (TWO inner walls).
+    /// Removing it shrinks the overall footprint by exactly its area, so it
+    /// is separable; with the door recorded and heating confirmed absent it
+    /// EXCLUDES, both inner walls go SemiExposed, and the roof piece over it
+    /// leaves the assessment.
     #[test]
-    fn storey_above_excluded_porch_goes_semi_exposed() {
-        let mut ber = porch_house();
-        ber.storeys[0].doors.push(separating_door());
-        confirm_unheated(&mut ber);
-        // First storey covering the whole footprint INCLUDING the porch bump.
+    fn nestled_porch_with_set_back_upper_storey_excludes() {
         let cid = ItemId::default();
-        let ring = vec![
-            Point2f64::new(0.0, -1.5),
-            Point2f64::new(10.0, -1.5),
-            Point2f64::new(10.0, 8.0),
+        // Ground outline: left block to y=8, front leg x∈[2,10] out to y=10.
+        let outline = vec![
+            Point2f64::new(0.0, 0.0),
+            Point2f64::new(10.0, 0.0),
+            Point2f64::new(10.0, 10.0),
+            Point2f64::new(2.0, 10.0),
+            Point2f64::new(2.0, 8.0),
             Point2f64::new(0.0, 8.0),
         ];
-        let floors = FloorRegions::new(ring.clone(), cid);
-        let ceilings = CeilingRegions::default_for_footprint(vec![ring.clone()], 2.4, cid);
+        // Porch: x∈[2,5], y∈[8,10] — dwelling to its RIGHT (the wing) and
+        // BELOW (the main block): an L-shaped inner boundary.
+        let porch = vec![
+            Point2f64::new(2.0, 8.0),
+            Point2f64::new(2.0, 10.0),
+            Point2f64::new(5.0, 10.0),
+            Point2f64::new(5.0, 8.0),
+        ];
+        let floors = FloorRegions::new(outline.clone(), cid);
+        let ceilings = CeilingRegions::default_for_footprint(vec![outline.clone()], 2.4, cid);
         let walls =
-            WallRegions::regenerate(perimeter(&ring), &ceilings, &floors, 0.0, 2.4, cid);
-        ber.storeys.push(Storey {
+            WallRegions::regenerate(perimeter(&outline), &ceilings, &floors, 0.0, 2.4, cid);
+        let inner_edges = vec![
+            (Point2f64::new(5.0, 10.0), Point2f64::new(5.0, 8.0), WallExposure::Unset),
+            (Point2f64::new(5.0, 8.0), Point2f64::new(2.0, 8.0), WallExposure::Unset),
+        ];
+        let porch_walls =
+            WallRegions::regenerate(inner_edges, &ceilings, &floors, 0.0, 2.4, cid);
+        let mut ground = Storey {
             floors,
             walls,
             ceilings,
+            porch_walls,
             ceiling_height_m: Some(2.4),
+            ..Storey::default()
+        };
+        ground.porches = FloorRegions::new(porch.clone(), cid);
+        // First floor: everything EXCEPT the porch — set back to its walls.
+        let upper_ring = vec![
+            Point2f64::new(0.0, 0.0),
+            Point2f64::new(10.0, 0.0),
+            Point2f64::new(10.0, 10.0),
+            Point2f64::new(5.0, 10.0),
+            Point2f64::new(5.0, 8.0),
+            Point2f64::new(0.0, 8.0),
+        ];
+        let upper = Storey {
+            floors: FloorRegions::new(upper_ring, cid),
             floor_thickness_m: Some(0.3),
             ..Storey::default()
-        });
-        derive_inter_storey(&mut ber, &[true, true]);
-        derive_porch_exclusions(&mut ber, &[true, true]);
+        };
+        let mut ber = Ber::default();
+        ber.storeys.push(ground);
+        ber.storeys.push(upper);
 
+        let key = ring_centroid_key(&porch);
+        ber.storeys[0].doors.push({
+            let mut d = separating_door();
+            d.wall_anchor.as_mut().unwrap().porch = Some(key);
+            d
+        });
+        ber.storeys[0].porch_checks.push(PorchCheck {
+            key,
+            heating_confirmed_absent: true,
+            door_confirmed_absent: false,
+        });
+
+        let facts = porch_facts(&ber, 0, &ber.storeys[0].porches.regions[0]);
+        assert!(
+            facts.fully_protruding,
+            "set-back first floor confirms the porch sticks out of the L"
+        );
+        assert_eq!(facts.verdict(), PorchVerdict::Excluded);
+
+        derive_porch_exclusions(&mut ber, &[true, true]);
+        let s = &ber.storeys[0];
+        assert_eq!(s.porch_walls.regions.len(), 2);
+        assert!(
+            s.porch_walls
+                .regions
+                .iter()
+                .all(|r| r.exposure == WallExposure::SemiExposed),
+            "BOTH inner walls become the heat-loss envelope"
+        );
         use geo::Area;
-        let semi: f64 = ber.storeys[1]
+        let irr: f64 = s
             .floors
             .regions
             .iter()
-            .filter(|r| r.exposure == FloorExposure::SemiExposed)
+            .filter(|r| r.exposure == FloorExposure::Irrelevant)
             .map(|r| r.polygon.unsigned_area())
             .sum();
-        assert!(
-            (semi - 3.0).abs() < 1e-6,
-            "the 2×1.5 m over-porch floor is semi-exposed, got {semi}"
-        );
+        assert!((irr - 6.0).abs() < 1e-6, "3×2 porch slab out, got {irr}");
         // The ground-storey ceiling piece under it is out of the assessment.
         assert!(ber.storeys[0]
             .ceilings
