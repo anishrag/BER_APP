@@ -828,13 +828,9 @@ impl AppController {
                     // a group. The selection paths already skip them
                     // (`WallExposure::in_structure_scope`); this catches a stale
                     // id whose wall was repainted out of scope since selection.
-                    // Porch inner walls use the narrower porch rule: in scope
-                    // only once the exclusion derive stamped them SemiExposed.
-                    if porch {
-                        if r.exposure != WallExposure::SemiExposed {
-                            return None;
-                        }
-                    } else if !r.exposure.in_structure_scope() {
+                    // Porch inner walls share the predicate (NonHeatLoss —
+                    // a confirmed-included porch — is the only out state).
+                    if !r.exposure.in_structure_scope() {
                         return None;
                     }
                     // A perimeter wall whose recovered VertexId is face-partitioned

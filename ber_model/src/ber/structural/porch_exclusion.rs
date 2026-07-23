@@ -1002,29 +1002,32 @@ mod tests {
             .all(|r| r.exposure == WallExposure::NonHeatLoss));
     }
 
-    /// The Structure-phase porch exception: a porch inner wall is OUT of
-    /// structure scope while its verdict is pending (`Unset` — unlike a
-    /// normal wall, where Unset stays reachable) and while the porch is
-    /// included (`NonHeatLoss`), and enters scope — selectable, counted,
-    /// flagged incomplete — exactly when the exclusion derive stamps it
-    /// `SemiExposed`.
+    /// The Structure-phase porch rule: an UNDECIDED porch's inner walls
+    /// (`Unset`) are attributable up front — Structure runs before the
+    /// Objects round, so the build-up is recorded first and the verdict
+    /// merely flips the exposure afterwards. Excluded (`SemiExposed`) keeps
+    /// them in scope; only a confirmed-INCLUDED porch (`NonHeatLoss`) drops
+    /// them out.
     #[test]
-    fn porch_wall_enters_structure_scope_only_when_semi_exposed() {
+    fn porch_wall_scope_follows_the_verdict() {
         use crate::ber::structural::SurfaceKind;
         let mut ber = porch_house();
         let wall_id = ber.storeys[0].porch_walls.regions[0].id;
-        let walls_before = ber.storeys[0].surface_counts().walls;
 
-        // Undecided → Unset → out of scope, uncounted.
+        // Undecided → Unset → IN scope (attribute during the normal pass).
         derive_porch_exclusions(&mut ber, &[true]);
         let s = &ber.storeys[0];
-        assert!(!s.surface_in_structure_scope(SurfaceKind::Walls, wall_id));
-        assert_eq!(s.surface_counts().walls, walls_before);
-        assert!(!ber
-            .incomplete_surface_ids(0, SurfaceKind::Walls)
-            .contains(&wall_id));
+        assert!(s.surface_in_structure_scope(SurfaceKind::Walls, wall_id));
+        assert!(s.surface_ids(SurfaceKind::Walls).contains(&wall_id));
+        assert!(
+            ber.incomplete_surface_ids(0, SurfaceKind::Walls)
+                .contains(&wall_id),
+            "an unattributed porch wall counts toward Structure completeness"
+        );
+        assert_eq!(s.surface_kind_of(wall_id), Some(SurfaceKind::Walls));
+        assert!(s.is_porch_wall(wall_id));
 
-        // Heated → Included → NonHeatLoss → still out of scope.
+        // Heated → Included → NonHeatLoss → drops OUT of scope.
         let mut room = ObjectRoom::new(Point2f32::new(5.0, -0.75));
         room.objects
             .push(BuildingObject::new(ObjectKind::Radiator(RadiatorTrv::WithTrv), 1));
@@ -1032,22 +1035,12 @@ mod tests {
         derive_porch_exclusions(&mut ber, &[true]);
         assert!(!ber.storeys[0].surface_in_structure_scope(SurfaceKind::Walls, wall_id));
 
-        // Excluded → SemiExposed → in scope, counted, and needing attribution.
+        // Excluded → SemiExposed → back IN scope.
         ber.storeys[0].object_rooms.clear();
         ber.storeys[0].doors.push(separating_door());
         confirm_unheated(&mut ber);
         derive_porch_exclusions(&mut ber, &[true]);
-        let s = &ber.storeys[0];
-        assert!(s.surface_in_structure_scope(SurfaceKind::Walls, wall_id));
-        assert_eq!(s.surface_kind_of(wall_id), Some(SurfaceKind::Walls));
-        assert!(s.is_porch_wall(wall_id));
-        assert!(s.surface_ids(SurfaceKind::Walls).contains(&wall_id));
-        assert!(s.surface_counts().walls > walls_before);
-        assert!(
-            ber.incomplete_surface_ids(0, SurfaceKind::Walls)
-                .contains(&wall_id),
-            "an unattributed semi-exposed porch wall must show in completeness"
-        );
+        assert!(ber.storeys[0].surface_in_structure_scope(SurfaceKind::Walls, wall_id));
     }
 
     /// The Ashgrove shape: an L-plan house whose first floor is SET BACK to

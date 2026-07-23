@@ -358,10 +358,9 @@ impl Storey {
     /// after the outline is finalised (walls/ceilings/floors are re-derived by
     /// `document::resolve_storey`).
     ///
-    /// `porch_walls` join the walls count ONLY once stamped `SemiExposed`
-    /// (an excluded porch's dwelling-side heat-loss boundary — see
-    /// [`structure_porch_walls`](Self::structure_porch_walls)); until the
-    /// porch verdict lands they are recordable geometry only.
+    /// `porch_walls` join the walls count unless their porch is confirmed
+    /// INCLUDED (`NonHeatLoss`) — see
+    /// [`structure_porch_walls`](Self::structure_porch_walls).
     pub fn surface_counts(&self) -> SurfaceCounts {
         SurfaceCounts {
             walls: self.walls.regions.len() + self.structure_porch_walls().count(),
@@ -498,13 +497,13 @@ impl Storey {
                 .find(|r| r.id == id)
                 .map(|r| r.exposure.in_structure_scope())
                 .unwrap_or_else(|| {
-                    // The porch exception: a porch inner wall is in scope
-                    // ONLY once stamped SemiExposed (see structure_porch_walls).
+                    // Porch inner walls: in scope unless the porch is
+                    // confirmed INCLUDED (see structure_porch_walls).
                     self.porch_walls
                         .regions
                         .iter()
                         .find(|r| r.id == id)
-                        .is_some_and(|r| r.exposure == WallExposure::SemiExposed)
+                        .is_some_and(|r| r.exposure.in_structure_scope())
                 }),
             SurfaceKind::Floors => self
                 .floors
@@ -830,20 +829,21 @@ impl Storey {
             .map(|r| r.level_m)
     }
 
-    /// The porch INNER walls the STRUCTURE phase sees: only those the porch
-    /// exclusion derivation stamped `SemiExposed` (an excluded porch's
-    /// dwelling-side boundary — now a real heat-loss wall needing
-    /// attribution). `Unset` (verdict pending) and `NonHeatLoss` (included
-    /// porch — internal partition) stay out. Note the porch EXCEPTION to the
-    /// normal scope rule: for perimeter walls `Unset` is in scope (an
-    /// unclassified wall must stay reachable), but a porch wall's exposure is
-    /// DERIVATION-owned (`derive_porch_exclusions`), so `Unset` here means
-    /// "verdict pending" and must not demand attribution it may never need.
+    /// The porch INNER walls the STRUCTURE phase sees: everything except a
+    /// confirmed-INCLUDED porch's (`NonHeatLoss` — an internal partition
+    /// needing no attribution). Structure runs BEFORE the Objects round in
+    /// the survey workflow, so an UNDECIDED porch's walls (`Unset`) are
+    /// attributed up front like any other wall — the wall's build-up is
+    /// knowable on site regardless of the eventual verdict — and the porch
+    /// checks then merely flip the exposure (`SemiExposed` on exclusion,
+    /// `NonHeatLoss` on inclusion) without a loop back into Structure. The
+    /// exposure itself stays DERIVATION-owned (`derive_porch_exclusions`);
+    /// only the attribution is the assessor's.
     pub fn structure_porch_walls(&self) -> impl Iterator<Item = &WallRegion> {
         self.porch_walls
             .regions
             .iter()
-            .filter(|r| r.exposure == WallExposure::SemiExposed)
+            .filter(|r| r.exposure.in_structure_scope())
     }
 
     /// Whether `id` is a porch INNER wall (any exposure state). The Structure
@@ -1045,14 +1045,21 @@ mod tests {
         assert!(loaded.porch_walls.regions.is_empty(), "defaults to empty");
     }
 
-    /// `surface_counts` deliberately EXCLUDES porch walls — recordable
-    /// geometry only, no effect on the Structure-phase tallies.
+    /// `surface_counts` follows the porch scope rule: an `Unset` (verdict
+    /// pending) porch wall COUNTS — Structure attributes it up front — and a
+    /// confirmed-included porch's `NonHeatLoss` wall does not.
     #[test]
-    fn surface_counts_exclude_porch_walls() {
-        let storey = Storey {
+    fn surface_counts_follow_porch_wall_scope() {
+        let mut storey = Storey {
             porch_walls: one_porch_wall(),
             ..Storey::default()
         };
-        assert_eq!(storey.surface_counts().walls, 0);
+        assert_eq!(storey.surface_counts().walls, 1, "Unset porch wall counts");
+        storey.porch_walls.regions[0].exposure = WallExposure::NonHeatLoss;
+        assert_eq!(
+            storey.surface_counts().walls,
+            0,
+            "an included porch's internal partition does not"
+        );
     }
 }
