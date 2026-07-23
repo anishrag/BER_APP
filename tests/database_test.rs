@@ -202,6 +202,7 @@ fn create_minimal_ber(id: ItemId) -> Ber {
             id: ItemId::default(),
             system_type: VentilationSystemType::Natural,
             description: None,
+            ..Default::default()
         },
         sheltered_sides: 2.0,
         number_of_storeys: 2,

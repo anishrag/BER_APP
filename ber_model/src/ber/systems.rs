@@ -55,11 +55,55 @@ pub enum VentilationSystemType {
     Invalid,
 }
 
+/// What the CENTRAL VENTILATION UNIT actually is — resolved at the office
+/// from the unit's make/model (it can't be told apart on site; the survey
+/// only records the "Central unit" fan pin + its name).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CentralUnitType {
+    /// MEV — continuous mechanical extract.
+    MechanicalExtract,
+    /// MVHR — needs the heat-recovery EFFICIENCY too.
+    HeatRecovery,
+    /// Exhaust-air heat pump — needs the EXHAUST AIR FLOW RATE too.
+    ExhaustAirHeatPump,
+}
+
+impl CentralUnitType {
+    pub fn label(&self) -> &'static str {
+        match self {
+            CentralUnitType::MechanicalExtract => "Mechanical extract (MEV)",
+            CentralUnitType::HeatRecovery => "Heat recovery (MVHR)",
+            CentralUnitType::ExhaustAirHeatPump => "Exhaust-air heat pump",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct VentilationSystem {
     pub id: ItemId,
     pub system_type: VentilationSystemType, // e.g., "Natural ventilation", "Mechanical ventilation with heat recovery"
     pub description: Option<String>,
+    /// ---- Central-unit details, entered at the office (BERresolve
+    /// Certificates stage) when the survey pinned a Central-unit fan ----
+    /// What the unit is (MEV / MVHR / exhaust-air heat pump).
+    #[serde(default)]
+    pub unit_type: Option<CentralUnitType>,
+    #[serde(default)]
+    pub manufacturer: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Specific fan power, W/(l/s).
+    #[serde(default)]
+    pub sfp_w_per_ls: Option<f32>,
+    /// Heat-recovery efficiency (%) — MVHR only.
+    #[serde(default)]
+    pub heat_recovery_efficiency_pct: Option<f32>,
+    /// Exhaust air flow rate (l/s) — exhaust-air heat pump only.
+    #[serde(default)]
+    pub exhaust_air_flow_ls: Option<f32>,
+    /// The unit's certificate / datasheet documents.
+    #[serde(default)]
+    pub certificates: Vec<crate::ber::common::Evidence>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

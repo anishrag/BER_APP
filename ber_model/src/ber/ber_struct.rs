@@ -2052,6 +2052,8 @@ mod tests {
 
     #[test]
     fn vent_sync_heat_recovery_unit() {
+        // LEGACY records with a VentilationUnit pin: counts like a Central
+        // fan — Mechanical, no MEV/MVHR distinction (retired picker options).
         use crate::ber::objects::{ObjectKind, VentUnitKind};
         use crate::ber::systems::VentilationSystemType;
         let mut ber = ber_with_objects(vec![obj(ObjectKind::VentilationUnit(
@@ -2060,36 +2062,31 @@ mod tests {
         ber.sync_ventilation_system_from_objects();
         assert!(matches!(
             ber.ventilation_system.system_type,
-            VentilationSystemType::MechanicalWithHeatRecovery
+            VentilationSystemType::Mechanical
         ));
     }
 
     #[test]
-    fn vent_sync_mvhr_wins_over_mev() {
-        use crate::ber::objects::{ObjectKind, VentUnitKind};
+    fn vent_sync_central_fan_is_mechanical() {
+        use crate::ber::objects::{FanType, ObjectKind};
         use crate::ber::systems::VentilationSystemType;
-        let mut ber = ber_with_objects(vec![
-            obj(ObjectKind::VentilationUnit(VentUnitKind::Mechanical)),
-            obj(ObjectKind::VentilationUnit(VentUnitKind::HeatRecovery)),
-        ]);
+        let mut ber = ber_with_objects(vec![obj(ObjectKind::Fan(FanType::Central))]);
         ber.sync_ventilation_system_from_objects();
         assert!(matches!(
             ber.ventilation_system.system_type,
-            VentilationSystemType::MechanicalWithHeatRecovery
+            VentilationSystemType::Mechanical
         ));
     }
 
     #[test]
     fn vent_sync_reverts_to_natural_when_unit_removed() {
-        use crate::ber::objects::{ObjectKind, VentUnitKind};
+        use crate::ber::objects::{FanType, ObjectKind};
         use crate::ber::systems::VentilationSystemType;
-        let mut ber = ber_with_objects(vec![obj(ObjectKind::VentilationUnit(
-            VentUnitKind::HeatRecovery,
-        ))]);
+        let mut ber = ber_with_objects(vec![obj(ObjectKind::Fan(FanType::Central))]);
         ber.sync_ventilation_system_from_objects();
         assert!(matches!(
             ber.ventilation_system.system_type,
-            VentilationSystemType::MechanicalWithHeatRecovery
+            VentilationSystemType::Mechanical
         ));
         // Remove the unit → re-derivation lands back on Natural.
         ber.attic_room.as_mut().unwrap().objects.clear();
