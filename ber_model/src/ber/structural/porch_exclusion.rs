@@ -200,15 +200,18 @@ fn classified_edge_runs(
     let mut edges: Vec<(bool, [Point2f64; 2])> = Vec::with_capacity(n);
     for i in 0..n {
         let (a, b) = (ring[i], ring[(i + 1) % n]);
-        let mid = Point2f64::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0);
-        let flush = footprint.rings.iter().any(|outer| {
-            let m = outer.len();
-            (0..m).any(|j| {
-                let (p, q) = (outer[j], outer[(j + 1) % m]);
-                point_to_segment_distance(mid.x, mid.y, p.x, p.y, q.x, q.y) <= CONTAINMENT_TOL_M
-            })
-        });
-        edges.push((flush, [a, b]));
+        // A MIXED edge — partly along the outline, partly interior (the
+        // porch's inner edge continuing into an outline jog) — SPLITS at the
+        // coverage transitions before classifying; a whole-edge midpoint
+        // test would call the whole thing inner and leave the flush portion
+        // (physically a porch OUTER face) unstamped.
+        for (flush, seg) in subdivide_by_outline(a, b, footprint) {
+            edges.push((flush, seg));
+        }
+    }
+    let n = edges.len();
+    if n == 0 {
+        return Vec::new();
     }
     // Fold consecutive same-class collinear edges into runs (ring-circular:
     // rotate so index 0 starts a run, then sweep once).
@@ -367,6 +370,69 @@ fn fully_protruding(ber: &Ber, storey_idx: usize, ring: &[Point2f64]) -> bool {
     // Every outdoor face continues the existing facade lines → the porch is
     // within the line of the building envelope → never separable.
     !all_flush_on_continuations
+}
+
+/// Split edge `a`→`b` at its outline-coverage transitions: the sub-segments
+/// that lie ALONG the footprint boundary come back `(true, seg)` (flush),
+/// the interior remainder `(false, seg)`. Slivers under [`CONTAINMENT_TOL_M`]
+/// are dropped.
+fn subdivide_by_outline(
+    a: Point2f64,
+    b: Point2f64,
+    footprint: &PlanFootprint,
+) -> Vec<(bool, [Point2f64; 2])> {
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let len2 = dx * dx + dy * dy;
+    if len2 < 1e-12 {
+        return Vec::new();
+    }
+    let len = len2.sqrt();
+    let mut ts = vec![0.0_f64, 1.0];
+    for outer in &footprint.rings {
+        let m = outer.len();
+        for j in 0..m {
+            let (p, q) = (outer[j], outer[(j + 1) % m]);
+            let tp = (((p.x - a.x) * dx + (p.y - a.y) * dy) / len2).clamp(0.0, 1.0);
+            let tq = (((q.x - a.x) * dx + (q.y - a.y) * dy) / len2).clamp(0.0, 1.0);
+            let (lo, hi) = if tp <= tq { (tp, tq) } else { (tq, tp) };
+            if hi - lo < 1e-9 {
+                continue;
+            }
+            let tm = (lo + hi) / 2.0;
+            let (mx, my) = (a.x + tm * dx, a.y + tm * dy);
+            if point_to_segment_distance(mx, my, p.x, p.y, q.x, q.y) <= CONTAINMENT_TOL_M {
+                ts.push(lo);
+                ts.push(hi);
+            }
+        }
+    }
+    ts.sort_by(|x, y| x.partial_cmp(y).unwrap());
+    ts.dedup_by(|x, y| (*x - *y).abs() < 1e-9);
+    let mut out = Vec::new();
+    for w in ts.windows(2) {
+        let (t0, t1) = (w[0], w[1]);
+        if (t1 - t0) * len < CONTAINMENT_TOL_M {
+            continue; // sliver
+        }
+        let tm = (t0 + t1) / 2.0;
+        let mid = Point2f64::new(a.x + tm * dx, a.y + tm * dy);
+        let flush = footprint.rings.iter().any(|outer| {
+            let m = outer.len();
+            (0..m).any(|j| {
+                let (p, q) = (outer[j], outer[(j + 1) % m]);
+                point_to_segment_distance(mid.x, mid.y, p.x, p.y, q.x, q.y)
+                    <= CONTAINMENT_TOL_M
+            })
+        });
+        out.push((
+            flush,
+            [
+                Point2f64::new(a.x + t0 * dx, a.y + t0 * dy),
+                Point2f64::new(a.x + t1 * dx, a.y + t1 * dy),
+            ],
+        ));
+    }
+    out
 }
 
 /// `p` within `tol` of any segment of `ring`.

@@ -7,7 +7,7 @@
 use crate::parametric::{Axis, CollinearitySuggestion, ParameterAxis};
 use crate::{geom, orthogonal, parametric};
 use crate::{Error, FloorPlan, ParameterId, VertexId};
-use domain::points::{point_on_ring_boundary, to_f64, Point2f32, Point2f64};
+use domain::points::{point_on_ring_boundary, point_to_segment_distance, to_f64, Point2f32, Point2f64};
 use std::collections::HashSet;
 
 impl FloorPlan {
@@ -30,16 +30,56 @@ impl FloorPlan {
         let op = self.get_points();
         let op64: Vec<Point2f64> = op.iter().map(|p| to_f64(*p)).collect();
         let n = ring.len();
+        let m = op64.len();
         let mut edges = Vec::new();
         for i in 0..n {
-            let a = ring[i];
-            let b = ring[(i + 1) % n];
-            let mx = (a.x + b.x) * 0.5;
-            let my = (a.y + b.y) * 0.5;
-            if !point_on_ring_boundary(&op64, mx as f64, my as f64, ON_BOUNDARY_TOL_M)
-                && geom::ring_contains_point(&op, mx, my)
-            {
-                edges.push([to_f64(a), to_f64(b)]);
+            let a64 = to_f64(ring[i]);
+            let b64 = to_f64(ring[(i + 1) % n]);
+            // A MIXED edge — partly along the outline, partly interior (a
+            // porch drawn so its inner edge continues into an outline jog) —
+            // must SPLIT, not classify whole: collect the outline-covered
+            // t-intervals along a→b, cut there, then midpoint-test each
+            // sub-segment as before.
+            let (dx, dy) = (b64.x - a64.x, b64.y - a64.y);
+            let len2 = dx * dx + dy * dy;
+            if len2 < 1e-12 {
+                continue;
+            }
+            let mut ts = vec![0.0_f64, 1.0];
+            for j in 0..m {
+                let (p, q) = (op64[j], op64[(j + 1) % m]);
+                let tp = (((p.x - a64.x) * dx + (p.y - a64.y) * dy) / len2).clamp(0.0, 1.0);
+                let tq = (((q.x - a64.x) * dx + (q.y - a64.y) * dy) / len2).clamp(0.0, 1.0);
+                let (lo, hi) = if tp <= tq { (tp, tq) } else { (tq, tp) };
+                if hi - lo < 1e-9 {
+                    continue;
+                }
+                // Real coverage only: the candidate sub-interval's midpoint
+                // must actually lie on THIS outline segment.
+                let tm = (lo + hi) / 2.0;
+                let (mx, my) = (a64.x + tm * dx, a64.y + tm * dy);
+                if point_to_segment_distance(mx, my, p.x, p.y, q.x, q.y) <= ON_BOUNDARY_TOL_M {
+                    ts.push(lo);
+                    ts.push(hi);
+                }
+            }
+            ts.sort_by(|x, y| x.partial_cmp(y).unwrap());
+            ts.dedup_by(|x, y| (*x - *y).abs() < 1e-9);
+            for w in ts.windows(2) {
+                let (t0, t1) = (w[0], w[1]);
+                if (t1 - t0) * len2.sqrt() < ON_BOUNDARY_TOL_M {
+                    continue; // sliver
+                }
+                let tm = (t0 + t1) / 2.0;
+                let (mx, my) = (a64.x + tm * dx, a64.y + tm * dy);
+                if !point_on_ring_boundary(&op64, mx, my, ON_BOUNDARY_TOL_M)
+                    && geom::ring_contains_point(&op, mx as f32, my as f32)
+                {
+                    edges.push([
+                        Point2f64::new(a64.x + t0 * dx, a64.y + t0 * dy),
+                        Point2f64::new(a64.x + t1 * dx, a64.y + t1 * dy),
+                    ]);
+                }
             }
         }
         edges
