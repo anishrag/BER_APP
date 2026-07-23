@@ -678,6 +678,8 @@ impl Ber {
             specifics,
             photos: vec![],
             notes: None,
+            assessed_u_value: None,
+            assessed_g_value: None,
         });
         id
     }

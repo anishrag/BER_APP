@@ -81,6 +81,14 @@ pub struct WindowType {
     pub specifics: WindowNameSpecifics,
     pub photos: Vec<Evidence>,
     pub notes: Option<String>,
+    /// CERTIFIED U-value (W/m²K) from the manufacturer/NSAI cert — entered at
+    /// the office (BERresolve certificates stage) for a `certified` type; the
+    /// cert document itself is attached to `photos`. `None` until resolved.
+    #[serde(default)]
+    pub assessed_u_value: Option<f32>,
+    /// CERTIFIED g-value (solar transmittance, 0..1) from the same cert.
+    #[serde(default)]
+    pub assessed_g_value: Option<f32>,
 }
 
 /// Durable identity of a PORCH inside its storey: the porch plan ring's
