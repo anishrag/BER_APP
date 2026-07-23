@@ -38,7 +38,15 @@ pub fn windows_issues(ber: &Ber) -> Vec<WindowsIssue> {
     let total: usize = ber
         .storeys
         .iter()
-        .map(|s| s.windows.iter().filter(|w| w.assembly_id.is_none()).count())
+        .map(|s| {
+            // Excluded-porch openings are outside the assessment — they
+            // neither satisfy nor trip the windows gate.
+            let excluded = ber_model::ber::structural::excluded_opening_ids(s);
+            s.windows
+                .iter()
+                .filter(|w| w.assembly_id.is_none() && !excluded.contains(&w.id))
+                .count()
+        })
         .sum();
     if total < 4 {
         let message = if total == 0 {

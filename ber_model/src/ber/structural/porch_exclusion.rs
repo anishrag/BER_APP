@@ -430,6 +430,32 @@ pub fn porch_facts(ber: &Ber, storey_idx: usize, porch: &FloorRegion) -> PorchFa
     }
 }
 
+/// Opening ids OUTSIDE the assessment for this storey — the single source
+/// both the capture app's counts/reviews and the DEAP export consume:
+///  - every opening on an `Irrelevant` wall (an excluded porch's own outer
+///    envelope — its windows and front door leave the assessment with it);
+///  - every WINDOW on a porch inner wall (`SemiExposed` → its area counts as
+///    WALL per DEAP, low transmittance; otherwise an internal partition's
+///    glass);
+///  - every DOOR on a porch inner wall EXCEPT the `SemiExposed` case — the
+///    separating door of an excluded porch IS a heat-loss door and stays.
+pub fn excluded_opening_ids(storey: &Storey) -> std::collections::HashSet<ItemId> {
+    let mut out = std::collections::HashSet::new();
+    for w in &storey.walls.regions {
+        if w.exposure == WallExposure::Irrelevant {
+            out.extend(w.opes.windows.iter().copied());
+            out.extend(w.opes.doors.iter().copied());
+        }
+    }
+    for w in &storey.porch_walls.regions {
+        out.extend(w.opes.windows.iter().copied());
+        if w.exposure != WallExposure::SemiExposed {
+            out.extend(w.opes.doors.iter().copied());
+        }
+    }
+    out
+}
+
 /// Facts + verdict for every porch on every storey — the read-only query the
 /// capture UI (pending checks) and export gate consume. Entries are
 /// `(storey index, facts, verdict)` in porch order.
