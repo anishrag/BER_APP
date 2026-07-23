@@ -1086,7 +1086,17 @@ impl AppController {
     pub(super) fn build_persist_record(&self) -> Option<BerRecord> {
         let record = self.current_record.as_ref()?;
         let mut out = record.clone();
-        let idx = self.current_storey_idx.unwrap_or(0);
+        // The living-area / porch overwrite below reads the ACTIVE editing
+        // buffer, which belongs to `current_storey_idx`. On the All-storeys
+        // view there IS no active storey — the buffer still holds whichever
+        // storey was edited last, and the old `unwrap_or(0)` wrote that
+        // buffer's slots onto storey 0 (a save from the All view after
+        // editing a porch-less upper storey silently DELETED storey 0's
+        // porches — field report: Ashgrove). No active storey → persist the
+        // record as-is.
+        let Some(idx) = self.current_storey_idx else {
+            return Some(out);
+        };
         if self.outline_finalised() {
             // Outline is metric + fully dimensioned → keep its floors/walls,
             // and persist only the living areas / porches that are themselves
