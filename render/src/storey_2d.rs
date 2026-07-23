@@ -247,7 +247,14 @@ fn draw_selection_overlay(
             draw_selection_outline(painter, &pts);
         }
     }
-    for wall in &storey.walls.regions {
+    // Perimeter AND porch inner walls — a selected porch wall shows the same
+    // dashed pre-edit line as any other wall.
+    for wall in storey
+        .walls
+        .regions
+        .iter()
+        .chain(storey.porch_walls.regions.iter())
+    {
         if selected.contains(&wall.id) {
             let v = &wall.polygon.exterior;
             if v.len() >= 2 {
