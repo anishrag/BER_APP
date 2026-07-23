@@ -186,19 +186,12 @@ impl AppController {
         }
 
         // ── Window types (house-wide) ─────────────────────────────────────────
-        // Excluded-porch openings are outside the assessment — reviewed
-        // counts must not include them (single source: excluded_opening_ids).
-        let excluded: HashSet<ItemId> = data
-            .storeys
-            .iter()
-            .flat_map(ber_model::ber::structural::excluded_opening_ids)
-            .collect();
         for t in &data.window_types {
             let ids: HashSet<ItemId> = data
                 .storeys
                 .iter()
                 .flat_map(|s| s.windows.iter())
-                .filter(|w| w.window_type_id == t.id && !excluded.contains(&w.id))
+                .filter(|w| w.window_type_id == t.id)
                 .map(|w| w.id)
                 .collect();
             if ids.is_empty() {
@@ -216,12 +209,7 @@ impl AppController {
         }
 
         // ── Doors (each individually, across all storeys) ─────────────────────
-        for door in data
-            .storeys
-            .iter()
-            .flat_map(|s| s.doors.iter())
-            .filter(|d| !excluded.contains(&d.id))
-        {
+        for door in data.storeys.iter().flat_map(|s| s.doors.iter()) {
             items.push(StructureReviewView {
                 cursor: 0,
                 total: 0,
