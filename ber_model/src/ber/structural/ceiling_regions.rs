@@ -242,6 +242,7 @@ impl CeilingRegions {
                     mean_height_m,
                     area_m2,
                     polygon,
+                    plane: (g.n.0, g.n.1, g.n.2, g.d),
                 });
             }
         }
@@ -2072,4 +2073,9 @@ pub struct CeilingPlaneZone {
     pub area_m2: f64,
     /// A point inside the zone — the label anchor.
     pub anchor: Point2f64,
+    /// The zone's PLANE as `(nx, ny, nz, d)` with `n·p = d` (unit normal,
+    /// z-positive): lets a consumer evaluate the height at any plan point —
+    /// e.g. the report's per-zone mean-height working (vertex heights,
+    /// triangle/trapezoid centroid rules).
+    pub plane: (f64, f64, f64, f64),
 }
