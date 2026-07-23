@@ -4485,11 +4485,13 @@ fn external_photos_button<F: FnMut(UiEvent)>(
                             // below (auto_shrink trims overshoot back to the
                             // real content height; undershoot would clip).
                             let entry_h = |i: usize| -> f32 {
-                                let has_thumb = view
+                                let n_photos = view
                                     .external_photos
                                     .get(i)
-                                    .is_some_and(|(_, p)| p.is_some());
-                                ENTRY_TEXT_AND_BUTTONS_H + if has_thumb { thumb_h } else { 0.0 }
+                                    .map(|(_, p)| p.len())
+                                    .unwrap_or(0);
+                                ENTRY_TEXT_AND_BUTTONS_H
+                                    + n_photos as f32 * (thumb_h + 34.0)
                             };
                             let n = view.external_photos.len();
                             let row_count = n.div_ceil(cols).max(1);
@@ -4555,50 +4557,48 @@ fn external_photos_button<F: FnMut(UiEvent)>(
 }
 
 /// One side's entry in the [`external_photos_button`] grid: status label,
-/// thumbnail (when a photo is stored, scaled to `thumb_size` — the caller's
-/// comfortable fixed size, shrunk only by the width budget), and the capture /
-/// annotate / rotate / remove button row — plus, on the deferrable sides, the
-/// "Defer" toggle (`deferred` is its current state). Front never shows the
-/// toggle: deferring exists for apartments where you can't tell which unit is
-/// which from outside until you've been inside, but you always know the front
-/// because you walk in through it (see `ExternalSide::photo_deferrable`).
+/// then EVERY stored photo of the side (a side can hold several shots) —
+/// each with its thumbnail (scaled to `thumb_size`) and its own annotate /
+/// rotate / remove row — and an "Add" capture row that always APPENDS.
+/// Deferrable sides with no photo also get the "Defer" toggle (`deferred`
+/// is its current state). Front never shows the toggle: deferring exists
+/// for apartments where you can't tell which unit is which from outside
+/// until you've been inside, but you always know the front because you walk
+/// in through it (see `ExternalSide::photo_deferrable`).
 fn external_photo_entry<F: FnMut(UiEvent)>(
     ui: &mut egui::Ui,
-    (side, photo): &(
+    (side, photos): &(
         ber_model::ber::common::ExternalSide,
-        Option<crate::controller::app_controller::PhotoView>,
+        Vec<crate::controller::app_controller::PhotoView>,
     ),
     deferred: bool,
     thumb_size: egui::Vec2,
     on_event: &mut F,
 ) {
     ui.vertical(|ui| {
-        match photo {
-            Some(_) => {
-                ui.label(format!("✔ {}", side.label()));
-            }
-            None if deferred => {
-                // Deferred = will be collected at the END of the assessment
-                // (counts as set for the checklist meanwhile). Amber, not
-                // red: it's an acknowledged postponement, not a gap.
-                ui.colored_label(
-                    egui::Color32::from_rgb(230, 190, 80),
-                    format!("⏳ {}: deferred to end", side.label()),
-                );
-            }
-            None if side.photo_required() => {
-                ui.colored_label(
-                    egui::Color32::from_rgb(220, 120, 120),
-                    format!("✗ {}: missing", side.label()),
-                );
-            }
-            None => {
-                // Left / Right are optional — a neutral
-                // prompt, no red "missing" nag.
-                ui.weak(format!("○ {} (optional)", side.label()));
-            }
+        if photos.len() > 1 {
+            ui.label(format!("✔ {} ×{}", side.label(), photos.len()));
+        } else if !photos.is_empty() {
+            ui.label(format!("✔ {}", side.label()));
+        } else if deferred {
+            // Deferred = will be collected at the END of the assessment
+            // (counts as set for the checklist meanwhile). Amber, not
+            // red: it's an acknowledged postponement, not a gap.
+            ui.colored_label(
+                egui::Color32::from_rgb(230, 190, 80),
+                format!("⏳ {}: deferred to end", side.label()),
+            );
+        } else if side.photo_required() {
+            ui.colored_label(
+                egui::Color32::from_rgb(220, 120, 120),
+                format!("✗ {}: missing", side.label()),
+            );
+        } else {
+            // Left / Right are optional — a neutral
+            // prompt, no red "missing" nag.
+            ui.weak(format!("○ {} (optional)", side.label()));
         }
-        // Thumbnail preview of the stored photo — ONLY ever the lightweight
+        // Thumbnail previews of the stored photos — ONLY ever the lightweight
         // thumbnail, NEVER the full-res original: texturing a ~12 MP camera
         // file costs ~48 MB of texture per photo, OOM territory on the
         // tablet. While a photo has no thumbnail (the capture job's
@@ -4608,7 +4608,7 @@ fn external_photo_entry<F: FnMut(UiEvent)>(
         // frame the gap is visible; the controller attempts once per photo.
         // The full-res image stays reachable through the explicit 🖌
         // annotate takeover below.
-        if let Some(p) = photo {
+        for p in photos {
             match p.thumbnail_path.as_deref() {
                 Some(src) => {
                     ui.add(
@@ -4631,17 +4631,47 @@ fn external_photo_entry<F: FnMut(UiEvent)>(
                     );
                 }
             }
+            ui.horizontal(|ui| {
+                // Paintbrush annotation over the stored photo
+                // (opens the takeover; see `photo_annotate`).
+                if ui.button("🖌").on_hover_text("Draw on this photo").clicked() {
+                    on_event(UiEvent::Sketch(SketchEvent::BeginAnnotateExternalPhoto {
+                        id: p.id,
+                    }));
+                }
+                // Quarter-turn rotate so the shot
+                // can be set upright / matched to
+                // the plan (⟲ anti-clockwise, ⟳
+                // clockwise).
+                if ui.button("⟲").on_hover_text("Rotate left").clicked() {
+                    on_event(UiEvent::Sketch(SketchEvent::RotateExternalPhoto {
+                        id: p.id,
+                        clockwise: false,
+                    }));
+                }
+                if ui.button("⟳").on_hover_text("Rotate right").clicked() {
+                    on_event(UiEvent::Sketch(SketchEvent::RotateExternalPhoto {
+                        id: p.id,
+                        clockwise: true,
+                    }));
+                }
+                if ui.button("Remove").clicked() {
+                    on_event(UiEvent::Sketch(SketchEvent::RemoveExternalPhoto {
+                        id: p.id,
+                    }));
+                }
+            });
         }
         ui.horizontal(|ui| {
             // The shared capture widget: desktop file dialog
             // / Android camera, returning the captured path.
             // Elevation shots want legible detail, so the hi
             // tier is High (TEMPORARY dual hi/lo buttons —
-            // see `photo_button_pair`).
-            let action = if photo.is_some() { "Replace" } else { "Add" };
+            // see `photo_button_pair`). Always APPENDS — take
+            // as many shots of a side as the survey needs.
             if let Some((path, quality)) = crate::ui::widgets::photo_button_pair(
                 ui,
-                action,
+                "Add",
                 true,
                 crate::ui::widgets::PhotoQuality::High,
                 false,
@@ -4655,7 +4685,7 @@ fn external_photo_entry<F: FnMut(UiEvent)>(
             // Defer toggle: only while the side has NO photo (capturing
             // fulfils/clears a deferral) and only on deferrable sides —
             // never Front (see the fn doc for the apartment rationale).
-            if photo.is_none() && side.photo_deferrable() {
+            if photos.is_empty() && side.photo_deferrable() {
                 let label = if deferred { "Deferred ⏳" } else { "Defer" };
                 if ui
                     .selectable_label(deferred, label)
@@ -4666,36 +4696,6 @@ fn external_photo_entry<F: FnMut(UiEvent)>(
                     .clicked()
                 {
                     on_event(UiEvent::Sketch(SketchEvent::ToggleDeferExternalPhoto {
-                        side: *side,
-                    }));
-                }
-            }
-            if photo.is_some() {
-                // Paintbrush annotation over the stored photo
-                // (opens the takeover; see `photo_annotate`).
-                if ui.button("🖌").on_hover_text("Draw on this photo").clicked() {
-                    on_event(UiEvent::Sketch(SketchEvent::BeginAnnotateExternalPhoto {
-                        side: *side,
-                    }));
-                }
-                // Quarter-turn rotate so the shot
-                // can be set upright / matched to
-                // the plan (⟲ anti-clockwise, ⟳
-                // clockwise).
-                if ui.button("⟲").on_hover_text("Rotate left").clicked() {
-                    on_event(UiEvent::Sketch(SketchEvent::RotateExternalPhoto {
-                        side: *side,
-                        clockwise: false,
-                    }));
-                }
-                if ui.button("⟳").on_hover_text("Rotate right").clicked() {
-                    on_event(UiEvent::Sketch(SketchEvent::RotateExternalPhoto {
-                        side: *side,
-                        clockwise: true,
-                    }));
-                }
-                if ui.button("Remove").clicked() {
-                    on_event(UiEvent::Sketch(SketchEvent::RemoveExternalPhoto {
                         side: *side,
                     }));
                 }
@@ -5989,7 +5989,7 @@ fn mapping_review_overlay<F: FnMut(UiEvent)>(
                         .clicked()
                     {
                         on_event(UiEvent::Sketch(SketchEvent::BeginAnnotateExternalPhoto {
-                            side: rv.side,
+                            id: p.id,
                         }));
                     }
                 });

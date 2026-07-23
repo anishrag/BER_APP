@@ -27,6 +27,9 @@ const SAVE_JPEG_QUALITY: u8 = 85;
 /// its lazily-uploaded display texture, and the strokes painted so far (points
 /// in IMAGE-pixel coordinates, so window resizes don't shift them).
 pub struct PhotoAnnotator {
+    /// The photo being annotated (its id in `Ber.photos`) + its side, for
+    /// the title.
+    id: ber_model::ber::common::ItemId,
     side: ExternalSide,
     img: image::RgbImage,
     texture: Option<egui::TextureHandle>,
@@ -37,10 +40,14 @@ pub struct PhotoAnnotator {
 }
 
 impl PhotoAnnotator {
-    /// Open a session on `side`'s stored photo at `path`. `None` when the file
+    /// Open a session on the stored photo `id` (of `side`) at `path`. `None` when the file
     /// can't be decoded (e.g. a desktop-picked format outside the app's
     /// jpeg/png decoders) — the caller then simply doesn't open the takeover.
-    pub fn open(side: ExternalSide, path: &str) -> Option<Self> {
+    pub fn open(
+        id: ber_model::ber::common::ItemId,
+        side: ExternalSide,
+        path: &str,
+    ) -> Option<Self> {
         let img = image::ImageReader::open(path)
             .and_then(|r| r.with_guessed_format())
             .ok()?
@@ -48,6 +55,7 @@ impl PhotoAnnotator {
             .ok()?
             .to_rgb8();
         Some(Self {
+            id,
             side,
             img,
             texture: None,
@@ -178,7 +186,7 @@ pub fn render<F: FnMut(UiEvent)>(
                         burn_strokes(&mut burned, &a.strokes, radius, BRUSH_RGB);
                         if let Some(jpeg) = encode_jpeg(&burned, SAVE_JPEG_QUALITY) {
                             on_event(UiEvent::Sketch(SketchEvent::AnnotateExternalPhoto {
-                                side: a.side,
+                                id: a.id,
                                 jpeg,
                             }));
                         }

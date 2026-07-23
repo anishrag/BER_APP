@@ -74,7 +74,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 let pending: Vec<_> = view
                     .external_photos
                     .iter()
-                    .filter(|(s, p)| view.deferred_photo_sides.contains(s) && p.is_none())
+                    .filter(|(s, p)| view.deferred_photo_sides.contains(s) && p.is_empty())
                     .map(|(s, _)| *s)
                     .collect();
                 if pending.is_empty() {

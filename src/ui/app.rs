@@ -1940,7 +1940,7 @@ impl eframe::App for BerApp {
                             // request is parked here and honoured right after
                             // render.
                             let annotate_request: std::cell::Cell<
-                                Option<ber_model::ber::common::ExternalSide>,
+                                Option<ber_model::ber::common::ItemId>,
                             > = std::cell::Cell::new(None);
                             // A dimension-prompt wall-length copy tap can't
                             // edit the expression buffer inside the event
@@ -3431,8 +3431,8 @@ impl eframe::App for BerApp {
                                                 .borrow_mut()
                                                 .add_external_photo(side, &path, quality);
                                         }
-                                        SketchEvent::RemoveExternalPhoto { side } => {
-                                            controller.borrow_mut().remove_external_photo(side);
+                                        SketchEvent::RemoveExternalPhoto { id } => {
+                                            controller.borrow_mut().remove_external_photo(id);
                                         }
                                         SketchEvent::ToggleDeferExternalPhoto { side } => {
                                             controller
@@ -3449,22 +3449,22 @@ impl eframe::App for BerApp {
                                                 .borrow_mut()
                                                 .ensure_external_photo_thumbnail(side);
                                         }
-                                        SketchEvent::RotateExternalPhoto { side, clockwise } => {
+                                        SketchEvent::RotateExternalPhoto { id, clockwise } => {
                                             controller
                                                 .borrow_mut()
-                                                .rotate_external_photo(side, clockwise);
+                                                .rotate_external_photo(id, clockwise);
                                         }
                                         // UI-local: opening the annotator needs the
                                         // page-state slot the in-render view already
                                         // borrows, so it's deferred to just after
                                         // render (see `annotate_request` below).
-                                        SketchEvent::BeginAnnotateExternalPhoto { side } => {
-                                            annotate_request.set(Some(side));
+                                        SketchEvent::BeginAnnotateExternalPhoto { id } => {
+                                            annotate_request.set(Some(id));
                                         }
-                                        SketchEvent::AnnotateExternalPhoto { side, jpeg } => {
+                                        SketchEvent::AnnotateExternalPhoto { id, jpeg } => {
                                             controller
                                                 .borrow_mut()
-                                                .annotate_external_photo(side, &jpeg);
+                                                .annotate_external_photo(id, &jpeg);
                                         }
                                         SketchEvent::EditMouseDown {
                                             world_x,
@@ -3616,20 +3616,22 @@ impl eframe::App for BerApp {
                                 self.app_controller.borrow_mut().open_attic_room();
                             }
                             // Deferred annotator open (see `annotate_request`
-                            // above): decode the side's stored full-res photo
+                            // above): decode that photo's stored full-res file
                             // into a fresh session. A missing/undecodable file
                             // simply doesn't open the takeover.
-                            if let Some(side) = annotate_request.take() {
-                                let path = self
+                            if let Some(id) = annotate_request.take() {
+                                let hit = self
                                     .app_controller
                                     .borrow()
                                     .external_photos()
                                     .into_iter()
-                                    .find(|(s, _)| *s == side)
-                                    .and_then(|(_, p)| p)
-                                    .map(|p| p.file_path);
-                                self.sketch_state.photo_annotator = path.and_then(|p| {
-                                    crate::ui::widgets::PhotoAnnotator::open(side, &p)
+                                    .find_map(|(side, ps)| {
+                                        ps.into_iter()
+                                            .find(|p| p.id == id)
+                                            .map(|p| (side, p.file_path))
+                                    });
+                                self.sketch_state.photo_annotator = hit.and_then(|(side, p)| {
+                                    crate::ui::widgets::PhotoAnnotator::open(id, side, &p)
                                 });
                             }
                             // Deferred dimension wall-length copy (see

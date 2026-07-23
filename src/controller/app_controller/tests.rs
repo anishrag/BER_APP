@@ -3554,7 +3554,15 @@ fn rotate_external_photo_swaps_dimensions_and_undo_reverts() {
         image::open(&p.file_path).unwrap().dimensions()
     };
 
-    c.rotate_external_photo(side, true);
+    let pid = |c: &AppController| {
+        c.external_photos()
+            .into_iter()
+            .find(|(s, _)| *s == side)
+            .unwrap()
+            .1[0]
+            .id
+    };
+    c.rotate_external_photo(pid(&c), true);
     assert_eq!(stored_dims(&c), (600, 800), "a quarter turn swaps w/h");
 
     c.undo().expect("undo");
@@ -17433,7 +17441,7 @@ fn external_photos_gate_and_checklist_row() {
         .external_photos()
         .into_iter()
         .find(|(s, _)| *s == ExternalSide::Front)
-        .and_then(|(_, v)| v)
+        .and_then(|(_, v)| v.into_iter().next())
         .unwrap()
         .file_path;
     assert!(
@@ -17441,7 +17449,7 @@ fn external_photos_gate_and_checklist_row() {
         "external photo stored under the photos dir, not the source path"
     );
 
-    // Re-adding a side REPLACES (no duplicate) — still four photos, new stored copy.
+    // Re-adding a side APPENDS — a side can hold several shots.
     c.add_external_photo(ExternalSide::Front, &src, PhotoQuality::Full);
     let externals: Vec<_> = c
         .current_record
@@ -17452,26 +17460,36 @@ fn external_photos_gate_and_checklist_row() {
         .iter()
         .filter(|p| p.side.is_some())
         .collect();
-    assert_eq!(externals.len(), 4, "re-shoot replaces, no duplicate");
-    let front_after = externals
+    assert_eq!(externals.len(), 5, "re-shoot appends a second Front shot");
+    let front_paths: Vec<_> = externals
         .iter()
-        .find(|p| p.side == Some(ExternalSide::Front))
-        .unwrap()
-        .file_path
-        .clone();
-    assert_ne!(
-        front_after, front_before,
-        "Front re-stored under a fresh path"
+        .filter(|p| p.side == Some(ExternalSide::Front))
+        .map(|p| p.file_path.clone())
+        .collect();
+    assert_eq!(front_paths.len(), 2, "Front now holds both shots");
+    assert!(
+        front_paths.contains(&front_before),
+        "the first Front shot is kept"
+    );
+    assert!(
+        front_paths.iter().any(|p| *p != front_before),
+        "the second Front shot has its own stored file"
     );
 
-    // The view data carries all four in ALL order, each with a stored photo.
+    // The view data carries all four sides in ALL order, with their photos.
     let view = c.external_photos();
     assert_eq!(view.len(), 4);
     assert_eq!(view[0].0, ExternalSide::Front);
-    assert!(view[0].1.is_some());
+    assert_eq!(view[0].1.len(), 2);
 
-    // Remove a side → gate fails again.
-    c.remove_external_photo(ExternalSide::Back);
+    // Remove the Back photo (by id) → gate fails again.
+    let back_id = view
+        .iter()
+        .find(|(s, _)| *s == ExternalSide::Back)
+        .unwrap()
+        .1[0]
+        .id;
+    c.remove_external_photo(back_id);
     assert!(!c.external_photos_complete());
     assert_eq!(
         checklist_status_of(&c, "External photos"),
@@ -17764,12 +17782,12 @@ fn annotate_external_photo_replaces_stored_photo() {
     let src = std::env::temp_dir().join(format!("ber_annot_src_{}.jpg", ItemId::default().0));
     std::fs::write(&src, b"jpeg-bytes").unwrap();
 
-    // No photo for the side yet → annotation is a no-op (edits an existing shot).
-    c.annotate_external_photo(ExternalSide::Front, b"anything");
-    assert!(c.external_photos().iter().all(|(_, p)| p.is_none()));
+    // No such photo id → annotation is a no-op (edits an existing shot).
+    c.annotate_external_photo(ItemId::default(), b"anything");
+    assert!(c.external_photos().iter().all(|(_, p)| p.is_empty()));
 
     c.add_external_photo(ExternalSide::Front, &src, PhotoQuality::Full);
-    let before = c.external_photos()[0].1.clone().expect("front photo");
+    let before = c.external_photos()[0].1.first().cloned().expect("front photo");
 
     // Save an annotated image: a real (decodable) JPEG so the thumbnail
     // regenerates — the annotator always hands over freshly encoded bytes.
@@ -17782,7 +17800,7 @@ fn annotate_external_photo_replaces_stored_photo() {
             .unwrap();
         buf
     };
-    c.annotate_external_photo(ExternalSide::Front, &jpeg);
+    c.annotate_external_photo(before.id, &jpeg);
 
     let photos = &c.current_record.as_ref().unwrap().data.photos;
     assert_eq!(
@@ -17793,7 +17811,7 @@ fn annotate_external_photo_replaces_stored_photo() {
         1,
         "still exactly one Front photo (replaced, not duplicated)"
     );
-    let after = c.external_photos()[0].1.clone().expect("front photo");
+    let after = c.external_photos()[0].1.first().cloned().expect("front photo");
     assert_ne!(after.file_path, before.file_path, "a fresh store file");
     assert_eq!(
         std::fs::read(&after.file_path).unwrap(),
@@ -17805,7 +17823,7 @@ fn annotate_external_photo_replaces_stored_photo() {
 
     // Undo restores the pre-annotation photo entry.
     c.undo().expect("undo");
-    let restored = c.external_photos()[0].1.clone().expect("front photo");
+    let restored = c.external_photos()[0].1.first().cloned().expect("front photo");
     assert_eq!(restored.file_path, before.file_path);
 
     let _ = std::fs::remove_dir_all(&tmp);

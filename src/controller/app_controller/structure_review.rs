@@ -286,6 +286,7 @@ fn photo_views(photos: &[ber_model::ber::common::Evidence]) -> Vec<PhotoView> {
     photos
         .iter()
         .map(|p| PhotoView {
+            id: p.id,
             file_path: p.file_path.clone(),
             thumbnail_path: p.thumbnail_path.clone(),
             description: p.description.clone(),

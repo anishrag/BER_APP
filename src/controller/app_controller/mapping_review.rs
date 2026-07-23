@@ -87,7 +87,7 @@ impl AppController {
             .external_photos()
             .into_iter()
             .find(|(s, _)| *s == side)
-            .and_then(|(_, p)| p);
+            .and_then(|(_, ps)| ps.into_iter().next());
         Some(ReviewView {
             side,
             elevation,

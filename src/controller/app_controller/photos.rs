@@ -22,19 +22,20 @@ use ber_model::ber::common::ExternalSide;
 /// [`AppController::external_photos`].
 #[derive(Debug, Clone)]
 pub struct PhotoView {
+    pub id: ber_model::ber::common::ItemId,
     pub file_path: String,
     pub thumbnail_path: Option<String>,
     pub description: Option<String>,
 }
 
 impl AppController {
-    /// Attach (or replace) the external photo for `side` from a captured/picked
-    /// `source` image. Recompresses + copies into the photo store via
+    /// Attach an external photo for `side` from a captured/picked `source`
+    /// image — APPENDED, a side can hold any number of shots. Recompresses +
+    /// copies into the photo store via
     /// [`store_photo_file`](Self::store_photo_file) (`quality` is the capture
-    /// tier), tags the stored `Evidence` with `side`, and REPLACES any existing
-    /// photo of that side in `Ber.photos` (re-shooting overwrites) — else pushes
-    /// a new external `Evidence`. Snapshots for undo; `mark_dirty` re-derives.
-    /// No-op if there's no record or the store I/O fails.
+    /// tier) and tags the stored `Evidence` with `side`. Snapshots for undo;
+    /// `mark_dirty` re-derives. No-op if there's no record or the store I/O
+    /// fails.
     pub fn add_external_photo(
         &mut self,
         side: ExternalSide,
@@ -51,8 +52,6 @@ impl AppController {
         let undo_snap = self.current_history_snapshot();
         {
             let data = &mut self.current_record.as_mut().unwrap().data;
-            // Re-shooting a side overwrites the prior photo for that side.
-            data.photos.retain(|p| p.side != Some(side));
             data.photos.push(photo);
             // Capturing a deferred side's photo CLEARS the deferral (defer =
             // postpone to the end, so the capture fulfils it) — same undo
@@ -72,13 +71,17 @@ impl AppController {
     /// disk, so undo still displays it). No-op when there's no record, the side
     /// has no photo (annotation edits an existing shot), or store I/O fails —
     /// the prior photo then stands.
-    pub fn annotate_external_photo(&mut self, side: ExternalSide, jpeg: &[u8]) {
-        let Some(description) = self.current_record.as_ref().and_then(|r| {
+    pub fn annotate_external_photo(
+        &mut self,
+        target: ber_model::ber::common::ItemId,
+        jpeg: &[u8],
+    ) {
+        let Some((side, description)) = self.current_record.as_ref().and_then(|r| {
             r.data
                 .photos
                 .iter()
-                .find(|p| p.side == Some(side))
-                .map(|p| p.description.clone())
+                .find(|p| p.id == target && p.side.is_some())
+                .map(|p| (p.side, p.description.clone()))
         }) else {
             return;
         };
@@ -102,14 +105,15 @@ impl AppController {
             file_path: dest.to_string_lossy().into_owned(),
             thumbnail_path,
             description,
-            side: Some(side),
+            side,
             content_type: None,
         };
         let undo_snap = self.current_history_snapshot();
         {
             let photos = &mut self.current_record.as_mut().unwrap().data.photos;
-            photos.retain(|p| p.side != Some(side));
-            photos.push(photo);
+            if let Some(slot) = photos.iter_mut().find(|p| p.id == target) {
+                *slot = photo;
+            }
         }
         let _ = self.mark_dirty();
         self.push_history_snapshot(undo_snap);
@@ -123,13 +127,17 @@ impl AppController {
     /// (which restores the prior entry, still on disk) reverts it. Regenerates
     /// the thumbnail. No-op with no record, no photo for the side, or on
     /// decode/store failure (the prior photo then stands).
-    pub fn rotate_external_photo(&mut self, side: ExternalSide, clockwise: bool) {
-        let Some((src_path, description)) = self.current_record.as_ref().and_then(|r| {
+    pub fn rotate_external_photo(
+        &mut self,
+        target: ber_model::ber::common::ItemId,
+        clockwise: bool,
+    ) {
+        let Some((side, src_path, description)) = self.current_record.as_ref().and_then(|r| {
             r.data
                 .photos
                 .iter()
-                .find(|p| p.side == Some(side))
-                .map(|p| (p.file_path.clone(), p.description.clone()))
+                .find(|p| p.id == target && p.side.is_some())
+                .map(|p| (p.side, p.file_path.clone(), p.description.clone()))
         }) else {
             return;
         };
@@ -166,37 +174,39 @@ impl AppController {
             file_path: dest.to_string_lossy().into_owned(),
             thumbnail_path,
             description,
-            side: Some(side),
+            side,
             content_type: None,
         };
         let undo_snap = self.current_history_snapshot();
         {
             let photos = &mut self.current_record.as_mut().unwrap().data.photos;
-            photos.retain(|p| p.side != Some(side));
-            photos.push(photo);
+            if let Some(slot) = photos.iter_mut().find(|p| p.id == target) {
+                *slot = photo;
+            }
         }
         let _ = self.mark_dirty();
         self.push_history_snapshot(undo_snap);
     }
 
-    /// Remove the external photo for `side`, if one is attached. Snapshots for
-    /// undo like [`add_external_photo`](Self::add_external_photo).
-    pub fn remove_external_photo(&mut self, side: ExternalSide) {
+    /// Remove one external photo by its id. Snapshots for undo like
+    /// [`add_external_photo`](Self::add_external_photo).
+    pub fn remove_external_photo(&mut self, target: ber_model::ber::common::ItemId) {
         if self.current_record.is_none() {
             return;
         }
         let undo_snap = self.current_history_snapshot();
         {
             let record = self.current_record.as_mut().unwrap();
-            record.data.photos.retain(|p| p.side != Some(side));
+            record.data.photos.retain(|p| p.id != target);
         }
         let _ = self.mark_dirty();
         self.push_history_snapshot(undo_snap);
     }
 
-    /// The four external sides in [`ExternalSide::ALL`] order, each paired with
-    /// its current photo (or `None`) — the UI panel's backing data.
-    pub fn external_photos(&self) -> Vec<(ExternalSide, Option<PhotoView>)> {
+    /// The four external sides in [`ExternalSide::ALL`] order, each paired
+    /// with ALL its photos (capture order; possibly none) — the UI panel's
+    /// backing data.
+    pub fn external_photos(&self) -> Vec<(ExternalSide, Vec<PhotoView>)> {
         let photos = self
             .current_record
             .as_ref()
@@ -205,15 +215,17 @@ impl AppController {
         ExternalSide::ALL
             .iter()
             .map(|&side| {
-                let view = photos
+                let views = photos
                     .iter()
-                    .find(|p| p.side == Some(side))
+                    .filter(|p| p.side == Some(side))
                     .map(|p| PhotoView {
+                        id: p.id,
                         file_path: p.file_path.clone(),
                         thumbnail_path: p.thumbnail_path.clone(),
                         description: p.description.clone(),
-                    });
-                (side, view)
+                    })
+                    .collect();
+                (side, views)
             })
             .collect()
     }
@@ -297,7 +309,11 @@ impl AppController {
             r.data
                 .photos
                 .iter()
-                .find(|p| p.side == Some(side) && p.thumbnail_path.is_none())
+                .find(|p| {
+                    p.side == Some(side)
+                        && p.thumbnail_path.is_none()
+                        && !self.thumbnail_backfill_attempted.contains(&p.id)
+                })
                 .map(|p| (p.id, p.file_path.clone()))
         }) else {
             return;

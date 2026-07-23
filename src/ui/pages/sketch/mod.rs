@@ -1092,15 +1092,15 @@ pub enum SketchEvent {
         path: std::path::PathBuf,
         quality: crate::ui::widgets::PhotoQuality,
     },
-    /// Remove the external photo for `side`.
+    /// Remove one external photo (by its id — a side can hold several).
     RemoveExternalPhoto {
-        side: ExternalSide,
+        id: ItemId,
     },
-    /// Rotate `side`'s external photo a quarter turn (`clockwise` or anti-) so
+    /// Rotate one external photo a quarter turn (`clockwise` or anti-) so
     /// the assessor can set which way is up. Handled by the controller, which
     /// bakes it into a new stored file.
     RotateExternalPhoto {
-        side: ExternalSide,
+        id: ItemId,
         clockwise: bool,
     },
     /// Toggle DEFERRING `side`'s external photo to the end of the assessment
@@ -1122,18 +1122,18 @@ pub enum SketchEvent {
     EnsureExternalPhotoThumbnail {
         side: ExternalSide,
     },
-    /// Open the paintbrush ANNOTATION takeover for `side`'s external photo
-    /// (the "🖌" affordance wherever external photos are shown). Handled by the
+    /// Open the paintbrush ANNOTATION takeover for one external photo (the
+    /// "🖌" affordance wherever external photos are shown). Handled by the
     /// app shell, not the controller: it decodes the stored image into the
     /// page-state annotator (`SketchState::photo_annotator`).
     BeginAnnotateExternalPhoto {
-        side: ExternalSide,
+        id: ItemId,
     },
     /// Save the annotation session: `jpeg` is the stored image re-encoded with
     /// the strokes burned in at image resolution. The controller writes it into
-    /// the photo store and REPLACES `side`'s external photo.
+    /// the photo store and REPLACES that photo in place.
     AnnotateExternalPhoto {
-        side: ExternalSide,
+        id: ItemId,
         jpeg: Vec<u8>,
     },
 }
@@ -1550,7 +1550,7 @@ pub struct SketchView<'a> {
     /// [`ExternalSide::ALL`] order, each with its current photo or `None`.
     /// Backs the floating "Add external pictures" panel. Shown in the Mapping
     /// phase when a record is loaded.
-    pub external_photos: Vec<(ExternalSide, Option<PhotoView>)>,
+    pub external_photos: Vec<(ExternalSide, Vec<PhotoView>)>,
     /// The sides whose external photo is DEFERRED to the end of the
     /// assessment (never contains Front — it isn't deferrable, see
     /// [`ExternalSide::photo_deferrable`]). Backs the panel's per-side Defer
