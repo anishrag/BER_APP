@@ -64,7 +64,7 @@ impl ObjectCategory {
             ObjectCategory::Chimney => "Chimney",
             ObjectCategory::AtticHatch => "Attic hatch",
             ObjectCategory::WaterFixture => "Shower / bath",
-            ObjectCategory::SolarPanel => "Solar panel",
+            ObjectCategory::SolarPanel => "Solar",
             ObjectCategory::Other => "Other",
         }
     }
@@ -83,8 +83,6 @@ impl ObjectCategory {
                 ObjectKind::Fan(FanType::Supply),
                 ObjectKind::Fan(FanType::Decentralized),
                 ObjectKind::Fan(FanType::Central),
-                ObjectKind::VentilationUnit(VentUnitKind::Mechanical),
-                ObjectKind::VentilationUnit(VentUnitKind::HeatRecovery),
             ],
             ObjectCategory::Light => vec![
                 ObjectKind::Light(LightKind::Led),
@@ -126,6 +124,7 @@ impl ObjectCategory {
             ObjectCategory::SolarPanel => vec![
                 ObjectKind::SolarPanel(SolarPanelKind::Photovoltaic),
                 ObjectKind::SolarPanel(SolarPanelKind::SolarThermal),
+                ObjectKind::SolarPanel(SolarPanelKind::Battery),
             ],
             // Singletons (no sub-choice).
             ObjectCategory::Other => Vec::new(),
@@ -155,7 +154,11 @@ pub enum FanType {
     Extract,
     Supply,
     Decentralized,
-    /// A central ventilation unit (e.g. MVHR / MEV serving the whole dwelling).
+    /// A central ventilation unit (e.g. MVHR / MEV serving the whole
+    /// dwelling). Its presence makes the ventilation NOT natural — it drives
+    /// [`ventilation_system.system_type`](crate::ber::systems::VentilationSystem)
+    /// via [`Ber::sync_ventilation_system_from_objects`](crate::ber::ber_struct::Ber::sync_ventilation_system_from_objects)
+    /// — and the panel requires its make/model name (like a boiler).
     Central,
 }
 
@@ -221,6 +224,9 @@ pub enum SolarPanelKind {
     Photovoltaic,
     /// Solar thermal (hot water).
     SolarThermal,
+    /// A home BATTERY (PV storage) — records its capacity in
+    /// [`BuildingObject::kwh`] (the panel requires it) plus a photo.
+    Battery,
 }
 
 /// A concrete recorded object kind: a category plus its subtype (where one
@@ -248,12 +254,11 @@ pub enum ObjectKind {
     /// An electric PANEL HEATER (a primary electric heat source). Groups under
     /// [`ObjectCategory::HeatingSystem`]; drives an `ElectricHeater` primary.
     PanelHeater,
-    /// A whole-house MECHANICAL VENTILATION unit (MEV / MVHR). Drives
-    /// [`ventilation_system.system_type`](crate::ber::systems::VentilationSystem)
-    /// via [`Ber::sync_ventilation_system_from_objects`](crate::ber::ber_struct::Ber::sync_ventilation_system_from_objects).
-    /// The pre-existing [`FanType::Central`] overlaps physically (also a
-    /// whole-dwelling unit) but does NOT drive the system type — it stays a
-    /// plain fan record.
+    /// LEGACY: a whole-house MEV / MVHR unit picked as such. No longer
+    /// offered (the MEV/MVHR distinction can't be made on site) — the
+    /// [`FanType::Central`] "Central unit" is the record now, and either
+    /// makes the ventilation non-natural. Kept so old records deserialize;
+    /// sync treats it like a Central fan.
     VentilationUnit(VentUnitKind),
     Other(String),
 }
@@ -311,6 +316,21 @@ impl ObjectKind {
             PhotoPolicy::FirstInstanceRequired => !already_recorded,
             PhotoPolicy::Optional => false,
         }
+    }
+
+    /// Whether recording this kind REQUIRES a NAME (make/model) in the
+    /// panel's text field: boilers and the central ventilation unit — the
+    /// model name is what the office looks up (efficiency / unit specs).
+    pub fn name_required(&self) -> bool {
+        matches!(
+            self,
+            ObjectKind::Boiler(_) | ObjectKind::Fan(FanType::Central)
+        )
+    }
+
+    /// Whether recording this kind REQUIRES a capacity in kWh (the battery).
+    pub fn kwh_required(&self) -> bool {
+        matches!(self, ObjectKind::SolarPanel(SolarPanelKind::Battery))
     }
 
     pub fn category(&self) -> ObjectCategory {
@@ -374,6 +394,7 @@ impl ObjectKind {
             ObjectKind::WaterFixture(WaterFixtureKind::ElectricShower) => "Electric shower",
             ObjectKind::SolarPanel(SolarPanelKind::Photovoltaic) => "Photovoltaic (PV)",
             ObjectKind::SolarPanel(SolarPanelKind::SolarThermal) => "Solar water heating",
+            ObjectKind::SolarPanel(SolarPanelKind::Battery) => "Battery",
             ObjectKind::Other(s) => s,
         }
     }
@@ -410,6 +431,10 @@ pub struct BuildingObject {
     /// How many of this object at this location (e.g. 5 radiators, 8 downlights).
     pub count: u32,
     pub note: Option<String>,
+    /// Capacity in kWh — recorded for a [`SolarPanelKind::Battery`] (the
+    /// panel requires it there); `None` for every other kind.
+    #[serde(default)]
+    pub kwh: Option<f32>,
     pub photos: Vec<Evidence>,
     /// The "separate time/temperature control for water and space" checkbox —
     /// meaningful only for `Boiler` and `Programmer` objects; drives
@@ -425,6 +450,7 @@ impl BuildingObject {
             kind,
             count: count.max(1),
             note: None,
+            kwh: None,
             photos: Vec::new(),
             separate_hw_control: false,
         }

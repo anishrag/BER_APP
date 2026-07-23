@@ -17959,13 +17959,13 @@ fn objects_capture_pins_counts_and_undo() {
     // Drop a pin and add two object entries (1 boiler + 5 radiators = 6).
     c.objects_pointer_down(2.0, 2.0, 0.5);
     let room = c.active_object_room().expect("a room opened");
-    c.add_object(ObjectKind::Boiler(BoilerFuel::Gas), 1, None, Vec::new());
+    c.add_object(ObjectKind::Boiler(BoilerFuel::Gas), 1, None, None, Vec::new());
     c.add_object(
         ObjectKind::Radiator(RadiatorTrv::WithTrv),
         5,
         None,
-        Vec::new(),
-    );
+        None,
+        Vec::new(),);
     let pins = c.object_rooms_view();
     assert_eq!(pins.len(), 1, "one pin");
     assert_eq!(pins[0].count, 6, "1 boiler + 5 radiators");
@@ -18037,7 +18037,7 @@ fn objects_3d_placement_stores_surface_point_and_pitch() {
     );
 
     // The room accepts objects while no storey is current.
-    c.add_object(ObjectKind::Boiler(BoilerFuel::Gas), 1, None, Vec::new());
+    c.add_object(ObjectKind::Boiler(BoilerFuel::Gas), 1, None, None, Vec::new());
     assert_eq!(
         c.active_object_room_view().unwrap().objects.len(),
         1,
@@ -18108,8 +18108,8 @@ fn roof_pins_hidden_from_storey_views() {
         ObjectKind::SolarPanel(SolarPanelKind::Photovoltaic),
         10,
         None,
-        Vec::new(),
-    );
+        None,
+        Vec::new(),);
     c.close_object_room();
 
     // Hidden from the storey's pin views (2D plan + single-storey 3D)…
@@ -18174,13 +18174,13 @@ fn attic_bucket_and_review_question() {
     // A normal room first, so the review has content. A gas boiler gives the
     // house a primary heat source (else the item-6 heating gate blocks confirm).
     c.objects_pointer_down(2.0, 2.0, 0.5);
-    c.add_object(ObjectKind::Thermostat, 1, None, Vec::new());
+    c.add_object(ObjectKind::Thermostat, 1, None, None, Vec::new());
     c.add_object(
         ObjectKind::Boiler(ber_model::ber::objects::BoilerFuel::Gas),
         1,
         None,
-        Vec::new(),
-    );
+        None,
+        Vec::new(),);
     c.close_object_room();
 
     // Open the attic: created on demand, flagged for the UI, no plan pin and
@@ -18220,8 +18220,8 @@ fn attic_bucket_and_review_question() {
         ObjectKind::Other("Heat recovery unit".into()),
         1,
         None,
-        Vec::new(),
-    );
+        None,
+        Vec::new(),);
     c.close_object_room();
     assert!(!c.attic_unresolved(), "attic object resolves the promise");
     let rv = c.object_review_view().unwrap();
@@ -18242,7 +18242,7 @@ fn attic_bucket_and_review_question() {
     let mut c2 = dimensioned_square_controller();
     c2.materialize();
     c2.objects_pointer_down(2.0, 2.0, 0.5);
-    c2.add_object(ObjectKind::Thermostat, 1, None, Vec::new());
+    c2.add_object(ObjectKind::Thermostat, 1, None, None, Vec::new());
     c2.close_object_room();
     c2.set_object_review_mode(true);
     c2.confirm_attic_absent();
@@ -18275,7 +18275,7 @@ fn object_photo_requirement_by_policy_and_first_instance() {
     let led = ObjectKind::Light(LightKind::Led);
     assert!(c.object_photo_required(&led), "first LED requires a photo");
     c.objects_pointer_down(2.0, 2.0, 0.5);
-    c.add_object(led.clone(), 1, None, Vec::new());
+    c.add_object(led.clone(), 1, None, None, Vec::new());
     assert!(!c.object_photo_required(&led), "a later LED is optional");
     // A DIFFERENT first-instance kind is still on its own first instance.
     assert!(
@@ -18287,7 +18287,7 @@ fn object_photo_requirement_by_policy_and_first_instance() {
     assert!(!c.object_photo_required(&ObjectKind::Other("meter".into())));
 
     // Always-required stays required even after one is recorded.
-    c.add_object(boiler.clone(), 1, None, Vec::new());
+    c.add_object(boiler.clone(), 1, None, None, Vec::new());
     assert!(
         c.object_photo_required(&boiler),
         "always-required stays required"
@@ -18317,7 +18317,7 @@ fn empty_object_pin_pruned_and_open_box_dismisses_on_tap() {
 
     // Drop a pin, add an object, close → it stays.
     c.objects_pointer_down(2.0, 2.0, 0.5);
-    c.add_object(ObjectKind::Boiler(BoilerFuel::Gas), 1, None, Vec::new());
+    c.add_object(ObjectKind::Boiler(BoilerFuel::Gas), 1, None, None, Vec::new());
     c.close_object_room();
     assert_eq!(c.object_rooms_view().len(), 1, "a pin with an object stays");
 
@@ -18347,13 +18347,13 @@ fn object_review_totals_and_hotspots() {
     c.materialize();
     // Room 1: 1 gas boiler + 3 radiators-with-TRV.
     c.objects_pointer_down(2.0, 2.0, 0.5);
-    c.add_object(ObjectKind::Boiler(BoilerFuel::Gas), 1, None, Vec::new());
+    c.add_object(ObjectKind::Boiler(BoilerFuel::Gas), 1, None, None, Vec::new());
     c.add_object(
         ObjectKind::Radiator(RadiatorTrv::WithTrv),
         3,
         None,
-        Vec::new(),
-    );
+        None,
+        Vec::new(),);
     c.close_object_room();
     // Room 2: 2 more radiators-with-TRV.
     c.objects_pointer_down(8.0, 8.0, 0.5);
@@ -18361,8 +18361,8 @@ fn object_review_totals_and_hotspots() {
         ObjectKind::Radiator(RadiatorTrv::WithTrv),
         2,
         None,
-        Vec::new(),
-    );
+        None,
+        Vec::new(),);
     c.close_object_room();
 
     c.set_object_review_mode(true);
@@ -18461,7 +18461,7 @@ fn object_review_absence_confirmation() {
     let mut c = dimensioned_square_controller();
     c.materialize();
     c.objects_pointer_down(2.0, 2.0, 0.5);
-    c.add_object(ObjectKind::Boiler(BoilerFuel::Gas), 1, None, Vec::new());
+    c.add_object(ObjectKind::Boiler(BoilerFuel::Gas), 1, None, None, Vec::new());
     c.close_object_room();
 
     c.set_object_review_mode(true);
@@ -18524,7 +18524,7 @@ fn object_review_flagged_present_blocks_confirm_until_added() {
     let mut c = dimensioned_square_controller();
     c.materialize();
     c.objects_pointer_down(2.0, 2.0, 0.5);
-    c.add_object(ObjectKind::Boiler(BoilerFuel::Gas), 1, None, Vec::new());
+    c.add_object(ObjectKind::Boiler(BoilerFuel::Gas), 1, None, None, Vec::new());
     c.close_object_room();
 
     c.set_object_review_mode(true);
@@ -18555,8 +18555,8 @@ fn object_review_flagged_present_blocks_confirm_until_added() {
         ObjectKind::SolarPanel(SolarPanelKind::Photovoltaic),
         1,
         None,
-        Vec::new(),
-    );
+        None,
+        Vec::new(),);
     c.close_object_room();
     assert!(
         c.unresolved_present_categories().is_empty(),
@@ -18589,12 +18589,12 @@ fn add_object_attaches_only_the_event_photos() {
         ObjectKind::Fan(FanType::Extract),
         1,
         None,
+        None,
         vec![(
             std::path::PathBuf::from("/nonexistent/fan.jpg"),
             PhotoQuality::High,
-        )],
-    );
-    c.add_object(ObjectKind::Thermostat, 1, None, Vec::new());
+        )],);
+    c.add_object(ObjectKind::Thermostat, 1, None, None, Vec::new());
 
     let rows = c.active_object_room_view().expect("room open").objects;
     assert_eq!(rows.len(), 2);
@@ -25582,7 +25582,7 @@ fn gas_boiler_add_sets_system_type_delete_reverts() {
     c.materialize();
     c.objects_pointer_down(2.0, 2.0, 0.5);
     let room = c.active_object_room().expect("a room opened");
-    c.add_object(ObjectKind::Boiler(BoilerFuel::Gas), 1, None, Vec::new());
+    c.add_object(ObjectKind::Boiler(BoilerFuel::Gas), 1, None, None, Vec::new());
     assert_eq!(
         c.current_record
             .as_ref()
@@ -25618,7 +25618,7 @@ fn boiler_separate_hw_control_sets_separate_hot_water() {
     c.materialize();
     c.objects_pointer_down(2.0, 2.0, 0.5);
     let room = c.active_object_room().expect("a room opened");
-    c.add_object(ObjectKind::Boiler(BoilerFuel::Gas), 1, None, Vec::new());
+    c.add_object(ObjectKind::Boiler(BoilerFuel::Gas), 1, None, None, Vec::new());
     let object_id = c.active_object_room_view().unwrap().objects[0].id;
     assert!(
         !c.current_record
@@ -25663,7 +25663,7 @@ fn heating_zones_prompt_sets_and_removal_clears_zones() {
     c.materialize();
     c.objects_pointer_down(2.0, 2.0, 0.5);
     let room = c.active_object_room().expect("a room opened");
-    c.add_object(ObjectKind::HeatingZones, 1, None, Vec::new());
+    c.add_object(ObjectKind::HeatingZones, 1, None, None, Vec::new());
     assert!(
         c.heating_zones_prompt_open(),
         "zones object raises the prompt"
@@ -25683,7 +25683,7 @@ fn heating_zones_prompt_sets_and_removal_clears_zones() {
     );
     // A later object add/remove must NOT wipe zones (the sync doesn't own it).
     use ber_model::ber::objects::{BoilerFuel, ObjectKind as OK};
-    c.add_object(OK::Boiler(BoilerFuel::Oil), 1, None, Vec::new());
+    c.add_object(OK::Boiler(BoilerFuel::Oil), 1, None, None, Vec::new());
     assert_eq!(
         c.current_record
             .as_ref()
@@ -25727,7 +25727,7 @@ fn heating_source_gate_blocks_review_until_boiler_or_panel() {
     let mut c = dimensioned_square_controller();
     c.materialize();
     c.objects_pointer_down(2.0, 2.0, 0.5);
-    c.add_object(ObjectKind::Chimney(ChimneyState::Open), 1, None, Vec::new());
+    c.add_object(ObjectKind::Chimney(ChimneyState::Open), 1, None, None, Vec::new());
     c.close_object_room();
     assert!(
         c.heating_source_missing(),
@@ -25740,7 +25740,7 @@ fn heating_source_gate_blocks_review_until_boiler_or_panel() {
     // Add a panel heater → the gate clears; answering the panel question then
     // lets the review confirm.
     c.objects_pointer_down(3.0, 3.0, 0.5);
-    c.add_object(ObjectKind::PanelHeater, 1, None, Vec::new());
+    c.add_object(ObjectKind::PanelHeater, 1, None, None, Vec::new());
     c.close_object_room();
     assert!(
         !c.heating_source_missing(),
@@ -25776,13 +25776,13 @@ fn multiple_sources_prompt_primary_pick_and_preserve() {
     let mut c = dimensioned_square_controller();
     c.materialize();
     c.objects_pointer_down(2.0, 2.0, 0.5);
-    c.add_object(ObjectKind::Boiler(BoilerFuel::Gas), 1, None, Vec::new());
+    c.add_object(ObjectKind::Boiler(BoilerFuel::Gas), 1, None, None, Vec::new());
     c.add_object(
         ObjectKind::Boiler(BoilerFuel::HeatPump),
         1,
         None,
-        Vec::new(),
-    );
+        None,
+        Vec::new(),);
     c.close_object_room();
     c.set_object_review_mode(true);
     let opts = c.primary_pick_options();
@@ -25804,7 +25804,7 @@ fn multiple_sources_prompt_primary_pick_and_preserve() {
     );
     // A later object add must NOT clobber the chosen primary (sync preserves it).
     c.objects_pointer_down(6.0, 6.0, 0.5);
-    c.add_object(ObjectKind::Thermostat, 1, None, Vec::new());
+    c.add_object(ObjectKind::Thermostat, 1, None, None, Vec::new());
     assert_eq!(
         c.current_record
             .as_ref()
@@ -25821,7 +25821,7 @@ fn multiple_sources_prompt_primary_pick_and_preserve() {
 /// deleting it reverts to `Natural`. The controller resyncs on every add/remove.
 #[test]
 fn vent_unit_add_sets_system_type_delete_reverts() {
-    use ber_model::ber::objects::{ObjectKind, VentUnitKind};
+    use ber_model::ber::objects::{FanType, ObjectKind};
     use ber_model::ber::systems::VentilationSystemType;
 
     let mut c = dimensioned_square_controller();
@@ -25829,8 +25829,9 @@ fn vent_unit_add_sets_system_type_delete_reverts() {
     c.objects_pointer_down(2.0, 2.0, 0.5);
     let room = c.active_object_room().expect("a room opened");
     c.add_object(
-        ObjectKind::VentilationUnit(VentUnitKind::HeatRecovery),
+        ObjectKind::Fan(FanType::Central),
         1,
+        Some("Vent Axia Sentinel".into()),
         None,
         Vec::new(),
     );
@@ -25842,9 +25843,9 @@ fn vent_unit_add_sets_system_type_delete_reverts() {
                 .data
                 .ventilation_system
                 .system_type,
-            VentilationSystemType::MechanicalWithHeatRecovery
+            VentilationSystemType::Mechanical
         ),
-        "adding an MVHR unit sets the mechanical-with-heat-recovery type",
+        "a Central-unit fan pin makes the ventilation mechanical (not natural)",
     );
     let object_id = c.active_object_room_view().unwrap().objects[0].id;
     c.delete_object(room, object_id);

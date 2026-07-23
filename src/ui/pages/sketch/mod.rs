@@ -722,12 +722,14 @@ pub enum SketchEvent {
     /// Open the house-level ATTIC object bucket (the "Attic" button), creating
     /// it on first use. The usual entry panel then adds objects to it.
     OpenAtticRoom,
-    /// Add an object to the open room: its kind, count, optional note, and
-    /// photos (each with its capture tier — see [`Self::PlaceOpening`]).
+    /// Add an object to the open room: its kind, count, optional note,
+    /// capacity in kWh (batteries only), and photos (each with its capture
+    /// tier — see [`Self::PlaceOpening`]).
     AddObject {
         kind: ObjectKind,
         count: u32,
         note: Option<String>,
+        kwh: Option<f32>,
         photos: Vec<(std::path::PathBuf, crate::ui::widgets::PhotoQuality)>,
     },
     /// Delete one object from a room (the Delete panel).
@@ -1625,6 +1627,8 @@ pub struct SketchView<'a> {
     pub object_selected_kind: &'a mut Option<ObjectKind>,
     pub object_count_input: &'a mut String,
     pub object_note_input: &'a mut String,
+    /// Battery capacity entry (kWh) — shown only for the battery kind.
+    pub object_kwh_input: &'a mut String,
     pub object_other_name: &'a mut String,
     pub object_pending_photos: &'a mut PendingObjectPhotos,
     /// Whether the "how many heating zones?" numeric prompt is open (item 3) —

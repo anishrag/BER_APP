@@ -224,12 +224,42 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                         .for_kind(room_id, &kind)
                         .is_empty();
 
+                    // Boilers + the central ventilation unit REQUIRE a
+                    // make/model name (the office looks the unit up); the
+                    // battery REQUIRES its capacity in kWh.
+                    let name_required = kind.name_required();
+                    let kwh_required = kind.kwh_required();
                     ui.horizontal(|ui| {
                         ui.label("count");
                         metre_input(ui, view.object_count_input, 48.0, "1");
-                        ui.label("note");
-                        text_input(ui, view.object_note_input, 110.0, "optional");
+                        ui.label(if name_required { "name" } else { "note" });
+                        text_input(
+                            ui,
+                            view.object_note_input,
+                            110.0,
+                            if name_required { "make & model" } else { "optional" },
+                        );
+                        if kwh_required {
+                            ui.label("kWh");
+                            metre_input(ui, view.object_kwh_input, 48.0, "e.g. 5");
+                        }
                     });
+                    let have_name = !view.object_note_input.trim().is_empty();
+                    let kwh_value = view.object_kwh_input.trim().parse::<f32>().ok();
+                    if name_required && !have_name {
+                        ui.label(
+                            RichText::new("✎ A name (make & model) is required for this item")
+                                .small()
+                                .color(egui::Color32::from_rgb(220, 160, 80)),
+                        );
+                    }
+                    if kwh_required && kwh_value.is_none() {
+                        ui.label(
+                            RichText::new("⚡ The battery capacity (kWh) is required")
+                                .small()
+                                .color(egui::Color32::from_rgb(220, 160, 80)),
+                        );
+                    }
 
                     // Auto-open the camera ONCE for a still-unsatisfied mandatory
                     // photo (latched per selected kind, so a cancel doesn't loop
@@ -272,8 +302,11 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     }
 
                     // OK is gated on the photo requirement — a mandatory photo
-                    // must be taken before the object can be added.
-                    let can_ok = !photo_required || have_photo;
+                    // must be taken before the object can be added — plus the
+                    // name / kWh requirements above.
+                    let can_ok = (!photo_required || have_photo)
+                        && (!name_required || have_name)
+                        && (!kwh_required || kwh_value.is_some());
                     if ui
                         .add_enabled(can_ok, egui::Button::new(RichText::new("OK").strong()))
                         .clicked()
@@ -291,6 +324,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                             kind,
                             count,
                             note,
+                            kwh: if kwh_required { kwh_value } else { None },
                             photos,
                         }));
                         *view.object_selected_category = None;
@@ -298,6 +332,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                         *view.object_auto_photo_for = None;
                         view.object_count_input.clear();
                         view.object_note_input.clear();
+                        view.object_kwh_input.clear();
                         view.object_other_name.clear();
                     }
                 }

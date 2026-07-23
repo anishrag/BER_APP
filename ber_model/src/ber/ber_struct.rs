@@ -496,20 +496,22 @@ impl Ber {
     /// (MVHR wins over MEV if both are placed); no unit → Natural. Fired by the
     /// shell on object add/remove.
     pub fn sync_ventilation_system_from_objects(&mut self) {
-        use crate::ber::objects::{ObjectKind, VentUnitKind};
+        use crate::ber::objects::{FanType, ObjectKind};
         use crate::ber::systems::VentilationSystemType;
 
-        let (mut mev, mut mvhr) = (false, false);
-        for obj in self.object_rooms_iter().flat_map(|r| r.objects.iter()) {
-            match obj.kind {
-                ObjectKind::VentilationUnit(VentUnitKind::HeatRecovery) => mvhr = true,
-                ObjectKind::VentilationUnit(VentUnitKind::Mechanical) => mev = true,
-                _ => {}
-            }
-        }
-        self.ventilation_system.system_type = if mvhr {
-            VentilationSystemType::MechanicalWithHeatRecovery
-        } else if mev {
+        // A CENTRAL UNIT fan pin means the ventilation is NOT natural;
+        // no pin means it is. (Legacy VentilationUnit records — the retired
+        // MEV/MVHR picker options — count the same way.)
+        let central = self
+            .object_rooms_iter()
+            .flat_map(|r| r.objects.iter())
+            .any(|obj| {
+                matches!(
+                    obj.kind,
+                    ObjectKind::Fan(FanType::Central) | ObjectKind::VentilationUnit(_)
+                )
+            });
+        self.ventilation_system.system_type = if central {
             VentilationSystemType::Mechanical
         } else {
             VentilationSystemType::Natural

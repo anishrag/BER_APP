@@ -119,6 +119,7 @@ pub struct EntryCommit {
     pub kind: ObjectKind,
     pub count: u32,
     pub note: Option<String>,
+    pub kwh: Option<f32>,
     pub photos: Vec<(PathBuf, PhotoQuality)>,
 }
 
@@ -129,8 +130,9 @@ pub struct EntryCommit {
 ///
 /// - The IN-FLIGHT entry (`selected_kind` + count/note + its pending photos)
 ///   commits when anything was entered — a count, a note, a photo, or an
-///   "Other" name (a typed name is data). It is withheld only if its
-///   mandatory photo is missing (OK would have been disabled; the text is
+///   "Other" name (a typed name is data). It is withheld if its mandatory
+///   photo is missing, or its required NAME (boiler / central unit) or kWh
+///   (battery) wasn't given (OK would have been disabled; the text is
 ///   dropped, exactly as the disabled OK would have dropped it).
 /// - Every OTHER buffer parked for this room (photos taken for a kind, then
 ///   the kind was switched) commits as its own object (count 1) — a
@@ -145,6 +147,7 @@ pub fn take_dismiss_commits(
     selected_kind: Option<&ObjectKind>,
     count_input: &str,
     note_input: &str,
+    kwh_input: &str,
     photo_required: impl Fn(&ObjectKind) -> bool,
     pending: &mut PendingObjectPhotos,
 ) -> Vec<EntryCommit> {
@@ -155,16 +158,21 @@ pub fn take_dismiss_commits(
         if kind_ready {
             let count_txt = count_input.trim();
             let note_txt = note_input.trim();
+            let kwh = kwh_input.trim().parse::<f32>().ok();
             let have_photo = !pending.for_kind(room, kind).is_empty();
             let entered = !count_txt.is_empty()
                 || !note_txt.is_empty()
                 || have_photo
                 || matches!(kind, ObjectKind::Other(_));
-            if entered && (!photo_required(kind) || have_photo) {
+            let gates_met = (!photo_required(kind) || have_photo)
+                && (!kind.name_required() || !note_txt.is_empty())
+                && (!kind.kwh_required() || kwh.is_some());
+            if entered && gates_met {
                 commits.push(EntryCommit {
                     kind: kind.clone(),
                     count: count_txt.parse::<u32>().unwrap_or(1),
                     note: (!note_txt.is_empty()).then(|| note_txt.to_string()),
+                    kwh: if kind.kwh_required() { kwh } else { None },
                     photos: pending.take(room, kind),
                 });
             }
@@ -176,6 +184,7 @@ pub fn take_dismiss_commits(
             kind,
             count: 1,
             note: None,
+            kwh: None,
             photos,
         });
     }
@@ -308,7 +317,7 @@ mod tests {
 
         // Empty entry (kind picked, nothing entered): silent dismiss.
         assert!(
-            take_dismiss_commits(room_a, Some(&fan()), "", "", |_| false, &mut pending).is_empty()
+            take_dismiss_commits(room_a, Some(&fan()), "", "", "", |_| false, &mut pending).is_empty()
         );
 
         // A note typed: commits (count defaults to 1), like pressing OK.
@@ -317,6 +326,7 @@ mod tests {
             Some(&fan()),
             "",
             " by door ",
+            "",
             |_| false,
             &mut pending,
         );
@@ -326,7 +336,7 @@ mod tests {
 
         // Mandatory photo missing: withheld (OK would have been disabled).
         assert!(
-            take_dismiss_commits(room_a, Some(&fan()), "2", "", |_| true, &mut pending).is_empty()
+            take_dismiss_commits(room_a, Some(&fan()), "2", "", "", |_| true, &mut pending).is_empty()
         );
 
         // In-flight entry with a photo + a parked buffer for another kind:
@@ -334,7 +344,7 @@ mod tests {
         pending.push(room_a, &fan(), photo("fan"));
         pending.push(room_a, &thermostat(), photo("stat"));
         pending.push(room_b, &fan(), photo("fan_b"));
-        let commits = take_dismiss_commits(room_a, Some(&fan()), "3", "", |_| true, &mut pending);
+        let commits = take_dismiss_commits(room_a, Some(&fan()), "3", "", "", |_| true, &mut pending);
         assert_eq!(commits.len(), 2);
         assert_eq!(commits[0].kind, fan());
         assert_eq!(commits[0].count, 3);

@@ -294,6 +294,7 @@ pub struct SketchState {
     pub object_selected_kind: Option<ber_model::ber::objects::ObjectKind>,
     pub object_count_input: String,
     pub object_note_input: String,
+    pub object_kwh_input: String,
     pub object_other_name: String,
     /// Zone-count entry buffer for the "how many heating zones?" prompt (item 3).
     pub zone_input: String,
@@ -400,6 +401,7 @@ impl BerApp {
                 st.object_selected_kind.as_ref(),
                 &st.object_count_input,
                 &st.object_note_input,
+                &st.object_kwh_input,
                 |k| ctrl.object_photo_required(k),
                 &mut st.object_pending_photos,
             )
@@ -411,10 +413,11 @@ impl BerApp {
         st.object_auto_photo_for = None;
         st.object_count_input.clear();
         st.object_note_input.clear();
+        st.object_kwh_input.clear();
         st.object_other_name.clear();
         let mut ctrl = self.app_controller.borrow_mut();
         for c in commits {
-            ctrl.add_object(c.kind, c.count, c.note, c.photos);
+            ctrl.add_object(c.kind, c.count, c.note, c.kwh, c.photos);
         }
         ctrl.close_object_room();
     }
@@ -1884,6 +1887,7 @@ impl eframe::App for BerApp {
                                 object_selected_kind: &mut self.sketch_state.object_selected_kind,
                                 object_count_input: &mut self.sketch_state.object_count_input,
                                 object_note_input: &mut self.sketch_state.object_note_input,
+                                object_kwh_input: &mut self.sketch_state.object_kwh_input,
                                 object_other_name: &mut self.sketch_state.object_other_name,
                                 object_pending_photos: &mut self.sketch_state.object_pending_photos,
                                 heating_zones_prompt_open,
@@ -2895,11 +2899,12 @@ impl eframe::App for BerApp {
                                             kind,
                                             count,
                                             note,
+                                            kwh,
                                             photos,
                                         } => {
                                             controller
                                                 .borrow_mut()
-                                                .add_object(kind, count, note, photos);
+                                                .add_object(kind, count, note, kwh, photos);
                                         }
                                         SketchEvent::DeleteObject { room, object } => {
                                             controller.borrow_mut().delete_object(room, object);

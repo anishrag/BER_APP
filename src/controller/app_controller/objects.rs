@@ -349,6 +349,7 @@ impl AppController {
         kind: ObjectKind,
         count: u32,
         note: Option<String>,
+        kwh: Option<f32>,
         photos: Vec<(std::path::PathBuf, PhotoQuality)>,
     ) {
         let Some(room_id) = self.active_object_room else {
@@ -366,6 +367,7 @@ impl AppController {
             let is_zones = matches!(kind, ObjectKind::HeatingZones);
             let mut obj = BuildingObject::new(kind, count);
             obj.note = note.filter(|s| !s.trim().is_empty());
+            obj.kwh = kwh;
             obj.photos = stored;
             let new_id = obj.id;
             room.objects.push(obj);
