@@ -1821,7 +1821,8 @@ impl AppController {
                         let plan = &sd.outline.floor_plan;
                         for r in ids
                             .iter()
-                            .filter_map(|id| storey.walls.regions.iter().find(|r| r.id == *id))
+                            // Spans porch inner walls (riser-key path).
+                            .filter_map(|id| storey.placeable_wall(*id))
                         {
                             let Some((e0, e1)) = r.base_edge() else {
                                 continue;

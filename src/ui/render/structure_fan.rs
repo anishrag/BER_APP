@@ -274,11 +274,11 @@ fn region_centroid(
     id: ber_model::ber::common::ItemId,
 ) -> Option<(f64, f64)> {
     match kind {
+        // `placeable_wall` spans perimeter AND porch inner walls — a porch
+        // wall group must anchor its window at the porch, not fall back to
+        // the screen corner.
         SurfaceKind::Walls => storey
-            .walls
-            .regions
-            .iter()
-            .find(|r| r.id == id)
+            .placeable_wall(id)
             .and_then(|r| r.base_midpoint())
             .map(|m| (m.x, m.y)),
         SurfaceKind::Floors => storey
@@ -396,7 +396,9 @@ fn draw_fanned_surface(
     let fill = egui::Color32::from_rgba_unmultiplied(r, g, b, 55);
     match kind {
         SurfaceKind::Walls => {
-            let Some(r) = storey.walls.regions.iter().find(|r| r.id == id) else {
+            // Spans porch inner walls too — a selected porch wall must light
+            // up on the plan like any other group member.
+            let Some(r) = storey.placeable_wall(id) else {
                 return;
             };
             let v = &r.polygon.exterior;

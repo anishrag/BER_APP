@@ -517,7 +517,7 @@ impl AppController {
         // re-derive — its id is otherwise unstable without the amend).
         let wall_key = |this: &Self, id| -> Option<(i64, i64, i64, i64)> {
             let storey = this.current_record.as_ref()?.data.storeys.get(idx)?;
-            let r = storey.walls.regions.iter().find(|r| r.id == id)?;
+            let r = storey.placeable_wall(id)?;
             let (e0, e1) = r.base_edge()?;
             Some(document::riser_key(
                 domain::points::Point2f64::new(e0.x, e0.y),
