@@ -29,6 +29,10 @@ pub fn render(
     // World-3D points to mark with a bright dot (the Objects review's hotspots
     // for the selected kind). Empty otherwise.
     hotspots: &[(f64, f64, f64)],
+    // Whether to draw the dwelling ROOF wireframe above the ceilings. The app
+    // views keep it; document figures (BERreport) drop it — the storeys read
+    // better uncapped.
+    draw_roof: bool,
 ) {
     if ber.storeys.is_empty() {
         painter.text(
@@ -115,7 +119,7 @@ pub fn render(
     // footprint, with z LOCAL to its covered storey — add that storey's floor
     // datum to place them in world z, then draw each plane as a wireframe.
     let roof_stroke = egui::Stroke::new(1.5, egui::Color32::from_rgb(150, 90, 60));
-    for area in &ber.roof.areas {
+    for area in ber.roof.areas.iter().filter(|_| draw_roof) {
         let Some(&datum) = z_offsets.get(area.storey_idx) else {
             continue;
         };

@@ -216,7 +216,7 @@ pub fn render_ber(
             all_storeys_2d::render(painter, rect, ber, display_mode, view, selected);
         }
         (SketchMode::Storey3D, None) => {
-            full_house_3d::render(painter, rect, ber, display_mode, view, selected, hotspots);
+            full_house_3d::render(painter, rect, ber, display_mode, view, selected, hotspots, true);
         }
     }
 }

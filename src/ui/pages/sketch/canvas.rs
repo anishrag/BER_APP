@@ -5518,6 +5518,7 @@ fn object_review_overlay<F: FnMut(UiEvent)>(
         vp,
         &std::collections::HashSet::new(),
         &orv.hotspots,
+        true,
     );
     painter.text(
         three_d_rect.right_bottom() - egui::vec2(8.0, 6.0),
@@ -5816,6 +5817,7 @@ fn structure_review_overlay<F: FnMut(UiEvent)>(
         vp,
         &srv.highlight,
         &[],
+        true,
     );
     painter.text(
         three_d_rect.right_bottom() - egui::vec2(8.0, 6.0),
