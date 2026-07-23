@@ -739,9 +739,12 @@ impl AppController {
             }
         }
         if changed {
-            // A decided porch re-stamps its exposures (Irrelevant /
-            // SemiExposed) in the same derive tail the storey pipeline uses.
-            self.derive_horizontal_exposure_all();
+            // Mark dirty and let the NORMAL materialize pipeline re-derive —
+            // never call the derive tail out-of-band: its pass-0 stamp wipes
+            // are ungated while the re-stamps are gated on the document being
+            // synced/dimensioned, so an out-of-band call from the Objects
+            // screen can wipe every derived stamp (inter-storey, porch) and
+            // re-apply none (field report: Ashgrove porch confirm).
             let _ = self.mark_dirty();
         }
     }

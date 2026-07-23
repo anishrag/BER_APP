@@ -635,28 +635,13 @@ pub fn derive_porch_exclusions(ber: &mut Ber, dimensioned: &[bool]) {
                 ber.storeys[i].walls.regions[ri].construction_id = reset;
             }
 
-            // ── Storey above: its floor over the excluded porch is over an
-            // UNHEATED space — semi-exposed (DEAP), not an inter-storey
-            // junction. `derive_inter_storey` ran first and stamped it
-            // `InterStorey` (the porch is inside this storey's footprint);
-            // re-stamp just the porch overlap. The construction was reset to
-            // phase-only by the inter-storey pass — correct here too: the
-            // now-heat-loss floor is back IN structure scope, awaiting
-            // attribution.
-            if i + 1 < n && dim(i + 1) {
-                let above = &mut ber.storeys[i + 1];
-                above.floors =
-                    split_floors_intact(std::mem::take(&mut above.floors), &[ring.clone()]);
-                for r in &mut above.floors.regions {
-                    let rr = floor_plan_ring(r);
-                    if rr.len() >= 3
-                        && porch_fp.contains_ring(&rr)
-                        && r.exposure == FloorExposure::InterStorey
-                    {
-                        r.exposure = FloorExposure::SemiExposed;
-                    }
-                }
-            }
+            // NOTE deliberately NO storey-above handling: the separability
+            // rule guarantees an EXCLUDED porch is not meaningfully covered
+            // by any other storey (≤5% wall-thickness sliver), so splitting
+            // the storey above at the porch line would only shave that
+            // sliver into a nagging Unset region (field report: the 2.4 cm
+            // strip between Ashgrove's drawn porch back edge and the
+            // set-back first-floor wall).
         }
     }
 }

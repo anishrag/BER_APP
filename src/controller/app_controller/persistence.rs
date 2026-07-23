@@ -647,7 +647,9 @@ impl AppController {
                     .filter(|r| {
                         !matches!(
                             r.exposure,
-                            FloorExposure::Unset | FloorExposure::InterStorey
+                            FloorExposure::Unset
+                                | FloorExposure::InterStorey
+                                | FloorExposure::Irrelevant
                         )
                     })
                     .map(|r| (document::centroid_key(r.centroid()), r.exposure))
@@ -659,7 +661,9 @@ impl AppController {
                     .filter(|r| {
                         !matches!(
                             r.exposure,
-                            CeilingExposure::Unset | CeilingExposure::InterStorey
+                            CeilingExposure::Unset
+                                | CeilingExposure::InterStorey
+                                | CeilingExposure::Irrelevant
                         )
                     })
                     .map(|r| (document::centroid_key(r.centroid()), r.exposure))
@@ -738,7 +742,18 @@ impl AppController {
                 let plan = &self.document.storeys[idx].outline.floor_plan;
                 let mut walls = Vec::new();
                 let mut risers = Vec::new();
-                for r in &storey.walls.regions {
+                // Perimeter AND porch inner walls: a porch wall's base midpoint
+                // has no outline SurfaceRef, so it seeds into the riser store —
+                // the same base-edge key its attribution writes and
+                // `stamp_wall_constructions` reads. Without this, a saved
+                // porch-wall attribution dies on the first re-resolve after an
+                // app restart (regions re-mint; the session store is empty).
+                for r in storey
+                    .walls
+                    .regions
+                    .iter()
+                    .chain(storey.porch_walls.regions.iter())
+                {
                     let Some(c) = record.data.wall_construction(r.construction_id) else {
                         continue;
                     };
