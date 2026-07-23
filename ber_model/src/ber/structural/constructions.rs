@@ -554,6 +554,15 @@ pub struct ConstructionBase {
     pub construction_makeup: ConstructionMakeup,
     pub construction_phase: ConstructionPhase,
     pub photos: Vec<Evidence>,
+    /// The office-RESOLVED U-value (W/m²K), entered in BERresolve from a
+    /// submitted U-value calculation — the calculation document itself is
+    /// attached to `photos`. Meaningful for a `Layers` (custom) build-up
+    /// whose U the office computed; DEAP-default build-ups leave it unset.
+    /// `None` = not resolved yet — BERreport then asks its `u-value:{id}`
+    /// question; `Some` pre-answers it (the value + `photos` feed the
+    /// report's appendix). `#[serde(default)]` so older records load.
+    #[serde(default)]
+    pub assessed_u_value: Option<f32>,
     /// The assessor's editable label for this construction (shown as the group's
     /// name in the Structure editor). `None` falls back to "Group N". `alias`
     /// keeps records saved under the former field name `description` loadable.
