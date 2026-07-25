@@ -42,6 +42,9 @@ pub struct BerApp {
     /// Backing buffers for the "add a BER-specific request" fields.
     followups_new_label: String,
     followups_new_content: String,
+    /// The one in-flight inline rename on a follow-up sub-row (which row +
+    /// the typed buffer); `None` when no rename field is open.
+    followups_rename: Option<(crate::controller::app_controller::FollowUpRenameKey, String)>,
 
     // Global bug-report overlay (available on every page but Splash).
     pub bug_report: BugReportState,
@@ -385,6 +388,7 @@ impl BerApp {
             followups_sig: None,
             followups_new_label: String::new(),
             followups_new_content: String::new(),
+            followups_rename: None,
             bug_report: BugReportState::default(),
             last_seen_revision: 0,
             last_change_time: 0.0,
@@ -663,8 +667,9 @@ impl BerApp {
             None => KeyDetailsState::default(),
         };
         // Force the Follow-ups draft buffer to resync from the freshly loaded
-        // record on its next render.
+        // record on its next render, and drop any in-flight inline rename.
         self.followups_sig = None;
+        self.followups_rename = None;
     }
 
     /// Act on a Home-page intent (controller call + navigation + state
@@ -901,8 +906,9 @@ impl eframe::App for BerApp {
                             if let Some(view) = view {
                                 // Resync the editable buffer from the (regenerated)
                                 // draft only when the request SET changes — a hash
-                                // over each row's (checked, label) plus the sent
-                                // flag. Adds/removes/toggles change it; typing in
+                                // over each row's AND sub-row's (checked, label)
+                                // plus the sent flag. Adds/removes/toggles and
+                                // renames (sub-row labels) change it; typing in
                                 // the body doesn't, so edits aren't clobbered.
                                 let sig = {
                                     let mut s = 0xcbf2_9ce4_8422_2325u64;
@@ -914,6 +920,13 @@ impl eframe::App for BerApp {
                                         mix(p.checked as u8, &mut s);
                                         for b in p.label.bytes() {
                                             mix(b, &mut s);
+                                        }
+                                        for sub in &p.sub_rows {
+                                            mix(sub.checked as u8, &mut s);
+                                            for b in sub.label.bytes() {
+                                                mix(b, &mut s);
+                                            }
+                                            mix(0xfe, &mut s); // sub-row separator
                                         }
                                         mix(0xff, &mut s); // row separator
                                     }
@@ -930,11 +943,15 @@ impl eframe::App for BerApp {
                                     &mut self.followups_body,
                                     &mut self.followups_new_label,
                                     &mut self.followups_new_content,
+                                    &mut self.followups_rename,
                                     |event| {
                                         let mut c = controller.borrow_mut();
                                         match event {
                                             FollowUpEvent::Toggle(key) => {
                                                 c.toggle_followup_point(key)
+                                            }
+                                            FollowUpEvent::Rename { key, name } => {
+                                                c.rename_followup(key, name)
                                             }
                                             FollowUpEvent::SetBody(b) => c.set_followup_body(b),
                                             FollowUpEvent::AddCustom { label, content } => {

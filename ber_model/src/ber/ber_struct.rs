@@ -729,6 +729,11 @@ impl Ber {
     /// across all storeys — the door analogue of a group rename (doors group
     /// by their free-text type label, not a shared registry). An empty or
     /// unchanged `new` is a no-op. Returns how many doors were renamed.
+    ///
+    /// The follow-up tab's per-door-type ticks key by the SAME free-text name
+    /// (`followup.door_types`), so a rename re-points any matching tick — a
+    /// rename from the Structure review or the Follow-ups tab never orphans a
+    /// ticked request.
     pub fn rename_door_type(&mut self, old: &str, new: &str) -> usize {
         let (old_t, new_t) = (old.trim(), new.trim());
         if new_t.is_empty() || old_t == new_t {
@@ -740,6 +745,15 @@ impl Ber {
                 if d.type_name.trim() == old_t {
                     d.type_name = new_t.to_string();
                     renamed += 1;
+                }
+            }
+        }
+        if renamed > 0 {
+            let ticks = &mut self.followup.door_types;
+            if ticks.iter().any(|n| n == old_t) {
+                ticks.retain(|n| n != old_t);
+                if !ticks.iter().any(|n| n == new_t) {
+                    ticks.push(new_t.to_string());
                 }
             }
         }

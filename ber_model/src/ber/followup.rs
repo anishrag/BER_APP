@@ -272,25 +272,89 @@ impl FollowUpPointId {
                      they comply with the building regulations of the time.{surfaces}{fallback}"
                 )
             }
-            WindowDop => "For the windows, to use better-than-default values I'd need two \
-                things:\n\n\
-                (1) the Declaration of Performance for the windows, showing the U-value and \
-                solar transmittance — [window supplier] should be able to provide this if you \
-                contact them (I need the standard certified product document, not one generated \
-                specifically for your house; NSAI WEP or BFRC certification also works).\n\n\
-                (2) something linking that model to your house — an invoice, order confirmation \
-                or email from the supplier listing the models supplied to your address.\n\n\
-                If it's not available it's no problem — the default values for the age of the \
-                house are reasonable, so it won't hurt the rating much."
-                .to_string(),
-            DoorDop => "For the [front / back] door, to use better-than-default values I'd need \
-                two things:\n\n\
-                (1) its Declaration of Performance showing the U-value — [door supplier] should \
-                be able to provide this if you don't have it.\n\n\
-                (2) proof of the model installed at your address, such as an invoice or order \
-                confirmation. If there's a sticker or marking on the door itself showing the \
-                make/model, a photo of that would also help."
-                .to_string(),
+            WindowDop => {
+                // Ticked window TYPES make the request concrete (the client
+                // sees which windows are meant); no types ticked keeps the
+                // general wording (records with no placed windows, or the
+                // intake-year-driven tick).
+                let ticked: Vec<String> = candidate_window_types(ber)
+                    .into_iter()
+                    .filter(|(id, _)| fu.window_types.contains(id))
+                    .map(|(_, label)| label)
+                    .collect();
+                let intro = if ticked.is_empty() {
+                    "For the windows, to use better-than-default values I'd need two \
+                     things:"
+                        .to_string()
+                } else {
+                    let bullets = ticked
+                        .iter()
+                        .map(|l| format!("• {l}"))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    format!(
+                        "For the following window types, to use better-than-default values \
+                         I'd need two things for each:\n\n{bullets}"
+                    )
+                };
+                format!(
+                    "{intro}\n\n\
+                     (1) the Declaration of Performance for the windows, showing the U-value and \
+                     solar transmittance — [window supplier] should be able to provide this if you \
+                     contact them (I need the standard certified product document, not one generated \
+                     specifically for your house; NSAI WEP or BFRC certification also works).\n\n\
+                     (2) something linking that model to your house — an invoice, order confirmation \
+                     or email from the supplier listing the models supplied to your address.\n\n\
+                     If it's not available it's no problem — the default values for the age of the \
+                     house are reasonable, so it won't hurt the rating much."
+                )
+            }
+            DoorDop => {
+                // Same idea for the ticked door TYPES. Per-type wording only
+                // applies while the record genuinely divides into MORE than
+                // one door type (matching the tab's sub-row gate — so ticks
+                // gone stale after doors collapsed to one type fall back
+                // too); otherwise the single-door wording with its bracketed
+                // prompt stands.
+                let candidates = candidate_door_types(ber);
+                let ticked: Vec<&String> = if candidates.len() > 1 {
+                    candidates
+                        .iter()
+                        .filter(|n| fu.door_types.contains(n))
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                let (intro, dop) = if ticked.is_empty() {
+                    (
+                        "For the [front / back] door, to use better-than-default values I'd \
+                         need two things:"
+                            .to_string(),
+                        "its",
+                    )
+                } else {
+                    let bullets = ticked
+                        .iter()
+                        .map(|l| format!("• {l}"))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    (
+                        format!(
+                            "For the following doors, to use better-than-default values I'd \
+                             need two things for each:\n\n{bullets}"
+                        ),
+                        "the",
+                    )
+                };
+                format!(
+                    "{intro}\n\n\
+                     (1) {dop} Declaration of Performance showing the U-value — [door supplier] \
+                     should be able to provide this if you don't have it.\n\n\
+                     (2) proof of the model installed at your address, such as an invoice or order \
+                     confirmation. If there's a sticker or marking on the door itself showing the \
+                     make/model, a photo of that would also help."
+                )
+            }
             SolarDocs => "Could you send me any documentation you have for the solar panels? The \
                 best document is the Declaration of Works from the installer, as it has \
                 everything required. Otherwise, an invoice or sign-off from [installer] on \
@@ -325,6 +389,44 @@ impl FollowUpPointId {
                 .to_string(),
         }
     }
+}
+
+/// The shared window TYPES offered as sub-checks under the Window-documentation
+/// request — `(type id, display label)`, in registry order, restricted to types
+/// some placed window actually references (orphan registry entries — deleted
+/// windows' types, dedup seeds — would only inflate the list; same scope lesson
+/// as [`builder_surface_groups`]). The client is asked about the ticked ones.
+pub fn candidate_window_types(ber: &Ber) -> Vec<(ItemId, String)> {
+    use std::collections::HashSet;
+    let used: HashSet<ItemId> = ber
+        .storeys
+        .iter()
+        .flat_map(|s| s.windows.iter())
+        .map(|w| w.window_type_id)
+        .collect();
+    ber.window_types
+        .iter()
+        .filter(|t| used.contains(&t.id))
+        .map(|t| (t.id, t.display_label()))
+        .collect()
+}
+
+/// The distinct door TYPES on the record — trimmed non-empty `type_name`s in
+/// first-appearance order (doors group by their free-text label; the label IS
+/// the group, as in `rename_door_type`). Offered as sub-checks under the
+/// Door-documentation request only when there's MORE than one — a single door
+/// type keeps the plain request row.
+pub fn candidate_door_types(ber: &Ber) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for s in &ber.storeys {
+        for d in &s.doors {
+            let name = d.type_name.trim();
+            if !name.is_empty() && !out.iter().any(|n| n == name) {
+                out.push(name.to_string());
+            }
+        }
+    }
+    out
 }
 
 /// The extension phases still needing a dated proof — defined but not
@@ -692,6 +794,24 @@ pub struct FollowUpRequest {
     /// `#[serde(default)]` so older records load.
     #[serde(default)]
     pub certifier_surfaces: Vec<ItemId>,
+    /// Window TYPE ids ticked for the Window-documentation request (the
+    /// per-type sub-checks, offered when the record has placed windows —
+    /// [`candidate_window_types`]). When non-empty, WindowDop's email block
+    /// names these types and the backend checklist gets one `window_dop:<id>`
+    /// row per tick instead of the single `window_dop` row.
+    /// `#[serde(default)]` so older records load.
+    #[serde(default)]
+    pub window_types: Vec<ItemId>,
+    /// Door TYPE names (trimmed) ticked for the Door-documentation request —
+    /// offered only when the record has more than one door type
+    /// ([`candidate_door_types`]); a single door type keeps the plain row.
+    /// Keys are the free-text type names (the label IS the group);
+    /// [`Ber::rename_door_type`] remaps them on a rename.
+    /// `#[serde(default)]` so older records load.
+    ///
+    /// [`Ber::rename_door_type`]: super::ber_struct::Ber::rename_door_type
+    #[serde(default)]
+    pub door_types: Vec<String>,
     /// Per-BER custom request points added via the tab's "+".
     #[serde(default)]
     pub custom: Vec<CustomPoint>,
@@ -710,12 +830,62 @@ impl FollowUpRequest {
     /// The requested items as `(item_id, label)`, in draft order — selected
     /// built-in points (by slug) then ticked custom points (by their id). Sent
     /// to the backend so the office checklist mirrors exactly what was asked.
-    pub fn checklist_items(&self) -> Vec<(String, String)> {
-        let mut items: Vec<(String, String)> = ALL_POINTS
-            .into_iter()
-            .filter(|p| self.selected.contains(p))
-            .map(|p| (p.slug().to_string(), p.label().to_string()))
-            .collect();
+    ///
+    /// PER-TYPE expansion (additive wire shapes; same `{itemId, label}` rows):
+    /// when window TYPES are ticked, the single `window_dop` row is replaced by
+    /// one `window_dop:<type_id>` row per ticked type (candidate order, labels
+    /// from [`candidate_window_types`]); ticked door TYPES likewise become
+    /// `door_dop:<type name>` rows. With no per-type ticks — or when every
+    /// ticked type has gone stale (its window type / door deleted since), or
+    /// the record no longer has MORE than one door type (the same gate the
+    /// tab and the draft use) — the classic `window_dop` / `door_dop` rows
+    /// are sent unchanged, so old records and records without placed openings
+    /// keep today's payload exactly and a selected point always yields at
+    /// least one row.
+    pub fn checklist_items(&self, ber: &Ber) -> Vec<(String, String)> {
+        let mut items: Vec<(String, String)> = Vec::new();
+        for p in ALL_POINTS.into_iter().filter(|p| self.selected.contains(p)) {
+            let per_type: Vec<(String, String)> = match p {
+                FollowUpPointId::WindowDop if !self.window_types.is_empty() => {
+                    candidate_window_types(ber)
+                        .into_iter()
+                        .filter(|(id, _)| self.window_types.contains(id))
+                        .map(|(id, label)| {
+                            (
+                                format!("{}:{}", p.slug(), id.0),
+                                format!("{} — {label}", p.label()),
+                            )
+                        })
+                        .collect()
+                }
+                FollowUpPointId::DoorDop if !self.door_types.is_empty() => {
+                    // Same >1-types gate as the draft and the tab's sub-rows:
+                    // a record whose doors (now) share one type sends the
+                    // classic row even if a stale per-type tick lingers.
+                    let candidates = candidate_door_types(ber);
+                    if candidates.len() > 1 {
+                        candidates
+                            .into_iter()
+                            .filter(|n| self.door_types.contains(n))
+                            .map(|name| {
+                                (
+                                    format!("{}:{name}", p.slug()),
+                                    format!("{} — {name}", p.label()),
+                                )
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    }
+                }
+                _ => Vec::new(),
+            };
+            if per_type.is_empty() {
+                items.push((p.slug().to_string(), p.label().to_string()));
+            } else {
+                items.extend(per_type);
+            }
+        }
         items.extend(
             self.custom
                 .iter()
@@ -741,6 +911,249 @@ mod tests {
         ber.construction_phases
             .set_year_proof(ConstructionPhase::Original, proven);
         ber
+    }
+
+    /// A minimal placed window referencing shared type `type_id` (per-type
+    /// candidates only offer types some window actually uses).
+    fn window_of(type_id: ItemId) -> crate::ber::fenestration::Window {
+        crate::ber::fenestration::Window {
+            id: ItemId::default(),
+            vertices: vec![],
+            width_m: 1.2,
+            height_m: 1.1,
+            window_type_id: type_id,
+            placement: None,
+            wall_anchor: None,
+            assembly_id: None,
+            multi_storey: false,
+            shape: crate::ber::fenestration::WindowShape::Rectangular,
+            overshading: Default::default(),
+            num_opes: None,
+        }
+    }
+
+    /// A minimal door with free-text type `name` (the label IS the group).
+    fn door_named(name: &str) -> crate::ber::fenestration::Door {
+        crate::ber::fenestration::Door {
+            id: ItemId::default(),
+            type_name: name.to_string(),
+            vertices: vec![],
+            photos: vec![],
+            width_m: 0.9,
+            height_m: 2.0,
+            kind: None,
+            placement: None,
+            wall_anchor: None,
+            assembly_id: None,
+            draught_stripped: None,
+        }
+    }
+
+    /// A ber with two USED window types (plus an orphan) and doors of two
+    /// free-text types, for the per-type window/door row tests.
+    fn ber_with_openings() -> (Ber, ItemId, ItemId) {
+        use crate::ber::fenestration::{Frame, Glazing};
+        let mut ber = ber_with_year(1990, true);
+        let front = ber.ensure_window_type(
+            Glazing::Double,
+            Frame::WoodUPVC,
+            2020,
+            false,
+            true,
+            vec![16],
+            Some("Rationel front".to_string()),
+        );
+        let back = ber.ensure_window_type(
+            Glazing::Triple,
+            Frame::Metal,
+            2021,
+            false,
+            true,
+            vec![],
+            Some("Velfac back".to_string()),
+        );
+        // An orphan registry type no window references — must never be offered.
+        let orphan = ber.ensure_window_type(
+            Glazing::Single,
+            Frame::Metal,
+            0,
+            false,
+            true,
+            vec![],
+            Some("Orphan".to_string()),
+        );
+        assert_ne!(orphan, front);
+        let mut s = crate::ber::structural::Storey::default();
+        s.windows.push(window_of(front));
+        s.windows.push(window_of(back));
+        s.windows.push(window_of(front));
+        s.doors.push(door_named("Front door"));
+        s.doors.push(door_named("Back door"));
+        s.doors.push(door_named("Front door")); // same type twice
+        ber.storeys.push(s);
+        (ber, front, back)
+    }
+
+    /// Per-type candidates: window types restricted to USED ones (registry
+    /// order, display labels); door types deduped trimmed names in
+    /// first-appearance order.
+    #[test]
+    fn candidate_window_and_door_types_scope_and_labels() {
+        let (ber, front, back) = ber_with_openings();
+        let wt = candidate_window_types(&ber);
+        assert_eq!(
+            wt.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![front, back],
+            "used types only — the orphan registry entry is not offered"
+        );
+        assert!(
+            wt[0].1.starts_with("Rationel front — Double · Wood/UPVC"),
+            "display label: {}",
+            wt[0].1
+        );
+        assert_eq!(
+            candidate_door_types(&ber),
+            vec!["Front door".to_string(), "Back door".to_string()],
+            "deduped, first-appearance order"
+        );
+    }
+
+    /// Ticked window/door types are named (bulleted) in their request blocks;
+    /// with no per-type ticks the classic general wording stands.
+    #[test]
+    fn per_type_ticks_render_into_the_draft() {
+        let (ber, front, _back) = ber_with_openings();
+        let mut fu = FollowUpRequest {
+            selected: vec![FollowUpPointId::WindowDop, FollowUpPointId::DoorDop],
+            ..Default::default()
+        };
+        let plain = assemble_draft(&ber, &fu);
+        assert!(
+            plain.contains("For the windows,") && plain.contains("For the [front / back] door,"),
+            "no per-type ticks → classic wording: {plain}"
+        );
+
+        fu.window_types = vec![front];
+        fu.door_types = vec!["Back door".to_string()];
+        let per_type = assemble_draft(&ber, &fu);
+        assert!(
+            per_type.contains("• Rationel front — Double"),
+            "ticked window type named: {per_type}"
+        );
+        assert!(
+            !per_type.contains("Velfac back"),
+            "unticked window type NOT named: {per_type}"
+        );
+        assert!(
+            per_type.contains("• Back door") && !per_type.contains("• Front door"),
+            "only the ticked door type named: {per_type}"
+        );
+    }
+
+    /// The backend checklist wire rows: per-type ticks replace the single
+    /// `window_dop` / `door_dop` rows with `window_dop:<type_id>` /
+    /// `door_dop:<type name>` rows (candidate order); without per-type ticks
+    /// the classic single rows are sent byte-identically (wire compat).
+    #[test]
+    fn checklist_items_expand_per_type_and_stay_compatible_without() {
+        let (ber, front, back) = ber_with_openings();
+        let mut fu = FollowUpRequest {
+            selected: vec![FollowUpPointId::WindowDop, FollowUpPointId::DoorDop],
+            ..Default::default()
+        };
+        let classic = fu.checklist_items(&ber);
+        assert_eq!(
+            classic
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["window_dop", "door_dop"],
+            "no per-type ticks → today's payload exactly"
+        );
+
+        fu.window_types = vec![front, back];
+        fu.door_types = vec!["Front door".to_string()];
+        let items = fu.checklist_items(&ber);
+        let ids: Vec<&str> = items.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                format!("window_dop:{}", front.0),
+                format!("window_dop:{}", back.0),
+                "door_dop:Front door".to_string(),
+            ],
+            "per-type rows replace the parents"
+        );
+        assert!(
+            items[0]
+                .1
+                .starts_with("Window DoP + proof of model — Rationel front"),
+            "per-type label carries the type: {}",
+            items[0].1
+        );
+    }
+
+    /// Stale per-type ticks (their openings deleted since seeding) fall back
+    /// to the CLASSIC wire rows and wording rather than silently dropping the
+    /// request: all windows gone → bare `window_dop`; doors collapsed to a
+    /// single type → bare `door_dop` (the same >1-types gate the tab uses).
+    #[test]
+    fn stale_per_type_ticks_fall_back_to_classic_rows() {
+        let (mut ber, front, back) = ber_with_openings();
+        // Doors collapse to one type; the seeded ticks linger.
+        ber.storeys[0].doors.retain(|d| d.type_name != "Back door");
+        let fu = FollowUpRequest {
+            selected: vec![FollowUpPointId::DoorDop],
+            door_types: vec!["Front door".to_string(), "Back door".to_string()],
+            ..Default::default()
+        };
+        assert_eq!(
+            fu.checklist_items(&ber)
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["door_dop"],
+            "one door type → classic row despite stale ticks"
+        );
+        assert!(
+            assemble_draft(&ber, &fu).contains("For the [front / back] door,"),
+            "classic wording too"
+        );
+
+        // Every window deleted; the seeded type ticks linger.
+        ber.storeys[0].windows.clear();
+        let fu = FollowUpRequest {
+            selected: vec![FollowUpPointId::WindowDop],
+            window_types: vec![front, back],
+            ..Default::default()
+        };
+        assert_eq!(
+            fu.checklist_items(&ber)
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["window_dop"],
+            "no candidates left → the selected point still yields its classic row"
+        );
+        assert!(assemble_draft(&ber, &fu).contains("For the windows,"));
+    }
+
+    /// A door-type rename re-points the follow-up tick keyed by the old name
+    /// (from either the Structure review or the Follow-ups tab — same model
+    /// write), so a ticked request never orphans.
+    #[test]
+    fn door_rename_remaps_followup_door_type_ticks() {
+        let (mut ber, _, _) = ber_with_openings();
+        ber.followup.door_types = vec!["Front door".to_string(), "Back door".to_string()];
+        assert_eq!(ber.rename_door_type("Front door", "Hall door"), 2);
+        assert_eq!(
+            ber.followup.door_types,
+            vec!["Back door".to_string(), "Hall door".to_string()],
+            "tick re-keyed to the new name"
+        );
+        // Renaming INTO an already-ticked name doesn't duplicate the tick.
+        assert_eq!(ber.rename_door_type("Hall door", "Back door"), 2);
+        assert_eq!(ber.followup.door_types, vec!["Back door".to_string()]);
     }
 
     #[test]

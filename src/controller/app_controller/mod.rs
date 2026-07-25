@@ -66,7 +66,9 @@ pub use exposure::{
     ExposureSelection, ExposureSnapKind, RiserView, SectionHandle, WallExposureView,
 };
 pub use floor_exposure::{FloorExposureRegionView, FloorExposureStoreyView};
-pub use followup::{FollowUpPointRow, FollowUpRowKey, FollowUpView};
+pub use followup::{
+    FollowUpPointRow, FollowUpRenameKey, FollowUpRowKey, FollowUpSubRow, FollowUpView,
+};
 pub use phase_regions::PhaseDisplayRegion;
 pub use roof::{
     PendingRoofSectionView, RoofContextRegion, RoofRegionView, RoofSectionStyle, RoofShape,

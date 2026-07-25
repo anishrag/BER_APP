@@ -26320,6 +26320,385 @@ fn followup_send_completion_lands_on_the_originating_record() {
     assert!(c.followup_send.is_none());
 }
 
+/// A controller with a BER carrying two USED window types and doors of two
+/// free-text types (plus an auto-offered builder surface), for the follow-up
+/// per-type row / rename tests. Returns `(controller, front_type, back_type,
+/// wall_group)`.
+fn followup_openings_controller() -> (
+    AppController,
+    ber_model::ber::common::ItemId,
+    ber_model::ber::common::ItemId,
+    ber_model::ber::common::ItemId,
+) {
+    use ber_model::ber::common::{ConstructionPhase, ItemId};
+    use ber_model::ber::fenestration::{Door, Frame, Glazing, Window, WindowShape};
+    use ber_model::ber::structural::{
+        ConstructionMakeup, Opes, Polygon3D, Storey, WallConstructionType, WallExposure, WallRegion,
+    };
+    use domain::points::Point3f64;
+
+    let date = chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    c.create_ber("Openings".to_string(), date);
+
+    let window_of = |type_id| Window {
+        id: ItemId::default(),
+        vertices: vec![],
+        width_m: 1.2,
+        height_m: 1.1,
+        window_type_id: type_id,
+        placement: None,
+        wall_anchor: None,
+        assembly_id: None,
+        multi_storey: false,
+        shape: WindowShape::Rectangular,
+        overshading: Default::default(),
+        num_opes: None,
+    };
+    let door_named = |name: &str| Door {
+        id: ItemId::default(),
+        type_name: name.to_string(),
+        vertices: vec![],
+        photos: vec![],
+        width_m: 0.9,
+        height_m: 2.0,
+        kind: None,
+        placement: None,
+        wall_anchor: None,
+        assembly_id: None,
+        draught_stripped: None,
+    };
+
+    let ber = &mut c.current_record.as_mut().unwrap().data;
+    // Recent window types + door year → WindowDop and DoorDop auto-select.
+    let front = ber.ensure_window_type(
+        Glazing::Double,
+        Frame::WoodUPVC,
+        2020,
+        false,
+        true,
+        vec![16],
+        Some("Rationel front".to_string()),
+    );
+    let back = ber.ensure_window_type(
+        Glazing::Triple,
+        Frame::Metal,
+        2021,
+        false,
+        true,
+        vec![],
+        Some("Velfac back".to_string()),
+    );
+    ber.intake.door_year = Some(2020);
+    // Insulation works → the Builder's-letter point, with one auto surface.
+    ber.intake.insulation_walls = true;
+    let wall_group = ber.ensure_wall_construction(
+        WallConstructionType::CavityWall,
+        ConstructionMakeup::Unknown,
+        ConstructionPhase::Original,
+    );
+    let mut s = Storey::default();
+    s.windows.push(window_of(front));
+    s.windows.push(window_of(back));
+    s.doors.push(door_named("Front door"));
+    s.doors.push(door_named("Back door"));
+    s.doors.push(door_named("Front door")); // same type twice → still 2 types
+    s.walls.regions.push(WallRegion {
+        id: ItemId::default(),
+        polygon: Polygon3D {
+            exterior: vec![
+                Point3f64::new(0.0, 0.0, 0.0),
+                Point3f64::new(4.0, 0.0, 0.0),
+                Point3f64::new(4.0, 0.0, 2.4),
+                Point3f64::new(0.0, 0.0, 2.4),
+            ],
+        },
+        exposure: WallExposure::Exposed,
+        opes: Opes::default(),
+        construction_id: wall_group,
+    });
+    ber.storeys.push(s);
+    (c, front, back, wall_group)
+}
+
+/// Per-type window/door rows on the Follow-ups tab: the first visit seeds one
+/// ticked sub-check per used window type / door type (doors because there's
+/// more than one type), unticking flows to the parent and to the send
+/// payload's per-type checklist keys, and unticking the last type drops the
+/// parent — the extension sub-check semantics.
+#[test]
+fn followup_per_type_window_and_door_rows_roundtrip_to_the_payload() {
+    use super::followup::{send_payload, FollowUpRowKey};
+    use ber_model::ber::followup::FollowUpPointId;
+
+    let (mut c, front, back, _) = followup_openings_controller();
+    let v = c.followup_view().unwrap();
+    let row = |v: &FollowUpView, id: FollowUpPointId| -> Vec<(FollowUpRowKey, String, bool)> {
+        v.points
+            .iter()
+            .find(|p| p.key == FollowUpRowKey::BuiltIn(id))
+            .expect("point row")
+            .sub_rows
+            .iter()
+            .map(|s| (s.key.clone(), s.label.clone(), s.checked))
+            .collect()
+    };
+
+    let windows = row(&v, FollowUpPointId::WindowDop);
+    assert_eq!(
+        windows
+            .iter()
+            .map(|(k, _, checked)| (k.clone(), *checked))
+            .collect::<Vec<_>>(),
+        vec![
+            (FollowUpRowKey::WindowTypeSub(front), true),
+            (FollowUpRowKey::WindowTypeSub(back), true),
+        ],
+        "one seeded, ticked sub-check per USED window type"
+    );
+    assert!(
+        windows[0]
+            .1
+            .starts_with("Rationel front — Double · Wood/UPVC"),
+        "sub-row shows the type's display label: {}",
+        windows[0].1
+    );
+    let doors = row(&v, FollowUpPointId::DoorDop);
+    assert_eq!(
+        doors
+            .iter()
+            .map(|(k, _, checked)| (k.clone(), *checked))
+            .collect::<Vec<_>>(),
+        vec![
+            (FollowUpRowKey::DoorTypeSub("Front door".to_string()), true),
+            (FollowUpRowKey::DoorTypeSub("Back door".to_string()), true),
+        ],
+        "two door types → seeded per-type sub-checks"
+    );
+
+    // Untick one window type: the parent stays, the payload names the rest.
+    c.toggle_followup_point(FollowUpRowKey::WindowTypeSub(front));
+    let ber = &c.current_record.as_ref().unwrap().data;
+    let (_, body, items) = send_payload(ber);
+    let ids: Vec<&str> = items.iter().map(|(id, _)| id.as_str()).collect();
+    assert!(
+        ids.contains(&format!("window_dop:{}", back.0).as_str()),
+        "ticked type keyed per-type: {ids:?}"
+    );
+    assert!(
+        !ids.iter()
+            .any(|i| *i == "window_dop" || i.contains(&front.0.to_string())),
+        "no bare window_dop row and no row for the unticked type: {ids:?}"
+    );
+    assert!(
+        body.contains("• Velfac back") && !body.contains("• Rationel front"),
+        "the draft names exactly the ticked types: {body}"
+    );
+
+    // Untick the last window type: the parent point drops.
+    c.toggle_followup_point(FollowUpRowKey::WindowTypeSub(back));
+    let ber = &c.current_record.as_ref().unwrap().data;
+    assert!(!ber.followup.selected.contains(&FollowUpPointId::WindowDop));
+    // Re-tick one: the parent returns.
+    c.toggle_followup_point(FollowUpRowKey::WindowTypeSub(front));
+    let ber = &c.current_record.as_ref().unwrap().data;
+    assert!(ber.followup.selected.contains(&FollowUpPointId::WindowDop));
+
+    // Doors: untick one → per-type payload key for the other.
+    c.toggle_followup_point(FollowUpRowKey::DoorTypeSub("Front door".to_string()));
+    let ber = &c.current_record.as_ref().unwrap().data;
+    let (_, body, items) = send_payload(ber);
+    let ids: Vec<&str> = items.iter().map(|(id, _)| id.as_str()).collect();
+    assert!(
+        ids.contains(&"door_dop:Back door") && !ids.iter().any(|i| i.contains("Front door")),
+        "door payload keys: {ids:?}"
+    );
+    assert!(body.contains("• Back door") && !body.contains("• Front door"));
+
+    // Ticking the PARENT off then on restores every type (mirror extensions).
+    c.toggle_followup_point(FollowUpRowKey::BuiltIn(FollowUpPointId::DoorDop));
+    let ber = &c.current_record.as_ref().unwrap().data;
+    assert!(ber.followup.door_types.is_empty());
+    c.toggle_followup_point(FollowUpRowKey::BuiltIn(FollowUpPointId::DoorDop));
+    let ber = &c.current_record.as_ref().unwrap().data;
+    assert_eq!(
+        ber.followup.door_types.len(),
+        2,
+        "parent re-tick = all types"
+    );
+}
+
+/// Inline renames from the Follow-ups tab write the SAME durable names the
+/// rest of the app uses (window type / door type / construction group) and
+/// regenerate the unsent draft — the letter uses the new name. A rejected
+/// window-type rename parks its hint on the sub-row and leaves the draft
+/// alone.
+#[test]
+fn followup_rename_writes_through_the_model_and_the_draft() {
+    use super::followup::{FollowUpRenameKey, FollowUpRowKey};
+    use ber_model::ber::followup::FollowUpPointId;
+
+    let (mut c, front, _back, wall_group) = followup_openings_controller();
+    let _ = c.followup_view().unwrap(); // seed
+
+    // Window type: durable model name + draft bullet.
+    c.rename_followup(
+        FollowUpRenameKey::WindowType(front),
+        "Nordan bay".to_string(),
+    );
+    let ber = &c.current_record.as_ref().unwrap().data;
+    assert_eq!(
+        ber.window_types
+            .iter()
+            .find(|t| t.id == front)
+            .unwrap()
+            .specifics
+            .name(),
+        Some("Nordan bay"),
+        "the shared type's durable name changed"
+    );
+    assert!(
+        ber.followup.body.contains("• Nordan bay —"),
+        "draft regenerated with the new name: {}",
+        ber.followup.body
+    );
+
+    // A rejected rename (another type's name) parks the hint on the sub-row.
+    c.rename_followup(
+        FollowUpRenameKey::WindowType(front),
+        "Velfac back".to_string(),
+    );
+    let ber = &c.current_record.as_ref().unwrap().data;
+    assert_eq!(
+        ber.window_types
+            .iter()
+            .find(|t| t.id == front)
+            .unwrap()
+            .specifics
+            .name(),
+        Some("Nordan bay"),
+        "rejected rename leaves the durable name"
+    );
+    let v = c.followup_view().unwrap();
+    let win_row = v
+        .points
+        .iter()
+        .find(|p| p.key == FollowUpRowKey::BuiltIn(FollowUpPointId::WindowDop))
+        .unwrap();
+    let front_sub = win_row
+        .sub_rows
+        .iter()
+        .find(|s| s.key == FollowUpRowKey::WindowTypeSub(front))
+        .unwrap();
+    assert!(
+        front_sub
+            .rename_error
+            .as_deref()
+            .is_some_and(|h| h.contains("Velfac back")),
+        "the parked hint shows on the type's sub-row: {:?}",
+        front_sub.rename_error
+    );
+    assert_eq!(
+        front_sub.rename_prefill, "Nordan bay",
+        "prefill = bare name"
+    );
+
+    // Door type: every door renamed, the tick re-keyed, the draft updated.
+    c.rename_followup(
+        FollowUpRenameKey::DoorType("Front door".to_string()),
+        "Hall door".to_string(),
+    );
+    let ber = &c.current_record.as_ref().unwrap().data;
+    assert_eq!(
+        ber.storeys[0]
+            .doors
+            .iter()
+            .filter(|d| d.type_name == "Hall door")
+            .count(),
+        2,
+        "both matching doors renamed"
+    );
+    assert!(ber.followup.door_types.iter().any(|n| n == "Hall door"));
+    assert!(
+        ber.followup.body.contains("• Hall door"),
+        "draft uses the door's new name: {}",
+        ber.followup.body
+    );
+
+    // Construction group: same write as the Structure review's rename.
+    c.rename_followup(
+        FollowUpRenameKey::Surface(wall_group),
+        "300mm pumped cavity".to_string(),
+    );
+    let ber = &c.current_record.as_ref().unwrap().data;
+    assert!(
+        ber.followup.body.contains("• 300mm pumped cavity"),
+        "the letter's surface bullet uses the assessor's name: {}",
+        ber.followup.body
+    );
+
+    // A no-op rename (Save with the name unchanged) must NOT regenerate the
+    // draft — hand edits survive.
+    c.set_followup_body("hand-edited".to_string());
+    c.rename_followup(
+        FollowUpRenameKey::Surface(wall_group),
+        "300mm pumped cavity".to_string(),
+    );
+    let ber = &c.current_record.as_ref().unwrap().data;
+    assert_eq!(
+        ber.followup.body, "hand-edited",
+        "no-op rename keeps the edit"
+    );
+
+    // Renaming a name the letter doesn't MENTION (an unticked sub-row) still
+    // writes the durable model name but leaves hand edits alone — only a
+    // rename that would change the letter regenerates it.
+    c.toggle_followup_point(FollowUpRowKey::WindowTypeSub(front)); // untick
+    c.set_followup_body("hand-edited again".to_string());
+    c.rename_followup(FollowUpRenameKey::WindowType(front), "Kastrup".to_string());
+    let ber = &c.current_record.as_ref().unwrap().data;
+    assert_eq!(
+        ber.window_types
+            .iter()
+            .find(|t| t.id == front)
+            .unwrap()
+            .specifics
+            .name(),
+        Some("Kastrup"),
+        "the durable rename still lands"
+    );
+    assert_eq!(
+        ber.followup.body, "hand-edited again",
+        "an off-letter rename doesn't clobber the edited draft"
+    );
+}
+
+/// The send seam receives the assessor's EDITED body verbatim — an explicit
+/// edit survives until send; a tick change regenerates the draft (and hence
+/// the payload).
+#[test]
+fn followup_send_payload_carries_the_edited_body() {
+    use super::followup::{send_payload, FollowUpRowKey};
+    use ber_model::ber::followup::FollowUpPointId;
+
+    let (mut c, _front, _back, _) = followup_openings_controller();
+    let _ = c.followup_view().unwrap(); // seed the draft
+
+    let edited = "Hi,\n\nJust the door documents please.\n\nThanks,\nAnish".to_string();
+    c.set_followup_body(edited.clone());
+    let ber = &c.current_record.as_ref().unwrap().data;
+    let (subject, body, _) = send_payload(ber);
+    assert_eq!(body, edited, "the edited buffer IS the sent text");
+    assert!(subject.contains("BER assessment"), "subject: {subject}");
+
+    // A tick change regenerates the draft — the payload follows the rebuild.
+    c.toggle_followup_point(FollowUpRowKey::BuiltIn(FollowUpPointId::HouseBuildDate));
+    let ber = &c.current_record.as_ref().unwrap().data;
+    let (_, body, _) = send_payload(ber);
+    assert_ne!(body, edited, "a regenerate replaces the edited buffer");
+    assert!(body.starts_with("Hi,\n\nThanks again"), "fresh composition");
+}
+
 // ── Heating-system wiring (objects → heating_system) ────────────────────────
 
 /// Placing a gas boiler drives `system_type` live (item 1); deleting it reverts

@@ -9,13 +9,21 @@ use egui::{Color32, RichText, Ui};
 
 use ber_model::ber::common::ItemId;
 
-use crate::controller::app_controller::{FollowUpRowKey, FollowUpView};
+use crate::controller::app_controller::{FollowUpRenameKey, FollowUpRowKey, FollowUpView};
+use crate::ui::widgets::{text_input, text_input_multiline};
 
 /// Intents raised by the Follow-ups tab.
 #[derive(Debug)]
 pub enum FollowUpEvent {
     /// Tick/untick a request row — built-in or custom (rebuilds the draft).
     Toggle(FollowUpRowKey),
+    /// Rename a named thing shown on a sub-row (window/door type, construction
+    /// group) — writes the durable model name the whole app uses, then
+    /// regenerates the draft so the letter uses the new name.
+    Rename {
+        key: FollowUpRenameKey,
+        name: String,
+    },
     /// The assessor edited the email body.
     SetBody(String),
     /// Add a per-BER custom request point (label + email paragraph).
@@ -31,13 +39,15 @@ pub struct FollowUpsPage;
 impl FollowUpsPage {
     /// Render the tab. `body` is the editable draft buffer (kept in sync with the
     /// view by the caller); `new_label`/`new_content` back the "add a request"
-    /// fields. The page emits events for every change.
+    /// fields; `rename` is the one in-flight inline rename (which sub-row +
+    /// its typed buffer). The page emits events for every change.
     pub fn render<F>(
         ui: &mut Ui,
         view: &FollowUpView,
         body: &mut String,
         new_label: &mut String,
         new_content: &mut String,
+        rename: &mut Option<(FollowUpRenameKey, String)>,
         mut on_event: F,
     ) where
         F: FnMut(FollowUpEvent),
@@ -101,7 +111,8 @@ impl FollowUpsPage {
                     }
                 }
             });
-            // Per-extension sub-checks, indented under the Extension build-date row.
+            // Per-thing sub-checks (extensions / surfaces / window & door
+            // types), indented under their parent row.
             for sub in &row.sub_rows {
                 ui.horizontal(|ui| {
                     ui.add_space(24.0);
@@ -109,7 +120,60 @@ impl FollowUpsPage {
                     if ui.checkbox(&mut checked, &sub.label).changed() {
                         on_event(FollowUpEvent::Toggle(sub.key.clone()));
                     }
+                    // Inline rename for rows that show a durable model name —
+                    // the letter uses THEIR name, so let the assessor clarify
+                    // it here (same write as the Structure review's rename).
+                    if let Some(rk) = &sub.rename_key {
+                        let renaming_this = rename.as_ref().is_some_and(|(k, _)| k == rk);
+                        if !renaming_this
+                            && ui
+                                .small_button("✏ Rename")
+                                .on_hover_text(
+                                    "Rename it for the client letter — this renames it \
+                                     everywhere in the app",
+                                )
+                                .clicked()
+                        {
+                            *rename = Some((rk.clone(), sub.rename_prefill.clone()));
+                        }
+                    }
                 });
+                if let Some(rk) = &sub.rename_key {
+                    let mut done = false;
+                    if let Some((k, buf)) = rename.as_mut() {
+                        if k == rk {
+                            ui.horizontal(|ui| {
+                                ui.add_space(48.0);
+                                // `text_input` (never a raw TextEdit) so the
+                                // native soft keyboard binds on Android —
+                                // winit drops text events.
+                                text_input(ui, buf, 220.0, "new name");
+                                if ui.button("Save").clicked() {
+                                    on_event(FollowUpEvent::Rename {
+                                        key: k.clone(),
+                                        name: buf.clone(),
+                                    });
+                                    done = true;
+                                }
+                                if ui.button("Cancel").clicked() {
+                                    done = true;
+                                }
+                            });
+                        }
+                    }
+                    if done {
+                        *rename = None;
+                    }
+                    if let Some(hint) = &sub.rename_error {
+                        ui.horizontal(|ui| {
+                            ui.add_space(48.0);
+                            ui.label(
+                                RichText::new(format!("⚠ {hint}"))
+                                    .color(Color32::from_rgb(0xc6, 0x28, 0x28)),
+                            );
+                        });
+                    }
+                }
             }
         }
 
@@ -119,19 +183,12 @@ impl FollowUpsPage {
             ui.label(RichText::new("Add a BER-specific request").strong());
             ui.horizontal(|ui| {
                 ui.label("Label:");
-                ui.add(
-                    egui::TextEdit::singleline(new_label)
-                        .desired_width(240.0)
-                        .hint_text("e.g. Septic tank cert"),
-                );
+                // text_input / text_input_multiline (not raw TextEdits) so
+                // the native soft keyboard binds on Android.
+                text_input(ui, new_label, 240.0, "e.g. Septic tank cert");
             });
             ui.label(RichText::new("What to ask the client:").weak());
-            ui.add(
-                egui::TextEdit::multiline(new_content)
-                    .desired_width(f32::INFINITY)
-                    .desired_rows(3)
-                    .hint_text("The paragraph added to the email…"),
-            );
+            text_input_multiline(ui, new_content, 3, "The paragraph added to the email…");
             let can_add = !new_label.trim().is_empty() || !new_content.trim().is_empty();
             if ui
                 .add_enabled(can_add, egui::Button::new("+ Add request"))
@@ -155,14 +212,10 @@ impl FollowUpsPage {
             .weak(),
         );
         ui.add_space(4.0);
-        if ui
-            .add(
-                egui::TextEdit::multiline(body)
-                    .desired_width(f32::INFINITY)
-                    .desired_rows(18),
-            )
-            .changed()
-        {
+        // The editable draft: a multiline `text_input` so the native soft
+        // keyboard binds on Android (with a real Enter for new lines). Every
+        // edit streams into the controller — the SENT text is this buffer.
+        if text_input_multiline(ui, body, 18, "").changed {
             on_event(FollowUpEvent::SetBody(body.clone()));
         }
 

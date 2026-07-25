@@ -70,6 +70,49 @@ pub fn text_input(ui: &mut egui::Ui, buf: &mut String, width: f32, hint: &str) -
     input_with_pad(ui, buf, width, hint, PadKind::Qwerty)
 }
 
+/// The MULTILINE free-text field (notes, the follow-up email body): a
+/// multiline `TextEdit` that raises the native text keyboard on Android with
+/// a REAL Enter — newlines commit into the buffer instead of acting as
+/// "Done" (`ImeKind::TextMultiline`) — and opens the shared QWERTY pad on
+/// desktop with `BER_TOUCH=1` (the pad has no newline key; it's the dev
+/// fallback). There is no Enter-submit idiom: `submitted` fires only from
+/// the pad's OK.
+pub fn text_input_multiline(
+    ui: &mut egui::Ui,
+    buf: &mut String,
+    rows: usize,
+    hint: &str,
+) -> PadResponse {
+    let response = ui.add(
+        egui::TextEdit::multiline(buf)
+            .desired_width(f32::INFINITY)
+            .desired_rows(rows)
+            .hint_text(hint),
+    );
+    let mut submitted = false;
+    let mut changed = response.changed();
+
+    // Android: the field drives the native soft keyboard instead of the pads.
+    #[cfg(target_os = "android")]
+    {
+        use super::native_ime::{attach, ImeKind};
+        let ime = attach(ui, &response, buf, ImeKind::TextMultiline);
+        changed |= ime.changed;
+        submitted |= ime.submitted;
+    }
+
+    desktop_pad(
+        ui,
+        &response,
+        buf,
+        PadKind::Qwerty,
+        &mut submitted,
+        &mut changed,
+    );
+
+    PadResponse { submitted, changed }
+}
+
 /// [`text_input`] that SELECTS the whole current text when the field GAINS
 /// focus, so typing replaces it without manual clearing — the group-name
 /// field idiom ("Group 1" should vanish on the first keystroke).
@@ -145,34 +188,49 @@ fn input_with_pad_opts(
         submitted |= ime.submitted;
     }
 
-    if pads_enabled() {
-        let ctx = ui.ctx().clone();
-        if response.has_focus() {
-            ctx.data_mut(|d| d.insert_temp(owner_key(), response.id));
-        }
-        let owner: Option<Id> = ctx.data(|d| d.get_temp(owner_key()));
-        if owner == Some(response.id) {
-            match render_pad(&ctx, buf, kind) {
-                PadEvent::Edited => changed = true,
-                // `remove_temp` needs `T: Default`, which `Id` isn't —
-                // overwrite with the never-matching NULL id instead.
-                PadEvent::Submit => {
-                    submitted = true;
-                    ctx.data_mut(|d| d.insert_temp(owner_key(), Id::NULL));
-                }
-                PadEvent::Dismiss => {
-                    ctx.data_mut(|d| d.insert_temp(owner_key(), Id::NULL));
-                }
-                PadEvent::None => {}
-            }
-        }
-        // A hardware-Enter submit closes the pad too.
-        if submitted {
-            ctx.data_mut(|d| d.insert_temp(owner_key(), Id::NULL));
-        }
-    }
+    desktop_pad(ui, &response, buf, kind, &mut submitted, &mut changed);
 
     PadResponse { submitted, changed }
+}
+
+/// The desktop (`BER_TOUCH=1`) on-screen pad half of a field: claim the pad on
+/// focus, apply its presses to `buf`, release on submit/dismiss. No-op when
+/// pads are disabled (Android / plain desktop).
+fn desktop_pad(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    buf: &mut String,
+    kind: PadKind,
+    submitted: &mut bool,
+    changed: &mut bool,
+) {
+    if !pads_enabled() {
+        return;
+    }
+    let ctx = ui.ctx().clone();
+    if response.has_focus() {
+        ctx.data_mut(|d| d.insert_temp(owner_key(), response.id));
+    }
+    let owner: Option<Id> = ctx.data(|d| d.get_temp(owner_key()));
+    if owner == Some(response.id) {
+        match render_pad(&ctx, buf, kind) {
+            PadEvent::Edited => *changed = true,
+            // `remove_temp` needs `T: Default`, which `Id` isn't —
+            // overwrite with the never-matching NULL id instead.
+            PadEvent::Submit => {
+                *submitted = true;
+                ctx.data_mut(|d| d.insert_temp(owner_key(), Id::NULL));
+            }
+            PadEvent::Dismiss => {
+                ctx.data_mut(|d| d.insert_temp(owner_key(), Id::NULL));
+            }
+            PadEvent::None => {}
+        }
+    }
+    // A hardware-Enter submit closes the pad too.
+    if *submitted {
+        ctx.data_mut(|d| d.insert_temp(owner_key(), Id::NULL));
+    }
 }
 
 /// Minimum finger-target size for pad keys.

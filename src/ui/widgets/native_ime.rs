@@ -46,6 +46,10 @@ pub enum ImeKind {
     Numeric,
     /// The full text keyboard — names, nicknames, notes.
     Text,
+    /// The full text keyboard for a MULTILINE field (the follow-up email
+    /// body): Enter commits a real newline instead of acting as "Done", so
+    /// the mirror keeps `'\n'`s instead of stripping them.
+    TextMultiline,
 }
 
 /// What the IME did to the attached field this frame.
@@ -219,10 +223,11 @@ pub fn attach(
                 // into egui, so the visible caret tracks the edit point.
                 let mut text = state.text;
                 let mut sel = ime_sel;
-                if text.contains('\n') {
-                    // Newline commit = this keyboard's "Done". Strip it (all
-                    // participating fields are single-line) and re-push so the
-                    // IME buffer matches what the field shows.
+                if text.contains('\n') && kind != ImeKind::TextMultiline {
+                    // Newline commit = this keyboard's "Done". Strip it (the
+                    // single-line fields; a multiline field keeps its real
+                    // newlines) and re-push so the IME buffer matches what
+                    // the field shows.
                     text.retain(|c| c != '\n');
                     out.submitted = true;
                     sel = clamp_sel(&text, sel);
@@ -396,6 +401,8 @@ const TYPE_CLASS_TEXT: i32 = 0x1;
 const TYPE_CLASS_NUMBER: i32 = 0x2;
 const TYPE_NUMBER_FLAG_SIGNED: i32 = 0x1000;
 const TYPE_NUMBER_FLAG_DECIMAL: i32 = 0x2000;
+const TYPE_TEXT_FLAG_MULTI_LINE: i32 = 0x2_0000;
+const IME_ACTION_NONE: i32 = 0x1;
 const IME_ACTION_DONE: i32 = 0x6;
 /// Never take over the whole screen in landscape (the tablet's natural
 /// orientation) — keep the app visible behind the keyboard.
@@ -410,9 +417,15 @@ fn set_editor_info(kind: ImeKind) {
     let input_type = match kind {
         ImeKind::Numeric => TYPE_CLASS_NUMBER | TYPE_NUMBER_FLAG_SIGNED | TYPE_NUMBER_FLAG_DECIMAL,
         ImeKind::Text => TYPE_CLASS_TEXT,
+        // MULTI_LINE turns the action key into a real Enter (newline commit).
+        ImeKind::TextMultiline => TYPE_CLASS_TEXT | TYPE_TEXT_FLAG_MULTI_LINE,
     };
-    let ime_options = IME_ACTION_DONE | IME_FLAG_NO_EXTRACT_UI | IME_FLAG_NO_FULLSCREEN;
-    if let Err(e) = call_set_editor_info(input_type, IME_ACTION_DONE, ime_options) {
+    let action = match kind {
+        ImeKind::TextMultiline => IME_ACTION_NONE,
+        _ => IME_ACTION_DONE,
+    };
+    let ime_options = action | IME_FLAG_NO_EXTRACT_UI | IME_FLAG_NO_FULLSCREEN;
+    if let Err(e) = call_set_editor_info(input_type, action, ime_options) {
         // Non-fatal: the default keyboard still types; only the layout hint
         // is lost.
         log::warn!("ime: setImeEditorInfoFields failed: {e}");

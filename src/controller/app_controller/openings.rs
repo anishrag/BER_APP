@@ -647,15 +647,8 @@ impl AppController {
                     certified: t.certified,
                     draught_stripped: t.draught_stripped,
                     gap: t.gap.clone(),
-                    name: name.clone(),
-                    label: window_type_label(
-                        &t.glazing,
-                        &t.frame,
-                        t.year,
-                        t.certified,
-                        &t.gap,
-                        name.as_deref(),
-                    ),
+                    name,
+                    label: t.display_label(),
                 }
             })
             .collect()
@@ -2235,47 +2228,6 @@ impl super::AppController {
             }
             self.photo_discards.insert(p.id);
         }
-    }
-}
-
-/// A short label for a window type, e.g.
-/// `"North bay — Double · Wood/UPVC · 16mm · 2010 · Cert"`. A name (model) is
-/// prefixed; year `0` (unknown) and an empty gap are omitted.
-fn window_type_label(
-    glazing: &Glazing,
-    frame: &Frame,
-    year: u32,
-    certified: bool,
-    gap: &[u32],
-    name: Option<&str>,
-) -> String {
-    let g = match glazing {
-        Glazing::Single => "Single".to_string(),
-        Glazing::Double => "Double".to_string(),
-        Glazing::Triple => "Triple".to_string(),
-        Glazing::Other(s) => s.clone(),
-    };
-    let f = match frame {
-        Frame::WoodUPVC => "Wood/UPVC".to_string(),
-        Frame::Metal => "Metal".to_string(),
-        Frame::Other(s) => s.clone(),
-    };
-    let mut label = format!("{g} · {f}");
-    if !gap.is_empty() {
-        let gaps = gap
-            .iter()
-            .map(|n| n.to_string())
-            .collect::<Vec<_>>()
-            .join("/");
-        label.push_str(&format!(" · {gaps}mm"));
-    }
-    if year != 0 {
-        label.push_str(&format!(" · {year}"));
-    }
-    label.push_str(if certified { " · Cert" } else { " · No cert" });
-    match name {
-        Some(n) if !n.trim().is_empty() => format!("{} — {label}", n.trim()),
-        _ => label,
     }
 }
 

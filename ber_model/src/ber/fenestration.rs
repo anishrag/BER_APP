@@ -91,6 +91,49 @@ pub struct WindowType {
     pub assessed_g_value: Option<f32>,
 }
 
+impl WindowType {
+    /// Short display label for this shared type, e.g.
+    /// `"North bay — Double · Wood/UPVC · 16mm · 2010 · Cert"`. The model name
+    /// (when given) is prefixed; year `0` (unknown) and an empty gap are
+    /// omitted. Shared by the placement box's type picker and the Follow-ups
+    /// per-type rows, so the assessor sees one spelling everywhere.
+    pub fn display_label(&self) -> String {
+        let g = match &self.glazing {
+            Glazing::Single => "Single".to_string(),
+            Glazing::Double => "Double".to_string(),
+            Glazing::Triple => "Triple".to_string(),
+            Glazing::Other(s) => s.clone(),
+        };
+        let f = match &self.frame {
+            Frame::WoodUPVC => "Wood/UPVC".to_string(),
+            Frame::Metal => "Metal".to_string(),
+            Frame::Other(s) => s.clone(),
+        };
+        let mut label = format!("{g} · {f}");
+        if !self.gap.is_empty() {
+            let gaps = self
+                .gap
+                .iter()
+                .map(|n| n.to_string())
+                .collect::<Vec<_>>()
+                .join("/");
+            label.push_str(&format!(" · {gaps}mm"));
+        }
+        if self.year != 0 {
+            label.push_str(&format!(" · {}", self.year));
+        }
+        label.push_str(if self.certified {
+            " · Cert"
+        } else {
+            " · No cert"
+        });
+        match self.specifics.name() {
+            Some(n) if !n.trim().is_empty() => format!("{} — {label}", n.trim()),
+            _ => label,
+        }
+    }
+}
+
 /// Durable identity of a PORCH inside its storey: the porch plan ring's
 /// area-weighted centroid quantized to the mm grid `(x_mm, y_mm)` — the same
 /// centroid-key convention the floor/ceiling exposure side-tables use. Chosen
