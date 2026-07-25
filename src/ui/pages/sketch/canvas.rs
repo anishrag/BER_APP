@@ -5945,10 +5945,15 @@ fn structure_review_overlay<F: FnMut(UiEvent)>(
                         let mut group_done = false;
                         if let Some((id, buf)) = rename_group.borrow_mut().as_mut() {
                             ui.horizontal(|ui| {
-                                ui.add(
-                                    egui::TextEdit::singleline(buf)
-                                        .hint_text("group name (blank = type label)")
-                                        .desired_width(220.0),
+                                // `text_input` (not a raw TextEdit) so the
+                                // native soft keyboard binds on Android —
+                                // winit drops text events (field report:
+                                // review renames typed nothing on tablet).
+                                crate::ui::widgets::text_input(
+                                    ui,
+                                    buf,
+                                    220.0,
+                                    "group name (blank = type label)",
                                 );
                                 if ui.button("Save").clicked() {
                                     on_event(UiEvent::Sketch(SketchEvent::RenameStructureGroup {
@@ -5972,11 +5977,7 @@ fn structure_review_overlay<F: FnMut(UiEvent)>(
                                     egui::RichText::new("Phase:")
                                         .color(egui::Color32::from_gray(160)),
                                 );
-                                ui.add(
-                                    egui::TextEdit::singleline(buf)
-                                        .hint_text(&rn.phase_default)
-                                        .desired_width(180.0),
-                                );
+                                crate::ui::widgets::text_input(ui, buf, 180.0, &rn.phase_default);
                                 if ui.button("Save").clicked() {
                                     on_event(UiEvent::Sketch(
                                         SketchEvent::RenameConstructionPhase {
@@ -6091,10 +6092,11 @@ fn structure_review_overlay<F: FnMut(UiEvent)>(
                         let mut done = false;
                         if let Some((tid, buf)) = rename_window_type.borrow_mut().as_mut() {
                             ui.horizontal(|ui| {
-                                ui.add(
-                                    egui::TextEdit::singleline(buf)
-                                        .hint_text(placeholder.as_str())
-                                        .desired_width(220.0),
+                                crate::ui::widgets::text_input(
+                                    ui,
+                                    buf,
+                                    220.0,
+                                    placeholder.as_str(),
                                 );
                                 if ui.button("Save").clicked() {
                                     on_event(UiEvent::Sketch(SketchEvent::RenameWindowType {
@@ -6133,11 +6135,7 @@ fn structure_review_overlay<F: FnMut(UiEvent)>(
                         let mut done = false;
                         if let Some((old, buf)) = rename_door.borrow_mut().as_mut() {
                             ui.horizontal(|ui| {
-                                ui.add(
-                                    egui::TextEdit::singleline(buf)
-                                        .hint_text("door type name")
-                                        .desired_width(220.0),
-                                );
+                                crate::ui::widgets::text_input(ui, buf, 220.0, "door type name");
                                 if ui.button("Save").clicked() {
                                     on_event(UiEvent::Sketch(SketchEvent::RenameDoorType {
                                         old: old.clone(),

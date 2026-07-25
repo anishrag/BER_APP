@@ -1556,6 +1556,9 @@ pub struct SketchView<'a> {
     pub wt_glazing: &'a mut Glazing,
     pub wt_frame: &'a mut Frame,
     pub wt_year_input: &'a mut String,
+    /// The year field's "unknown" tick — disables the field and submits year 0
+    /// (the model's unknown-year value). See [`crate::ui::app::SketchState`].
+    pub wt_year_unknown: &'a mut bool,
     pub wt_certified: &'a mut bool,
     pub wt_gap_input: &'a mut String,
     pub wt_name_input: &'a mut String,

@@ -277,6 +277,10 @@ pub struct SketchState {
     pub wt_glazing: ber_model::ber::fenestration::Glazing,
     pub wt_frame: ber_model::ber::fenestration::Frame,
     pub wt_year_input: String,
+    /// "unknown" tick beside the new-type YEAR field: ticked disables the
+    /// field and submits year 0 (the model's explicit unknown-year value).
+    /// Persists across placements like the other type state.
+    pub wt_year_unknown: bool,
     pub wt_certified: bool,
     /// New-window-type draught-stripped checkbox (default ON — modern units).
     pub wt_draught_stripped: bool,
@@ -1850,6 +1854,7 @@ impl eframe::App for BerApp {
                                 wt_glazing: &mut self.sketch_state.wt_glazing,
                                 wt_frame: &mut self.sketch_state.wt_frame,
                                 wt_year_input: &mut self.sketch_state.wt_year_input,
+                                wt_year_unknown: &mut self.sketch_state.wt_year_unknown,
                                 wt_certified: &mut self.sketch_state.wt_certified,
                                 wt_draught_stripped: &mut self.sketch_state.wt_draught_stripped,
                                 opening_num_opes: &mut self.sketch_state.opening_num_opes,

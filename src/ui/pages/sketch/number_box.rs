@@ -308,6 +308,13 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         let mut full_height_display = full_span
             .map(|i| fmt_span(i.face_height_m))
             .unwrap_or_default();
+        // The new-type YEAR field's "unknown" tick (same field-disabling
+        // pattern as Full width/height): ticked shows "unknown" in the
+        // disabled field — the typed buffer is kept, so unticking restores it
+        // — and the submitted year is 0, the model's explicit unknown-year
+        // value. Settled previous-frame value, like the other toggles.
+        let year_unknown = *view.wt_year_unknown;
+        let mut year_unknown_display = "unknown".to_string();
         // Documents the split rules while a composite full-span tick is on:
         // Full width — door width typed, sidelights share the rest; Full
         // height — door height typed, sidelights run to the roofline and the
@@ -636,11 +643,18 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             box_fields.push(BoxField {
                 label: "year",
                 hint: "2010",
-                buf: &mut *view.wt_year_input,
+                buf: if year_unknown {
+                    &mut year_unknown_display
+                } else {
+                    &mut *view.wt_year_input
+                },
                 required: false,
-                enabled: true,
+                enabled: !year_unknown,
                 measurable: false,
-                check: None,
+                check: Some(BoxCheck {
+                    label: "unknown",
+                    value: &mut *view.wt_year_unknown,
+                }),
             });
             box_fields.push(BoxField {
                 label: "gap",
@@ -1604,7 +1618,7 @@ fn current_window_type(view: &SketchView<'_>) -> WindowTypeChoice {
         _ => WindowTypeChoice::New {
             glazing: view.wt_glazing.clone(),
             frame: view.wt_frame.clone(),
-            year: view.wt_year_input.trim().parse().unwrap_or(0),
+            year: effective_year(*view.wt_year_unknown, view.wt_year_input),
             certified: *view.wt_certified,
             draught_stripped: *view.wt_draught_stripped,
             gap: parse_gaps(view.wt_gap_input),
@@ -1613,6 +1627,19 @@ fn current_window_type(view: &SketchView<'_>) -> WindowTypeChoice {
                 (!n.is_empty()).then(|| n.to_string())
             },
         },
+    }
+}
+
+/// The year a NEW window type submits: 0 — the model's explicit unknown-year
+/// value (`window_type_label` omits it; `WindowTypeChoice::default()` starts
+/// there) — while the "unknown" tick is on, else the typed year. An
+/// unparseable typed year falls back to 0 as before; the year is never a
+/// Place gate.
+fn effective_year(unknown: bool, input: &str) -> u32 {
+    if unknown {
+        0
+    } else {
+        input.trim().parse().unwrap_or(0)
     }
 }
 
@@ -2411,4 +2438,23 @@ fn laser_status_panel(ctx: &egui::Context, ui: &mut egui::Ui, laser: &mut LaserS
     // Keep repainting while in Laser mode so the connect transition advances and
     // freshly-arrived readings are polled without other UI input.
     ctx.request_repaint_after(Duration::from_millis(150));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The "unknown year" tick beside the new-type YEAR field submits year 0
+    /// (the model's explicit unknown-year value) REGARDLESS of what the
+    /// disabled field's buffer still holds; unticked keeps today's parse
+    /// (garbage → 0, and the year is never a Place gate).
+    #[test]
+    fn unknown_year_tick_submits_zero() {
+        assert_eq!(effective_year(true, "2010"), 0, "tick wins over the buffer");
+        assert_eq!(effective_year(true, ""), 0);
+        assert_eq!(effective_year(false, "2010"), 2010);
+        assert_eq!(effective_year(false, " 1995 "), 1995, "typed year trims");
+        assert_eq!(effective_year(false, "old"), 0, "unparseable falls back");
+        assert_eq!(effective_year(false, ""), 0);
+    }
 }
