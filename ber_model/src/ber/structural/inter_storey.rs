@@ -294,10 +294,17 @@ pub(crate) struct PlanFootprint {
 
 impl PlanFootprint {
     pub(crate) fn of(floors: &FloorRegions) -> Self {
+        Self::of_many(std::iter::once(floors))
+    }
+
+    /// The union footprint of SEVERAL region sets — e.g. floors ∪ porches for
+    /// the "inside the dwelling at all" test (a porch is carved out of `floors`
+    /// once excluded, but a pin in it is still on the dwelling).
+    pub(crate) fn of_many<'a>(region_sets: impl IntoIterator<Item = &'a FloorRegions>) -> Self {
         use geo::bool_ops::BooleanOps;
         use geo::Area;
         let mut acc = MultiPolygon::<f64>(Vec::new());
-        for r in &floors.regions {
+        for r in region_sets.into_iter().flat_map(|f| f.regions.iter()) {
             if r.polygon.exterior().0.len() < 4 {
                 continue;
             }

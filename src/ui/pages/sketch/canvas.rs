@@ -1649,7 +1649,18 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     // group's surfaces shaded. Owns its own input (orbit on the 3D side).
     if let Some(srv) = view.structure_review_view.as_ref() {
         if let Some(ber) = ber {
-            structure_review_overlay(ui, rect, &response, srv, ber, vp, on_event);
+            structure_review_overlay(
+                ui,
+                rect,
+                &response,
+                srv,
+                ber,
+                vp,
+                view.structure_rename_group,
+                view.structure_rename_phase,
+                view.structure_merge_phase,
+                on_event,
+            );
         }
         return;
     }
@@ -1837,8 +1848,10 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 let stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(r, g, b));
                 painter.add(egui::Shape::convex_polygon(pts, fill, stroke));
             }
-            // Selectable ceiling regions on top: tap to group into a roof area.
-            // Selected regions read bright; the rest show their storey tint.
+            // Selectable ceiling regions on top: tap to group into a roof
+            // selection. Selected regions read bright; regions already under a
+            // committed roof area read DIMMED (grey — not selectable in the
+            // Section stage); the rest show their storey tint.
             for region in view.roof_regions {
                 if region.ring.len() < 3 {
                     continue;
@@ -1849,6 +1862,11 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     (
                         egui::Color32::from_rgba_unmultiplied(120, 220, 140, 150),
                         egui::Stroke::new(3.0, egui::Color32::from_rgb(60, 180, 90)),
+                    )
+                } else if region.covered {
+                    (
+                        egui::Color32::from_rgba_unmultiplied(120, 120, 120, 40),
+                        egui::Stroke::new(1.0, egui::Color32::from_rgb(140, 140, 140)),
                     )
                 } else {
                     let (r, g, b) = roof_storey_tint(region.storey_idx);
@@ -3677,10 +3695,10 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         }
     }
 
-    // Roof step (post-gate). Two input modes share the takeover transform:
-    // while a ridge is awaited (`roof_area_ridge_pending`) a primary DRAG
-    // captures the ridge stroke; otherwise (grouping) a primary TAP toggles the
-    // ceiling region under it in/out of the roof-area-in-progress.
+    // Roof step (post-gate): a primary TAP toggles the ceiling region under it
+    // in/out of the roof selection. Suppressed while a Stage-B section is in
+    // flight (its candidates were generated over the CURRENT selection — the
+    // controller ignores taps then too).
     if roof_active
         && matches!(mode, SketchMode::Storey2D)
         && !touch_nav_active
@@ -3688,43 +3706,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         && view.position_prompt.is_none()
     {
         if let Some(t) = floor_exposure_transform(ber, rect, vp) {
-            if view.roof_area_ridge_pending {
-                if response.drag_started_by(egui::PointerButton::Primary) {
-                    if let Some(pos) = response.interact_pointer_pos() {
-                        on_event(UiEvent::Sketch(SketchEvent::StartStroke(
-                            pos - rect.left_top().to_vec2(),
-                        )));
-                    }
-                }
-                if response.dragged_by(egui::PointerButton::Primary) {
-                    if let Some(pos) = response.interact_pointer_pos() {
-                        on_event(UiEvent::Sketch(SketchEvent::AddPoint(
-                            pos - rect.left_top().to_vec2(),
-                        )));
-                    }
-                }
-                if response.drag_stopped_by(egui::PointerButton::Primary) {
-                    if let Some(stroke) = view.current.as_ref() {
-                        let topleft = rect.left_top();
-                        let world_points: Vec<(f32, f32)> = stroke
-                            .points
-                            .iter()
-                            .map(|p| {
-                                let (wx, wy) = t.inverse(p.x + topleft.x, p.y + topleft.y);
-                                (wx as f32, wy as f32)
-                            })
-                            .collect();
-                        on_event(UiEvent::Sketch(SketchEvent::RoofAreaRidgeStroke {
-                            points: world_points,
-                        }));
-                    } else {
-                        on_event(UiEvent::Sketch(SketchEvent::CancelStroke));
-                    }
-                }
-                if let Some(stroke) = &view.current {
-                    draw_stroke(&painter, rect, stroke);
-                }
-            } else if !view.roof_area_pitch_pending
+            if view.roof_section.is_none()
                 && !copy_pick
                 && response.clicked_by(egui::PointerButton::Primary)
             {
@@ -3738,15 +3720,19 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     }));
                 }
             }
-            // Pending ridge(s) — a hip's collected set while more are drawn,
-            // the full set while the pitch is entered: segments over the area.
-            for ((ax, ay), (bx, by)) in &view.roof_area_ridge_lines {
-                let a = t.apply(*ax, *ay);
-                let b = t.apply(*bx, *by);
-                painter.line_segment(
-                    [a, b],
-                    egui::Stroke::new(2.5, egui::Color32::from_rgb(60, 180, 90)),
-                );
+            // The selected candidate's generated ridge, dashed over the area
+            // (empty while the pitch prompt is up).
+            if let Some(section) = view.roof_section.as_ref() {
+                for ((ax, ay), (bx, by)) in &section.ridge_lines {
+                    let a = t.apply(*ax, *ay);
+                    let b = t.apply(*bx, *by);
+                    painter.extend(egui::Shape::dashed_line(
+                        &[a, b],
+                        egui::Stroke::new(2.5, egui::Color32::from_rgb(60, 180, 90)),
+                        8.0,
+                        6.0,
+                    ));
+                }
             }
         }
     }
@@ -3984,6 +3970,9 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 let sp = t.apply(pin.x, pin.y);
                 let fill = if pin.active {
                     egui::Color32::from_rgb(90, 200, 180)
+                } else if pin.external {
+                    // Outside the dwelling footprint (e.g. an external boiler).
+                    egui::Color32::from_rgb(210, 150, 60)
                 } else {
                     egui::Color32::from_rgb(70, 150, 200)
                 };
@@ -4006,6 +3995,15 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                         &pin.name,
                         egui::FontId::proportional(11.0),
                         egui::Color32::from_gray(220),
+                    );
+                }
+                if pin.external {
+                    painter.text(
+                        sp + egui::vec2(0.0, 12.0),
+                        egui::Align2::CENTER_TOP,
+                        "outside",
+                        egui::FontId::proportional(10.0),
+                        egui::Color32::from_rgb(210, 150, 60),
                     );
                 }
             }
@@ -4490,8 +4488,7 @@ fn external_photos_button<F: FnMut(UiEvent)>(
                                     .get(i)
                                     .map(|(_, p)| p.len())
                                     .unwrap_or(0);
-                                ENTRY_TEXT_AND_BUTTONS_H
-                                    + n_photos as f32 * (thumb_h + 34.0)
+                                ENTRY_TEXT_AND_BUTTONS_H + n_photos as f32 * (thumb_h + 34.0)
                             };
                             let n = view.external_photos.len();
                             let row_count = n.div_ceil(cols).max(1);
@@ -5106,6 +5103,13 @@ fn object_pin_dropdown<F: FnMut(UiEvent)>(
                         }
                     });
                 });
+                if room.external {
+                    ui.label(
+                        egui::RichText::new("Outside the dwelling")
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(210, 150, 60)),
+                    );
+                }
                 if room.objects.is_empty() {
                     ui.label(
                         egui::RichText::new("Pick a category above to add.")
@@ -5750,6 +5754,9 @@ fn structure_review_overlay<F: FnMut(UiEvent)>(
     srv: &crate::controller::app_controller::StructureReviewView,
     ber: &ber_model::ber::ber_struct::Ber,
     vp: render::ViewParams,
+    rename_group: &std::cell::RefCell<Option<(ber_model::ber::common::ItemId, String)>>,
+    rename_phase: &std::cell::RefCell<Option<(ber_model::ber::common::ConstructionPhase, String)>>,
+    merge_phase: &std::cell::RefCell<Option<Option<ber_model::ber::common::ConstructionPhase>>>,
     on_event: &mut F,
 ) {
     let painter = ui.painter_at(rect);
@@ -5859,7 +5866,175 @@ fn structure_review_overlay<F: FnMut(UiEvent)>(
                         .color(egui::Color32::from_gray(160))
                         .size(13.0),
                 );
-                ui.label(egui::RichText::new(&srv.title).strong().size(20.0));
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(&srv.title).strong().size(20.0));
+                    // Rename affordances (constructions only): the review is
+                    // where survey-time shorthand names get firmed up — they
+                    // feed the letters and every picker.
+                    if let Some(rn) = srv.rename.as_ref() {
+                        let editing =
+                            rename_group.borrow().is_some() || rename_phase.borrow().is_some();
+                        if !editing {
+                            if ui
+                                .small_button("✏ Rename")
+                                .on_hover_text("Rename this group")
+                                .clicked()
+                            {
+                                *rename_group.borrow_mut() =
+                                    Some((rn.group_id, rn.group_name.clone()));
+                            }
+                            if ui
+                                .small_button("✏ Rename phase")
+                                .on_hover_text("Rename the construction phase (house-wide)")
+                                .clicked()
+                            {
+                                *rename_phase.borrow_mut() =
+                                    Some((rn.phase.clone(), rn.phase_name.clone()));
+                            }
+                        }
+                    }
+                });
+                if let Some(rn) = srv.rename.as_ref() {
+                    // A buffer left over from another item dies here.
+                    if rename_group
+                        .borrow()
+                        .as_ref()
+                        .is_some_and(|(id, _)| *id != rn.group_id)
+                    {
+                        *rename_group.borrow_mut() = None;
+                    }
+                    if rename_phase
+                        .borrow()
+                        .as_ref()
+                        .is_some_and(|(p, _)| *p != rn.phase)
+                    {
+                        *rename_phase.borrow_mut() = None;
+                    }
+                    let mut group_done = false;
+                    if let Some((id, buf)) = rename_group.borrow_mut().as_mut() {
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(buf)
+                                    .hint_text("group name (blank = type label)")
+                                    .desired_width(220.0),
+                            );
+                            if ui.button("Save").clicked() {
+                                on_event(UiEvent::Sketch(SketchEvent::RenameStructureGroup {
+                                    id: *id,
+                                    name: buf.clone(),
+                                }));
+                                group_done = true;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                group_done = true;
+                            }
+                        });
+                    }
+                    if group_done {
+                        *rename_group.borrow_mut() = None;
+                    }
+                    let mut phase_done = false;
+                    if let Some((phase, buf)) = rename_phase.borrow_mut().as_mut() {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new("Phase:").color(egui::Color32::from_gray(160)),
+                            );
+                            ui.add(
+                                egui::TextEdit::singleline(buf)
+                                    .hint_text(&rn.phase_default)
+                                    .desired_width(180.0),
+                            );
+                            if ui.button("Save").clicked() {
+                                on_event(UiEvent::Sketch(SketchEvent::RenameConstructionPhase {
+                                    phase: phase.clone(),
+                                    name: buf.clone(),
+                                }));
+                                phase_done = true;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                phase_done = true;
+                            }
+                        });
+                        ui.label(
+                            egui::RichText::new(
+                                "Renames the phase everywhere it appears (blank = default).",
+                            )
+                            .size(11.0)
+                            .color(egui::Color32::from_gray(120)),
+                        );
+                    }
+                    if phase_done {
+                        *rename_phase.borrow_mut() = None;
+                    }
+                    // ── Merge phase: picker → confirm → event ──
+                    let phase_label = if rn.phase_name.is_empty() {
+                        rn.phase_default.clone()
+                    } else {
+                        rn.phase_name.clone()
+                    };
+                    let merge_state = merge_phase.borrow().clone();
+                    match merge_state {
+                        None => {
+                            if !rn.merge_targets.is_empty()
+                                && rename_group.borrow().is_none()
+                                && rename_phase.borrow().is_none()
+                                && ui
+                                    .small_button("⇄ Merge phase…")
+                                    .on_hover_text(
+                                        "Fold this phase into another — everything that \
+                                         points at it re-points",
+                                    )
+                                    .clicked()
+                            {
+                                *merge_phase.borrow_mut() = Some(None);
+                            }
+                        }
+                        Some(None) => {
+                            ui.label(
+                                egui::RichText::new(format!("Merge '{phase_label}' into:"))
+                                    .color(egui::Color32::from_gray(160)),
+                            );
+                            ui.horizontal_wrapped(|ui| {
+                                for (target, label) in &rn.merge_targets {
+                                    if ui.button(label).clicked() {
+                                        *merge_phase.borrow_mut() = Some(Some(target.clone()));
+                                    }
+                                }
+                                if ui.button("Cancel").clicked() {
+                                    *merge_phase.borrow_mut() = None;
+                                }
+                            });
+                        }
+                        Some(Some(target)) => {
+                            let target_label = rn
+                                .merge_targets
+                                .iter()
+                                .find(|(p, _)| *p == target)
+                                .map(|(_, l)| l.clone())
+                                .unwrap_or_else(|| target.default_name());
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "Merge '{phase_label}' into '{target_label}'? Every \
+                                     surface, year record and follow-up tick moves over."
+                                ))
+                                .color(egui::Color32::from_rgb(210, 150, 60)),
+                            );
+                            ui.horizontal(|ui| {
+                                if ui.button(egui::RichText::new("Merge").strong()).clicked() {
+                                    on_event(UiEvent::Sketch(
+                                        SketchEvent::MergeConstructionPhase {
+                                            from: rn.phase.clone(),
+                                            to: target,
+                                        },
+                                    ));
+                                    *merge_phase.borrow_mut() = None;
+                                } else if ui.button("Cancel").clicked() {
+                                    *merge_phase.borrow_mut() = None;
+                                }
+                            });
+                        }
+                    }
+                }
                 ui.add_space(8.0);
                 for (label, value) in &srv.detail_lines {
                     ui.horizontal(|ui| {

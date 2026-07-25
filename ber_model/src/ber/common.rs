@@ -317,6 +317,57 @@ impl ConstructionPhases {
         self.years.contains_key(phase)
     }
 
+    /// MERGE phase `from` into `to`: `from`'s records fold into `to` and
+    /// `from` becomes undefined. The TARGET WINS on conflicts; absent target
+    /// values adopt the source's:
+    ///
+    /// - year: `to` keeps its own; an unknown/absent `to` year adopts `from`'s;
+    /// - nickname: `to` keeps its own, else adopts `from`'s;
+    /// - year PROOF + booking-sourced flags transfer only when `to` ended up
+    ///   ON `from`'s year (adopted it, or they matched) — `from`'s proof
+    ///   evidences `from`'s year, not a different one;
+    /// - year EVIDENCE documents always append (deduplicated by file path) —
+    ///   captured artifacts stay with the dwelling either way.
+    ///
+    /// `false` (no change) when the phases are equal or either is undefined.
+    /// Callers re-point everything else that references `from`
+    /// (constructions, follow-up ticks) — see `Ber::merge_construction_phases`.
+    pub fn merge(&mut self, from: &ConstructionPhase, to: &ConstructionPhase) -> bool {
+        if from == to || !self.years.contains_key(from) || !self.years.contains_key(to) {
+            return false;
+        }
+        let from_year = self.years.remove(from).flatten();
+        let to_year = self.years.get_mut(to).expect("checked above");
+        let adopted_year = match (&to_year, from_year) {
+            (None, Some(y)) => {
+                *to_year = Some(y);
+                true
+            }
+            (Some(t), Some(f)) => *t == f,
+            _ => false,
+        };
+        if let Some(nick) = self.nicknames.remove(from) {
+            self.nicknames.entry(to.clone()).or_insert(nick);
+        }
+        let from_proof = self.year_proof.remove(from).unwrap_or(false);
+        if adopted_year && from_proof && !self.has_year_proof(to) {
+            self.year_proof.insert(to.clone(), true);
+        }
+        let from_booked = self.booking_sourced.remove(from).unwrap_or(false);
+        if adopted_year && from_booked {
+            self.booking_sourced.insert(to.clone(), true);
+        }
+        if let Some(evidence) = self.year_evidence.remove(from) {
+            let target = self.year_evidence.entry(to.clone()).or_default();
+            for e in evidence {
+                if !target.iter().any(|t| t.file_path == e.file_path) {
+                    target.push(e);
+                }
+            }
+        }
+        true
+    }
+
     /// True when `phase` is defined but its year was marked UNKNOWN (the
     /// Key-Details "unknown" checkbox) — displayed as "unk", fillable later.
     pub fn year_is_unknown(&self, phase: &ConstructionPhase) -> bool {

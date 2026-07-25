@@ -683,6 +683,24 @@ pub enum SketchEvent {
     StepStructureReview(i32),
     /// Confirm "all's good": record the dwelling Structure-reviewed and close.
     ConfirmStructureReview,
+    /// Structure review: rename the shown construction GROUP (blank clears
+    /// back to the type label) — firming up a survey-time shorthand.
+    RenameStructureGroup {
+        id: ItemId,
+        name: String,
+    },
+    /// Structure review: rename a construction PHASE's nickname, house-wide
+    /// (blank clears back to "Original" / "Extension N").
+    RenameConstructionPhase {
+        phase: ber_model::ber::common::ConstructionPhase,
+        name: String,
+    },
+    /// Structure review: MERGE phase `from` into `to` — every reference
+    /// (constructions, year records, follow-up ticks) re-points to `to`.
+    MergeConstructionPhase {
+        from: ber_model::ber::common::ConstructionPhase,
+        to: ber_model::ber::common::ConstructionPhase,
+    },
     /// Phase-3 (Objects): tap the plan to drop / open a room pin at world `(x, y)`.
     ObjectsPointerDown {
         world_x: f64,
@@ -1042,22 +1060,33 @@ pub enum SketchEvent {
         world_y: f64,
         tol: f64,
     },
-    /// Roof step: pick the shape for the grouped roof area (Flat commits; Gable/Hip
-    /// start the ridge-draw flow).
-    PickRoofShape(crate::controller::app_controller::RoofShape),
-    /// Roof step: a ridge stroke (world coords) for the grouped area — a gable's
-    /// single ridge, or one of a hip's several.
-    RoofAreaRidgeStroke {
-        points: Vec<(f32, f32)>,
-    },
-    /// Roof step (hip): done drawing ridges — move to the pitch question.
-    FinishRoofRidges,
-    /// Roof step (gable): re-centre the placed ridge between the eaves.
-    CentreRoofRidge,
-    /// Roof step: assign the pitch (degrees) to the placed ridge(s).
-    AssignRoofPitch(f32),
-    /// Roof step: discard the in-flight per-area drawing (keeps the grouping).
-    CancelRoofArea,
+    /// Roof step (Classify): commit the "these ceilings ARE the roof" answer —
+    /// sloped picks become one FollowCeiling area, flat picks a Flat area per
+    /// storey; an empty selection is a valid answer. Advances to Section.
+    ConfirmRoofFollow,
+    /// Roof step (Section): pick the style for the grouped section (Flat
+    /// commits; the sloped styles open the generated-candidate preview).
+    PickRoofSectionStyle(crate::controller::app_controller::RoofSectionStyle),
+    /// Roof step (Section): run the generated ridge the other way.
+    FlipRoofSectionAxis,
+    /// Roof step (Section): cycle to the next generated candidate.
+    NextRoofSectionCandidate,
+    /// Roof step (Section): set the pitch (degrees) — the pitch-prompt answer,
+    /// or an override of the inherited pitch — and (re)generate candidates.
+    AssignRoofSectionPitch(f32),
+    /// Roof step (Section): reopen the pitch prompt over the generated
+    /// candidates ("Change pitch" on an inherited pitch).
+    ReopenRoofSectionPitch,
+    /// Roof step (Section): commit the selected candidate as a roof area.
+    ConfirmRoofSection,
+    /// Roof step (Section): drop the pending section (keeps the selection).
+    CancelRoofSection,
+    /// Roof step: raise the "wipe the whole roof?" confirm (Start roof again).
+    RequestClearRoof,
+    /// Roof step: dismiss the clear-roof confirm without wiping.
+    CancelClearRoof,
+    /// Roof step: CONFIRMED wipe of every roof area — start again at Classify.
+    ClearRoof,
     /// Set (or clear with `None`) the ceiling-exposure Select subtool.
     SetCeilingExposureSelectMode(Option<SelectMode>),
     /// Ceiling-exposure Click subtool: a tap (world coords) toggling the ceiling
@@ -1609,6 +1638,18 @@ pub struct SketchView<'a> {
     /// The open Structure-REVIEW takeover view, if active: the current group's
     /// details + photos + highlight set. When `Some`, it replaces the plan canvas.
     pub structure_review_view: Option<StructureReviewView>,
+    /// In-flight review GROUP rename: `(target group id, edit buffer)` —
+    /// cross-frame so typing survives re-render; the overlay drops it when
+    /// the shown item no longer matches the target. `RefCell` so the overlay
+    /// edits it behind the shared view.
+    pub structure_rename_group: &'a std::cell::RefCell<Option<(ItemId, String)>>,
+    /// In-flight review PHASE-nickname rename: `(target phase, edit buffer)`.
+    pub structure_rename_phase:
+        &'a std::cell::RefCell<Option<(ber_model::ber::common::ConstructionPhase, String)>>,
+    /// Review MERGE-phase picker: `Some(None)` = target list open,
+    /// `Some(Some(target))` = confirm stage.
+    pub structure_merge_phase:
+        &'a std::cell::RefCell<Option<Option<ber_model::ber::common::ConstructionPhase>>>,
     /// Phase-3 (Objects): the room pins on the current storey, for the plan
     /// overlay. Empty outside the Objects phase.
     pub object_pins: Vec<ObjectPinView>,
@@ -1725,27 +1766,17 @@ pub struct SketchView<'a> {
     /// Each storey's footprint ring (world metres) for the top-storey-shaded
     /// context overlay, drawn bottom→top. Empty while the gate is up.
     pub roof_context: &'a [crate::controller::app_controller::RoofContextRegion],
-    /// Selectable ceiling regions (non-party) for grouping into a roof area, with
-    /// the in-progress selection flag. Empty while the gate is up.
+    /// Selectable ceiling regions (non-party) for the roof step, with the
+    /// selection + already-covered flags. Empty while the gate is up.
     pub roof_regions: &'a [crate::controller::app_controller::RoofRegionView],
-    /// At least one area is grouped and no per-area drawing is in flight — the
-    /// shape buttons (Flat/Gable/Hip) are offered.
-    pub roof_area_can_pick_shape: bool,
-    /// The grouped area's storey has a sloped ceiling (converted attic) — the
-    /// "Follow ceiling" shape is offered so the roof adopts that slope.
-    pub roof_area_ceiling_sloped: bool,
-    /// The grouped area awaits its ridge stroke(s).
-    pub roof_area_ridge_pending: bool,
-    /// `Some(ridges drawn so far)` while a HIP collects its ridges — shows the
-    /// count and the "Finish ridges" button. `None` for a gable's single stroke.
-    pub roof_area_hip_ridge_count: Option<usize>,
-    /// The placed ridge(s) await their pitch (degrees).
-    pub roof_area_pitch_pending: bool,
-    /// A gable ridge is placed — offer "Centre on roof" alongside the pitch.
-    pub roof_area_can_centre_ridge: bool,
-    /// Every placed ridge's endpoints (world coords) for the dashed overlay
-    /// (a hip's collected set while drawing, the full set during the pitch).
-    pub roof_area_ridge_lines: Vec<((f64, f64), (f64, f64))>,
+    /// The roof step's stage — `None` when the step is off, `Gate` while the
+    /// storey-count prompt is up, then Classify → Section.
+    pub roof_stage: Option<crate::controller::app_controller::RoofStage>,
+    /// The in-flight Stage-B section (style picked, candidates being browsed /
+    /// pitch prompt up). `None` while only grouping.
+    pub roof_section: Option<crate::controller::app_controller::PendingRoofSectionView>,
+    /// The "wipe the whole roof and start again?" confirm is up.
+    pub roof_clear_confirm: bool,
     /// Backing string for the roof pitch input (degrees).
     pub roof_pitch_input: &'a mut String,
     // ── Ceiling exposure ─────────────────────────────────────────────────────

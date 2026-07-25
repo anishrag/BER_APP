@@ -364,10 +364,10 @@ impl AppController {
         // resets — none of it may carry onto the storey below). The doomed
         // storey is never committed: its half-drawn state is the point.
         self.reset_transient_editing_state();
-        // A pending roof area may hold the doomed storey's index — cleared here
-        // (delete-specific: a storey SWITCH keeps it, the roof tool spans
+        // A pending roof section may hold the doomed storey's index — cleared
+        // here (delete-specific: a storey SWITCH keeps it, the roof tool spans
         // storeys by design and records its own storey index).
-        self.pending_roof_area = None;
+        self.pending_roof_section = None;
         // Pop BOTH containers together (lock-step invariant — refresh_storey
         // indexes them in parallel). The popped `Storey` carries its own
         // per-storey data (floor thickness, regions) with it.

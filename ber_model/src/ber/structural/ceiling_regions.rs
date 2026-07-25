@@ -1799,6 +1799,23 @@ impl CeilingRegion {
         ring_centroid(&ring)
     }
 
+    /// A plan point guaranteed INSIDE the region — the probe for roof
+    /// coverage / inference containment tests. [`centroid`](Self::centroid)
+    /// is the ring's VERTEX MEAN, which lies OUTSIDE a concave region (e.g.
+    /// the L-shaped flat band left around an attic conversion), so probing
+    /// with it makes a roof drawn exactly over the region read as not
+    /// covering it. Falls back to the vertex mean for a degenerate ring.
+    /// The centroid stays the durable IDENTITY key (stability matters there,
+    /// interiority doesn't).
+    pub fn interior_point(&self) -> Point2f64 {
+        use geo::InteriorPoint;
+        let ring: Vec<(f64, f64)> = self.polygon.exterior.iter().map(|v| (v.x, v.y)).collect();
+        Polygon::new(LineString::from(ring), vec![])
+            .interior_point()
+            .map(|p| Point2f64::new(p.x(), p.y()))
+            .unwrap_or_else(|| self.centroid())
+    }
+
     /// The region's plan area (m²) — its `Polygon3D` exterior projected to xy.
     /// Mirrors [`FloorRegion::area`](super::FloorRegion::area); used by the
     /// ceiling-exposure tap pick to choose the smallest region under a point.

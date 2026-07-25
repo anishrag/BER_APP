@@ -38,6 +38,29 @@ impl StructureReviewKind {
     }
 }
 
+/// Rename affordances for a CONSTRUCTION review item — the review is where
+/// the assessor firms up the shorthand names typed during the survey (the
+/// group's display name and its phase's nickname feed the letters and every
+/// picker). `None` on window/door items.
+pub struct StructureReviewRename {
+    /// The construction group's id (rename target).
+    pub group_id: ItemId,
+    /// Its current custom name ("" = none, showing the type label) — the
+    /// edit-field prefill.
+    pub group_name: String,
+    /// The item's construction phase (nickname rename target).
+    pub phase: ber_model::ber::common::ConstructionPhase,
+    /// The phase's current nickname ("" = none) — the edit-field prefill.
+    pub phase_name: String,
+    /// The phase's default name ("Original", "Extension 1", …) — the
+    /// edit-field placeholder / what a blank rename falls back to.
+    pub phase_default: String,
+    /// The OTHER defined phases this item's phase could MERGE into, with
+    /// their display labels ("Original (1990)", …). Empty when the dwelling
+    /// has only one defined phase (nothing to merge with).
+    pub merge_targets: Vec<(ber_model::ber::common::ConstructionPhase, String)>,
+}
+
 /// Everything the review overlay needs for one item: its kind, a title, the
 /// detail lines (label/value pairs) to list, the photos to show, and the set of
 /// 3D surface / opening ids to shade. `cursor`/`total` drive the scroll readout.
@@ -50,6 +73,8 @@ pub struct StructureReviewView {
     pub detail_lines: Vec<(String, String)>,
     pub photos: Vec<PhotoView>,
     pub highlight: HashSet<ItemId>,
+    /// Present on construction items: the rename targets + prefills.
+    pub rename: Option<StructureReviewRename>,
 }
 
 impl AppController {
@@ -83,6 +108,58 @@ impl AppController {
         self.current_record
             .as_ref()
             .is_some_and(|r| r.data.structure_reviewed)
+    }
+
+    /// Rename a construction group from the review (blank clears back to the
+    /// type label) — the assessor firming up a survey-time shorthand. The
+    /// model owns the write ([`Ber::rename_construction_group`]); display-only,
+    /// nothing re-links.
+    ///
+    /// [`Ber::rename_construction_group`]: ber_model::ber::ber_struct::Ber
+    pub fn rename_structure_group(&mut self, id: ItemId, name: String) {
+        if let Some(record) = self.current_record.as_mut() {
+            if record.data.rename_construction_group(id, &name) {
+                let _ = self.mark_dirty();
+            }
+        }
+    }
+
+    /// Rename a construction phase's nickname from the review (blank clears
+    /// back to the default "Original" / "Extension N"). House-wide: every
+    /// group in that phase shows the new name.
+    pub fn rename_construction_phase(
+        &mut self,
+        phase: ber_model::ber::common::ConstructionPhase,
+        name: String,
+    ) {
+        if let Some(record) = self.current_record.as_mut() {
+            record.data.construction_phases.set_nickname(phase, name);
+            let _ = self.mark_dirty();
+        }
+    }
+
+    /// MERGE construction phase `from` into `to` from the review — the model
+    /// re-points every reference ([`Ber::merge_construction_phases`]); the
+    /// per-storey phase editing regions are then reconstructed so the session
+    /// state reflects the merged attribution.
+    ///
+    /// [`Ber::merge_construction_phases`]: ber_model::ber::ber_struct::Ber
+    pub fn merge_structure_phase(
+        &mut self,
+        from: ber_model::ber::common::ConstructionPhase,
+        to: ber_model::ber::common::ConstructionPhase,
+    ) {
+        let Some(record) = self.current_record.as_mut() else {
+            return;
+        };
+        if !record.data.merge_construction_phases(&from, &to) {
+            return;
+        }
+        let n = record.data.storeys.len();
+        for idx in 0..n {
+            self.reconstruct_phase_regions_for(idx);
+        }
+        let _ = self.mark_dirty();
     }
 
     /// Confirm "all's good": mark the dwelling Structure-reviewed (persisted) and
@@ -140,6 +217,7 @@ impl AppController {
                 ),
                 photos: photo_views(&c.base.photos),
                 highlight: ids,
+                rename: Some(rename_info(&c.base, &data.construction_phases)),
             });
         }
         for c in &data.floor_constructions {
@@ -161,6 +239,7 @@ impl AppController {
                 ),
                 photos: photo_views(&c.base.photos),
                 highlight: ids,
+                rename: Some(rename_info(&c.base, &data.construction_phases)),
             });
         }
         for c in &data.ceiling_constructions {
@@ -182,6 +261,7 @@ impl AppController {
                 ),
                 photos: photo_views(&c.base.photos),
                 highlight: ids,
+                rename: Some(rename_info(&c.base, &data.construction_phases)),
             });
         }
 
@@ -205,6 +285,7 @@ impl AppController {
                 detail_lines: window_type_lines(t, ids.len()),
                 photos: photo_views(&t.photos),
                 highlight: ids,
+                rename: None,
             });
         }
 
@@ -234,6 +315,7 @@ impl AppController {
                 ],
                 photos: photo_views(&door.photos),
                 highlight: std::iter::once(door.id).collect(),
+                rename: None,
             });
         }
 
@@ -299,6 +381,35 @@ fn group_title(name: &Option<String>, type_label: &str) -> String {
     match name.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
         Some(n) => n.to_string(),
         None => type_label.to_string(),
+    }
+}
+
+/// The rename targets + prefills for one construction item.
+fn rename_info(
+    base: &ber_model::ber::structural::ConstructionBase,
+    phases: &ber_model::ber::common::ConstructionPhases,
+) -> StructureReviewRename {
+    StructureReviewRename {
+        group_id: base.id,
+        group_name: base.name.clone().unwrap_or_default(),
+        phase: base.construction_phase.clone(),
+        phase_name: phases
+            .nickname_of(&base.construction_phase)
+            .unwrap_or_default()
+            .to_string(),
+        phase_default: base.construction_phase.default_name(),
+        // Only a DEFINED phase can merge (the model guards it too) — an
+        // Unassigned item offers nothing.
+        merge_targets: if phases.is_defined(&base.construction_phase) {
+            phases
+                .years
+                .keys()
+                .filter(|p| **p != base.construction_phase)
+                .map(|p| (p.clone(), phases.display_label(p)))
+                .collect()
+        } else {
+            Vec::new()
+        },
     }
 }
 

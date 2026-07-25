@@ -68,7 +68,10 @@ pub use exposure::{
 pub use floor_exposure::{FloorExposureRegionView, FloorExposureStoreyView};
 pub use followup::{FollowUpPointRow, FollowUpRowKey, FollowUpView};
 pub use phase_regions::PhaseDisplayRegion;
-pub use roof::{RoofContextRegion, RoofRegionView, RoofShape};
+pub use roof::{
+    PendingRoofSectionView, RoofContextRegion, RoofRegionView, RoofSectionStyle, RoofShape,
+    RoofStage,
+};
 // `ExposureSection` is re-exported above (the controller's public surface).
 
 use chrono::NaiveDate;
@@ -678,12 +681,18 @@ pub struct AppController {
     /// storeys) like the exposure tools.
     roof_mode: bool,
     roof_gate_pending: bool,
-    /// The ceiling regions tapped into the current roof-area-in-progress, keyed
+    /// The ceiling regions tapped into the current roof selection, keyed
     /// by `(storey_idx, centroid key)` (stable across re-resolves, unlike ItemId).
     roof_selected: HashSet<(usize, document::CentroidKey)>,
-    /// The in-flight per-area roof drawing (ridge stroke → pitch), once a sloped
-    /// shape is picked for the grouped area. `None` while only grouping.
-    pending_roof_area: Option<roof::PendingRoofArea>,
+    /// The roof step's post-gate stage (Classify → Section). Only read while
+    /// `roof_mode` is on and the gate is down (`roof_stage()`).
+    roof_stage: roof::RoofStage,
+    /// The in-flight Stage-B roof section (style picked over the grouped
+    /// selection, candidates being browsed). `None` while only grouping.
+    pending_roof_section: Option<roof::PendingRoofSection>,
+    /// "Wipe the whole roof and start again?" confirm — up after the Start-
+    /// roof-again button, before the (un-undoable) [`clear_roof`] runs.
+    roof_clear_confirm: bool,
     /// Completed background photo-processing jobs, awaiting application to the
     /// model by id ([`apply_finished_photos`](Self::apply_finished_photos)).
     /// Pushed from worker threads; drained each frame.
@@ -878,7 +887,9 @@ impl AppController {
             roof_mode: false,
             roof_gate_pending: false,
             roof_selected: HashSet::new(),
-            pending_roof_area: None,
+            roof_stage: roof::RoofStage::Gate,
+            pending_roof_section: None,
+            roof_clear_confirm: false,
             photo_results: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             photo_jobs_inflight: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             ceiling_exposure_select: None,

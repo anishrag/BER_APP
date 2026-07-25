@@ -237,7 +237,11 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                             ui,
                             view.object_note_input,
                             110.0,
-                            if name_required { "make & model" } else { "optional" },
+                            if name_required {
+                                "make & model"
+                            } else {
+                                "optional"
+                            },
                         );
                         if kwh_required {
                             ui.label("kWh");

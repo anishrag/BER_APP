@@ -74,7 +74,35 @@ pub fn resolve_storey(
     // dimensioning loop has nothing left to prompt). The deferred projection
     // catches up on the first resolve after the loop completes.
     if !s.measurements_complete() {
-        return ber.storeys[idx].clone();
+        let prev = ber.storeys[idx].clone();
+        // FRESH-OUTLINE EXCEPTION: on a storey with NO resolved content yet
+        // (no walls, no ceilings — nothing the guard exists to protect from
+        // scarring), project the just-drawn OUTLINE as a bare floor region so
+        // the canvas has a bbox to auto-fit and something to draw the moment
+        // the stroke closes — before (and during) dimensioning. Display-only:
+        // walls/ceilings stay empty, the nil construction id references
+        // nothing, the persist filter (same completeness gate) never stores
+        // an incomplete storey, and every cross-storey derivation is gated on
+        // the dimensioned flags. Re-projected each resolve, so it tracks the
+        // pixels→metres `scale_all` when the first dimension lands. A
+        // DIMENSIONED storey mid-trim/extend has walls, so it still returns
+        // the previous resolved storey untouched (the original guard).
+        if prev.walls.regions.is_empty() && prev.ceilings.regions.is_empty() {
+            let rings: Vec<Vec<Point2f64>> = s
+                .outline
+                .floor_plan
+                .polygons()
+                .into_iter()
+                .map(|ring| ring.into_iter().map(to_f64).collect())
+                .filter(|ring: &Vec<Point2f64>| ring.len() >= 3)
+                .collect();
+            if !rings.is_empty() {
+                let mut display = prev;
+                display.floors = FloorRegions::from_vertex_lists(rings, ItemId::nil());
+                return display;
+            }
+        }
+        return prev;
     }
     // The storey footprint is always the OUTLINE (never a living area, even
     // when one is active). One ring → one FloorRegion.

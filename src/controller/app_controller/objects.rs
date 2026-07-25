@@ -23,6 +23,9 @@ pub struct ObjectPinView {
     pub name: String,
     pub count: u32,
     pub active: bool,
+    /// The pin sits OUTSIDE the dwelling footprint (e.g. an external oil
+    /// boiler) — derived per frame, see [`Storey::external_object_pin_ids`].
+    pub external: bool,
 }
 
 /// One object row in the open room's panel.
@@ -55,6 +58,9 @@ pub struct ActiveObjectRoomView {
     /// Whether this is the house-level ATTIC bucket (no plan pin — the UI
     /// anchors its box to the Attic button instead of a pin).
     pub is_attic: bool,
+    /// The pin sits OUTSIDE the dwelling footprint (e.g. an external oil
+    /// boiler); always `false` for the attic bucket.
+    pub external: bool,
 }
 
 /// Which porch fact a pending review question asks about.
@@ -467,6 +473,7 @@ impl AppController {
         else {
             return Vec::new();
         };
+        let external = storey.external_object_pin_ids();
         storey
             .object_rooms
             .iter()
@@ -479,6 +486,7 @@ impl AppController {
                 name: r.name.clone(),
                 count: r.total_count(),
                 active: self.active_object_room == Some(r.id),
+                external: external.contains(&r.id),
             })
             .collect()
     }
@@ -531,6 +539,7 @@ impl AppController {
             categories_present: room.categories_present(),
             surface_pitch_deg: room.surface_pitch_deg,
             is_attic: data.attic_room.as_ref().is_some_and(|a| a.id == room.id),
+            external: data.object_pin_is_external(room.id),
         })
     }
 
@@ -684,7 +693,10 @@ impl AppController {
                     format!("porch {} ({})", i + 1, storey_display_name(s, idx))
                 };
                 let mut push = |question: PorchQuestion| {
-                    if !self.porch_review_skipped.contains(&(idx, facts.key, question)) {
+                    if !self
+                        .porch_review_skipped
+                        .contains(&(idx, facts.key, question))
+                    {
                         out.push(PorchPromptView {
                             storey_idx: idx,
                             key: facts.key,
@@ -761,7 +773,8 @@ impl AppController {
         key: ber_model::ber::fenestration::PorchKey,
         question: PorchQuestion,
     ) {
-        self.porch_review_skipped.insert((storey_idx, key, question));
+        self.porch_review_skipped
+            .insert((storey_idx, key, question));
     }
 
     /// Deferred porch questions whose promised evidence STILL isn't recorded

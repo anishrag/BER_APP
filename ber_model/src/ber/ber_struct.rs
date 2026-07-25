@@ -230,7 +230,8 @@ impl Ber {
                 .iter()
                 .any(|e| e.file_path == loe.file_path);
             if !already {
-                self.construction_phases.add_year_evidence(phase, loe.clone());
+                self.construction_phases
+                    .add_year_evidence(phase, loe.clone());
             }
         }
     }
@@ -351,6 +352,16 @@ impl Ber {
             .iter()
             .flat_map(|s| s.object_rooms.iter())
             .chain(self.attic_room.iter())
+    }
+
+    /// Whether object pin `room_id` sits OUTSIDE the dwelling — derived from
+    /// its owning storey's footprint (see [`Storey::external_object_pin_ids`]).
+    /// `false` for the attic bucket (no plan position) and unknown ids.
+    pub fn object_pin_is_external(&self, room_id: crate::ber::common::ItemId) -> bool {
+        self.storeys.iter().any(|s| {
+            s.object_rooms.iter().any(|r| r.id == room_id)
+                && s.external_object_pin_ids().contains(&room_id)
+        })
     }
 
     /// Mutable [`object_rooms_iter`](Self::object_rooms_iter).

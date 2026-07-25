@@ -240,6 +240,22 @@ impl FollowUpPointId {
                 )
             }
             CertifierNewbuildLetter => {
+                // The ticked surface split (same offered list as the builder's
+                // letter): named surfaces make the request concrete; none
+                // ticked keeps the general wording.
+                let bullets = builder_surface_groups(ber)
+                    .into_iter()
+                    .filter(|s| fu.certifier_surfaces.contains(&s.id))
+                    .map(|s| format!("• {}", s.name))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let surfaces = if bullets.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " It needs to cover the build-up of the following surfaces:\n\n{bullets}\n"
+                    )
+                };
                 let fallback = match latest_extension_year(ber) {
                     Some(y) => format!(
                         " If this isn't available it wouldn't make much of a difference — I'd \
@@ -253,7 +269,7 @@ impl FollowUpPointId {
                      can't be accepted by the SEAI — I'd need documentation from the certifying \
                      architect, engineer or assigned certifier: as-built drawings signed off by \
                      them, or a signed letter confirming the build-ups as actually built and that \
-                     they comply with the building regulations of the time.{fallback}"
+                     they comply with the building regulations of the time.{surfaces}{fallback}"
                 )
             }
             WindowDop => "For the windows, to use better-than-default values I'd need two \
@@ -362,26 +378,65 @@ fn builder_auto(base: &ConstructionBase) -> bool {
             || base.construction_makeup == ConstructionMakeup::Unknown)
 }
 
-/// Every wall/floor/ceiling construction group, for the Builder's-letter
-/// sub-checks — walls, then floors, then ceilings/roofs, each with a display
-/// name and the auto-tick flag.
+/// The wall/floor/ceiling construction groups an EXISTING heat-loss surface
+/// references, for the Builder's-/certifier's-letter sub-checks — walls, then
+/// floors, then ceilings/roofs, each with a display name and the auto-tick
+/// flag. The division and scope mirror the STRUCTURE REVIEW exactly: one
+/// entry per construction group, offered only when some resolved region in
+/// structure scope (`in_structure_scope` — heat-loss-relevant: not
+/// party / inter-storey / excluded) carries it. Untethered constructions —
+/// the find-or-create base seeds, records orphaned by re-grouping, groups
+/// referenced only by buried junction surfaces — never reach the list (they
+/// were what inflated a messy record's letter to 20+ rows; field feedback
+/// 2026-07-24).
 pub fn builder_surface_groups(ber: &Ber) -> Vec<SurfaceGroup> {
+    use std::collections::HashSet;
+    let (mut walls, mut floors, mut ceilings) = (HashSet::new(), HashSet::new(), HashSet::new());
+    for s in &ber.storeys {
+        for r in &s.walls.regions {
+            if r.exposure.in_structure_scope() {
+                walls.insert(r.construction_id);
+            }
+        }
+        for r in &s.floors.regions {
+            if r.exposure.in_structure_scope() {
+                floors.insert(r.construction_id);
+            }
+        }
+        for r in &s.ceilings.regions {
+            if r.exposure.in_structure_scope() {
+                ceilings.insert(r.construction_id);
+            }
+        }
+    }
     let mut out = Vec::new();
-    for w in &ber.wall_constructions {
+    for w in ber
+        .wall_constructions
+        .iter()
+        .filter(|w| walls.contains(&w.base.id))
+    {
         out.push(SurfaceGroup {
             id: w.base.id,
             name: surface_name(&w.base, w.construction_type.label()),
             auto: builder_auto(&w.base),
         });
     }
-    for f in &ber.floor_constructions {
+    for f in ber
+        .floor_constructions
+        .iter()
+        .filter(|f| floors.contains(&f.base.id))
+    {
         out.push(SurfaceGroup {
             id: f.base.id,
             name: surface_name(&f.base, f.construction_type.label()),
             auto: builder_auto(&f.base),
         });
     }
-    for c in &ber.ceiling_constructions {
+    for c in ber
+        .ceiling_constructions
+        .iter()
+        .filter(|c| ceilings.contains(&c.base.id))
+    {
         out.push(SurfaceGroup {
             id: c.base.id,
             name: surface_name(&c.base, c.construction_type.label()),
@@ -627,6 +682,16 @@ pub struct FollowUpRequest {
     /// non-empty.
     #[serde(default)]
     pub builder_surfaces: Vec<ItemId>,
+    /// Construction group ids ticked for the CERTIFIER's-letter request — the
+    /// SAME offered surface list as the builder's letter
+    /// ([`builder_surface_groups`]), ticked independently: the assessor's
+    /// split of the surfaces decides who is asked to evidence what (builder
+    /// letter vs certifier letter). Unlike `builder_surfaces` this list may
+    /// be empty with the point still selected — the certifier request reads
+    /// fine without named surfaces (the general new-build wording).
+    /// `#[serde(default)]` so older records load.
+    #[serde(default)]
+    pub certifier_surfaces: Vec<ItemId>,
     /// Per-BER custom request points added via the tab's "+".
     #[serde(default)]
     pub custom: Vec<CustomPoint>,
@@ -892,9 +957,7 @@ mod tests {
         let mut ber = ber_with_year(2018, true);
         ber.heating_system.system_type = HeatingSystemType::HeatPump;
         assert!(!auto_selected(&ber, REF_YEAR).contains(&FollowUpPointId::WaterCylinderModel));
-        assert!(
-            !auto_selected(&ber, REF_YEAR).contains(&FollowUpPointId::WaterCylinderInsulation)
-        );
+        assert!(!auto_selected(&ber, REF_YEAR).contains(&FollowUpPointId::WaterCylinderInsulation));
         // When manually ticked both render with their heading + explainer link.
         let fu = FollowUpRequest {
             selected: vec![
@@ -930,6 +993,128 @@ mod tests {
         assert!(
             !draft.contains("More details"),
             "custom points have no explainer page: {draft}"
+        );
+    }
+    /// The letter sub-checks mirror the STRUCTURE REVIEW: one row per
+    /// construction group, offered only when an EXISTING in-scope (heat-loss)
+    /// region references it. Seeds/orphans and groups referenced only by
+    /// buried (inter-storey) surfaces never show — the 20-row messy-record
+    /// inflation of field feedback 2026-07-24.
+    #[test]
+    fn builder_surfaces_mirror_the_structure_review_scope() {
+        use crate::ber::structural::{
+            CeilingConstructionType, CeilingExposure, CeilingRegion, Opes, Polygon3D, Storey,
+            WallConstructionType, WallExposure, WallRegion,
+        };
+        use domain::points::Point3f64;
+
+        let mut ber = Ber::default();
+        let used_wall = ber.ensure_wall_construction(
+            WallConstructionType::CavityWall,
+            ConstructionMakeup::Unknown,
+            ConstructionPhase::Original,
+        );
+        // A second group of a DIFFERENT type that no region references — the
+        // find-or-create seed / re-grouping orphan case.
+        let orphan_wall = ber.ensure_wall_construction(
+            WallConstructionType::TimberConstruction,
+            ConstructionMakeup::Unknown,
+            ConstructionPhase::Original,
+        );
+        // A ceiling group referenced ONLY by a buried inter-storey region.
+        let buried_ceiling = ber.ensure_ceiling_construction(
+            CeilingConstructionType::FlatRoof,
+            ConstructionMakeup::Unknown,
+            ConstructionPhase::Original,
+        );
+        let quad = |z: f64| Polygon3D {
+            exterior: vec![
+                Point3f64::new(0.0, 0.0, z),
+                Point3f64::new(4.0, 0.0, z),
+                Point3f64::new(4.0, 0.0, z + 2.4),
+                Point3f64::new(0.0, 0.0, z + 2.4),
+            ],
+        };
+        let mut s = Storey::default();
+        s.walls.regions.push(WallRegion {
+            id: ItemId::default(),
+            polygon: quad(0.0),
+            exposure: WallExposure::Exposed,
+            opes: Opes::default(),
+            construction_id: used_wall,
+        });
+        s.ceilings.regions.push(CeilingRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D {
+                exterior: vec![
+                    Point3f64::new(0.0, 0.0, 2.4),
+                    Point3f64::new(4.0, 0.0, 2.4),
+                    Point3f64::new(4.0, 4.0, 2.4),
+                    Point3f64::new(0.0, 4.0, 2.4),
+                ],
+            },
+            opes: Opes::default(),
+            construction_id: buried_ceiling,
+            exposure: CeilingExposure::InterStorey,
+        });
+        ber.storeys.push(s);
+
+        let ids: Vec<ItemId> = builder_surface_groups(&ber).iter().map(|g| g.id).collect();
+        assert_eq!(
+            ids,
+            vec![used_wall],
+            "only the group an existing in-scope surface references is offered \
+             (orphan {orphan_wall:?} and buried {buried_ceiling:?} are not)"
+        );
+    }
+    /// The certifier's letter offers the SAME surface list as the builder's
+    /// letter, ticked independently — the assessor's split decides who
+    /// evidences what. Ticked certifier surfaces are named in the draft; with
+    /// none ticked the general wording stands.
+    #[test]
+    fn certifier_letter_names_its_own_ticked_surfaces() {
+        use crate::ber::structural::{
+            Opes, Polygon3D, WallConstructionType, WallExposure, WallRegion,
+        };
+        use domain::points::Point3f64;
+
+        let mut ber = ber_with_year(1990, true);
+        let wall = ber.ensure_wall_construction(
+            WallConstructionType::CavityWall,
+            ConstructionMakeup::Unknown,
+            ConstructionPhase::Extension1,
+        );
+        let mut s = crate::ber::structural::Storey::default();
+        s.walls.regions.push(WallRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D {
+                exterior: vec![
+                    Point3f64::new(0.0, 0.0, 0.0),
+                    Point3f64::new(4.0, 0.0, 0.0),
+                    Point3f64::new(4.0, 0.0, 2.4),
+                    Point3f64::new(0.0, 0.0, 2.4),
+                ],
+            },
+            exposure: WallExposure::Exposed,
+            opes: Opes::default(),
+            construction_id: wall,
+        });
+        ber.storeys.push(s);
+
+        let mut fu = FollowUpRequest {
+            selected: vec![FollowUpPointId::CertifierNewbuildLetter],
+            ..FollowUpRequest::default()
+        };
+        let plain = assemble_draft(&ber, &fu);
+        assert!(
+            !plain.contains("needs to cover the build-up"),
+            "no surfaces ticked → general wording"
+        );
+        fu.certifier_surfaces = vec![wall];
+        let named = assemble_draft(&ber, &fu);
+        assert!(
+            named.contains("needs to cover the build-up") && named.contains("• Cavity"),
+            "ticked surface named in the certifier request: {named}"
         );
     }
 }

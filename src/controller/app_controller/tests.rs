@@ -2226,6 +2226,76 @@ fn snapped_walls_are_pinned_so_only_drawn_walls_dimension() {
     );
 }
 
+/// A square drawn from scratch (raw PIXEL coords, nothing dimensioned) must
+/// resolve to a bare display floor region the moment the stroke closes — the
+/// canvas auto-fit keys off `storey.floors`, so without this the fresh shape
+/// has no fitted transform and reads as "off screen". The projection then
+/// TRACKS the pixels→metres rescale when the first dimension lands, and the
+/// full resolve replaces it once the loop completes.
+#[test]
+fn fresh_undimensioned_outline_resolves_for_display_fit() {
+    let p = |x: f32, y: f32| Point2f32::new(x, y);
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    let _ = c.create_ber(
+        "T".into(),
+        chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+    );
+    // The from-scratch pixel path: a rough square around (300..600) px.
+    c.apply_drawperp_stroke(
+        &[
+            p(300., 300.),
+            p(600., 302.),
+            p(598., 600.),
+            p(301., 599.),
+            p(300., 305.),
+        ],
+        true,
+    )
+    .unwrap();
+    c.materialize();
+    let ber = c.current_ber_clone().unwrap();
+    let floors = &ber.storeys[0].floors;
+    assert!(
+        !floors.regions.is_empty(),
+        "undimensioned outline projects a display floor region"
+    );
+    let bbox_x: Vec<f64> = floors.regions[0]
+        .polygon
+        .exterior()
+        .coords()
+        .map(|c| c.x)
+        .collect();
+    let span = bbox_x.iter().fold(f64::MIN, |a, &b| a.max(b))
+        - bbox_x.iter().fold(f64::MAX, |a, &b| a.min(b));
+    assert!(
+        (span - 300.0).abs() < 30.0,
+        "display region is at stroke (pixel) scale pre-dimension: span {span}"
+    );
+    assert!(
+        ber.storeys[0].walls.regions.is_empty() && ber.storeys[0].ceilings.regions.is_empty(),
+        "display-only: no walls/ceilings derived from the undimensioned outline"
+    );
+
+    // First dimension: the plan rescales to metres — the display region must
+    // track it (a stale pixel-scale bbox would throw the fit off again).
+    assert!(c.dimensioning_active(), "dimension loop opened");
+    c.apply_dimension(10.0).unwrap();
+    c.materialize();
+    let ber = c.current_ber_clone().unwrap();
+    let floors = &ber.storeys[0].floors;
+    assert!(!floors.regions.is_empty());
+    let max_x = floors.regions[0]
+        .polygon
+        .exterior()
+        .coords()
+        .map(|c| c.x)
+        .fold(f64::MIN, f64::max);
+    assert!(
+        max_x < 50.0,
+        "display region tracked the metre rescale: max x {max_x}"
+    );
+}
+
 /// Helper: a 10×10 dimensioned storey with a BER record, ready for exposure
 /// marking. Returns the controller.
 #[cfg(test)]
@@ -4610,12 +4680,12 @@ fn roof_row_gates_mapping_complete() {
         ChecklistStatus::Incomplete,
         "no roof yet"
     );
-    // Draw a (flat) roof over the storey's ceiling.
+    // Classify the (flat) ceiling as the roof surface itself.
     c.set_default_ceiling_height(2.4).unwrap();
     c.set_roof_mode(true);
     c.confirm_all_storeys_added_roof();
     c.roof_region_tap(5.0, 5.0, 0.5);
-    c.pick_roof_area_shape(RoofShape::Flat);
+    c.confirm_roof_follow().unwrap();
     assert_eq!(
         checklist_status_of(&c, "Roof"),
         ChecklistStatus::AllStoreys,
@@ -4637,7 +4707,7 @@ fn flat_roof_eave_snaps_to_the_resolved_ceiling_z() {
     c.set_roof_mode(true);
     c.confirm_all_storeys_added_roof();
     c.roof_region_tap(7.0, 5.0, 0.5); // the RAISED piece (right of x = 4)
-    c.pick_roof_area_shape(RoofShape::Flat);
+    c.confirm_roof_follow().unwrap(); // Classify: this flat ceiling IS the roof
 
     let record = c.current_record.as_ref().unwrap();
     let area = record.data.roof.areas.last().expect("roof area committed");
@@ -4671,15 +4741,17 @@ fn ceiling_groups_split_by_inferred_roof_type_and_prefill_never_clobbers() {
     c.assign_ceiling_step_delta(0.3).expect("amount applies");
     c.materialize();
 
-    // FLAT roof over the raised right piece; GABLE (departing) over the left.
+    // FLAT roof over the raised right piece (Classify: the ceiling IS the
+    // roof); GABLE (departing) generated over the left in the Section stage.
     c.set_roof_mode(true);
     c.confirm_all_storeys_added_roof();
     c.roof_region_tap(7.0, 5.0, 0.5);
-    c.pick_roof_area_shape(RoofShape::Flat);
+    c.confirm_roof_follow().unwrap();
     c.roof_region_tap(2.0, 5.0, 0.5);
-    c.pick_roof_area_shape(RoofShape::Gable);
-    c.apply_roof_area_ridge(&[(2.0, 3.0), (2.0, 7.0)]).unwrap();
-    c.assign_roof_area_pitch(45.0).unwrap();
+    c.pick_roof_section_style(RoofSectionStyle::GableBoth)
+        .unwrap();
+    c.assign_roof_section_pitch(45.0).unwrap();
+    c.confirm_roof_section().unwrap();
     c.set_roof_mode(false);
     c.materialize();
 
@@ -5451,15 +5523,15 @@ fn curve_arc_is_provisional_until_attach_lines_are_dimensioned() {
 /// Drop a dimensioned 10x10 square outline into whichever storey is current.
 /// Used by the multi-storey tests to set each storey up identically.
 fn finalise_current_storey_as_square(c: &mut AppController, side: f32) {
+    finalise_current_storey_as_rect(c, side, side);
+}
+
+/// Like [`finalise_current_storey_as_square`] but with independent extents —
+/// an origin-anchored `w × h` rectangle.
+fn finalise_current_storey_as_rect(c: &mut AppController, w: f32, h: f32) {
     let p = |x: f32, y: f32| Point2f32::new(x, y);
     c.document.floor_plan = FloorPlan::from_points_to_orthogonal(
-        &[
-            p(0., 0.),
-            p(side, 0.),
-            p(side, side),
-            p(0., side),
-            p(0.05, 0.05),
-        ],
+        &[p(0., 0.), p(w, 0.), p(w, h), p(0., h), p(0.05, 0.05)],
         0.1,
         true,
     )
@@ -8032,8 +8104,8 @@ fn entering_plan_takeover_tools_from_3d_returns_to_2d() {
     c.confirm_all_storeys_added_roof();
     c.roof_region_tap(5.0, 5.0, 0.5);
     assert!(
-        c.roof_area_can_pick_shape(),
-        "the tap lands — grouping works straight after coming from 3D"
+        c.roof_regions_view().iter().any(|r| r.selected),
+        "the tap lands — selection works straight after coming from 3D"
     );
     c.set_roof_mode(false);
 
@@ -8051,56 +8123,246 @@ fn entering_plan_takeover_tools_from_3d_returns_to_2d() {
     );
 }
 
-/// Phase-1 roof step: group the ceiling area, pick GABLE, draw a ridge, type a
-/// pitch. The roof lands on `Ber.roof` as a SEPARATE structure — the ceiling
-/// (`storey.ceiling_apexes`) is left UNTOUCHED (the bug this replaced reshaped the
-/// ceiling). A gable extends the ridge to the area's full span (x = 5, y 0..10).
+/// Roof step, Stage A (Classify): the gate opens onto CLASSIFY with the
+/// sloped roofable regions PRESELECTED (a converted attic's rafter ceiling IS
+/// the roof skin); confirming commits ONE FollowCeiling area over the sloped
+/// picks and a Flat area PER STOREY for the flat picks, then advances to
+/// SECTION where covered regions stop being selectable. The ceiling itself is
+/// untouched throughout.
 #[test]
-fn roof_area_gable_commits_to_ber_roof_without_touching_ceiling() {
+fn classify_commits_follow_ceiling_for_sloped_and_flat_areas_per_storey() {
+    use ber_model::ber::structural::CeilingApex;
+    use domain::points::Point2f64;
+
+    // Storey 0 = 10x10 flat at 2.4. Storey 1 (the attic) = a 6x10 strip at
+    // the same origin (so storey 0's remaining roofable band is the CONVEX
+    // 4x10 rectangle east of it — `covers_on` keys on the vertex-mean
+    // centroid, which lands outside a concave band), ceiling sloped to a
+    // ridge at x = 3 (4.0 m above the ATTIC floor).
+    let mut c = dimensioned_square_controller();
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.add_storey().unwrap();
+    finalise_current_storey_as_rect(&mut c, 6.0, 10.0);
+    c.set_default_ceiling_height(2.2).unwrap();
+    {
+        let rec = c.current_record.as_mut().unwrap();
+        rec.data.add_ceiling_apex(
+            1,
+            CeilingApex {
+                point: Point2f64::new(3.0, 0.0),
+                z_m: 4.0,
+            },
+        );
+        rec.data.add_ceiling_apex(
+            1,
+            CeilingApex {
+                point: Point2f64::new(3.0, 10.0),
+                z_m: 4.0,
+            },
+        );
+    }
+    c.recompose_ceilings(1);
+    c.materialize();
+
+    c.set_roof_mode(true);
+    assert_eq!(c.roof_stage(), Some(RoofStage::Gate));
+    c.confirm_all_storeys_added_roof();
+    assert_eq!(
+        c.roof_stage(),
+        Some(RoofStage::Classify),
+        "an empty roof opens on Classify"
+    );
+    // The attic's sloped regions arrive preselected; storey 0's flat band does
+    // not.
+    let regions = c.roof_regions_view();
+    assert!(
+        regions
+            .iter()
+            .filter(|r| r.storey_idx == 1)
+            .all(|r| r.selected),
+        "sloped roofable regions are PRESELECTED"
+    );
+    assert!(
+        regions
+            .iter()
+            .filter(|r| r.storey_idx == 0)
+            .all(|r| !r.selected),
+        "flat regions are not preselected"
+    );
+    // Add storey 0's flat band (a flat roof there) and confirm.
+    c.roof_region_tap(8.0, 5.0, 0.5);
+    c.confirm_roof_follow().unwrap();
+    assert_eq!(c.roof_stage(), Some(RoofStage::Section), "advances");
+
+    let ber = &c.current_record.as_ref().unwrap().data;
+    assert!(
+        ber.storeys[1].ceiling_apexes.len() == 2,
+        "the ceiling itself is untouched"
+    );
+    assert_eq!(ber.roof.areas.len(), 2, "one FollowCeiling + one Flat");
+    let follow = ber
+        .roof
+        .areas
+        .iter()
+        .find(|a| a.shape == ber_model::ber::roof::RoofShape::FollowCeiling)
+        .expect("the sloped picks became a FollowCeiling area");
+    assert_eq!(follow.covered_storeys, vec![1]);
+    assert_eq!(
+        follow.apexes.len(),
+        2,
+        "the roof adopted the attic ceiling's apexes"
+    );
+    assert!(
+        follow.apexes.iter().all(|a| (a.z_m - 4.0).abs() < 1e-6),
+        "same apex height as the ceiling"
+    );
+    let flat = ber
+        .roof
+        .areas
+        .iter()
+        .find(|a| a.shape == ber_model::ber::roof::RoofShape::Flat)
+        .expect("the flat pick became a per-storey Flat area");
+    assert_eq!(flat.covered_storeys, vec![0]);
+    assert!(
+        (flat.eave_z - 2.4).abs() < 1e-6,
+        "flat roof on the ceiling plane"
+    );
+    // Coverage credits BOTH storeys' regions (the mapping-gate read).
+    assert!(ber.roof.covers_on(0, Point2f64::new(8.0, 5.0)));
+    assert!(ber.roof.covers_on(1, Point2f64::new(1.5, 5.0)));
+    // Section stage: covered regions are dimmed and no longer selectable.
+    assert!(
+        c.roof_regions_view().iter().all(|r| r.covered),
+        "everything is covered now"
+    );
+    c.roof_region_tap(1.5, 5.0, 0.5);
+    assert!(
+        !c.roof_regions_view().iter().any(|r| r.selected),
+        "a covered region can't be re-selected in the Section stage"
+    );
+    // The whole-dwelling coverage gate agrees (the checklist read).
+    assert!(
+        c.current_record
+            .as_ref()
+            .unwrap()
+            .data
+            .roof_coverage()
+            .complete(),
+        "every roofable region is covered"
+    );
+}
+
+/// An empty Classify selection is a valid answer ("nothing follows the
+/// ceiling"): confirming commits nothing and just advances to Section. A
+/// record whose roof already has areas re-enters the step straight into
+/// SECTION (classification was answered on a previous visit).
+#[test]
+fn classify_empty_is_valid_and_existing_roof_reenters_section() {
     let mut c = dimensioned_square_controller();
     c.set_default_ceiling_height(2.4).unwrap();
     c.set_roof_mode(true);
-    assert!(c.roof_mode());
     c.confirm_all_storeys_added_roof();
-    assert!(!c.roof_gate_pending());
+    assert_eq!(c.roof_stage(), Some(RoofStage::Classify));
+    c.confirm_roof_follow().unwrap();
+    assert_eq!(c.roof_stage(), Some(RoofStage::Section));
+    assert!(
+        c.current_record.as_ref().unwrap().data.roof.is_empty(),
+        "an empty selection commits nothing"
+    );
 
+    // Commit one flat section, leave, re-enter: straight into Section.
     c.roof_region_tap(5.0, 5.0, 0.5);
-    assert!(c.roof_area_can_pick_shape(), "the area is grouped");
+    c.pick_roof_section_style(RoofSectionStyle::Flat).unwrap();
+    assert_eq!(
+        c.current_record.as_ref().unwrap().data.roof.areas.len(),
+        1,
+        "Flat commits immediately"
+    );
+    c.set_roof_mode(false);
+    c.set_roof_mode(true);
+    c.confirm_all_storeys_added_roof();
+    assert_eq!(
+        c.roof_stage(),
+        Some(RoofStage::Section),
+        "an existing roof skips Classify"
+    );
+}
 
-    c.pick_roof_area_shape(RoofShape::Gable);
-    assert!(c.roof_area_ridge_pending());
-    // A vertical ridge drawn down the middle (x = 5), short of the end walls.
-    c.apply_roof_area_ridge(&[(5.0, 3.0), (5.0, 7.0)]).unwrap();
-    assert!(c.roof_area_pitch_pending());
-
-    c.assign_roof_area_pitch(45.0).unwrap();
-    assert!(!c.roof_area_pitch_pending(), "committed");
+/// Stage B over a flat-ceilinged square with NO adjacent sloped ceiling: the
+/// style pick opens the PITCH prompt (nothing to inherit), the assigned pitch
+/// generates the candidate, and confirming commits a GABLE area — ceiling
+/// untouched, `ends` recorded, the generated ridge centred and spanning the
+/// footprint, apexes risen by the pitch over the half-span run.
+#[test]
+fn roof_section_gable_commits_to_ber_roof_without_touching_ceiling() {
+    let mut c = dimensioned_square_controller();
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.set_roof_mode(true);
+    c.confirm_all_storeys_added_roof();
+    c.confirm_roof_follow().unwrap(); // nothing follows — plain flat ceiling
+    c.roof_region_tap(5.0, 5.0, 0.5);
+    c.pick_roof_section_style(RoofSectionStyle::GableBoth)
+        .unwrap();
+    let view = c.pending_roof_section_view().expect("section pending");
+    assert!(
+        view.needs_pitch && !view.pitch_inherited,
+        "no sloped ceiling touches the square — the pitch prompt opens"
+    );
+    assert!(
+        view.ridge_lines.is_empty(),
+        "no candidates before the pitch arrives"
+    );
+    c.assign_roof_section_pitch(45.0).unwrap();
+    let view = c.pending_roof_section_view().expect("still pending");
+    assert!(!view.needs_pitch);
+    assert_eq!(view.candidate_count, 1, "GableBoth has one candidate");
+    assert_eq!(view.candidate_label, "Gable both ends");
+    c.confirm_roof_section().unwrap();
+    assert!(
+        c.pending_roof_section_view().is_none(),
+        "confirm clears the pending section"
+    );
+    assert_eq!(c.roof_stage(), Some(RoofStage::Section), "stays in Section");
 
     let ber = &c.current_record.as_ref().unwrap().data;
-    // The CEILING is untouched — no apexes were stamped.
     assert!(
         ber.storeys[0].ceiling_apexes.is_empty(),
         "the roof must NOT reshape the ceiling"
     );
-    // The roof landed on Ber.roof as a separate area.
     assert_eq!(ber.roof.areas.len(), 1, "one roof area on Ber.roof");
     let area = &ber.roof.areas[0];
     assert_eq!(area.shape, ber_model::ber::roof::RoofShape::Gable);
+    assert_eq!(
+        area.ends,
+        Some([
+            ber_model::ber::roof::RoofEnd::Gable,
+            ber_model::ber::roof::RoofEnd::Gable
+        ])
+    );
     assert!((area.pitch_deg - 45.0).abs() < 1e-4);
     assert!(
         (area.eave_z - 2.4).abs() < 1e-6,
         "eave at the ceiling height"
     );
+    // The square's longer way is a tie → axis X: ridge centred at y = 5,
+    // running the full x span (gable ends at the walls).
     let (a, b) = area.ridge.expect("gable has a ridge");
     assert!(
-        (a.x - 5.0).abs() < 1e-3 && (b.x - 5.0).abs() < 1e-3,
-        "ridge at x = 5"
+        (a.y - 5.0).abs() < 1e-3 && (b.y - 5.0).abs() < 1e-3,
+        "ridge centred at y = 5: {a:?} {b:?}"
     );
-    let mut ys = [a.y, b.y];
-    ys.sort_by(|p, q| p.partial_cmp(q).unwrap());
+    let mut xs = [a.x, b.x];
+    xs.sort_by(|p, q| p.partial_cmp(q).unwrap());
     assert!(
-        ys[0].abs() < 1e-3 && (ys[1] - 10.0).abs() < 1e-3,
-        "a gable extends the ridge to the area span (y 0..10): {ys:?}"
+        xs[0].abs() < 1e-3 && (xs[1] - 10.0).abs() < 1e-3,
+        "a gable runs the ridge to the end walls (x 0..10): {xs:?}"
+    );
+    // Half-span run 5: apexes at eave 2.4 + 5·tan45 = 7.4.
+    assert_eq!(area.apexes.len(), 2);
+    assert!(
+        area.apexes.iter().all(|ap| (ap.z_m - 7.4).abs() < 1e-6),
+        "apex height from the centred run: {:?}",
+        area.apexes
     );
     assert!(
         !area.footprint.is_empty(),
@@ -8108,229 +8370,20 @@ fn roof_area_gable_commits_to_ber_roof_without_touching_ceiling() {
     );
 }
 
-/// A HIP keeps the DRAWN ridge length (the ends slope in) rather than extending
-/// to the end walls — the recorded ridge endpoints are the drawn 3 / 7. The hip
-/// flow now COLLECTS ridges (an L-shaped hip has several): after the stroke it
-/// stays in the ridge stage until "Finish ridges" moves it to the pitch.
+/// Stage B next to a SLOPED ceiling: half the ceiling was classified as
+/// FollowCeiling (a room-in-roof), and the section over the other half
+/// INHERITS its slope — no pitch prompt, candidates arrive immediately, and
+/// the committed pitch is the adjacent rafter angle. An explicit
+/// `assign_roof_section_pitch` afterwards OVERRIDES the inherited value.
 #[test]
-fn roof_area_hip_keeps_drawn_ridge_length() {
-    let mut c = dimensioned_square_controller();
-    c.set_default_ceiling_height(2.4).unwrap();
-    c.set_roof_mode(true);
-    c.confirm_all_storeys_added_roof();
-    c.roof_region_tap(5.0, 5.0, 0.5);
-    c.pick_roof_area_shape(RoofShape::Hip);
-    c.apply_roof_area_ridge(&[(5.0, 3.0), (5.0, 7.0)]).unwrap();
-    assert!(
-        c.roof_area_ridge_pending() && c.roof_area_hip_ridge_count() == Some(1),
-        "a hip stays collecting ridges after a stroke"
-    );
-    c.finish_roof_area_ridges().unwrap();
-    assert!(c.roof_area_pitch_pending(), "Finish opens the pitch");
-    c.assign_roof_area_pitch(45.0).unwrap();
-
-    let ber = &c.current_record.as_ref().unwrap().data;
-    assert!(
-        ber.storeys[0].ceiling_apexes.is_empty(),
-        "ceiling untouched"
-    );
-    let area = &ber.roof.areas[0];
-    assert_eq!(area.shape, ber_model::ber::roof::RoofShape::Hip);
-    let (a, b) = area.ridge.expect("hip has a ridge");
-    let mut ys = [a.y, b.y];
-    ys.sort_by(|p, q| p.partial_cmp(q).unwrap());
-    assert!(
-        (ys[0] - 3.0).abs() < 1e-3 && (ys[1] - 7.0).abs() < 1e-3,
-        "a hip keeps the drawn ridge extent (y 3..7): {ys:?}"
-    );
-}
-
-/// A HIP accepts SEVERAL ridge strokes before Finish — each contributes its
-/// apex pair to the committed area (4 apexes for 2 ridges), and finishing with
-/// no ridge drawn is refused.
-#[test]
-fn roof_area_hip_collects_multiple_ridges() {
-    let mut c = dimensioned_square_controller();
-    c.set_default_ceiling_height(2.4).unwrap();
-    c.set_roof_mode(true);
-    c.confirm_all_storeys_added_roof();
-    c.roof_region_tap(5.0, 5.0, 0.5);
-    c.pick_roof_area_shape(RoofShape::Hip);
-    assert!(
-        c.finish_roof_area_ridges().is_err(),
-        "finishing with no ridge drawn is refused"
-    );
-    c.apply_roof_area_ridge(&[(5.0, 2.0), (5.0, 5.0)]).unwrap();
-    c.apply_roof_area_ridge(&[(3.0, 5.0), (5.0, 5.0)]).unwrap();
-    assert_eq!(c.roof_area_hip_ridge_count(), Some(2));
-    assert_eq!(
-        c.pending_roof_area_ridge_lines().len(),
-        2,
-        "both collected ridges overlay while drawing"
-    );
-    c.finish_roof_area_ridges().unwrap();
-    c.assign_roof_area_pitch(45.0).unwrap();
-
-    let area = &c.current_record.as_ref().unwrap().data.roof.areas[0];
-    assert_eq!(
-        area.apexes.len(),
-        4,
-        "one apex pair per ridge: {:?}",
-        area.apexes
-    );
-    assert!(area.ridge.is_some(), "the first ridge is recorded");
-}
-
-/// A HIP's DIAGONAL ridge stroke is NOT orthogonalized: drawn at ~45° from
-/// near a footprint corner towards the main ridge's end, it keeps its
-/// direction, its corner end snaps onto the corner, and its inner end snaps
-/// onto the already-drawn main ridge's endpoint. Near-orthogonal strokes
-/// still straighten (the main ridge below).
-#[test]
-fn roof_area_hip_diagonal_ridge_is_not_orthogonalized() {
-    let mut c = dimensioned_square_controller();
-    c.set_default_ceiling_height(2.4).unwrap();
-    c.set_roof_mode(true);
-    c.confirm_all_storeys_added_roof();
-    c.roof_region_tap(5.0, 5.0, 0.5);
-    c.pick_roof_area_shape(RoofShape::Hip);
-    // Main ridge: slightly wobbly vertical stroke → straightens to x = 5.
-    c.apply_roof_area_ridge(&[(4.9, 3.0), (5.1, 7.0)]).unwrap();
-    // Corner ridge: ~45° from near the (10,10) corner to the main ridge's
-    // (5,7) end — must stay diagonal, ends snapped to corner + junction.
-    c.apply_roof_area_ridge(&[(9.8, 9.7), (5.2, 7.3)]).unwrap();
-    c.finish_roof_area_ridges().unwrap();
-    c.assign_roof_area_pitch(35.0).unwrap();
-
-    let area = &c.current_record.as_ref().unwrap().data.roof.areas[0];
-    assert_eq!(area.apexes.len(), 4, "two ridges, one apex pair each");
-    let has_apex_at = |x: f64, y: f64| {
-        area.apexes
-            .iter()
-            .any(|a| (a.point.x - x).abs() < 1e-6 && (a.point.y - y).abs() < 1e-6)
-    };
-    assert!(
-        has_apex_at(5.0, 3.0) && has_apex_at(5.0, 7.0),
-        "the main ridge straightened to x = 5: {:?}",
-        area.apexes
-    );
-    assert!(
-        has_apex_at(10.0, 10.0),
-        "the diagonal's corner end snapped onto (10,10): {:?}",
-        area.apexes
-    );
-    assert!(
-        has_apex_at(5.0, 7.0),
-        "the diagonal's inner end meets the main ridge at (5,7)"
-    );
-}
-
-/// The GABLE pitch stage offers "Centre on roof": a rough off-centre stroke
-/// (x = 3 across the 10-wide square) recentres to x = 5, keeping its
-/// full-span extension along the ridge.
-#[test]
-fn roof_area_gable_ridge_can_be_centred() {
-    let mut c = dimensioned_square_controller();
-    c.set_default_ceiling_height(2.4).unwrap();
-    c.set_roof_mode(true);
-    c.confirm_all_storeys_added_roof();
-    c.roof_region_tap(5.0, 5.0, 0.5);
-    c.pick_roof_area_shape(RoofShape::Gable);
-    c.apply_roof_area_ridge(&[(3.0, 3.0), (3.0, 7.0)]).unwrap();
-    assert!(c.roof_area_can_centre_ridge(), "gable offers centring");
-    // The pending 2D line shows the DRAWN (pre-centre) position first…
-    let lines = c.pending_roof_area_ridge_lines();
-    assert!(
-        (lines[0].0 .0 - 3.0).abs() < 1e-3,
-        "pending line at the drawn x = 3: {lines:?}"
-    );
-    c.centre_pending_roof_ridge();
-    // …and moves to the centre IMMEDIATELY on the button press, so the canvas
-    // redraws the green line centred before the pitch is even entered.
-    let lines = c.pending_roof_area_ridge_lines();
-    assert!(
-        (lines[0].0 .0 - 5.0).abs() < 1e-3 && (lines[0].1 .0 - 5.0).abs() < 1e-3,
-        "pending line recentred to x = 5: {lines:?}"
-    );
-    c.assign_roof_area_pitch(45.0).unwrap();
-
-    let area = &c.current_record.as_ref().unwrap().data.roof.areas[0];
-    let (a, b) = area.ridge.expect("gable has a ridge");
-    assert!(
-        (a.x - 5.0).abs() < 1e-3 && (b.x - 5.0).abs() < 1e-3,
-        "recentred to x = 5: {a:?} {b:?}"
-    );
-    // Centred half-span run: eave 2.4 + 5·tan45 = 7.4.
-    assert!(
-        area.apexes.iter().all(|ap| (ap.z_m - 7.4).abs() < 1e-6),
-        "apex height from the centred run: {:?}",
-        area.apexes
-    );
-}
-
-/// A ridge drawn NEARLY on an eave edge snaps ONTO it (mono-pitch): drawn at
-/// x = 9.8 against the x = 10 wall, the committed ridge sits at 10 and its
-/// apexes rise over the FULL 10 m span.
-#[test]
-fn roof_area_ridge_near_an_edge_snaps_onto_it() {
-    let mut c = dimensioned_square_controller();
-    c.set_default_ceiling_height(2.4).unwrap();
-    c.set_roof_mode(true);
-    c.confirm_all_storeys_added_roof();
-    c.roof_region_tap(5.0, 5.0, 0.5);
-    c.pick_roof_area_shape(RoofShape::Gable);
-    c.apply_roof_area_ridge(&[(9.8, 3.0), (9.8, 7.0)]).unwrap();
-    c.assign_roof_area_pitch(45.0).unwrap();
-
-    let area = &c.current_record.as_ref().unwrap().data.roof.areas[0];
-    let (a, b) = area.ridge.expect("gable has a ridge");
-    assert!(
-        (a.x - 10.0).abs() < 1e-3 && (b.x - 10.0).abs() < 1e-3,
-        "snapped onto the x = 10 edge: {a:?} {b:?}"
-    );
-    // Mono-pitch run is the full span: eave 2.4 + 10·tan45 = 12.4.
-    assert!(
-        area.apexes.iter().all(|ap| (ap.z_m - 12.4).abs() < 1e-6),
-        "apex height from the full-span run: {:?}",
-        area.apexes
-    );
-}
-
-/// A FLAT roof commits immediately (no ridge/pitch) to `Ber.roof`, ceiling
-/// untouched.
-#[test]
-fn roof_area_flat_commits_without_ridge() {
-    let mut c = dimensioned_square_controller();
-    c.set_default_ceiling_height(2.4).unwrap();
-    c.set_roof_mode(true);
-    c.confirm_all_storeys_added_roof();
-    c.roof_region_tap(5.0, 5.0, 0.5);
-    c.pick_roof_area_shape(RoofShape::Flat);
-
-    let ber = &c.current_record.as_ref().unwrap().data;
-    assert!(
-        ber.storeys[0].ceiling_apexes.is_empty(),
-        "ceiling untouched"
-    );
-    assert_eq!(ber.roof.areas.len(), 1);
-    let area = &ber.roof.areas[0];
-    assert_eq!(area.shape, ber_model::ber::roof::RoofShape::Flat);
-    assert!(area.ridge.is_none(), "a flat roof has no ridge");
-    assert!(!c.roof_area_pitch_pending(), "no pitch question for flat");
-}
-
-/// Converted attic: when the covered storey's ceiling is already sloped, the roof
-/// step offers "Follow ceiling", and picking it commits a roof that ADOPTS the
-/// ceiling's apexes (so the roof coincides with the sloped ceiling) — the ceiling
-/// itself stays untouched.
-#[test]
-fn roof_follows_a_sloped_ceiling_in_a_converted_attic() {
+fn roof_section_inherits_pitch_from_the_adjacent_sloped_ceiling() {
     use ber_model::ber::structural::CeilingApex;
     use domain::points::Point2f64;
 
+    // 10x10 storey, ceiling ridge at x = 5, apex 6.9 → both halves slope at
+    // atan(4.5 / 5) ≈ 41.99°.
     let mut c = dimensioned_square_controller();
     c.set_default_ceiling_height(2.4).unwrap();
-    // Slope the ceiling directly (a ridge at x = 5, height 6.9), then re-derive.
     {
         let rec = c.current_record.as_mut().unwrap();
         rec.data.add_ceiling_apex(
@@ -8353,117 +8406,455 @@ fn roof_follows_a_sloped_ceiling_in_a_converted_attic() {
 
     c.set_roof_mode(true);
     c.confirm_all_storeys_added_roof();
-    // Tap inside the west slope (off the ridge line, which is a shared edge).
-    c.roof_region_tap(2.5, 5.0, 0.5);
-    assert!(c.roof_area_can_pick_shape(), "a ceiling area was grouped");
-    assert!(
-        c.roof_area_ceiling_is_sloped(),
-        "the sloped ceiling is detected"
+    // Both slopes preselected; keep only the WEST one as follow-the-ceiling.
+    c.roof_region_tap(7.5, 5.0, 0.5); // deselect the east slope
+    c.confirm_roof_follow().unwrap();
+    let ber = &c.current_record.as_ref().unwrap().data;
+    assert_eq!(ber.roof.areas.len(), 1);
+    assert_eq!(
+        ber.roof.areas[0].shape,
+        ber_model::ber::roof::RoofShape::FollowCeiling
     );
-    c.pick_roof_area_shape(RoofShape::FollowCeiling);
+
+    // Section over the east half: the west rafters' angle is inherited.
+    c.roof_region_tap(7.5, 5.0, 0.5);
+    c.pick_roof_section_style(RoofSectionStyle::GableBoth)
+        .unwrap();
+    let view = c.pending_roof_section_view().expect("section pending");
+    assert!(
+        !view.needs_pitch && view.pitch_inherited,
+        "an adjacent sloped ceiling supplies the pitch"
+    );
+    let expected = (4.5f64 / 5.0).atan().to_degrees() as f32;
+    assert!(
+        (view.pitch_deg - expected).abs() < 0.2,
+        "inherited the rafter angle: got {}, want ≈{expected}",
+        view.pitch_deg
+    );
+    assert_eq!(view.candidate_count, 1, "candidates generated immediately");
+    assert!(!view.ridge_lines.is_empty(), "ridge preview available");
+    c.confirm_roof_section().unwrap();
 
     let ber = &c.current_record.as_ref().unwrap().data;
-    assert_eq!(
-        ber.storeys[0].ceiling_apexes.len(),
-        2,
-        "the ceiling itself is untouched"
-    );
-    let area = &ber.roof.areas[0];
-    assert_eq!(area.shape, ber_model::ber::roof::RoofShape::FollowCeiling);
-    assert_eq!(
-        area.apexes.len(),
-        2,
-        "the roof adopted the ceiling's apexes"
-    );
+    let area = ber.roof.areas.last().unwrap();
+    assert_eq!(area.shape, ber_model::ber::roof::RoofShape::Gable);
     assert!(
-        area.apexes.iter().all(|a| (a.z_m - 6.9).abs() < 1e-6),
-        "same apex height as the ceiling"
+        (area.pitch_deg - expected).abs() < 0.2,
+        "committed with the inherited pitch"
+    );
+    // East half is 5 wide × 10 tall → axis Y: the generated ridge runs
+    // north–south at x = 7.5, spanning y 0..10.
+    let (a, b) = area.ridge.expect("gable has a ridge");
+    assert!(
+        (a.x - 7.5).abs() < 1e-3 && (b.x - 7.5).abs() < 1e-3,
+        "ridge centred in the east half: {a:?} {b:?}"
+    );
+    let mut ys = [a.y, b.y];
+    ys.sort_by(|p, q| p.partial_cmp(q).unwrap());
+    assert!(
+        ys[0].abs() < 1e-3 && (ys[1] - 10.0).abs() < 1e-3,
+        "ridge spans the footprint (y 0..10): {ys:?}"
     );
 }
 
-/// Attic conversion spanning storeys: grouping the attic's SLOPED ceiling with
-/// the surrounding flat ceiling of the storey BELOW commits ONE roof area —
-/// based on the lower storey (its ceiling is the eave), covering both storeys,
-/// with the attic's ceiling apexes DATUM-SHIFTED into base-storey-local z so
-/// the extended rafter planes keep their world height.
+/// An inherited pitch can be OVERRIDDEN: `assign_roof_section_pitch`
+/// revalidates, regenerates the candidates at the new angle, and drops the
+/// `pitch_inherited` flag. Out-of-range pitches are refused with the
+/// user-facing message.
 #[test]
-fn roof_area_spans_attic_and_the_storey_below() {
+fn roof_section_pitch_override_and_validation() {
+    let mut c = dimensioned_square_controller();
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.set_roof_mode(true);
+    c.confirm_all_storeys_added_roof();
+    c.confirm_roof_follow().unwrap();
+    c.roof_region_tap(5.0, 5.0, 0.5);
+    c.pick_roof_section_style(RoofSectionStyle::GableBoth)
+        .unwrap();
+    assert!(c.assign_roof_section_pitch(0.0).is_err(), "pitch 0 refused");
+    assert!(
+        c.assign_roof_section_pitch(90.0).is_err(),
+        "pitch 90 refused"
+    );
+    c.assign_roof_section_pitch(30.0).unwrap();
+    let z30 = c.pending_roof_section_view().unwrap();
+    assert!(!z30.pitch_inherited && !z30.needs_pitch);
+    // Override regenerates: apexes rise higher at 60°.
+    c.assign_roof_section_pitch(60.0).unwrap();
+    c.confirm_roof_section().unwrap();
+    let area = c
+        .current_record
+        .as_ref()
+        .unwrap()
+        .data
+        .roof
+        .areas
+        .last()
+        .unwrap()
+        .clone();
+    assert!((area.pitch_deg - 60.0).abs() < 1e-4);
+    let expected_z = 2.4 + 5.0 * 60.0f64.to_radians().tan();
+    assert!(
+        area.apexes
+            .iter()
+            .all(|ap| (ap.z_m - expected_z).abs() < 1e-6),
+        "apexes regenerated at the overridden pitch: {:?}",
+        area.apexes
+    );
+}
+
+/// HipOne generates TWO candidates (hip at either end) and `Next option`
+/// cycles between them; the labels name the end by compass direction read off
+/// the ridge axis.
+#[test]
+fn roof_section_hip_one_end_offers_both_ends_and_next_cycles() {
+    let mut c = dimensioned_square_controller();
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.set_roof_mode(true);
+    c.confirm_all_storeys_added_roof();
+    c.confirm_roof_follow().unwrap();
+    c.roof_region_tap(5.0, 5.0, 0.5);
+    c.pick_roof_section_style(RoofSectionStyle::HipOne).unwrap();
+    c.assign_roof_section_pitch(35.0).unwrap();
+    let view = c.pending_roof_section_view().unwrap();
+    assert_eq!(view.candidate_count, 2, "one candidate per hipped end");
+    assert_eq!(view.candidate_idx, 0);
+    assert_eq!(
+        view.candidate_label, "Hip west end",
+        "axis X: low end = west"
+    );
+    c.next_roof_section_candidate();
+    let view = c.pending_roof_section_view().unwrap();
+    assert_eq!(view.candidate_idx, 1);
+    assert_eq!(view.candidate_label, "Hip east end");
+    c.next_roof_section_candidate();
+    assert_eq!(
+        c.pending_roof_section_view().unwrap().candidate_idx,
+        0,
+        "Next wraps around"
+    );
+    c.confirm_roof_section().unwrap();
+    let area = c
+        .current_record
+        .as_ref()
+        .unwrap()
+        .data
+        .roof
+        .areas
+        .last()
+        .unwrap()
+        .clone();
+    assert_eq!(
+        area.shape,
+        ber_model::ber::roof::RoofShape::Hip,
+        "any hipped end commits as a Hip"
+    );
+    assert_eq!(
+        area.ends,
+        Some([
+            ber_model::ber::roof::RoofEnd::Hip,
+            ber_model::ber::roof::RoofEnd::Gable
+        ])
+    );
+}
+
+/// Flip direction re-runs the generator on the flipped axis: the square's
+/// default east–west ridge becomes north–south, and the preview + labels
+/// follow.
+#[test]
+fn roof_section_flip_axis_regenerates_the_other_way() {
+    let mut c = dimensioned_square_controller();
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.set_roof_mode(true);
+    c.confirm_all_storeys_added_roof();
+    c.confirm_roof_follow().unwrap();
+    c.roof_region_tap(5.0, 5.0, 0.5);
+    c.pick_roof_section_style(RoofSectionStyle::GableBoth)
+        .unwrap();
+    c.assign_roof_section_pitch(40.0).unwrap();
+    let view = c.pending_roof_section_view().unwrap();
+    assert_eq!(view.axis_label, "ridge east–west", "square defaults to X");
+    let ((ax, ay), (bx, by)) = view.ridge_lines[0];
+    assert!((ay - 5.0).abs() < 1e-3 && (by - 5.0).abs() < 1e-3);
+    assert!((ax - 0.0).abs() < 1e-3 || (bx - 0.0).abs() < 1e-3);
+
+    c.flip_roof_section_axis();
+    let view = c.pending_roof_section_view().unwrap();
+    assert_eq!(view.axis_label, "ridge north–south", "flipped to Y");
+    let ((ax, ay), (bx, by)) = view.ridge_lines[0];
+    assert!(
+        (ax - 5.0).abs() < 1e-3 && (bx - 5.0).abs() < 1e-3,
+        "ridge now runs along Y at x = 5: {:?}",
+        view.ridge_lines
+    );
+    let mut ys = [ay, by];
+    ys.sort_by(|p, q| p.partial_cmp(q).unwrap());
+    assert!(ys[0].abs() < 1e-3 && (ys[1] - 10.0).abs() < 1e-3);
+}
+
+/// Cancel drops the pending section but KEEPS the selection (pick another
+/// style over the same grouping); `clear_roof` wipes every area and returns
+/// to Classify with the sloped preselection — the "start again" escape hatch.
+#[test]
+fn roof_section_cancel_keeps_selection_and_clear_roof_restarts_classify() {
     use ber_model::ber::structural::CeilingApex;
     use domain::points::Point2f64;
 
-    // Storey 0 = 10x10, ceiling 2.4. Storey 1 (the attic) = 6x6 at the same
-    // origin, ceiling sloped to a ridge at x = 3 (4.0 m above the ATTIC floor).
+    let mut c = dimensioned_square_controller();
+    c.set_default_ceiling_height(2.4).unwrap();
+    {
+        let rec = c.current_record.as_mut().unwrap();
+        rec.data.add_ceiling_apex(
+            0,
+            CeilingApex {
+                point: Point2f64::new(5.0, 0.0),
+                z_m: 6.9,
+            },
+        );
+        rec.data.add_ceiling_apex(
+            0,
+            CeilingApex {
+                point: Point2f64::new(5.0, 10.0),
+                z_m: 6.9,
+            },
+        );
+    }
+    c.recompose_ceilings(0);
+    c.materialize();
+
+    c.set_roof_mode(true);
+    c.confirm_all_storeys_added_roof();
+    assert!(
+        c.roof_regions_view().iter().all(|r| r.selected),
+        "both slopes preselected"
+    );
+    c.confirm_roof_follow().unwrap();
+    assert_eq!(
+        c.current_record.as_ref().unwrap().data.roof.areas.len(),
+        1,
+        "one FollowCeiling area over both slopes"
+    );
+
+    // clear_roof: everything gone, back to Classify, preselection restored.
+    c.clear_roof().unwrap();
+    assert!(
+        c.current_record.as_ref().unwrap().data.roof.is_empty(),
+        "clear_roof wipes the areas"
+    );
+    assert_eq!(c.roof_stage(), Some(RoofStage::Classify));
+    assert!(
+        c.roof_regions_view().iter().all(|r| r.selected),
+        "the sloped preselection is re-applied"
+    );
+
+    // Cancel: deselect the preselection path — take the east slope through a
+    // section and cancel it; the selection survives for another style.
+    c.roof_region_tap(2.5, 5.0, 0.5); // deselect west
+    c.roof_region_tap(7.5, 5.0, 0.5); // deselect east
+    c.confirm_roof_follow().unwrap(); // empty classify → Section
+    c.roof_region_tap(7.5, 5.0, 0.5); // select east
+    c.pick_roof_section_style(RoofSectionStyle::HipBoth)
+        .unwrap();
+    assert!(c.pending_roof_section_view().is_some());
+    c.cancel_roof_section();
+    assert!(c.pending_roof_section_view().is_none(), "pending dropped");
+    assert!(
+        c.roof_regions_view().iter().any(|r| r.selected),
+        "the selection survives a cancel"
+    );
+}
+
+/// FIELD REPORT 803471b7: a FLAT roof over a SLOPED ceiling must sit at the
+/// ceiling's TOP (the roof is never below the ceiling it covers). The old
+/// eave pick read only `flat_z()` — a sloped region contributed nothing and
+/// the fallback (storey ceiling height) put the flat plane at the gable's
+/// EAVE, slicing through the ceiling that rises to the ridge.
+#[test]
+fn flat_roof_over_sloped_ceiling_sits_at_the_ceiling_top() {
+    use ber_model::ber::roof::RoofShape;
+    use ber_model::ber::structural::CeilingApex;
+    use domain::points::Point2f64;
+
+    let mut c = dimensioned_square_controller();
+    c.set_default_ceiling_height(2.4).unwrap();
+    {
+        let rec = c.current_record.as_mut().unwrap();
+        // A gable ridge along x=5: both halves slope 2.4 → 6.9.
+        for y in [0.0, 10.0] {
+            rec.data.add_ceiling_apex(
+                0,
+                CeilingApex {
+                    point: Point2f64::new(5.0, y),
+                    z_m: 6.9,
+                },
+            );
+        }
+    }
+    c.recompose_ceilings(0);
+    c.materialize();
+    c.set_roof_mode(true);
+    c.confirm_all_storeys_added_roof();
+    // Classify: only the WEST slope follows the roof.
+    c.roof_region_tap(7.5, 5.0, 0.5); // deselect east
+    c.confirm_roof_follow().unwrap();
+    // Section: the EAST slope gets a FLAT roof (the field-report action).
+    c.roof_region_tap(7.5, 5.0, 0.5);
+    c.pick_roof_section_style(RoofSectionStyle::Flat).unwrap();
+    let areas = &c.current_record.as_ref().unwrap().data.roof.areas;
+    let flat = areas
+        .iter()
+        .find(|a| a.shape == RoofShape::Flat)
+        .expect("flat area committed");
+    assert!(
+        (flat.eave_z - 6.9).abs() < 1e-6,
+        "flat roof sits at the covered ceiling's TOP (ridge 6.9), got {}",
+        flat.eave_z
+    );
+}
+
+/// SUGGEST browses the whole candidate space — every end combination along
+/// BOTH axes — so the assessor picks the shape closest to the truth instead
+/// of committing to a style up front.
+#[test]
+fn suggest_browses_both_axes() {
+    let mut c = dimensioned_square_controller();
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.materialize();
+    c.set_roof_mode(true);
+    c.confirm_all_storeys_added_roof();
+    c.confirm_roof_follow().unwrap(); // flat square, empty classify → Section
+    c.roof_region_tap(5.0, 5.0, 0.5);
+    c.pick_roof_section_style(RoofSectionStyle::Suggest)
+        .unwrap();
+    if c.pending_roof_section_view().is_some_and(|v| v.needs_pitch) {
+        c.assign_roof_section_pitch(30.0).unwrap();
+    }
+    let v = c.pending_roof_section_view().expect("candidates up");
+    assert!(
+        v.candidate_count >= 6,
+        "both axes' combos offered (got {})",
+        v.candidate_count
+    );
+    // Cycling reaches a cross-axis candidate (labelled with its ridge way).
+    let mut cross = false;
+    for _ in 0..v.candidate_count {
+        if c.pending_roof_section_view()
+            .is_some_and(|v| v.candidate_label.contains("ridge"))
+        {
+            cross = true;
+        }
+        c.next_roof_section_candidate();
+    }
+    assert!(cross, "a candidate on the flipped axis is offered");
+}
+
+/// The un-undoable roof wipe sits behind a confirm: Start-roof-again raises
+/// the prompt (Section stage only), Keep-it dismisses it, and the confirmed
+/// `clear_roof` lowers it as it wipes. Leaving the roof step clears a stray
+/// pending confirm.
+#[test]
+fn clear_roof_requires_a_confirm() {
+    let mut c = dimensioned_square_controller();
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.materialize();
+    c.set_roof_mode(true);
+    c.confirm_all_storeys_added_roof();
+    c.confirm_roof_follow().unwrap(); // flat square, empty classify → Section
+    assert!(!c.roof_clear_confirm_pending());
+    c.request_clear_roof();
+    assert!(c.roof_clear_confirm_pending(), "confirm raised in Section");
+    c.cancel_clear_roof();
+    assert!(!c.roof_clear_confirm_pending(), "Keep-it dismisses");
+    c.request_clear_roof();
+    c.clear_roof().unwrap();
+    assert!(!c.roof_clear_confirm_pending(), "wipe lowers the confirm");
+    assert_eq!(c.roof_stage(), Some(RoofStage::Classify));
+    // In Classify the request is a no-op (the button only exists in Section).
+    c.request_clear_roof();
+    assert!(!c.roof_clear_confirm_pending());
+    // A stray pending confirm dies with the mode.
+    c.confirm_roof_follow().unwrap();
+    c.request_clear_roof();
+    c.set_roof_mode(false);
+    assert!(!c.roof_clear_confirm_pending());
+}
+
+/// A multi-storey pitched SECTION over an attic + the storey below re-derives
+/// the ROOF-VOID wall stamps on commit, and `clear_roof` re-resolves them
+/// away: the attic's inner walls (inside the roof envelope) gain a
+/// `SemiExposed` piece under the slope; wiping the roof rebuilds the walls
+/// from durable inputs with no stale split/stamp left (the v1 known limit).
+#[test]
+fn roof_section_stamps_void_walls_and_clear_roof_unstamps_them() {
+    use ber_model::ber::structural::WallExposure;
+
+    // Storey 0 = 10x10 (ceiling 2.4), storey 1 = 6x6 at the same origin
+    // (ceiling 2.2, flat) — the attic volume the roof passes OVER.
     let mut c = dimensioned_square_controller();
     c.set_default_ceiling_height(2.4).unwrap();
     c.add_storey().unwrap();
     finalise_current_storey_as_square(&mut c, 6.0);
     c.set_default_ceiling_height(2.2).unwrap();
-    {
-        let rec = c.current_record.as_mut().unwrap();
-        rec.data.add_ceiling_apex(
-            1,
-            CeilingApex {
-                point: Point2f64::new(3.0, 0.0),
-                z_m: 4.0,
-            },
-        );
-        rec.data.add_ceiling_apex(
-            1,
-            CeilingApex {
-                point: Point2f64::new(3.0, 6.0),
-                z_m: 4.0,
-            },
-        );
-    }
-    c.recompose_ceilings(1);
     c.materialize();
+    let walls_before = c.current_record.as_ref().unwrap().data.storeys[1]
+        .walls
+        .regions
+        .len();
+    assert!(
+        c.current_record.as_ref().unwrap().data.storeys[1]
+            .walls
+            .regions
+            .iter()
+            .all(|w| w.exposure != WallExposure::SemiExposed),
+        "fixture: no void stamps before the roof exists"
+    );
 
     c.set_roof_mode(true);
     c.confirm_all_storeys_added_roof();
-    // Group the attic's west slope AND storey 0's ceiling outside the attic.
-    c.roof_region_tap(1.5, 3.0, 0.5); // attic slope (storey 1)
-    c.roof_region_tap(8.0, 8.0, 0.5); // storey 0's ceiling band (no attic there)
-    let selected_storeys: std::collections::BTreeSet<usize> =
-        c.roof_selected.iter().map(|(idx, _)| *idx).collect();
-    assert_eq!(
-        selected_storeys.into_iter().collect::<Vec<_>>(),
-        vec![0, 1],
-        "regions from BOTH storeys grouped into one area"
-    );
-    assert!(
-        c.roof_area_ceiling_is_sloped(),
-        "the attic's sloped ceiling is detected across the grouping"
-    );
-    c.pick_roof_area_shape(RoofShape::FollowCeiling);
+    c.confirm_roof_follow().unwrap(); // nothing follows (all flat)
+    c.roof_region_tap(3.0, 3.0, 0.5); // the attic's ceiling (smallest wins)
+    c.roof_region_tap(8.0, 8.0, 0.5); // storey 0's band around it
+    c.pick_roof_section_style(RoofSectionStyle::GableBoth)
+        .unwrap();
+    c.assign_roof_section_pitch(20.0).unwrap();
+    c.confirm_roof_section().unwrap();
 
+    {
+        let ber = &c.current_record.as_ref().unwrap().data;
+        let area = &ber.roof.areas[0];
+        assert_eq!(area.storey_idx, 0, "based on the LOWER storey (the eave)");
+        assert_eq!(area.covered_storeys, vec![0, 1]);
+        // The commit re-resolved the stack: the attic's inner walls (x = 6 /
+        // y = 6, strictly inside the 10x10 roof footprint) now carry a
+        // SemiExposed piece under the 20° slope.
+        assert!(
+            ber.storeys[1]
+                .walls
+                .regions
+                .iter()
+                .any(|w| w.exposure == WallExposure::SemiExposed),
+            "a covered wall gained a roof-void (SemiExposed) piece"
+        );
+    }
+
+    // Wipe the roof: the full re-resolve rebuilds every wall from durable
+    // inputs — no stale void split or stamp survives.
+    c.clear_roof().unwrap();
     let ber = &c.current_record.as_ref().unwrap().data;
-    assert_eq!(ber.roof.areas.len(), 1);
-    let area = &ber.roof.areas[0];
-    assert_eq!(area.storey_idx, 0, "based on the LOWER storey (the eave)");
-    assert_eq!(area.covered_storeys, vec![0, 1]);
+    assert!(ber.roof.is_empty());
     assert!(
-        (area.eave_z - 2.4).abs() < 1e-6,
-        "eave at storey 0's ceiling, got {}",
-        area.eave_z
-    );
-    // The attic's apexes were adopted, re-based onto storey 0's floor datum.
-    let datums = ber.storey_floor_datums();
-    let expected_apex_z = 4.0 + datums[1] - datums[0];
-    assert_eq!(
-        area.apexes.len(),
-        2,
-        "the attic's ridge apexes were adopted"
-    );
-    assert!(
-        area.apexes
+        ber.storeys[1]
+            .walls
+            .regions
             .iter()
-            .all(|a| (a.z_m - expected_apex_z).abs() < 1e-6),
-        "apex z datum-shifted to base-local: expected {expected_apex_z}, got {:?}",
-        area.apexes.iter().map(|a| a.z_m).collect::<Vec<_>>()
+            .all(|w| w.exposure != WallExposure::SemiExposed),
+        "clear_roof leaves no stale void stamp"
     );
-    // Coverage credits BOTH storeys' ceiling regions (the mapping-gate read).
-    assert!(ber.roof.covers_on(0, Point2f64::new(8.0, 8.0)));
-    assert!(ber.roof.covers_on(1, Point2f64::new(1.5, 3.0)));
+    assert_eq!(
+        ber.storeys[1].walls.regions.len(),
+        walls_before,
+        "clear_roof leaves no stale void split"
+    );
 }
 
 /// A tap within snap tolerance of a parallel wall on ONE axis snaps that
@@ -17787,7 +18178,11 @@ fn annotate_external_photo_replaces_stored_photo() {
     assert!(c.external_photos().iter().all(|(_, p)| p.is_empty()));
 
     c.add_external_photo(ExternalSide::Front, &src, PhotoQuality::Full);
-    let before = c.external_photos()[0].1.first().cloned().expect("front photo");
+    let before = c.external_photos()[0]
+        .1
+        .first()
+        .cloned()
+        .expect("front photo");
 
     // Save an annotated image: a real (decodable) JPEG so the thumbnail
     // regenerates — the annotator always hands over freshly encoded bytes.
@@ -17811,7 +18206,11 @@ fn annotate_external_photo_replaces_stored_photo() {
         1,
         "still exactly one Front photo (replaced, not duplicated)"
     );
-    let after = c.external_photos()[0].1.first().cloned().expect("front photo");
+    let after = c.external_photos()[0]
+        .1
+        .first()
+        .cloned()
+        .expect("front photo");
     assert_ne!(after.file_path, before.file_path, "a fresh store file");
     assert_eq!(
         std::fs::read(&after.file_path).unwrap(),
@@ -17823,7 +18222,11 @@ fn annotate_external_photo_replaces_stored_photo() {
 
     // Undo restores the pre-annotation photo entry.
     c.undo().expect("undo");
-    let restored = c.external_photos()[0].1.first().cloned().expect("front photo");
+    let restored = c.external_photos()[0]
+        .1
+        .first()
+        .cloned()
+        .expect("front photo");
     assert_eq!(restored.file_path, before.file_path);
 
     let _ = std::fs::remove_dir_all(&tmp);
@@ -17878,6 +18281,183 @@ fn structure_review_confirm_sets_reviewed_flag_and_persists() {
 
 /// The Structure review enumerates a review item per construction group / window
 /// type (whole house), each highlighting its surfaces; the cursor wraps.
+#[test]
+/// The review offers renames on construction items — the assessor firming up
+/// survey-time shorthand: a group rename changes its title (and what the
+/// letters show), a phase rename shows house-wide in the Phase line; blanks
+/// clear back to the type label / default phase name.
+fn structure_review_renames_group_and_phase() {
+    use ber_model::ber::structural::{ConstructionMakeup, ConstructionType, WallConstructionType};
+
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    attribute_all_surfaces(
+        &mut c,
+        SurfaceKind::Walls,
+        ConstructionType::Wall(WallConstructionType::CavityWall),
+        ConstructionMakeup::Default,
+    );
+    c.materialize();
+    c.set_structure_review_mode(true);
+    let v = c.structure_review_view().expect("review has items");
+    let rn = v.rename.expect("construction item offers renames");
+    assert_eq!(rn.group_name, "", "no shorthand typed in this fixture");
+
+    c.rename_structure_group(rn.group_id, "300mm cavity, pumped".to_string());
+    c.rename_construction_phase(rn.phase.clone(), "Main house".to_string());
+    let v = c.structure_review_view().unwrap();
+    assert_eq!(v.title, "300mm cavity, pumped");
+    assert!(
+        v.detail_lines
+            .iter()
+            .any(|(l, val)| l == "Phase" && val.contains("Main house")),
+        "phase nickname shows in the Phase line: {:?}",
+        v.detail_lines
+    );
+    let rn2 = v.rename.expect("still offered");
+    assert_eq!(rn2.group_name, "300mm cavity, pumped", "prefill = current");
+    assert_eq!(rn2.phase_name, "Main house");
+
+    // Blank clears both back to defaults.
+    c.rename_structure_group(rn.group_id, "   ".to_string());
+    c.rename_construction_phase(rn.phase.clone(), String::new());
+    let v = c.structure_review_view().unwrap();
+    assert_eq!(v.title, "Cavity", "back to the type label");
+    assert!(
+        v.detail_lines
+            .iter()
+            .any(|(l, val)| l == "Phase" && !val.contains("Main house")),
+        "nickname cleared"
+    );
+}
+
+/// Merging phase A into B re-points EVERYTHING: construction groups' phase
+/// tags, the year records (target wins; an absent target year adopts the
+/// source's, and with it the proof), the follow-up extension ticks, and the
+/// review's Phase lines. A becomes undefined and drops out of the merge
+/// targets.
+#[test]
+fn structure_review_merges_phases() {
+    use ber_model::ber::common::ConstructionPhase;
+    use ber_model::ber::structural::{ConstructionMakeup, ConstructionType, WallConstructionType};
+
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    attribute_all_surfaces(
+        &mut c,
+        SurfaceKind::Walls,
+        ConstructionType::Wall(WallConstructionType::CavityWall),
+        ConstructionMakeup::Default,
+    );
+    {
+        let rec = c.current_record.as_mut().unwrap();
+        let phases = &mut rec.data.construction_phases;
+        phases.set_year(ConstructionPhase::Original, 1990);
+        phases.set_year(ConstructionPhase::Extension1, 2005);
+        phases.set_year_proof(ConstructionPhase::Extension1, true);
+        phases.set_nickname(ConstructionPhase::Extension1, "Back kitchen".to_string());
+        // Tag every wall construction Extension1 and tick its follow-up.
+        for w in &mut rec.data.wall_constructions {
+            w.base.construction_phase = ConstructionPhase::Extension1;
+        }
+        rec.data.followup.extensions = vec![ConstructionPhase::Extension1];
+    }
+    c.materialize();
+    c.set_structure_review_mode(true);
+    let v = c.structure_review_view().unwrap();
+    let rn = v.rename.expect("construction item");
+    assert_eq!(rn.phase, ConstructionPhase::Extension1);
+    assert!(
+        rn.merge_targets
+            .iter()
+            .any(|(p, _)| *p == ConstructionPhase::Original),
+        "Original offered as a merge target"
+    );
+
+    c.merge_structure_phase(ConstructionPhase::Extension1, ConstructionPhase::Original);
+    let rec = c.current_record.as_ref().unwrap();
+    assert!(
+        rec.data
+            .wall_constructions
+            .iter()
+            .all(|w| w.base.construction_phase == ConstructionPhase::Original),
+        "constructions re-pointed"
+    );
+    let phases = &rec.data.construction_phases;
+    assert!(!phases.is_defined(&ConstructionPhase::Extension1), "A gone");
+    assert_eq!(
+        phases.year_of(&ConstructionPhase::Original),
+        Some(1990),
+        "target keeps its own year"
+    );
+    assert!(
+        !phases.has_year_proof(&ConstructionPhase::Original),
+        "source proof does NOT transfer onto a different year"
+    );
+    assert_eq!(
+        phases.nickname_of(&ConstructionPhase::Original),
+        Some("Back kitchen"),
+        "unnamed target adopts the source nickname"
+    );
+    assert!(
+        rec.data.followup.extensions.is_empty(),
+        "extension tick retires when merged into Original"
+    );
+    let v = c.structure_review_view().unwrap();
+    let rn = v.rename.expect("still a construction item");
+    assert_eq!(rn.phase, ConstructionPhase::Original);
+    assert!(
+        !rn.merge_targets
+            .iter()
+            .any(|(p, _)| *p == ConstructionPhase::Extension1),
+        "the merged-away phase is no longer a target"
+    );
+}
+
+/// The phase-record fold when the target ADOPTS the source's year: proof and
+/// evidence ride along, and a tick on a merged extension re-points to a
+/// target extension.
+#[test]
+fn phase_merge_adopts_year_and_repoints_extension_ticks() {
+    use ber_model::ber::common::ConstructionPhase;
+
+    let mut ber = ber_model::ber::ber_struct::Ber::default();
+    let phases = &mut ber.construction_phases;
+    phases.set_year_unknown(ConstructionPhase::Extension1);
+    phases.set_year(ConstructionPhase::Extension2, 2010);
+    phases.set_year_proof(ConstructionPhase::Extension2, true);
+    ber.followup.extensions = vec![ConstructionPhase::Extension2];
+
+    assert!(ber.merge_construction_phases(
+        &ConstructionPhase::Extension2,
+        &ConstructionPhase::Extension1
+    ));
+    let phases = &ber.construction_phases;
+    assert_eq!(
+        phases.year_of(&ConstructionPhase::Extension1),
+        Some(2010),
+        "unknown target year adopts the source's"
+    );
+    assert!(
+        phases.has_year_proof(&ConstructionPhase::Extension1),
+        "proof rides along with the adopted year"
+    );
+    assert_eq!(
+        ber.followup.extensions,
+        vec![ConstructionPhase::Extension1],
+        "extension tick re-points to the target extension"
+    );
+    // Undefined / self merges are refused.
+    assert!(!ber.merge_construction_phases(
+        &ConstructionPhase::Extension2,
+        &ConstructionPhase::Extension1
+    ));
+    assert!(!ber.merge_construction_phases(
+        &ConstructionPhase::Extension1,
+        &ConstructionPhase::Extension1
+    ));
+}
+
 #[test]
 fn structure_review_items_cover_groups_and_cursor_wraps() {
     use ber_model::ber::fenestration::{Frame, Glazing};
@@ -17959,13 +18539,20 @@ fn objects_capture_pins_counts_and_undo() {
     // Drop a pin and add two object entries (1 boiler + 5 radiators = 6).
     c.objects_pointer_down(2.0, 2.0, 0.5);
     let room = c.active_object_room().expect("a room opened");
-    c.add_object(ObjectKind::Boiler(BoilerFuel::Gas), 1, None, None, Vec::new());
+    c.add_object(
+        ObjectKind::Boiler(BoilerFuel::Gas),
+        1,
+        None,
+        None,
+        Vec::new(),
+    );
     c.add_object(
         ObjectKind::Radiator(RadiatorTrv::WithTrv),
         5,
         None,
         None,
-        Vec::new(),);
+        Vec::new(),
+    );
     let pins = c.object_rooms_view();
     assert_eq!(pins.len(), 1, "one pin");
     assert_eq!(pins[0].count, 6, "1 boiler + 5 radiators");
@@ -18037,7 +18624,13 @@ fn objects_3d_placement_stores_surface_point_and_pitch() {
     );
 
     // The room accepts objects while no storey is current.
-    c.add_object(ObjectKind::Boiler(BoilerFuel::Gas), 1, None, None, Vec::new());
+    c.add_object(
+        ObjectKind::Boiler(BoilerFuel::Gas),
+        1,
+        None,
+        None,
+        Vec::new(),
+    );
     assert_eq!(
         c.active_object_room_view().unwrap().objects.len(),
         1,
@@ -18109,7 +18702,8 @@ fn roof_pins_hidden_from_storey_views() {
         10,
         None,
         None,
-        Vec::new(),);
+        Vec::new(),
+    );
     c.close_object_room();
 
     // Hidden from the storey's pin views (2D plan + single-storey 3D)…
@@ -18180,7 +18774,8 @@ fn attic_bucket_and_review_question() {
         1,
         None,
         None,
-        Vec::new(),);
+        Vec::new(),
+    );
     c.close_object_room();
 
     // Open the attic: created on demand, flagged for the UI, no plan pin and
@@ -18221,7 +18816,8 @@ fn attic_bucket_and_review_question() {
         1,
         None,
         None,
-        Vec::new(),);
+        Vec::new(),
+    );
     c.close_object_room();
     assert!(!c.attic_unresolved(), "attic object resolves the promise");
     let rv = c.object_review_view().unwrap();
@@ -18317,7 +18913,13 @@ fn empty_object_pin_pruned_and_open_box_dismisses_on_tap() {
 
     // Drop a pin, add an object, close → it stays.
     c.objects_pointer_down(2.0, 2.0, 0.5);
-    c.add_object(ObjectKind::Boiler(BoilerFuel::Gas), 1, None, None, Vec::new());
+    c.add_object(
+        ObjectKind::Boiler(BoilerFuel::Gas),
+        1,
+        None,
+        None,
+        Vec::new(),
+    );
     c.close_object_room();
     assert_eq!(c.object_rooms_view().len(), 1, "a pin with an object stays");
 
@@ -18347,13 +18949,20 @@ fn object_review_totals_and_hotspots() {
     c.materialize();
     // Room 1: 1 gas boiler + 3 radiators-with-TRV.
     c.objects_pointer_down(2.0, 2.0, 0.5);
-    c.add_object(ObjectKind::Boiler(BoilerFuel::Gas), 1, None, None, Vec::new());
+    c.add_object(
+        ObjectKind::Boiler(BoilerFuel::Gas),
+        1,
+        None,
+        None,
+        Vec::new(),
+    );
     c.add_object(
         ObjectKind::Radiator(RadiatorTrv::WithTrv),
         3,
         None,
         None,
-        Vec::new(),);
+        Vec::new(),
+    );
     c.close_object_room();
     // Room 2: 2 more radiators-with-TRV.
     c.objects_pointer_down(8.0, 8.0, 0.5);
@@ -18362,7 +18971,8 @@ fn object_review_totals_and_hotspots() {
         2,
         None,
         None,
-        Vec::new(),);
+        Vec::new(),
+    );
     c.close_object_room();
 
     c.set_object_review_mode(true);
@@ -18461,7 +19071,13 @@ fn object_review_absence_confirmation() {
     let mut c = dimensioned_square_controller();
     c.materialize();
     c.objects_pointer_down(2.0, 2.0, 0.5);
-    c.add_object(ObjectKind::Boiler(BoilerFuel::Gas), 1, None, None, Vec::new());
+    c.add_object(
+        ObjectKind::Boiler(BoilerFuel::Gas),
+        1,
+        None,
+        None,
+        Vec::new(),
+    );
     c.close_object_room();
 
     c.set_object_review_mode(true);
@@ -18524,7 +19140,13 @@ fn object_review_flagged_present_blocks_confirm_until_added() {
     let mut c = dimensioned_square_controller();
     c.materialize();
     c.objects_pointer_down(2.0, 2.0, 0.5);
-    c.add_object(ObjectKind::Boiler(BoilerFuel::Gas), 1, None, None, Vec::new());
+    c.add_object(
+        ObjectKind::Boiler(BoilerFuel::Gas),
+        1,
+        None,
+        None,
+        Vec::new(),
+    );
     c.close_object_room();
 
     c.set_object_review_mode(true);
@@ -18556,7 +19178,8 @@ fn object_review_flagged_present_blocks_confirm_until_added() {
         1,
         None,
         None,
-        Vec::new(),);
+        Vec::new(),
+    );
     c.close_object_room();
     assert!(
         c.unresolved_present_categories().is_empty(),
@@ -18593,7 +19216,8 @@ fn add_object_attaches_only_the_event_photos() {
         vec![(
             std::path::PathBuf::from("/nonexistent/fan.jpg"),
             PhotoQuality::High,
-        )],);
+        )],
+    );
     c.add_object(ObjectKind::Thermostat, 1, None, None, Vec::new());
 
     let rows = c.active_object_room_view().expect("room open").objects;
@@ -19397,7 +20021,7 @@ fn delete_storey_clears_last_snap_action() {
         "the stale snap action is cleared — no replay against the shrunken record"
     );
     assert!(c.snap_overlay().is_empty(), "no stale tags to click");
-    assert!(c.pending_roof_area.is_none());
+    assert!(c.pending_roof_section.is_none());
 }
 
 // ─── Snap-affordance unification: sub-area carve flows share the tag overlay ─
@@ -21668,7 +22292,7 @@ fn dimensioned_t_plan_controller() -> AppController {
 /// the Definite type so the editor opens with the dropdown populated.
 #[test]
 fn new_group_tap_seeds_the_definite_inference() {
-    use ber_model::ber::roof::{InferredRoofType, RoofShape};
+    use ber_model::ber::roof::InferredRoofType;
     use ber_model::ber::structural::{CeilingConstructionType, ConstructionType};
 
     let mut c = ceiling_ready_controller();
@@ -21677,7 +22301,7 @@ fn new_group_tap_seeds_the_definite_inference() {
     c.set_roof_mode(true);
     c.confirm_all_storeys_added_roof();
     c.roof_region_tap(5.0, 5.0, 0.5);
-    c.pick_roof_area_shape(RoofShape::Flat);
+    c.confirm_roof_follow().unwrap();
     c.set_roof_mode(false);
     c.materialize();
 
@@ -25582,7 +26206,13 @@ fn gas_boiler_add_sets_system_type_delete_reverts() {
     c.materialize();
     c.objects_pointer_down(2.0, 2.0, 0.5);
     let room = c.active_object_room().expect("a room opened");
-    c.add_object(ObjectKind::Boiler(BoilerFuel::Gas), 1, None, None, Vec::new());
+    c.add_object(
+        ObjectKind::Boiler(BoilerFuel::Gas),
+        1,
+        None,
+        None,
+        Vec::new(),
+    );
     assert_eq!(
         c.current_record
             .as_ref()
@@ -25618,7 +26248,13 @@ fn boiler_separate_hw_control_sets_separate_hot_water() {
     c.materialize();
     c.objects_pointer_down(2.0, 2.0, 0.5);
     let room = c.active_object_room().expect("a room opened");
-    c.add_object(ObjectKind::Boiler(BoilerFuel::Gas), 1, None, None, Vec::new());
+    c.add_object(
+        ObjectKind::Boiler(BoilerFuel::Gas),
+        1,
+        None,
+        None,
+        Vec::new(),
+    );
     let object_id = c.active_object_room_view().unwrap().objects[0].id;
     assert!(
         !c.current_record
@@ -25727,7 +26363,13 @@ fn heating_source_gate_blocks_review_until_boiler_or_panel() {
     let mut c = dimensioned_square_controller();
     c.materialize();
     c.objects_pointer_down(2.0, 2.0, 0.5);
-    c.add_object(ObjectKind::Chimney(ChimneyState::Open), 1, None, None, Vec::new());
+    c.add_object(
+        ObjectKind::Chimney(ChimneyState::Open),
+        1,
+        None,
+        None,
+        Vec::new(),
+    );
     c.close_object_room();
     assert!(
         c.heating_source_missing(),
@@ -25776,13 +26418,20 @@ fn multiple_sources_prompt_primary_pick_and_preserve() {
     let mut c = dimensioned_square_controller();
     c.materialize();
     c.objects_pointer_down(2.0, 2.0, 0.5);
-    c.add_object(ObjectKind::Boiler(BoilerFuel::Gas), 1, None, None, Vec::new());
+    c.add_object(
+        ObjectKind::Boiler(BoilerFuel::Gas),
+        1,
+        None,
+        None,
+        Vec::new(),
+    );
     c.add_object(
         ObjectKind::Boiler(BoilerFuel::HeatPump),
         1,
         None,
         None,
-        Vec::new(),);
+        Vec::new(),
+    );
     c.close_object_room();
     c.set_object_review_mode(true);
     let opts = c.primary_pick_options();

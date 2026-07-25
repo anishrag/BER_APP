@@ -546,6 +546,7 @@ mod tests {
             ridge: Some(ridge),
             footprint,
             apexes,
+            ends: None,
         });
         ber
     }

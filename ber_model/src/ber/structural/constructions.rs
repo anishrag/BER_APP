@@ -781,6 +781,79 @@ impl Ber {
 
     /// Find a wall construction matching `(construction_type, makeup, phase)`,
     /// else create and append one. Returns its id.
+    /// Rename construction group `id` (any kind — wall, floor or ceiling):
+    /// set its custom display name, or CLEAR it back to the type label when
+    /// `name` is blank. `false` when no group carries that id. The rename is
+    /// display-only — regions reference the group by id, so nothing re-links;
+    /// the Structure review, letters and pickers all read the new name.
+    pub fn rename_construction_group(&mut self, id: ItemId, name: &str) -> bool {
+        let trimmed = name.trim();
+        let new = (!trimmed.is_empty()).then(|| trimmed.to_string());
+        let base = self
+            .wall_constructions
+            .iter_mut()
+            .map(|c| &mut c.base)
+            .chain(self.floor_constructions.iter_mut().map(|c| &mut c.base))
+            .chain(self.ceiling_constructions.iter_mut().map(|c| &mut c.base))
+            .find(|b| b.id == id);
+        match base {
+            Some(b) => {
+                b.name = new;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// MERGE construction phase `from` into `to`: everything that points at
+    /// `from` re-points to `to` — every wall/floor/ceiling construction
+    /// group's phase tag, the follow-up extension ticks, and the phase
+    /// records themselves ([`ConstructionPhases::merge`]: year / nickname /
+    /// proof / evidence fold, target wins on conflicts). `from` ends up
+    /// undefined. `false` (no change) when the phases are equal or either is
+    /// undefined. Construction groups that become fabric-identical after the
+    /// re-tag stay SEPARATE groups (their surfaces, photos and names are
+    /// untouched) — only the phase pointer moves.
+    pub fn merge_construction_phases(
+        &mut self,
+        from: &ConstructionPhase,
+        to: &ConstructionPhase,
+    ) -> bool {
+        if !self.construction_phases.merge(from, to) {
+            return false;
+        }
+        for base in self
+            .wall_constructions
+            .iter_mut()
+            .map(|c| &mut c.base)
+            .chain(self.floor_constructions.iter_mut().map(|c| &mut c.base))
+            .chain(self.ceiling_constructions.iter_mut().map(|c| &mut c.base))
+        {
+            if base.construction_phase == *from {
+                base.construction_phase = to.clone();
+            }
+        }
+        // Follow-up extension ticks: a tick on `from` becomes a tick on `to`
+        // when `to` is itself a dated extension; merged into Original the
+        // tick simply retires (Original is asked via the house-build-date
+        // point, not the extension list).
+        let ext = &mut self.followup.extensions;
+        if ext.contains(from) {
+            ext.retain(|p| p != from);
+            let to_is_extension = matches!(
+                to,
+                ConstructionPhase::Extension1
+                    | ConstructionPhase::Extension2
+                    | ConstructionPhase::Extension3
+                    | ConstructionPhase::Extension4
+            );
+            if to_is_extension && !ext.contains(to) {
+                ext.push(to.clone());
+            }
+        }
+        true
+    }
+
     pub fn ensure_wall_construction(
         &mut self,
         construction_type: WallConstructionType,

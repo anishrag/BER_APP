@@ -71,11 +71,7 @@ impl AppController {
     /// disk, so undo still displays it). No-op when there's no record, the side
     /// has no photo (annotation edits an existing shot), or store I/O fails —
     /// the prior photo then stands.
-    pub fn annotate_external_photo(
-        &mut self,
-        target: ber_model::ber::common::ItemId,
-        jpeg: &[u8],
-    ) {
+    pub fn annotate_external_photo(&mut self, target: ber_model::ber::common::ItemId, jpeg: &[u8]) {
         let Some((side, description)) = self.current_record.as_ref().and_then(|r| {
             r.data
                 .photos

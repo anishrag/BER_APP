@@ -283,24 +283,22 @@ pub(super) fn instruction(view: &SketchView<'_>) -> Option<&'static str> {
         });
     }
     if view.roof_mode {
+        use crate::controller::app_controller::RoofStage;
         return Some(if view.roof_gate_pending {
             "Have you finished adding all storeys? (the roof covers the top storey everywhere)"
-        } else if view.roof_area_pitch_pending {
-            "Roof — type the pitch (degrees) for the ridge(s)."
-        } else if view.roof_area_ridge_pending {
-            if view.roof_area_hip_ridge_count.is_some() {
-                "Roof — draw ALL the hip's ridge lines, then Finish. Near an edge snaps onto it."
+        } else if view.roof_stage == Some(RoofStage::Classify) {
+            "Select every ceiling that is ALSO the roof surface (flat roofs and sloped \
+             ceilings). Sloped ones are pre-selected."
+        } else if let Some(section) = view.roof_section.as_ref() {
+            if section.needs_pitch {
+                "No sloped ceiling touches this area — enter the roof pitch (°)"
             } else {
-                "Roof — draw the ridge line across the grouped area (near an edge snaps onto it)."
+                "Roof — browse the generated options, then confirm the one that matches."
             }
-        } else if view.roof_area_can_pick_shape {
-            if view.roof_area_ceiling_sloped {
-                "Roof — pick the shape (Follow ceiling / Flat / Gable / Hip)."
-            } else {
-                "Roof — pick the shape for the grouped area (Flat / Gable / Hip)."
-            }
+        } else if view.roof_regions.iter().any(|r| r.selected) {
+            "Roof — pick the style for the selected areas."
         } else {
-            "Roof — tap the ceiling areas (shaded by top storey) to group them into one roof area."
+            "Select the areas one roof covers, then pick its style."
         });
     }
     if view
@@ -1344,93 +1342,136 @@ fn roof_gate_toolbar<F: FnMut(UiEvent)>(ui: &mut egui::Ui, on_event: &mut F) {
     }
 }
 
-/// The roof-step toolbar (post-gate): drives the per-area drawing flow —
-/// group areas (tap on the canvas) → pick Flat/Gable/Hip → draw a ridge → type
-/// the pitch. Which controls show depends on the in-flight stage.
+/// The roof-step toolbar (post-gate): drives the classify-then-generate flow —
+/// Stage A confirms which ceilings ARE the roof surface; Stage B picks a style
+/// over the selected areas and browses the GENERATED ridge candidates.
 fn roof_toolbar<F: FnMut(UiEvent)>(ui: &mut egui::Ui, view: &mut SketchView<'_>, on_event: &mut F) {
-    use crate::controller::app_controller::RoofShape;
+    use crate::controller::app_controller::{RoofSectionStyle, RoofStage};
     ui.horizontal_wrapped(|ui| {
-        if view.roof_area_pitch_pending {
-            ui.label("Pitch:");
-            let submit = metre_input(ui, view.roof_pitch_input, 54.0, "°").submitted
-                | ui.button("Set").clicked();
-            if submit {
-                if let Ok(deg) = view.roof_pitch_input.trim().parse::<f32>() {
-                    on_event(UiEvent::Sketch(SketchEvent::AssignRoofPitch(deg)));
-                }
-            }
-            // A gable's rough stroke can be perfected: recentre it between the
-            // eaves (the drawn position stays available by just not pressing it).
-            if view.roof_area_can_centre_ridge
-                && ui
-                    .button("Centre on roof")
-                    .hint("Move the ridge to the middle of the area it spans")
-                    .clicked()
+        if view.roof_stage == Some(RoofStage::Classify) {
+            // Stage A: the empty selection is a valid answer (nothing follows).
+            if ui
+                .button("These follow the roof ✓")
+                .hint("Commit the selected ceilings as the roof surface itself")
+                .clicked()
             {
-                on_event(UiEvent::Sketch(SketchEvent::CentreRoofRidge));
+                on_event(UiEvent::Sketch(SketchEvent::ConfirmRoofFollow));
             }
-            if ui.button("Cancel").clicked() {
-                on_event(UiEvent::Sketch(SketchEvent::CancelRoofArea));
-            }
-        } else if view.roof_area_ridge_pending {
-            if let Some(count) = view.roof_area_hip_ridge_count {
-                // HIP: several ridges (an L-shaped roof has one per wing) —
-                // keep drawing, then Finish moves to the pitch.
-                ui.label(if count == 0 {
-                    "Draw the hip's ridge lines.".to_string()
-                } else {
-                    format!("{count} ridge(s) drawn — draw the rest, then Finish.")
-                });
-                if count > 0
-                    && ui
-                        .button("Finish ridges")
-                        .hint("All ridges drawn — set the pitch next")
-                        .clicked()
-                {
-                    on_event(UiEvent::Sketch(SketchEvent::FinishRoofRidges));
+        } else if view.roof_section.is_some() {
+            let section = view.roof_section.as_ref().unwrap();
+            if section.needs_pitch {
+                // The pitch prompt (no adjacent sloped ceiling), or the
+                // "Change pitch" override of an inherited one.
+                ui.label("Pitch:");
+                let submit = metre_input(ui, view.roof_pitch_input, 54.0, "°").submitted
+                    | ui.button("Set").clicked();
+                if submit {
+                    if let Ok(deg) = view.roof_pitch_input.trim().parse::<f32>() {
+                        on_event(UiEvent::Sketch(SketchEvent::AssignRoofSectionPitch(deg)));
+                    }
+                }
+                if ui.button("Cancel").clicked() {
+                    on_event(UiEvent::Sketch(SketchEvent::CancelRoofSection));
                 }
             } else {
-                ui.label("Draw the ridge line across the area.");
-            }
-            if ui.button("Cancel").clicked() {
-                on_event(UiEvent::Sketch(SketchEvent::CancelRoofArea));
-            }
-        } else if view.roof_area_can_pick_shape {
-            ui.label("Shape:");
-            // Converted attic: the ceiling is already sloped — offer to adopt it
-            // (the rafters ARE the ceiling), so no ridge/pitch is re-asked.
-            if view.roof_area_ceiling_sloped
-                && ui
-                    .button("Follow ceiling")
-                    .hint("Converted attic — the roof follows the already-sloped ceiling")
+                ui.label(&section.candidate_label);
+                if section.pitch_inherited {
+                    ui.label(format!(
+                        "{:.0}° (inherited from the sloped ceiling)",
+                        section.pitch_deg
+                    ));
+                } else {
+                    ui.label(format!("{:.0}°", section.pitch_deg));
+                }
+                if ui
+                    .button("Change pitch")
+                    .hint("Type a different pitch and regenerate")
                     .clicked()
-            {
-                on_event(UiEvent::Sketch(SketchEvent::PickRoofShape(
-                    RoofShape::FollowCeiling,
-                )));
+                {
+                    // Prefill with the current pitch, then reopen the prompt.
+                    *view.roof_pitch_input = format!("{:.0}", section.pitch_deg);
+                    on_event(UiEvent::Sketch(SketchEvent::ReopenRoofSectionPitch));
+                }
+                if ui
+                    .button("Flip direction")
+                    .hint(section.axis_label)
+                    .clicked()
+                {
+                    on_event(UiEvent::Sketch(SketchEvent::FlipRoofSectionAxis));
+                }
+                if section.candidate_count > 1
+                    && ui
+                        .button(format!(
+                            "Next option ({}/{})",
+                            section.candidate_idx + 1,
+                            section.candidate_count
+                        ))
+                        .hint("Show the next generated candidate")
+                        .clicked()
+                {
+                    on_event(UiEvent::Sketch(SketchEvent::NextRoofSectionCandidate));
+                }
+                if ui.button("Confirm ✓").clicked() {
+                    on_event(UiEvent::Sketch(SketchEvent::ConfirmRoofSection));
+                }
+                if ui.button("Cancel").clicked() {
+                    on_event(UiEvent::Sketch(SketchEvent::CancelRoofSection));
+                }
             }
+        } else if view.roof_regions.iter().any(|r| r.selected) {
+            ui.label("Style:");
+            for (label, style, hint) in [
+                (
+                    "Gable",
+                    RoofSectionStyle::GableBoth,
+                    "Ridge to the end walls (vertical gable ends)",
+                ),
+                (
+                    "Hip both ends",
+                    RoofSectionStyle::HipBoth,
+                    "Ridge inset from both ends (the ends slope down too)",
+                ),
+                (
+                    "Hip one end",
+                    RoofSectionStyle::HipOne,
+                    "One hipped end, one gable end — browse which",
+                ),
+                (
+                    "Suggest",
+                    RoofSectionStyle::Suggest,
+                    "Browse every end combination",
+                ),
+                (
+                    "Flat",
+                    RoofSectionStyle::Flat,
+                    "Flat roof — keeps the ceiling level",
+                ),
+            ] {
+                if ui.button(label).hint(hint).clicked() {
+                    on_event(UiEvent::Sketch(SketchEvent::PickRoofSectionStyle(style)));
+                }
+            }
+        } else if view.roof_clear_confirm {
+            // The wipe is un-undoable — a mis-tap must not lose the roof work.
+            ui.label("Wipe the whole roof and start again?");
             if ui
-                .button("Flat")
-                .hint("Flat roof — keeps the ceiling level")
+                .button("Yes — start again")
+                .hint("Delete every roof area and re-answer which ceilings are the roof")
                 .clicked()
             {
-                on_event(UiEvent::Sketch(SketchEvent::PickRoofShape(RoofShape::Flat)));
+                on_event(UiEvent::Sketch(SketchEvent::ClearRoof));
             }
+            if ui.button("Keep it").clicked() {
+                on_event(UiEvent::Sketch(SketchEvent::CancelClearRoof));
+            }
+        } else {
+            // Section stage, nothing selected: the escape hatch back to Classify.
             if ui
-                .button("Gable")
-                .hint("Ridge to the end walls (vertical gable ends)")
+                .button("Start roof again")
+                .hint("Delete every roof area and re-answer which ceilings are the roof")
                 .clicked()
             {
-                on_event(UiEvent::Sketch(SketchEvent::PickRoofShape(
-                    RoofShape::Gable,
-                )));
-            }
-            if ui
-                .button("Hip")
-                .hint("Ridge inset from the ends (the ends slope down too)")
-                .clicked()
-            {
-                on_event(UiEvent::Sketch(SketchEvent::PickRoofShape(RoofShape::Hip)));
+                on_event(UiEvent::Sketch(SketchEvent::RequestClearRoof));
             }
         }
         if ui.button("Done").hint("Leave the roof step").clicked() {

@@ -155,6 +155,18 @@ pub struct SketchState {
     pub ceiling_apex_input: String,
     /// Backing string for the Phase-1 roof step's pitch input (degrees).
     pub roof_pitch_input: String,
+    /// In-flight Structure-review GROUP rename: `(group id, buffer)`.
+    /// `RefCell` because the review overlay edits it behind the shared
+    /// `SketchView` while the event closure holds the other state.
+    pub structure_rename_group:
+        std::cell::RefCell<Option<(ber_model::ber::common::ItemId, String)>>,
+    /// In-flight Structure-review PHASE rename: `(phase, buffer)`.
+    pub structure_rename_phase:
+        std::cell::RefCell<Option<(ber_model::ber::common::ConstructionPhase, String)>>,
+    /// Structure-review MERGE-phase picker: `None` closed; `Some(None)` the
+    /// target list is open; `Some(Some(target))` awaiting the confirm tap.
+    pub structure_merge_phase:
+        std::cell::RefCell<Option<Option<ber_model::ber::common::ConstructionPhase>>>,
     /// One-shot guard for the prefill above: set when the Height stage's
     /// prefill has been written, cleared when the stage closes, so the user's
     /// in-progress typing isn't clobbered every frame.
@@ -1626,13 +1638,9 @@ impl eframe::App for BerApp {
                                 roof_gate_pending,
                                 roof_context,
                                 roof_regions,
-                                roof_area_can_pick_shape,
-                                roof_area_ceiling_sloped,
-                                roof_area_ridge_pending,
-                                roof_area_hip_ridge_count,
-                                roof_area_pitch_pending,
-                                roof_area_can_centre_ridge,
-                                roof_area_ridge_lines,
+                                roof_stage,
+                                roof_section,
+                                roof_clear_confirm,
                             ) = {
                                 let c = self.app_controller.borrow();
                                 (
@@ -1640,13 +1648,9 @@ impl eframe::App for BerApp {
                                     c.roof_gate_pending(),
                                     c.roof_context(),
                                     c.roof_regions_view(),
-                                    c.roof_area_can_pick_shape(),
-                                    c.roof_area_ceiling_is_sloped(),
-                                    c.roof_area_ridge_pending(),
-                                    c.roof_area_hip_ridge_count(),
-                                    c.roof_area_pitch_pending(),
-                                    c.roof_area_can_centre_ridge(),
-                                    c.pending_roof_area_ridge_lines(),
+                                    c.roof_stage(),
+                                    c.pending_roof_section_view(),
+                                    c.roof_clear_confirm_pending(),
                                 )
                             };
 
@@ -1878,6 +1882,9 @@ impl eframe::App for BerApp {
                                 show_deferred_photos_prompt,
                                 show_summary,
                                 structure_review_view,
+                                structure_rename_group: &self.sketch_state.structure_rename_group,
+                                structure_rename_phase: &self.sketch_state.structure_rename_phase,
+                                structure_merge_phase: &self.sketch_state.structure_merge_phase,
                                 object_pins,
                                 object_pins_world,
                                 active_object_room,
@@ -1921,13 +1928,9 @@ impl eframe::App for BerApp {
                                 roof_gate_pending,
                                 roof_context: &roof_context,
                                 roof_regions: &roof_regions,
-                                roof_area_can_pick_shape,
-                                roof_area_ceiling_sloped,
-                                roof_area_ridge_pending,
-                                roof_area_hip_ridge_count,
-                                roof_area_pitch_pending,
-                                roof_area_can_centre_ridge,
-                                roof_area_ridge_lines,
+                                roof_stage,
+                                roof_section,
+                                roof_clear_confirm,
                                 roof_pitch_input: &mut self.sketch_state.roof_pitch_input,
                                 ceiling_exposure_mode,
                                 ceiling_exposure_gate_pending,
@@ -2838,6 +2841,17 @@ impl eframe::App for BerApp {
                                         SketchEvent::ConfirmStructureReview => {
                                             controller.borrow_mut().confirm_structure_review()
                                         }
+                                        SketchEvent::RenameStructureGroup { id, name } => {
+                                            controller.borrow_mut().rename_structure_group(id, name)
+                                        }
+                                        SketchEvent::RenameConstructionPhase { phase, name } => {
+                                            controller
+                                                .borrow_mut()
+                                                .rename_construction_phase(phase, name)
+                                        }
+                                        SketchEvent::MergeConstructionPhase { from, to } => {
+                                            controller.borrow_mut().merge_structure_phase(from, to)
+                                        }
                                         // The three tap handlers below: a tap
                                         // while a room box is OPEN dismisses it —
                                         // that path goes through the DEFERRED
@@ -3332,6 +3346,7 @@ impl eframe::App for BerApp {
                                         }
                                         SketchEvent::SetRoofMode(on) => {
                                             self.sketch_state.stroke_error = None;
+                                            self.sketch_state.roof_error = None;
                                             controller.borrow_mut().set_roof_mode(on);
                                         }
                                         SketchEvent::ConfirmAllStoreysAddedRoof => {
@@ -3351,41 +3366,64 @@ impl eframe::App for BerApp {
                                                 .borrow_mut()
                                                 .roof_region_tap(world_x, world_y, tol);
                                         }
-                                        SketchEvent::PickRoofShape(shape) => {
-                                            controller.borrow_mut().pick_roof_area_shape(shape);
+                                        SketchEvent::ConfirmRoofFollow => {
+                                            let r = controller.borrow_mut().confirm_roof_follow();
+                                            match r {
+                                                Ok(()) => self.sketch_state.roof_error = None,
+                                                Err(e) => self.sketch_state.roof_error = Some(e),
+                                            }
                                         }
-                                        SketchEvent::RoofAreaRidgeStroke { points } => {
+                                        SketchEvent::PickRoofSectionStyle(style) => {
                                             let r = controller
                                                 .borrow_mut()
-                                                .apply_roof_area_ridge(&points);
-                                            if let Err(e) = r {
-                                                self.sketch_state.roof_error = Some(e);
-                                            } else {
-                                                self.sketch_state.roof_error = None;
-                                            }
-                                        }
-                                        SketchEvent::FinishRoofRidges => {
-                                            let r =
-                                                controller.borrow_mut().finish_roof_area_ridges();
+                                                .pick_roof_section_style(style);
                                             match r {
                                                 Ok(()) => self.sketch_state.roof_error = None,
                                                 Err(e) => self.sketch_state.roof_error = Some(e),
                                             }
                                         }
-                                        SketchEvent::CentreRoofRidge => {
-                                            controller.borrow_mut().centre_pending_roof_ridge();
+                                        SketchEvent::FlipRoofSectionAxis => {
+                                            controller.borrow_mut().flip_roof_section_axis();
                                         }
-                                        SketchEvent::AssignRoofPitch(deg) => {
-                                            let r =
-                                                controller.borrow_mut().assign_roof_area_pitch(deg);
+                                        SketchEvent::NextRoofSectionCandidate => {
+                                            controller.borrow_mut().next_roof_section_candidate();
+                                        }
+                                        SketchEvent::AssignRoofSectionPitch(deg) => {
+                                            let r = controller
+                                                .borrow_mut()
+                                                .assign_roof_section_pitch(deg);
                                             match r {
                                                 Ok(()) => self.sketch_state.roof_error = None,
                                                 Err(e) => self.sketch_state.roof_error = Some(e),
                                             }
                                         }
-                                        SketchEvent::CancelRoofArea => {
-                                            controller.borrow_mut().cancel_roof_area();
+                                        SketchEvent::ReopenRoofSectionPitch => {
+                                            controller.borrow_mut().reopen_roof_section_pitch();
                                             self.sketch_state.roof_error = None;
+                                        }
+                                        SketchEvent::ConfirmRoofSection => {
+                                            let r = controller.borrow_mut().confirm_roof_section();
+                                            match r {
+                                                Ok(()) => self.sketch_state.roof_error = None,
+                                                Err(e) => self.sketch_state.roof_error = Some(e),
+                                            }
+                                        }
+                                        SketchEvent::CancelRoofSection => {
+                                            controller.borrow_mut().cancel_roof_section();
+                                            self.sketch_state.roof_error = None;
+                                        }
+                                        SketchEvent::RequestClearRoof => {
+                                            controller.borrow_mut().request_clear_roof();
+                                        }
+                                        SketchEvent::CancelClearRoof => {
+                                            controller.borrow_mut().cancel_clear_roof();
+                                        }
+                                        SketchEvent::ClearRoof => {
+                                            let r = controller.borrow_mut().clear_roof();
+                                            match r {
+                                                Ok(()) => self.sketch_state.roof_error = None,
+                                                Err(e) => self.sketch_state.roof_error = Some(e),
+                                            }
                                         }
                                         SketchEvent::SetCeilingExposureSelectMode(mode) => {
                                             controller

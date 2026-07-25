@@ -317,7 +317,8 @@ mod tests {
 
         // Empty entry (kind picked, nothing entered): silent dismiss.
         assert!(
-            take_dismiss_commits(room_a, Some(&fan()), "", "", "", |_| false, &mut pending).is_empty()
+            take_dismiss_commits(room_a, Some(&fan()), "", "", "", |_| false, &mut pending)
+                .is_empty()
         );
 
         // A note typed: commits (count defaults to 1), like pressing OK.
@@ -336,7 +337,8 @@ mod tests {
 
         // Mandatory photo missing: withheld (OK would have been disabled).
         assert!(
-            take_dismiss_commits(room_a, Some(&fan()), "2", "", "", |_| true, &mut pending).is_empty()
+            take_dismiss_commits(room_a, Some(&fan()), "2", "", "", |_| true, &mut pending)
+                .is_empty()
         );
 
         // In-flight entry with a photo + a parked buffer for another kind:
@@ -344,7 +346,8 @@ mod tests {
         pending.push(room_a, &fan(), photo("fan"));
         pending.push(room_a, &thermostat(), photo("stat"));
         pending.push(room_b, &fan(), photo("fan_b"));
-        let commits = take_dismiss_commits(room_a, Some(&fan()), "3", "", "", |_| true, &mut pending);
+        let commits =
+            take_dismiss_commits(room_a, Some(&fan()), "3", "", "", |_| true, &mut pending);
         assert_eq!(commits.len(), 2);
         assert_eq!(commits[0].kind, fan());
         assert_eq!(commits[0].count, 3);

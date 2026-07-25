@@ -229,6 +229,36 @@ impl Storey {
         self.ceilings.has_unjustified_flat_seams(&justified)
     }
 
+    /// The object-room pins recorded OUTSIDE the dwelling on this storey — a
+    /// pin clearly beyond the storey footprint (floors ∪ porches: an excluded
+    /// porch is carved out of `floors`, but a pin in it is still on the
+    /// dwelling), e.g. an external oil boiler against the back wall. DERIVED on
+    /// read from the current geometry — never stored, so it tracks outline
+    /// redraws. Roof pins are envelope-mounted, not external, and are skipped;
+    /// the house-level attic bucket has no plan position and never reaches
+    /// here. Empty while no floor region exists yet (nothing to be outside of).
+    pub fn external_object_pin_ids(&self) -> Vec<ItemId> {
+        // Generous slack: the outline is the internal wall face and pins are
+        // dropped by eye, so a pin within a wall's thickness of the boundary
+        // (or ON it, from a 3D wall-surface pick) still counts as inside.
+        const EXTERNAL_PIN_TOL_M: f64 = 0.3;
+        let footprint = PlanFootprint::of_many([&self.floors, &self.porches]);
+        if footprint.is_empty() {
+            return Vec::new();
+        }
+        self.object_rooms
+            .iter()
+            .filter(|r| !r.is_roof_mounted(self.ceiling_height_m))
+            .filter(|r| {
+                !footprint.contains_within(
+                    Point2f64::new(r.plan_position.x as f64, r.plan_position.y as f64),
+                    EXTERNAL_PIN_TOL_M,
+                )
+            })
+            .map(|r| r.id)
+            .collect()
+    }
+
     /// Record a dimensioned Structure-phase split onto the durable split field
     /// for `kind` (replayed by `resolve_storey`). Floors/ceilings store the whole
     /// carved `ring`; walls store the fixed interior cut SEGMENT(s) in
@@ -988,6 +1018,53 @@ mod tests {
         assert!(obj.remove("porches").is_some(), "key was present");
         let loaded: Storey = serde_json::from_value(json).expect("old record loads");
         assert!(loaded.porches.regions.is_empty(), "defaults to empty");
+    }
+
+    /// "External" object pins derive from the current footprint: outside the
+    /// floors ∪ porches union (beyond the wall-thickness slack) is external;
+    /// inside, near the boundary, in a porch, or on the roof is not.
+    #[test]
+    fn external_object_pins_derive_from_footprint() {
+        use crate::ber::objects::ObjectRoom;
+        use domain::points::Point2f32;
+
+        let square = |x0: f64, y0: f64, x1: f64, y1: f64| {
+            vec![
+                Point2f64::new(x0, y0),
+                Point2f64::new(x1, y0),
+                Point2f64::new(x1, y1),
+                Point2f64::new(x0, y1),
+            ]
+        };
+        let mut storey = Storey {
+            floors: FloorRegions::new(square(0.0, 0.0, 10.0, 10.0), ItemId::default()),
+            porches: FloorRegions::new(square(10.0, 0.0, 12.0, 2.0), ItemId::default()),
+            ..Storey::default()
+        };
+        let inside = ObjectRoom::new(Point2f32::new(5.0, 5.0));
+        let outside = ObjectRoom::new(Point2f32::new(15.0, 5.0));
+        // Within the wall-thickness slack of the boundary → still inside.
+        let near_wall = ObjectRoom::new(Point2f32::new(10.2, 5.0));
+        // In the porch: carved out of `floors` once excluded, but on the dwelling.
+        let in_porch = ObjectRoom::new(Point2f32::new(11.0, 1.0));
+        // A roof pin is envelope-mounted, never "external".
+        let on_roof = ObjectRoom::new_on_surface(Point2f32::new(20.0, 20.0), 5.0, Some(30.0), true);
+        let outside_id = outside.id;
+        storey.object_rooms = vec![inside, outside, near_wall, in_porch, on_roof];
+
+        assert_eq!(storey.external_object_pin_ids(), vec![outside_id]);
+    }
+
+    /// With no floor region drawn yet there is nothing to be outside of — no
+    /// pin is labelled external.
+    #[test]
+    fn no_footprint_means_no_external_pins() {
+        use crate::ber::objects::ObjectRoom;
+        use domain::points::Point2f32;
+
+        let mut storey = Storey::default();
+        storey.object_rooms = vec![ObjectRoom::new(Point2f32::new(5.0, 5.0))];
+        assert!(storey.external_object_pin_ids().is_empty());
     }
 
     /// `clear_derived_geometry` drops porches back to empty along with the

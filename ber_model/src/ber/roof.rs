@@ -132,6 +132,12 @@ pub struct RoofArea {
     /// the ceiling uses. Empty = flat at the eave.
     #[serde(default)]
     pub apexes: Vec<CeilingApex>,
+    /// How each ridge END terminates (`[low, high]` along the ridge axis) for a
+    /// GENERATED Gable/Hip area — descriptive metadata so the review UI can
+    /// show and re-offer the picked combination; the geometry is still driven
+    /// by `apexes`. `None` on hand-drawn legacy areas and non-ridge shapes.
+    #[serde(default)]
+    pub ends: Option<[RoofEnd; 2]>,
 }
 
 impl RoofArea {
@@ -215,7 +221,10 @@ impl RoofArea {
     /// footprint). Feeds the ceiling's [`with_apexes`] fan. Empty if the
     /// footprint is degenerate. Used at commit to populate a Gable/Hip roof
     /// area's [`apexes`](Self::apexes) — once per drawn ridge (a multi-ridge
-    /// hip concatenates each ridge's pair).
+    /// hip concatenates each ridge's pair). LEGACY: the generated-roof flow
+    /// ([`generate_roof`]) computes apexes itself — no production caller
+    /// builds from a hand-drawn ridge any more; kept for the stored-record
+    /// semantics of hand-drawn areas (and their tests).
     pub fn ridge_apexes(
         ridge: (Point2f64, Point2f64),
         pitch_deg: f32,
@@ -491,7 +500,7 @@ impl RoofArea {
             .regions
             .iter()
             .filter(|r| {
-                let c = r.centroid();
+                let c = r.interior_point();
                 footprints
                     .iter()
                     .any(|fp| fp.contains(&geo::Point::new(c.x, c.y)))
@@ -649,7 +658,8 @@ pub fn ridge_perp_reach(
 /// by that distance so it lies exactly on the boundary — a roughly-drawn
 /// eave-line becomes a true mono-pitch. The NEARER side wins when both are in
 /// tolerance. Unchanged when nothing is within `tol_m` or the ridge is
-/// degenerate.
+/// degenerate. LEGACY: hand-drawn-ridge era helper, no production caller
+/// since [`generate_roof`] took over; kept for old-record semantics + tests.
 pub fn snap_ridge_to_edge(
     ridge: (Point2f64, Point2f64),
     footprint: &[Vec<Point2f64>],
@@ -697,6 +707,9 @@ pub const RIDGE_ORTHO_SNAP_DEG: f64 = 15.0;
 ///   drawn and instead snap each ENDPOINT (in plan) onto the nearest footprint
 ///   corner or `extra_targets` point (an already-drawn ridge's endpoint, so
 ///   junctions meet exactly) within `tol_m`.
+///
+/// LEGACY: hand-drawn-ridge era helper, no production caller since
+/// [`generate_roof`] took over; kept for old-record semantics + tests.
 pub fn snap_hip_ridge(
     ridge: (Point2f64, Point2f64),
     footprint: &[Vec<Point2f64>],
@@ -761,6 +774,257 @@ fn shift_ridge_perp(ridge: (Point2f64, Point2f64), shift: f64) -> (Point2f64, Po
         Point2f64::new(a.x + shift * nx, a.y + shift * ny),
         Point2f64::new(b.x + shift * nx, b.y + shift * ny),
     )
+}
+
+// ── Generated roofs (ridge computed from footprint + style, not drawn) ──────
+
+/// How one END of a generated ridge terminates: `Gable` runs the ridge out to
+/// the end wall (vertical gable there); `Hip` insets the ridge so the end
+/// slopes down to the eave like the sides.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RoofEnd {
+    Gable,
+    Hip,
+}
+
+/// The plan axis a generated ridge runs along. The default is the footprint's
+/// LONGER way ([`default_ridge_axis`]); the assessor can flip it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RidgeAxis {
+    X,
+    Y,
+}
+
+impl RidgeAxis {
+    pub fn flipped(self) -> Self {
+        match self {
+            RidgeAxis::X => RidgeAxis::Y,
+            RidgeAxis::Y => RidgeAxis::X,
+        }
+    }
+}
+
+/// One generated roof candidate over a footprint: the computed ridge and the
+/// apexes that realise it (drop-in for [`RoofArea::apexes`]), plus the end
+/// combination and axis that produced it. A footprint too short for the hip
+/// insets collapses to a single apex — a pyramid / pavilion — with
+/// `ridge` at that point.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GeneratedRoof {
+    pub axis: RidgeAxis,
+    /// `[low, high]` along the axis (west/east for `X`, south/north for `Y`).
+    pub ends: [RoofEnd; 2],
+    pub ridge: (Point2f64, Point2f64),
+    pub apexes: Vec<CeilingApex>,
+    /// The half-span run (m) the pitch acts over — the eave-to-ridge plan
+    /// distance perpendicular to the ridge.
+    pub run_m: f64,
+}
+
+/// The footprint's longer way — the default ridge axis.
+pub fn default_ridge_axis(footprint: &[Vec<Point2f64>]) -> RidgeAxis {
+    match RoofArea::footprint_bbox(footprint) {
+        Some((x0, y0, x1, y1)) if (x1 - x0) >= (y1 - y0) => RidgeAxis::X,
+        Some(_) => RidgeAxis::Y,
+        None => RidgeAxis::X,
+    }
+}
+
+/// Parametric crossings of the ridge's INFINITE line with the footprint rings:
+/// `(s_min, s_max)` in metres along the ridge direction from the ridge
+/// midpoint. `None` when degenerate or no crossing (midpoint outside the
+/// footprint with the line missing it entirely).
+fn ridge_line_span(
+    ridge: (Point2f64, Point2f64),
+    footprint: &[Vec<Point2f64>],
+) -> Option<(f64, f64)> {
+    let (a, b) = ridge;
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let len = (dx * dx + dy * dy).sqrt();
+    if len < 1e-3 {
+        return None;
+    }
+    let (ux, uy) = (dx / len, dy / len);
+    let (mx, my) = ((a.x + b.x) / 2.0, (a.y + b.y) / 2.0);
+    let mut s_min: Option<f64> = None;
+    let mut s_max: Option<f64> = None;
+    for ring in footprint {
+        let n = ring.len();
+        if n < 3 {
+            continue;
+        }
+        for i in 0..n {
+            let p = ring[i];
+            let q = ring[(i + 1) % n];
+            let (ex, ey) = (q.x - p.x, q.y - p.y);
+            // mid + s·u = p + t·e
+            let denom = ux * ey - uy * ex;
+            if denom.abs() < 1e-12 {
+                continue;
+            }
+            let (wx, wy) = (p.x - mx, p.y - my);
+            let s = (wx * ey - wy * ex) / denom;
+            let t = (wx * uy - wy * ux) / denom;
+            if !(-1e-9..=1.0 + 1e-9).contains(&t) {
+                continue;
+            }
+            s_min = Some(s_min.map_or(s, |v: f64| v.min(s)));
+            s_max = Some(s_max.map_or(s, |v: f64| v.max(s)));
+        }
+    }
+    match (s_min, s_max) {
+        (Some(lo), Some(hi)) if hi - lo > 1e-6 => Some((lo, hi)),
+        _ => None,
+    }
+}
+
+/// Generate a roof over `footprint`: ridge along `axis` on the footprint's
+/// centreline (perp-reach centred, so an off-centre bbox in an L-wing still
+/// centres within the actual ring), each end run out to the wall (`Gable`) or
+/// inset by the cross-slope run (`Hip`), apexes at
+/// `eave_z + run · tan(pitch)`. Ends too close for both hip insets collapse
+/// to a single-apex pyramid. `None` when the footprint is degenerate.
+pub fn generate_roof(
+    footprint: &[Vec<Point2f64>],
+    axis: RidgeAxis,
+    ends: [RoofEnd; 2],
+    pitch_deg: f32,
+    eave_z: f64,
+) -> Option<GeneratedRoof> {
+    let merged = merge_footprint_rings(footprint);
+    let (x0, y0, x1, y1) = RoofArea::footprint_bbox(&merged)?;
+    let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+    let seed = match axis {
+        RidgeAxis::X => (Point2f64::new(x0, cy), Point2f64::new(x1, cy)),
+        RidgeAxis::Y => (Point2f64::new(cx, y0), Point2f64::new(cx, y1)),
+    };
+    // Centre between the true eaves (equal perp reach), then read the run.
+    let centred = centre_ridge(seed, &merged);
+    let (d_neg, d_pos) = ridge_perp_reach(centred, &merged)?;
+    let run = d_neg.max(d_pos);
+    if run < 1e-6 {
+        return None;
+    }
+    let (lo, hi) = ridge_line_span(centred, &merged)?;
+    let (a, b) = centred;
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let len = (dx * dx + dy * dy).sqrt();
+    let (ux, uy) = (dx / len, dy / len);
+    let (mx, my) = ((a.x + b.x) / 2.0, (a.y + b.y) / 2.0);
+    let at = |s: f64| Point2f64::new(mx + s * ux, my + s * uy);
+    let s_lo = lo + if ends[0] == RoofEnd::Hip { run } else { 0.0 };
+    let s_hi = hi - if ends[1] == RoofEnd::Hip { run } else { 0.0 };
+    let z = eave_z + run * (pitch_deg as f64).to_radians().tan();
+    let (ridge, apexes) = if s_hi - s_lo > 1e-3 {
+        let (pa, pb) = (at(s_lo), at(s_hi));
+        (
+            (pa, pb),
+            vec![
+                CeilingApex { point: pa, z_m: z },
+                CeilingApex { point: pb, z_m: z },
+            ],
+        )
+    } else {
+        // Hip insets meet or cross: a single apex. A GABLE end pins the peak
+        // to its wall (the collapsed half-hip fans down from the gable top);
+        // hip both ends peaks at the middle — a pyramid.
+        let s = match ends {
+            [RoofEnd::Hip, RoofEnd::Gable] => hi,
+            [RoofEnd::Gable, RoofEnd::Hip] => lo,
+            _ => (lo + hi) / 2.0,
+        };
+        let p = at(s);
+        ((p, p), vec![CeilingApex { point: p, z_m: z }])
+    };
+    Some(GeneratedRoof {
+        axis,
+        ends,
+        ridge,
+        apexes,
+        run_m: run,
+    })
+}
+
+/// The slope of a ceiling region's plane in degrees from horizontal — `None`
+/// for a degenerate/vertical polygon. 0° for a flat region.
+pub fn region_slope_deg(region: &CeilingRegion) -> Option<f64> {
+    let (n, _) = region.polygon.get_normal_and_distance_to_origin()?;
+    let horiz = (n.x * n.x + n.y * n.y).sqrt();
+    Some(horiz.atan2(n.z.abs()).to_degrees())
+}
+
+/// Plan-distance tolerance for "this ceiling edge lies on the section
+/// boundary" — matches the resolve-derivation containment tolerances.
+const ADJACENT_TOL_M: f64 = 0.05;
+
+/// The pitch a new roof section should INHERIT: the slope of the sloped
+/// ceiling region that shares the longest boundary run with `footprint`, over
+/// the given storeys. A sloped ceiling adjacent to the section is the
+/// room-in-roof whose rafters continue over the section (the roof skin is one
+/// plane), so its angle is the roof's angle. `None` when no sloped region
+/// touches the footprint — the caller asks the assessor instead.
+pub fn inherited_pitch_deg(
+    ber: &crate::ber::ber_struct::Ber,
+    storeys: &[usize],
+    footprint: &[Vec<Point2f64>],
+) -> Option<f32> {
+    let merged = merge_footprint_rings(footprint);
+    if merged.is_empty() {
+        return None;
+    }
+    // Length of `ring`'s edges that lie along the merged boundary.
+    let touch_len = |ring: &[Point3f64]| -> f64 {
+        let n = ring.len();
+        (0..n)
+            .map(|i| {
+                let p = ring[i];
+                let q = ring[(i + 1) % n];
+                let e_len = ((q.x - p.x).powi(2) + (q.y - p.y).powi(2)).sqrt();
+                if e_len < 1e-6 {
+                    return 0.0;
+                }
+                let on = |x: f64, y: f64| {
+                    merged.iter().any(|mring| {
+                        let m = mring.len();
+                        (0..m).any(|j| {
+                            let a = mring[j];
+                            let b = mring[(j + 1) % m];
+                            domain::points::point_to_segment_distance(x, y, a.x, a.y, b.x, b.y)
+                                <= ADJACENT_TOL_M
+                        })
+                    })
+                };
+                let mid = ((p.x + q.x) / 2.0, (p.y + q.y) / 2.0);
+                if on(p.x, p.y) && on(q.x, q.y) && on(mid.0, mid.1) {
+                    e_len
+                } else {
+                    0.0
+                }
+            })
+            .sum()
+    };
+    let mut best: Option<(f64, f64)> = None; // (touch length, slope)
+    for &idx in storeys {
+        let Some(s) = ber.storeys.get(idx) else {
+            continue;
+        };
+        for r in &s.ceilings.regions {
+            if r.flat_z().is_some() {
+                continue; // flat — nothing to inherit
+            }
+            let Some(slope) = region_slope_deg(r) else {
+                continue;
+            };
+            if slope < 1.0 {
+                continue;
+            }
+            let t = touch_len(&r.polygon.exterior);
+            if t > ADJACENT_TOL_M && best.is_none_or(|(bt, _)| t > bt) {
+                best = Some((t, slope));
+            }
+        }
+    }
+    best.map(|(_, slope)| slope as f32)
 }
 
 /// z tolerance (m) for [`RoofArea::follows_ceiling`]'s vertex-on-surface test —
@@ -874,7 +1138,10 @@ impl crate::ber::ber_struct::Ber {
                     continue;
                 }
                 roofable_regions += 1;
-                if !self.roof.covers_on(idx, r.centroid()) {
+                // Probe with a guaranteed-interior point, not the vertex-mean
+                // centroid — a CONCAVE region's centroid can sit outside it
+                // (and outside the covering roof), sticking the gate red.
+                if !self.roof.covers_on(idx, r.interior_point()) {
                     uncovered.push(RoofGap {
                         storey_idx: idx,
                         area_m2: r.area(),
@@ -964,7 +1231,7 @@ impl crate::ber::ber_struct::Ber {
         region: &CeilingRegion,
     ) -> InferredRoofType {
         use geo::Contains;
-        let c = region.centroid();
+        let c = region.interior_point();
         let pt = geo::Point::new(c.x, c.y);
         let Some(area) = self.roof.areas.iter().find(|a| {
             a.covers_storey(storey_idx)
@@ -1082,6 +1349,7 @@ mod tests {
             ridge: None,
             footprint: square_10(),
             apexes: Vec::new(),
+            ends: None,
         };
         let roof = Roof { areas: vec![area] };
         let p = Point2f64::new(5.0, 5.0);
@@ -1132,6 +1400,7 @@ mod tests {
             ridge: None,
             footprint: square_10(),
             apexes: Vec::new(),
+            ends: None,
         });
         let cov = ber.roof_coverage();
         assert_eq!(cov.roofable_regions, 1);
@@ -1162,6 +1431,7 @@ mod tests {
             ridge: None,
             footprint: square_10(),
             apexes: Vec::new(),
+            ends: None,
         };
         // JSON produced by the OLD shape: serialize and strip the field.
         let mut json = serde_json::to_value(&area).expect("serialize");
@@ -1193,6 +1463,7 @@ mod tests {
             ridge: None,
             footprint: square_10(),
             apexes: Vec::new(),
+            ends: None,
         };
         let roof = Roof { areas: vec![area] };
         assert!(
@@ -1238,6 +1509,7 @@ mod tests {
             ridge: Some(ridge),
             footprint: square_10(),
             apexes,
+            ends: None,
         };
         // Regions are built by the SHARED ceiling fan; z runs eave→ridge.
         let regions = area.regions(0.0, ItemId::default());
@@ -1273,6 +1545,7 @@ mod tests {
             ridge: None,
             footprint: square_10(),
             apexes: ceiling_apexes.clone(),
+            ends: None,
         };
         let roof = area.regions(0.0, ItemId::default());
         // Same as the ceiling built the same way.
@@ -1299,6 +1572,7 @@ mod tests {
             ridge: None,
             footprint: square_10(),
             apexes: Vec::new(),
+            ends: None,
         };
         let regions = area.regions(0.0, ItemId::default());
         // Flat = the footprint regions at the eave (shares the ceiling's vertices).
@@ -1349,6 +1623,7 @@ mod tests {
             ridge: Some(ridge),
             footprint: square_10(),
             apexes,
+            ends: None,
         };
         let over = area.regions(0.3, ItemId::default());
         assert!(
@@ -1396,6 +1671,7 @@ mod tests {
                 CeilingApex { point: a, z_m: 3.0 },
                 CeilingApex { point: b, z_m: 3.0 },
             ],
+            ends: None,
         };
         let base = area.regions(0.0, ItemId::default());
         assert_eq!(base.regions.len(), 2, "void/coincidence solve: two planes");
@@ -1576,6 +1852,7 @@ mod tests {
             ridge: Some(ridge),
             footprint,
             apexes,
+            ends: None,
         };
         let regions = area.regions(0.0, ItemId::default());
         assert!(!regions.regions.is_empty());
@@ -1647,6 +1924,7 @@ mod tests {
             ridge: None,
             footprint: square_10(),
             apexes: Vec::new(),
+            ends: None,
         };
         let ceilings = CeilingRegions::default_for_footprint(square_10(), 2.4, ItemId::default());
         assert!(area.follows_ceiling(&ceilings, &[]));
@@ -1666,6 +1944,7 @@ mod tests {
             ridge: None,
             footprint: square_10(),
             apexes: Vec::new(),
+            ends: None,
         };
         let half = vec![
             Point2f64::new(0.0, 0.0),
@@ -1694,6 +1973,7 @@ mod tests {
             ridge: Some(ridge),
             footprint: square_10(),
             apexes,
+            ends: None,
         };
         let ceilings = CeilingRegions::default_for_footprint(square_10(), 2.4, ItemId::default());
         assert!(!area.follows_ceiling(&ceilings, &[]));
@@ -1713,6 +1993,7 @@ mod tests {
             ridge: None,
             footprint: square_10(),
             apexes: Vec::new(),
+            ends: None,
         };
         assert!(area.follows_ceiling(&CeilingRegions::default(), &[]));
     }
@@ -1731,6 +2012,7 @@ mod tests {
             ridge: None,
             footprint: square_10(),
             apexes: Vec::new(),
+            ends: None,
         };
         assert!(!area.follows_ceiling(&CeilingRegions::default(), &[]));
     }
@@ -1750,6 +2032,7 @@ mod tests {
             ridge: None,
             footprint: square_10(),
             apexes: Vec::new(),
+            ends: None,
         };
         let over = area.regions(0.3, ItemId::default());
         assert!(
@@ -1798,6 +2081,7 @@ mod tests {
             ridge: Some(ridge),
             footprint: square_10(),
             apexes,
+            ends: None,
         };
         // A dormer low on the west slope (plane z = 2.4 + x over x ∈ [0, 5]):
         // top 4.5 clears the plane over its whole footprint (x ≤ 2 → z ≤ 4.4).
@@ -1862,6 +2146,7 @@ mod tests {
             ridge: None,
             footprint: square_10(),
             apexes,
+            ends: None,
         };
         assert!(
             !area.follows_ceiling(&base_ceilings, &[]),
@@ -1909,6 +2194,7 @@ mod tests {
             ridge: None,
             footprint: square_10(),
             apexes: Vec::new(),
+            ends: None,
         };
         let datums = ber.storey_floor_datums();
         assert!(
@@ -1949,6 +2235,7 @@ mod tests {
             ridge: None,
             footprint: square_10(),
             apexes: Vec::new(),
+            ends: None,
         }
     }
 
@@ -1965,6 +2252,7 @@ mod tests {
             ridge: Some(ridge),
             footprint: square_10(),
             apexes,
+            ends: None,
         }
     }
 
@@ -2083,5 +2371,323 @@ mod tests {
             InferredRoofType::Unknown,
             "covering is per-storey"
         );
+    }
+}
+
+#[cfg(test)]
+mod generate_tests {
+    use super::*;
+    use crate::ber::ber_struct::Ber;
+    use crate::ber::structural::Storey;
+
+    fn rect(x0: f64, y0: f64, x1: f64, y1: f64) -> Vec<Point2f64> {
+        vec![
+            Point2f64::new(x0, y0),
+            Point2f64::new(x1, y0),
+            Point2f64::new(x1, y1),
+            Point2f64::new(x0, y1),
+        ]
+    }
+
+    /// The area a generated roof commits as — shape from the end combo, the
+    /// generator's ridge + apexes.
+    fn committed(footprint: Vec<Vec<Point2f64>>, g: &GeneratedRoof) -> RoofArea {
+        RoofArea {
+            id: ItemId::default(),
+            storey_idx: 0,
+            covered_storeys: Vec::new(),
+            shape: if g.ends == [RoofEnd::Gable, RoofEnd::Gable] {
+                RoofShape::Gable
+            } else {
+                RoofShape::Hip
+            },
+            pitch_deg: 30.0,
+            eave_z: 2.4,
+            ridge: Some(g.ridge),
+            footprint,
+            apexes: g.apexes.clone(),
+            ends: Some(g.ends),
+        }
+    }
+
+    /// Long-way default: X for a wide footprint, Y for a deep one.
+    #[test]
+    fn default_axis_is_the_longer_way() {
+        assert_eq!(
+            default_ridge_axis(&[rect(0.0, 0.0, 10.0, 6.0)]),
+            RidgeAxis::X
+        );
+        assert_eq!(
+            default_ridge_axis(&[rect(0.0, 0.0, 6.0, 10.0)]),
+            RidgeAxis::Y
+        );
+    }
+
+    /// Gable both ends over a 10×6 rectangle: ridge runs the full length on
+    /// the centreline, apexes rise pitch·half-width above the eave, and the
+    /// solve is the classic TWO planes.
+    #[test]
+    fn gable_both_ends_generates_full_length_centre_ridge() {
+        let fp = vec![rect(0.0, 0.0, 10.0, 6.0)];
+        let g = generate_roof(
+            &fp,
+            RidgeAxis::X,
+            [RoofEnd::Gable, RoofEnd::Gable],
+            30.0,
+            2.4,
+        )
+        .expect("generates");
+        let (a, b) = g.ridge;
+        assert!(
+            (a.x - 0.0).abs() < 1e-6 && (b.x - 10.0).abs() < 1e-6,
+            "{g:?}"
+        );
+        assert!(
+            (a.y - 3.0).abs() < 1e-6 && (b.y - 3.0).abs() < 1e-6,
+            "{g:?}"
+        );
+        assert!((g.run_m - 3.0).abs() < 1e-6);
+        let want_z = 2.4 + 3.0 * 30.0f64.to_radians().tan();
+        assert!(g.apexes.iter().all(|ap| (ap.z_m - want_z).abs() < 1e-6));
+        let area = committed(fp, &g);
+        assert_eq!(area.regions(0.0, ItemId::default()).regions.len(), 2);
+    }
+
+    /// Hip both ends: the ridge is inset by the run at each end and the solve
+    /// yields the classic FOUR planes.
+    #[test]
+    fn hip_both_ends_insets_the_ridge() {
+        let fp = vec![rect(0.0, 0.0, 10.0, 6.0)];
+        let g = generate_roof(&fp, RidgeAxis::X, [RoofEnd::Hip, RoofEnd::Hip], 30.0, 2.4)
+            .expect("generates");
+        let (a, b) = g.ridge;
+        assert!(
+            (a.x - 3.0).abs() < 1e-6 && (b.x - 7.0).abs() < 1e-6,
+            "{g:?}"
+        );
+        let area = committed(fp, &g);
+        let faces = area.regions(0.0, ItemId::default()).regions.len();
+        assert_eq!(faces, 4, "hip-hip should solve to 4 planes");
+    }
+
+    /// One hip end + one gable end: ridge inset only at the hip end; the
+    /// surface still peaks at the ridge z and spans the footprint.
+    #[test]
+    fn mixed_hip_and_gable_ends() {
+        let fp = vec![rect(0.0, 0.0, 10.0, 6.0)];
+        let g = generate_roof(&fp, RidgeAxis::X, [RoofEnd::Hip, RoofEnd::Gable], 30.0, 2.4)
+            .expect("generates");
+        let (a, b) = g.ridge;
+        assert!((a.x - 3.0).abs() < 1e-6, "hip end inset: {g:?}");
+        assert!((b.x - 10.0).abs() < 1e-6, "gable end at the wall: {g:?}");
+        let area = committed(fp, &g);
+        let regions = area.regions(0.0, ItemId::default());
+        assert!(!regions.regions.is_empty());
+        let plan: f64 = regions.regions.iter().map(|r| r.area()).sum();
+        assert!((plan - 60.0).abs() < 0.1, "surface covers the plan: {plan}");
+        let want_z = 2.4 + 3.0 * 30.0f64.to_radians().tan();
+        let max_z = regions
+            .regions
+            .iter()
+            .flat_map(|r| r.polygon.exterior.iter().map(|v| v.z))
+            .fold(f64::MIN, f64::max);
+        assert!((max_z - want_z).abs() < 1e-6, "peaks at the ridge: {max_z}");
+    }
+
+    /// A square with hips on both ends collapses to a single-apex pyramid.
+    #[test]
+    fn square_hip_hip_collapses_to_pyramid() {
+        let fp = vec![rect(0.0, 0.0, 6.0, 6.0)];
+        let g = generate_roof(&fp, RidgeAxis::X, [RoofEnd::Hip, RoofEnd::Hip], 45.0, 2.4)
+            .expect("generates");
+        assert_eq!(g.apexes.len(), 1, "pyramid: {g:?}");
+        let ap = &g.apexes[0];
+        assert!((ap.point.x - 3.0).abs() < 1e-6 && (ap.point.y - 3.0).abs() < 1e-6);
+    }
+
+    /// Flipping the axis swaps the ridge direction and the run.
+    #[test]
+    fn axis_flip_swaps_ridge_direction() {
+        let fp = vec![rect(0.0, 0.0, 10.0, 6.0)];
+        let g = generate_roof(
+            &fp,
+            RidgeAxis::Y,
+            [RoofEnd::Gable, RoofEnd::Gable],
+            30.0,
+            2.4,
+        )
+        .expect("generates");
+        let (a, b) = g.ridge;
+        assert!(
+            (a.y - 0.0).abs() < 1e-6 && (b.y - 6.0).abs() < 1e-6,
+            "{g:?}"
+        );
+        assert!((a.x - 5.0).abs() < 1e-6, "centred on the short way: {g:?}");
+        assert!((g.run_m - 5.0).abs() < 1e-6, "run is the half-LENGTH now");
+    }
+
+    /// Pitch inheritance: a sloped ceiling sharing the section boundary lends
+    /// its slope; with only flat neighbours there is nothing to inherit.
+    #[test]
+    fn inherits_pitch_from_adjacent_sloped_ceiling() {
+        let mut ber = Ber::default();
+        let mut s = Storey::default();
+        // Sloped region over x∈[0,4]: z = 2.4 + 0.5·(4 − x) — a mono-pitch
+        // rising toward x=0 (slope atan(0.5) ≈ 26.57°), eave at the shared
+        // x=4 boundary.
+        let sloped = Polygon3D {
+            exterior: vec![
+                Point3f64::new(0.0, 0.0, 4.4),
+                Point3f64::new(4.0, 0.0, 2.4),
+                Point3f64::new(4.0, 6.0, 2.4),
+                Point3f64::new(0.0, 6.0, 4.4),
+            ],
+        };
+        let flat = Polygon3D {
+            exterior: vec![
+                Point3f64::new(4.0, 0.0, 2.4),
+                Point3f64::new(10.0, 0.0, 2.4),
+                Point3f64::new(10.0, 6.0, 2.4),
+                Point3f64::new(4.0, 6.0, 2.4),
+            ],
+        };
+        let mk = |polygon: Polygon3D| CeilingRegion {
+            id: ItemId::default(),
+            polygon,
+            opes: Opes::default(),
+            construction_id: ItemId::default(),
+            exposure: CeilingExposure::ExposedRoof,
+        };
+        s.ceilings = CeilingRegions {
+            regions: vec![mk(sloped), mk(flat)],
+        };
+        ber.storeys.push(s);
+
+        // Section over the FLAT region: shares the x=4 edge with the slope.
+        let fp = vec![rect(4.0, 0.0, 10.0, 6.0)];
+        let inherited = inherited_pitch_deg(&ber, &[0], &fp).expect("inherits");
+        assert!(
+            (inherited as f64 - 0.5f64.atan().to_degrees()).abs() < 0.1,
+            "inherited {inherited}°"
+        );
+
+        // A detached section far from the slope inherits nothing.
+        let far = vec![rect(20.0, 0.0, 26.0, 6.0)];
+        assert!(inherited_pitch_deg(&ber, &[0], &far).is_none());
+    }
+    /// Coverage probes an INTERIOR point, not the vertex-mean centroid: an
+    /// L-shaped (concave) region whose vertex mean falls in the notch —
+    /// outside the region — still reads covered by a Flat area drawn exactly
+    /// over it, and the gate goes green.
+    #[test]
+    fn concave_region_covered_by_its_own_flat_area() {
+        let l_ring = vec![
+            Point2f64::new(0.0, 0.0),
+            Point2f64::new(6.0, 0.0),
+            Point2f64::new(6.0, 2.0),
+            Point2f64::new(2.0, 2.0),
+            Point2f64::new(2.0, 6.0),
+            Point2f64::new(0.0, 6.0),
+        ];
+        let mut ber = Ber::default();
+        let mut s = Storey::default();
+        s.ceilings = CeilingRegions {
+            regions: vec![CeilingRegion {
+                id: ItemId::default(),
+                polygon: Polygon3D {
+                    exterior: l_ring
+                        .iter()
+                        .map(|p| Point3f64::new(p.x, p.y, 2.4))
+                        .collect(),
+                },
+                opes: Opes::default(),
+                construction_id: ItemId::default(),
+                exposure: CeilingExposure::ExposedRoof,
+            }],
+        };
+        ber.storeys.push(s);
+        // The vertex mean sits in the notch — outside the L.
+        let region = &ber.storeys[0].ceilings.regions[0];
+        let mean = region.centroid();
+        assert!(
+            mean.x > 2.0 && mean.y > 2.0,
+            "precondition: vertex mean ({}, {}) is in the notch",
+            mean.x,
+            mean.y
+        );
+        let interior = region.interior_point();
+        assert!(
+            interior.x <= 2.0 || interior.y <= 2.0,
+            "interior point ({}, {}) is inside the L",
+            interior.x,
+            interior.y
+        );
+        assert!(!ber.roof_coverage().complete(), "uncovered while no roof");
+        ber.roof.areas.push(RoofArea {
+            id: ItemId::default(),
+            storey_idx: 0,
+            covered_storeys: Vec::new(),
+            shape: RoofShape::Flat,
+            pitch_deg: 0.0,
+            eave_z: 2.4,
+            ridge: None,
+            footprint: vec![l_ring],
+            apexes: Vec::new(),
+            ends: None,
+        });
+        let cov = ber.roof_coverage();
+        assert!(
+            cov.complete(),
+            "flat area over the L covers it: uncovered = {}",
+            cov.uncovered.len()
+        );
+    }
+    /// A collapsed (short-footprint) hip+gable section pins its single apex to
+    /// the GABLE wall, not the centre — the half-hip fans down from the gable
+    /// top.
+    #[test]
+    fn collapsed_hip_gable_peaks_at_the_gable_wall() {
+        // 2 wide (axis X) x 6 deep: run = 3 > the 2 m span, so the single hip
+        // inset consumes the whole ridge → collapse.
+        let fp = vec![rect(0.0, 0.0, 2.0, 6.0)];
+        let g = generate_roof(&fp, RidgeAxis::X, [RoofEnd::Hip, RoofEnd::Gable], 30.0, 2.4)
+            .expect("generates");
+        assert_eq!(g.apexes.len(), 1, "collapsed: {g:?}");
+        assert!(
+            (g.apexes[0].point.x - 2.0).abs() < 1e-6,
+            "apex pinned to the gable wall: {g:?}"
+        );
+        let flipped = generate_roof(&fp, RidgeAxis::X, [RoofEnd::Gable, RoofEnd::Hip], 30.0, 2.4)
+            .expect("generates");
+        assert_eq!(flipped.apexes.len(), 1);
+        assert!(
+            (flipped.apexes[0].point.x - 0.0).abs() < 1e-6,
+            "apex pinned to the other gable wall: {flipped:?}"
+        );
+    }
+
+    /// Back-compat: a RoofArea serialized BEFORE `ends` existed (key absent)
+    /// still deserializes, with `ends: None`.
+    #[test]
+    fn old_record_without_ends_key_still_deserializes() {
+        let area = RoofArea {
+            id: ItemId::default(),
+            storey_idx: 0,
+            covered_storeys: Vec::new(),
+            shape: RoofShape::Gable,
+            pitch_deg: 30.0,
+            eave_z: 2.4,
+            ridge: None,
+            footprint: vec![rect(0.0, 0.0, 10.0, 6.0)],
+            apexes: Vec::new(),
+            ends: Some([RoofEnd::Gable, RoofEnd::Gable]),
+        };
+        let mut json = serde_json::to_value(&area).unwrap();
+        json.as_object_mut()
+            .unwrap()
+            .remove("ends")
+            .expect("key was present");
+        let loaded: RoofArea = serde_json::from_value(json).expect("old record loads");
+        assert_eq!(loaded.ends, None);
     }
 }

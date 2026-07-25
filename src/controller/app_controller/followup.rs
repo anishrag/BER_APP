@@ -36,6 +36,9 @@ pub enum FollowUpRowKey {
     ExtensionSub(ConstructionPhase),
     /// A per-surface (construction group) sub-check under the Builder's-letter point.
     SurfaceSub(ItemId),
+    /// The SAME surface list under the CERTIFIER's-letter point, ticked
+    /// independently — the assessor's split decides who evidences what.
+    CertifierSurfaceSub(ItemId),
     Custom(ItemId),
 }
 
@@ -149,6 +152,17 @@ impl AppController {
                             checked: fu.builder_surfaces.contains(&s.id),
                         })
                         .collect()
+                } else if id == FollowUpPointId::CertifierNewbuildLetter {
+                    // The same offered surfaces, ticked independently: the
+                    // builder/certifier split of who evidences what.
+                    surfaces
+                        .iter()
+                        .map(|s| FollowUpSubRow {
+                            key: FollowUpRowKey::CertifierSurfaceSub(s.id),
+                            label: s.name.clone(),
+                            checked: fu.certifier_surfaces.contains(&s.id),
+                        })
+                        .collect()
                 } else {
                     Vec::new()
                 };
@@ -228,6 +242,15 @@ impl AppController {
                         ber.followup.builder_surfaces = auto_surfaces;
                         ber.followup.selected.push(id);
                     }
+                } else if id == FollowUpPointId::CertifierNewbuildLetter {
+                    // Parent: plain toggle (the certifier request reads fine
+                    // with no named surfaces); unticking clears its split.
+                    if ber.followup.selected.contains(&id) {
+                        ber.followup.selected.retain(|p| *p != id);
+                        ber.followup.certifier_surfaces.clear();
+                    } else {
+                        ber.followup.selected.push(id);
+                    }
                 } else if let Some(pos) = ber.followup.selected.iter().position(|p| *p == id) {
                     ber.followup.selected.remove(pos);
                 } else {
@@ -263,6 +286,20 @@ impl AppController {
                         *p != FollowUpPointId::BuilderUpgradeLetter
                             && *p != FollowUpPointId::WorksEvidenceNoBuilder
                     });
+                }
+            }
+            FollowUpRowKey::CertifierSurfaceSub(id) => {
+                // Independent tick of the same offered list — no parent drop
+                // when empty (the certifier request stands without surfaces).
+                if let Some(pos) = ber
+                    .followup
+                    .certifier_surfaces
+                    .iter()
+                    .position(|s| *s == id)
+                {
+                    ber.followup.certifier_surfaces.remove(pos);
+                } else {
+                    ber.followup.certifier_surfaces.push(id);
                 }
             }
             FollowUpRowKey::Custom(id) => {

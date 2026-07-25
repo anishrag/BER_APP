@@ -15,13 +15,16 @@
 //! top of the per-storey resolves. Only the ACTIVE storey is re-resolved
 //! between derive tails, so the pass regularly re-runs on its OWN output —
 //! it must be (and is) stable there: a re-cut along an existing split
-//! collapses to one piece and the stamp re-applies. KNOWN LIMIT (v1): the
-//! stamp is the paintable `SemiExposed`, indistinguishable from assessor
-//! paint, so there is no clear pass — deleting/reshaping the roof area leaves
-//! stale splits + stamps on a NON-active covered storey until that storey is
-//! next re-resolved. The pass runs on the storeys a roof area covers ABOVE
-//! its base storey only — the base storey's walls sit below their own
-//! ceiling, i.e. below the eave, and are never inside the roof void.
+//! collapses to one piece and the stamp re-applies. The stamp is the
+//! paintable `SemiExposed`, indistinguishable from assessor paint, so there
+//! is NO clear pass here; instead the CONTRACT is that every roof MUTATION
+//! (commit / clear in the controller's roof flow) triggers a full
+//! re-resolve of the storey stack, which rebuilds each covered storey's
+//! walls from durable inputs — stale splits/stamps from a deleted or
+//! reshaped roof area cannot survive it. (Retired the v1 known limit.) The
+//! pass runs on the storeys a roof area covers ABOVE its base storey only —
+//! the base storey's walls sit below their own ceiling, i.e. below the
+//! eave, and are never inside the roof void.
 //!
 //! A wall is considered only when its base midpoint sits strictly INSIDE the
 //! roof footprint ([`BOUNDARY_INSET_M`]): a gable-end / eave-line wall ON the
@@ -373,6 +376,7 @@ mod tests {
             ridge: Some(ridge),
             footprint,
             apexes,
+            ends: None,
         });
         ber
     }
