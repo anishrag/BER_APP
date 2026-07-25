@@ -27409,3 +27409,651 @@ fn aligned_floor_step_shows_zone_without_warning() {
         zones[0]
     );
 }
+
+// ----- subtract-don't-split: legacy split-record migration (plan §4, §6 step 3)
+
+/// Local mirror of ber_model's sliver invariant (its `MIN_SUBWALL_M` is
+/// `pub(crate)`): every wall region of every storey must clear the sub-wall
+/// floor in area AND bounding-box minor dimension (plan extent vs z extent).
+/// Asserted at the controller level so the FULL pipeline (resolve →
+/// stamp-all → derive tail → openings re-link) is what's being measured.
+fn assert_no_degenerate_walls_ber(ber: &ber_model::ber::ber_struct::Ber) {
+    const MIN_SUBWALL_M: f64 = 0.01; // mirrors ber_model::structural::wall_regions
+    for (si, s) in ber.storeys.iter().enumerate() {
+        for w in &s.walls.regions {
+            let area = w.polygon.area();
+            assert!(
+                area > MIN_SUBWALL_M * MIN_SUBWALL_M,
+                "storey {si}: wall {:?} has sliver area {area}",
+                w.id
+            );
+            let (mut xmin, mut xmax) = (f64::INFINITY, f64::NEG_INFINITY);
+            let (mut ymin, mut ymax) = (f64::INFINITY, f64::NEG_INFINITY);
+            let (mut zmin, mut zmax) = (f64::INFINITY, f64::NEG_INFINITY);
+            for v in &w.polygon.exterior {
+                xmin = xmin.min(v.x);
+                xmax = xmax.max(v.x);
+                ymin = ymin.min(v.y);
+                ymax = ymax.max(v.y);
+                zmin = zmin.min(v.z);
+                zmax = zmax.max(v.z);
+            }
+            let plan_extent = (xmax - xmin).hypot(ymax - ymin);
+            assert!(
+                plan_extent.min(zmax - zmin) > MIN_SUBWALL_M,
+                "storey {si}: wall {:?} has a sliver minor dimension (plan {plan_extent}, z {})",
+                w.id,
+                zmax - zmin
+            );
+        }
+    }
+}
+
+/// Storey 1's wall pieces lying on the y=4 base line, split into
+/// (labellable, InterStorey bands).
+#[allow(clippy::type_complexity)]
+fn y4_run_walls(
+    s: &ber_model::ber::structural::Storey,
+) -> (
+    Vec<&ber_model::ber::structural::WallRegion>,
+    Vec<&ber_model::ber::structural::WallRegion>,
+) {
+    s.walls
+        .regions
+        .iter()
+        .filter(|w| w.polygon.exterior.iter().all(|v| (v.y - 4.0).abs() < 1e-6))
+        .partition(|w| w.exposure != ber_model::ber::structural::WallExposure::InterStorey)
+}
+
+/// The Elmwood stack on the CONTROLLER (mirror of ber_model's
+/// `elmwood_fixture`, which pins the geometry half): ground 8×4 with the
+/// front strip y∈[0,2] flat at 2.4 (the datum anchor) and the back strip at
+/// 3.04 carrying a raised zone x∈[zx0,zx1] at `raised_z`; first storey 8×4,
+/// slab 0.3, ceiling 2.4 — so the upper y=4 wall is backed by band tops
+/// 0.34 / (raised_z−2.7) / 0.34 storey-local. Every upper wall is painted
+/// Exposed and the y=4 host gets a CavityWall construction with an assigned
+/// PHASE via the durable SurfaceRef doc-map. Ground ceilings are hand-set on
+/// the record (regions-as-truth: same footprint area+bbox, so every resolve
+/// keeps them verbatim — the same mechanism a real raised-ceiling record
+/// rides). Returns the controller in the MODERN derived state.
+fn elmwood_migration_controller(raised_z: f64, zx0: f64, zx1: f64) -> AppController {
+    use ber_model::ber::common::ConstructionPhase;
+    use ber_model::ber::structural::{
+        CeilingRegion, CeilingRegions, Polygon3D, WallConstructionType,
+    };
+    use domain::points::Point3f64;
+
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    let _ = c.create_ber(
+        "Elmwood".into(),
+        chrono::NaiveDate::from_ymd_opt(2026, 7, 25).unwrap(),
+    );
+    finalise_current_storey_as_rect(&mut c, 8.0, 4.0);
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.materialize();
+    // Hand-set the ground ceilings (keep the derived default's construction).
+    let flat = |x0: f64, y0: f64, x1: f64, y1: f64, z: f64, cid| CeilingRegion {
+        id: Default::default(),
+        polygon: Polygon3D::new(vec![
+            Point3f64::new(x0, y0, z),
+            Point3f64::new(x1, y0, z),
+            Point3f64::new(x1, y1, z),
+            Point3f64::new(x0, y1, z),
+        ]),
+        opes: Default::default(),
+        construction_id: cid,
+        exposure: Default::default(),
+    };
+    {
+        let ber = &mut c.current_record.as_mut().unwrap().data;
+        let cid = ber.storeys[0].ceilings.regions[0].construction_id;
+        let mut regions = vec![flat(0.0, 0.0, 8.0, 2.0, 2.4, cid)];
+        if zx0 > 0.0 {
+            regions.push(flat(0.0, 2.0, zx0, 4.0, 3.04, cid));
+        }
+        regions.push(flat(zx0, 2.0, zx1, 4.0, raised_z, cid));
+        if zx1 < 8.0 {
+            regions.push(flat(zx1, 2.0, 8.0, 4.0, 3.04, cid));
+        }
+        ber.storeys[0].ceilings = CeilingRegions { regions };
+    }
+    c.mark_dirty().unwrap();
+    c.materialize();
+
+    // The upper storey: slab 0.3 → datum 2.7 (anchored on the front strip).
+    c.add_storey().unwrap();
+    c.assign_floor_thickness(0.3).unwrap();
+    c.choose_draw_outline();
+    finalise_current_storey_as_rect(&mut c, 8.0, 4.0);
+    c.set_default_ceiling_height(2.4).unwrap();
+    let datums = c
+        .current_record
+        .as_ref()
+        .unwrap()
+        .data
+        .storey_floor_datums();
+    assert!(
+        (datums[1] - 2.7).abs() < 1e-9,
+        "datum anchors on the front strip, got {datums:?}"
+    );
+
+    // Paint every upper perimeter wall Exposed (1-D sections, full spans).
+    c.set_exposure_mode(true);
+    let mids: Vec<(f64, f64)> = c
+        .document
+        .outline
+        .floor_plan
+        .perimeter_walls()
+        .iter()
+        .map(|(_, a, b)| (((a.x + b.x) * 0.5) as f64, ((a.y + b.y) * 0.5) as f64))
+        .collect();
+    for (mx, my) in mids {
+        c.exposure_pointer_down(mx, my, 0.5);
+        c.set_wall_exposure(WallExposure::Exposed);
+    }
+    c.set_exposure_mode(false);
+    c.materialize();
+
+    // MODERN-state sanity (the ber_model fixture pins this in depth): ONE
+    // exposed wall on the y=4 run.
+    let host_id = {
+        let s1 = &c.current_record.as_ref().unwrap().data.storeys[1];
+        let (exposed, bands) = y4_run_walls(s1);
+        assert_eq!(exposed.len(), 1, "modern state: one exposed y=4 wall");
+        assert!(!bands.is_empty(), "modern state: InterStorey band(s)");
+        exposed[0].id
+    };
+    // Construction + PHASE onto the run via the durable SurfaceRef doc-map
+    // (`set_wall_construction_for` keys it parametrically, so it must land on
+    // the unified wall after any re-derive/migration).
+    c.set_wall_construction_for(
+        &[host_id],
+        WallConstructionType::CavityWall,
+        Default::default(),
+        ConstructionPhase::Original,
+        None,
+    );
+    c.materialize();
+    c
+}
+
+/// Place a window on the upper storey's y=4 wall at plan x (tap 0.2 m
+/// outside), 0.6 × 0.8 m with the given (host-base-relative) sill.
+fn place_y4_window(c: &mut AppController, x: f64, sill: f32) {
+    use ber_model::ber::fenestration::{Frame, Glazing};
+    c.select_opening_tool(OpeningToolKind::Window);
+    c.openings_pointer_down(x, 4.2, 0.5);
+    assert!(
+        c.pending_opening_prompt().is_some(),
+        "the y=4 wall was picked at x={x}"
+    );
+    c.place_pending_window(0.6, 0.8, sill, Glazing::Double, Frame::WoodUPVC, 2010)
+        .expect("window places");
+}
+
+/// One window's captured MODERN placement: `(id, plan x of centre, world
+/// z-lo, world z-hi, stored sill)` — the world rectangle is the migration
+/// invariant, the stored sill re-checks "rebased exactly once".
+type ModernWindow = (ber_model::ber::common::ItemId, f64, f64, f64, f32);
+
+/// Capture the modern y=4 host + each window's world rectangle off the
+/// resolved record (world lo = host base_z + stored sill).
+fn capture_modern_y4(
+    s1: &ber_model::ber::structural::Storey,
+) -> (ber_model::ber::structural::WallRegion, Vec<ModernWindow>) {
+    use ber_model::ber::fenestration::OpeningPlacement;
+    let (exposed, _) = y4_run_walls(s1);
+    assert_eq!(exposed.len(), 1, "one exposed wall on the y=4 run");
+    let host = exposed[0].clone();
+    let (o, (ux, _uy), _len, ubase) = host.base_frame().expect("host base frame");
+    let mut out = Vec::new();
+    for w in &s1.windows {
+        let Some(OpeningPlacement::Wall {
+            wall_id,
+            along_m,
+            sill_m,
+        }) = &w.placement
+        else {
+            panic!("window {:?} lost its wall placement", w.id);
+        };
+        assert_eq!(*wall_id, host.id, "modern window hosts on the y=4 wall");
+        let cx = o.x + ux * (*along_m as f64);
+        let lo = ubase + *sill_m as f64;
+        out.push((w.id, cx, lo, lo + w.height_m as f64, *sill_m));
+    }
+    (host, out)
+}
+
+/// Rewrite storey 1's y=4 run into the OLD split output — flat-bottom strips
+/// (one per band-top), optionally plus a sub-sliver strip, with every window
+/// re-pointed at its strip under PIECE-RELATIVE sill storage — mimicking a
+/// pre-change DB row ("56 Elmwood Road"). `pieces` are `(x0, x1, base_z)`.
+fn rewrite_y4_run_as_legacy_split(c: &mut AppController, pieces: &[(f64, f64, f64)], sliver: bool) {
+    use ber_model::ber::fenestration::OpeningPlacement;
+    use ber_model::ber::structural::{Polygon3D, WallExposure, WallRegion};
+    use domain::points::Point3f64;
+    let ber = &mut c.current_record.as_mut().unwrap().data;
+    let s1 = &mut ber.storeys[1];
+    let uidx = s1
+        .walls
+        .regions
+        .iter()
+        .position(|w| {
+            w.exposure != WallExposure::InterStorey
+                && w.polygon.exterior.iter().all(|v| (v.y - 4.0).abs() < 1e-6)
+        })
+        .expect("the modern unified y=4 wall");
+    let unified = s1.walls.regions.remove(uidx);
+    let (o, (ux, _uy), _len, ubase) = unified.base_frame().expect("unified frame");
+    let top_z = unified
+        .polygon
+        .exterior
+        .iter()
+        .map(|v| v.z)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let mut legacy: Vec<(ber_model::ber::common::ItemId, f64, f64, f64)> = Vec::new();
+    let mut strips: Vec<(f64, f64, f64)> = pieces.to_vec();
+    if sliver {
+        // The old pass's boundary leftover: an 8 mm strip hugging a run end.
+        let &(_, x1, bz) = pieces
+            .iter()
+            .find(|p| p.2 > pieces[0].2)
+            .unwrap_or(&pieces[0]);
+        strips.push((x1 - 0.008, x1, bz));
+    }
+    for &(x0, x1, bz) in &strips {
+        let id = ber_model::ber::common::ItemId::default();
+        legacy.push((id, x0, x1, bz));
+        s1.walls.regions.push(WallRegion {
+            id,
+            polygon: Polygon3D::new(vec![
+                Point3f64::new(x0, 4.0, bz),
+                Point3f64::new(x1, 4.0, bz),
+                Point3f64::new(x1, 4.0, top_z),
+                Point3f64::new(x0, 4.0, top_z),
+            ]),
+            exposure: WallExposure::Exposed,
+            opes: Default::default(),
+            construction_id: unified.construction_id,
+        });
+    }
+    // Re-point each window at the strip containing its centre, with the sill
+    // re-based to the STRIP's flat bottom (the old storage semantics), and
+    // along measured from the strip's own x0 end.
+    let mut links: Vec<(
+        ber_model::ber::common::ItemId,
+        ber_model::ber::common::ItemId,
+    )> = Vec::new();
+    for w in &mut s1.windows {
+        let Some(OpeningPlacement::Wall {
+            wall_id,
+            along_m,
+            sill_m,
+        }) = &mut w.placement
+        else {
+            continue;
+        };
+        if *wall_id != unified.id {
+            continue;
+        }
+        let cx = o.x + ux * (*along_m as f64);
+        let lo = ubase + *sill_m as f64;
+        let &(pid, x0, _x1, bz) = legacy
+            .iter()
+            .find(|&&(_, x0, x1, _)| cx >= x0 - 1e-6 && cx <= x1 + 1e-6)
+            .expect("a legacy strip hosts the window");
+        *wall_id = pid;
+        *along_m = (cx - x0) as f32;
+        *sill_m = (lo - bz) as f32;
+        links.push((pid, w.id));
+    }
+    assert_eq!(
+        links.len(),
+        s1.windows.len(),
+        "every window re-pointed at a legacy strip"
+    );
+    for (pid, wid) in links {
+        let piece = s1.walls.regions.iter_mut().find(|r| r.id == pid).unwrap();
+        piece.opes.windows.push(wid);
+    }
+}
+
+/// Storey 1's walls+windows serialized with the wall-region ids NORMALIZED
+/// to ring-sorted tokens: region ids re-mint on every resolve BY DESIGN
+/// (durable identity is parametric), so byte-stability across save→load→save
+/// is asserted on everything EXCEPT the minting — geometry, exposures,
+/// constructions, placements (sill/along), anchors, vertices, opes.
+fn walls_windows_fingerprint(s1: &ber_model::ber::structural::Storey) -> String {
+    let mut json = serde_json::to_string(&(&s1.walls, &s1.windows)).unwrap();
+    let mut walls: Vec<&ber_model::ber::structural::WallRegion> = s1.walls.regions.iter().collect();
+    walls.sort_by_key(|w| format!("{:?}", w.polygon.exterior));
+    for (i, w) in walls.iter().enumerate() {
+        json = json.replace(&w.id.to_string(), &format!("wall#{i}"));
+    }
+    json
+}
+
+/// THE MIGRATION PROOF (plan §4 + §6 step 3, fixture of record "56 Elmwood
+/// Road"): a saved record shaped like the OLD split output — the upper y=4
+/// run stored as THREE flat-bottom Exposed strips (bottoms 0.34/0.79/0.34)
+/// plus a sub-sliver, four windows spread 0+2+2 across the strips with
+/// PIECE-RELATIVE sills — unifies on `open_ber`:
+///  - ONE non-InterStorey wall on the base line, underside stepping
+///    0.34 → 0.79 → 0.34, per-run bands intact;
+///  - every window re-linked to it (placement + opes), WORLD rectangles
+///    unchanged (computed from the legacy host base_z + sill before);
+///  - stored sills rebased EXACTLY once (back to the run's 0.34 base — the
+///    modern values), pinned by save→load→save fingerprint equality, id
+///    minting normalized out;
+///  - painted exposure survives as the wall's Exposed stamp, checklist
+///    counts 0 unset; the SurfaceRef-keyed construction+phase land on the
+///    unified wall; no degenerate wall anywhere, including after a second
+///    materialize.
+#[test]
+fn elmwood_legacy_split_record_unifies_on_open_with_world_rects_stable() {
+    use ber_model::ber::common::ConstructionPhase;
+    use ber_model::ber::fenestration::OpeningPlacement;
+    use ber_model::ber::structural::{WallConstructionType, WallExposure};
+
+    let mut c = elmwood_migration_controller(3.49, 2.0, 6.0);
+    // Four windows, 0+2+2: none on x∈[0,2], two over the raised zone
+    // (min-sill clamp there is 0.45 above the 0.34 base), two on x∈[6,8].
+    place_y4_window(&mut c, 2.9, 0.8);
+    place_y4_window(&mut c, 5.1, 1.0);
+    place_y4_window(&mut c, 6.5, 0.6);
+    place_y4_window(&mut c, 7.4, 0.6);
+    c.materialize();
+
+    let (modern_host, modern) = {
+        let s1 = &c.current_record.as_ref().unwrap().data.storeys[1];
+        assert_eq!(s1.windows.len(), 4, "all four windows placed");
+        capture_modern_y4(s1)
+    };
+    let (_, _, _, modern_base_z) = modern_host.base_frame().unwrap();
+    assert!(
+        (modern_base_z - 0.34).abs() < 1e-6,
+        "modern host base anchors the low runs, got {modern_base_z}"
+    );
+
+    // Rewrite into the pre-change DB row and save it.
+    rewrite_y4_run_as_legacy_split(
+        &mut c,
+        &[(0.0, 2.0, 0.34), (2.0, 6.0, 0.79), (6.0, 8.0, 0.34)],
+        true,
+    );
+    {
+        // The legacy row really is piece-relative: the middle-strip windows'
+        // stored sills DIFFER from the modern values by the 0.45 notch.
+        let s1 = &c.current_record.as_ref().unwrap().data.storeys[1];
+        let mid = modern
+            .iter()
+            .find(|(_, cx, ..)| (*cx - 2.9).abs() < 0.2)
+            .unwrap();
+        let w = s1.windows.iter().find(|w| w.id == mid.0).unwrap();
+        let Some(OpeningPlacement::Wall { sill_m, .. }) = &w.placement else {
+            panic!("wall placement");
+        };
+        assert!(
+            (*sill_m - (mid.4 - 0.45)).abs() < 1e-5,
+            "legacy sill is piece-relative: {} vs modern {}",
+            sill_m,
+            mid.4
+        );
+    }
+    c.persist().unwrap();
+    let id = c.current_record.as_ref().unwrap().id.clone();
+
+    // MIGRATE: reload the pre-change row.
+    c.open_ber(&id).unwrap();
+    {
+        let ber = &c.current_record.as_ref().unwrap().data;
+        let s1 = &ber.storeys[1];
+        let (exposed, bands) = y4_run_walls(s1);
+        assert_eq!(exposed.len(), 1, "the legacy strips unified on load");
+        let host = exposed[0];
+        assert_eq!(host.exposure, WallExposure::Exposed, "paint survived");
+        let (_, _, len, base_z) = host.base_frame().expect("unified base frame");
+        assert!((len - 8.0).abs() < 1e-6, "full-run frame, got {len}");
+        assert!((base_z - 0.34).abs() < 1e-6);
+        for (along, want) in [(1.0, 0.34), (4.0, 0.79), (7.0, 0.34)] {
+            let z = host.base_z_at_along(along);
+            assert!(
+                (z - want).abs() < 1e-6,
+                "base_z_at_along({along}) = {z}, want {want}"
+            );
+        }
+        assert_eq!(bands.len(), 3, "per-run InterStorey bands survive");
+        // Windows: all four on the unified wall, opes carry them, world
+        // rectangles unchanged, sills rebased exactly once (the modern
+        // values, base 0.34).
+        assert_eq!(s1.windows.len(), 4, "no window pruned by the migration");
+        for (wid, cx, lo, hi, modern_sill) in &modern {
+            let w = s1.windows.iter().find(|w| w.id == *wid).unwrap();
+            let Some(OpeningPlacement::Wall {
+                wall_id,
+                along_m,
+                sill_m,
+            }) = &w.placement
+            else {
+                panic!("window {wid:?} lost its wall placement");
+            };
+            assert_eq!(*wall_id, host.id, "window re-linked to the unified wall");
+            assert!(host.opes.windows.contains(wid), "opes carry window {wid:?}");
+            let (o, (ux, _), _, base_z) = host.base_frame().unwrap();
+            let got_cx = o.x + ux * (*along_m as f64);
+            let got_lo = base_z + *sill_m as f64;
+            let got_hi = got_lo + w.height_m as f64;
+            assert!(
+                (got_cx - cx).abs() < 2e-4,
+                "window {wid:?} slid along the wall: {got_cx} vs {cx}"
+            );
+            assert!(
+                (got_lo - lo).abs() < 2e-4 && (got_hi - hi).abs() < 2e-4,
+                "window {wid:?} world rect moved: [{got_lo},{got_hi}] vs [{lo},{hi}]"
+            );
+            assert!(
+                (*sill_m - modern_sill).abs() < 2e-4,
+                "sill rebased once back to the run base: {sill_m} vs {modern_sill}"
+            );
+        }
+        // Checklist: nothing came back unclassified (this pinned a REAL gap:
+        // the side walls' 0.64 m-notched L-remainders used to recover only
+        // their floor-band-truncated base span, reloading the back half
+        // Unset — see `recover_wall_region_span`'s full-extent span).
+        assert!(
+            document::wall_exposure_reasons(ber, 1).is_empty(),
+            "no exposure churn: {:?}",
+            document::wall_exposure_reasons(ber, 1)
+        );
+        // Construction + phase (SurfaceRef doc-map) landed on the unified wall.
+        let wc = ber.wall_construction(host.construction_id).expect("fabric");
+        assert_eq!(wc.construction_type, WallConstructionType::CavityWall);
+        assert_eq!(wc.base.construction_phase, ConstructionPhase::Original);
+        assert_no_degenerate_walls_ber(ber);
+    }
+    // The painted 1-D model holds ONE full-span Exposed section for the run.
+    {
+        let sd = &c.document.storeys[1];
+        let (vid, a, b) = sd
+            .outline
+            .floor_plan
+            .perimeter_walls()
+            .into_iter()
+            .find(|(_, a, b)| (a.y - 4.0).abs() < 1e-3 && (b.y - 4.0).abs() < 1e-3)
+            .expect("the y=4 plan wall");
+        let len = ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt();
+        let secs = sd.wall_sections.get(&vid).expect("painted sections");
+        assert_eq!(secs.len(), 1, "one section on the run: {secs:?}");
+        assert_eq!(secs[0].exposure, WallExposure::Exposed);
+        assert!(
+            secs[0].start_m < 1e-3 && (secs[0].end_m - len).abs() < 1e-3,
+            "full span: {secs:?}"
+        );
+    }
+
+    // Second materialize (double-derive through the whole pipeline): still
+    // one unified wall, still sliver-free.
+    c.mark_dirty().unwrap();
+    c.materialize();
+    let fp1 = {
+        let ber = &c.current_record.as_ref().unwrap().data;
+        let (exposed, _) = y4_run_walls(&ber.storeys[1]);
+        assert_eq!(exposed.len(), 1, "re-derive keeps the unified wall");
+        assert_no_degenerate_walls_ber(ber);
+        walls_windows_fingerprint(&ber.storeys[1])
+    };
+
+    // Save → load → save: byte-stable modulo the by-design id re-mint —
+    // in particular the sills do NOT rebase a second time.
+    c.persist().unwrap();
+    c.open_ber(&id).unwrap();
+    c.materialize();
+    let fp2 = walls_windows_fingerprint(&c.current_record.as_ref().unwrap().data.storeys[1]);
+    assert_eq!(fp1, fp2, "save→load→save is stable (ids normalized)");
+}
+
+/// SNAPSHOT-LESS recovery over the legacy split (plan §2.3's test
+/// obligation): with the editing snapshot unusable, `open_ber` rebuilds the
+/// editing model FROM the legacy record — `sections_from_wall_regions` /
+/// `recover_wall_region_span` must coalesce the three Exposed strips (+ the
+/// sliver) into ONE full-span section, and the record-seeded SurfaceRef
+/// store must still land the construction+phase on the unified wall.
+#[test]
+fn legacy_split_exposure_recovers_one_span_without_snapshot() {
+    use ber_model::ber::common::ConstructionPhase;
+    use ber_model::ber::structural::{WallConstructionType, WallExposure};
+
+    let mut c = elmwood_migration_controller(3.49, 2.0, 6.0);
+    c.materialize();
+    rewrite_y4_run_as_legacy_split(
+        &mut c,
+        &[(0.0, 2.0, 0.34), (2.0, 6.0, 0.79), (6.0, 8.0, 0.34)],
+        true,
+    );
+    c.persist().unwrap();
+    let id = c.current_record.as_ref().unwrap().id.clone();
+    // Kill the snapshot AFTER the save: the reload must take the legacy
+    // (Layer-1-only) path a pre-feature record would.
+    BerRepository::new(&c.conn)
+        .save_snapshot(&id, PARAMETRIC_SNAPSHOT_VERSION + 1, 0, "not json")
+        .unwrap();
+
+    c.open_ber(&id).unwrap();
+    // 1-D recovery: one coalesced full-span Exposed section on the run.
+    {
+        let sd = &c.document.storeys[1];
+        let (vid, a, b) = sd
+            .outline
+            .floor_plan
+            .perimeter_walls()
+            .into_iter()
+            .find(|(_, a, b)| (a.y - 4.0).abs() < 1e-3 && (b.y - 4.0).abs() < 1e-3)
+            .expect("the y=4 plan wall");
+        let len = ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt();
+        let secs = sd.wall_sections.get(&vid).expect("recovered sections");
+        assert_eq!(
+            secs.len(),
+            1,
+            "three strips + sliver coalesced to one span: {secs:?}"
+        );
+        assert_eq!(secs[0].exposure, WallExposure::Exposed);
+        assert!(
+            secs[0].start_m < 1e-3 && (secs[0].end_m - len).abs() < 1e-3,
+            "full span: {secs:?}"
+        );
+    }
+    // And the resolved record unified with everything re-stamped.
+    let ber = &c.current_record.as_ref().unwrap().data;
+    let (exposed, _) = y4_run_walls(&ber.storeys[1]);
+    assert_eq!(exposed.len(), 1, "unified on the snapshot-less path too");
+    assert_eq!(exposed[0].exposure, WallExposure::Exposed);
+    assert!(
+        document::wall_exposure_reasons(ber, 1).is_empty(),
+        "0 unset: {:?}",
+        document::wall_exposure_reasons(ber, 1)
+    );
+    let wc = ber
+        .wall_construction(exposed[0].construction_id)
+        .expect("fabric");
+    assert_eq!(wc.construction_type, WallConstructionType::CavityWall);
+    assert_eq!(wc.base.construction_phase, ConstructionPhase::Original);
+    assert_no_degenerate_walls_ber(ber);
+}
+
+/// Step-2 note verified at the controller level (plan §2.1 base_edge band):
+/// a remainder whose bottom steps MORE than `MAX_FLOOR_STEP_M` (0.6) — the
+/// raised zone at the far half of the run, band tops 0.34 → 1.29 — keeps its
+/// base FRAME truncated to the LOW run, and a legacy two-strip record still
+/// re-links its low-span windows onto the unified wall with world rects
+/// unchanged.
+#[test]
+fn legacy_split_with_over_step_remainder_relinks_low_span_windows() {
+    use ber_model::ber::fenestration::OpeningPlacement;
+    use ber_model::ber::structural::WallExposure;
+
+    // Raised zone x∈[4,8] at absolute 3.99 → storey-local band top 1.29,
+    // a 0.95 m bottom step (> MAX_FLOOR_STEP_M).
+    let mut c = elmwood_migration_controller(3.99, 4.0, 8.0);
+    place_y4_window(&mut c, 1.5, 0.8);
+    place_y4_window(&mut c, 3.0, 0.8);
+    c.materialize();
+
+    let (modern_host, modern) = {
+        let s1 = &c.current_record.as_ref().unwrap().data.storeys[1];
+        capture_modern_y4(s1)
+    };
+    // The >0.6 m step means the base FRAME cannot span both runs at floor
+    // level: it either truncates to the low run (ring starting there) or
+    // anchors on the high shoulder (ring starting there — this fixture's
+    // orientation, base_z 1.29 over the full span). Either way the UNDERSIDE
+    // query must read the true profile at the window stations; the exact
+    // frame choice is ber_model's pin, not this test's.
+    let (o, (ux, uy), _len, _base_z) = modern_host.base_frame().unwrap();
+    for (x, want) in [(1.5, 0.34), (3.0, 0.34), (6.0, 1.29)] {
+        let along = (x - o.x) * ux + (4.0 - o.y) * uy;
+        let z = modern_host.base_z_at_along(along);
+        assert!(
+            (z - want).abs() < 1e-6,
+            "underside at x={x}: {z}, want {want}"
+        );
+    }
+
+    rewrite_y4_run_as_legacy_split(&mut c, &[(0.0, 4.0, 0.34), (4.0, 8.0, 1.29)], false);
+    c.persist().unwrap();
+    let id = c.current_record.as_ref().unwrap().id.clone();
+    c.open_ber(&id).unwrap();
+
+    let ber = &c.current_record.as_ref().unwrap().data;
+    let s1 = &ber.storeys[1];
+    let (exposed, _) = y4_run_walls(s1);
+    assert_eq!(exposed.len(), 1, "one exposed wall on the run");
+    let host = exposed[0];
+    assert_eq!(host.exposure, WallExposure::Exposed);
+    assert_eq!(s1.windows.len(), 2, "no low-span window pruned");
+    for (wid, cx, lo, hi, _) in &modern {
+        let w = s1.windows.iter().find(|w| w.id == *wid).unwrap();
+        let Some(OpeningPlacement::Wall {
+            wall_id,
+            along_m,
+            sill_m,
+        }) = &w.placement
+        else {
+            panic!("window {wid:?} lost its wall placement");
+        };
+        assert_eq!(*wall_id, host.id, "window re-linked to the unified wall");
+        assert!(host.opes.windows.contains(wid), "opes carry {wid:?}");
+        let (o, (ux, _), _, hbase) = host.base_frame().unwrap();
+        let got_cx = o.x + ux * (*along_m as f64);
+        let got_lo = hbase + *sill_m as f64;
+        let got_hi = got_lo + w.height_m as f64;
+        assert!(
+            (got_cx - cx).abs() < 2e-4,
+            "window {wid:?} slid: {got_cx} vs {cx}"
+        );
+        assert!(
+            (got_lo - lo).abs() < 2e-4 && (got_hi - hi).abs() < 2e-4,
+            "window {wid:?} world rect moved: [{got_lo},{got_hi}] vs [{lo},{hi}]"
+        );
+    }
+    assert_no_degenerate_walls_ber(ber);
+}

@@ -330,10 +330,21 @@ impl StoreyDoc {
     /// (recovering painted sections) and by the shell to repaint just one
     /// region's span via [`set_wall_section`](Self::set_wall_section).
     ///
-    /// Uses the TRUE footprint base edge a→b (via `base_frame`), NOT raw
-    /// `exterior[0]/[1]`: over a floor-step-crossed wall the base is a stepped
-    /// profile, so `exterior[1]` is the first breakpoint, not the far endpoint —
-    /// reading it raw would recover the span as `0..step` and drop the rest.
+    /// Matches the wall through the TRUE footprint base edge (via
+    /// `base_frame`), NOT raw `exterior[0]/[1]` — over a floor-step-crossed
+    /// wall the base is a stepped profile, so `exterior[1]` is the first
+    /// breakpoint, not the far endpoint. The SPAN, however, is the region's
+    /// FULL plan extent (every ring vertex projected onto the wall, clamped
+    /// to it), not the base edge's: `base_frame` confines its far endpoint to
+    /// the FLOOR BAND (within `MAX_FLOOR_STEP_M` of the base run), so a
+    /// remainder whose bottom steps deeper than that — e.g. the L left by an
+    /// inter-storey band notching >0.6 m above the wall base — has a
+    /// deliberately TRUNCATED base edge. Its painted face still covers the
+    /// whole extent; recovering only the truncated span would reload part of
+    /// the wall `Unset` (exposure churn), and orientation-dependently so (a
+    /// ring starting on the high shoulder truncates differently from its
+    /// mirror wall). The clamp keeps a coplanar-flush MERGED guest's forward
+    /// arm (which projects past the wall's ends) from stretching the span.
     pub fn recover_wall_region_span(
         &self,
         region: &WallRegion,
@@ -354,9 +365,13 @@ impl StoreyDoc {
             ) < 1e-2
         })?;
         let len = segment_len(a, b);
-        let d0 = project_distance_along(a, b, len, p0.x, p0.y);
-        let d1 = project_distance_along(a, b, len, p1.x, p1.y);
-        Some((vid, d0.min(d1), d0.max(d1), len))
+        let (mut d0, mut d1) = (f32::INFINITY, f32::NEG_INFINITY);
+        for v in &region.polygon.exterior {
+            let d = project_distance_along(a, b, len, v.x as f32, v.y as f32);
+            d0 = d0.min(d);
+            d1 = d1.max(d);
+        }
+        Some((vid, d0.max(0.0), d1.min(len), len))
     }
 
     /// After a splice (dormer extend / trim) has split one outline wall into two
@@ -1822,6 +1837,107 @@ mod tests {
         assert_eq!(secs[0].exposure, WallExposure::Exposed);
         assert!((secs[0].start_m - 0.0).abs() < 1e-3);
         assert!((secs[0].end_m - 2.0).abs() < 1e-3);
+    }
+
+    /// `recover_wall_region_span` reads the region's FULL plan extent, not
+    /// its floor-band base edge: an L-shaped remainder whose bottom steps
+    /// DEEPER than `MAX_FLOOR_STEP_M` (here 0 → 1.0 m at x=2) has a base
+    /// edge/frame confined near the low run, but its painted face covers the
+    /// whole wall — the span must recover `[0, 4]` in BOTH ring orientations
+    /// (the truncation is orientation-dependent: a ring starting on the high
+    /// shoulder yields a different frame than its mirror). Regression for
+    /// the Elmwood migration churn: the truncated span reloaded the notched
+    /// half of the wall `Unset` on every open.
+    #[test]
+    fn recover_span_covers_a_deep_notched_remainder_fully() {
+        let doc = square_doc();
+        let (vid, a, b) = doc.outline.floor_plan.perimeter_walls()[0];
+        let len = segment_len(a, b);
+        // The L in both orientations: low run first, high shoulder first.
+        let l_low_first = WallRegion {
+            polygon: Polygon3D::new(vec![
+                Point3f64::new(0.0, 0.0, 0.0),
+                Point3f64::new(2.0, 0.0, 0.0),
+                Point3f64::new(2.0, 0.0, 1.0),
+                Point3f64::new(4.0, 0.0, 1.0),
+                Point3f64::new(4.0, 0.0, 2.4),
+                Point3f64::new(0.0, 0.0, 2.4),
+            ]),
+            ..wall_region(
+                Point2f64::new(0.0, 0.0),
+                Point2f64::new(4.0, 0.0),
+                WallExposure::Exposed,
+            )
+        };
+        let l_high_first = WallRegion {
+            polygon: Polygon3D::new(vec![
+                Point3f64::new(4.0, 0.0, 1.0),
+                Point3f64::new(2.0, 0.0, 1.0),
+                Point3f64::new(2.0, 0.0, 0.0),
+                Point3f64::new(0.0, 0.0, 0.0),
+                Point3f64::new(0.0, 0.0, 2.4),
+                Point3f64::new(4.0, 0.0, 2.4),
+            ]),
+            ..wall_region(
+                Point2f64::new(4.0, 0.0),
+                Point2f64::new(0.0, 0.0),
+                WallExposure::Exposed,
+            )
+        };
+        for l in [&l_low_first, &l_high_first] {
+            let (got_vid, s, e, wall_len) =
+                doc.recover_wall_region_span(l).expect("the L recovers");
+            assert_eq!(got_vid, vid);
+            assert!((wall_len - len).abs() < 1e-4);
+            assert!(
+                s < 1e-3 && (e - len).abs() < 1e-3,
+                "full plan extent despite the >MAX_FLOOR_STEP_M notch, got [{s}, {e}]"
+            );
+        }
+        // And through the recovery pass: the deep-notched painted remainder
+        // reloads as ONE full-span section (no Unset back half).
+        let walls = WallRegions {
+            regions: vec![l_low_first],
+        };
+        let recovered = doc.sections_from_wall_regions(&walls);
+        let secs = recovered.get(&vid).expect("recovers");
+        assert_eq!(secs.len(), 1);
+        assert!(secs[0].start_m < 1e-3 && (secs[0].end_m - len).abs() < 1e-3);
+    }
+
+    /// The recovered span CLAMPS to the matched wall: a coplanar-flush MERGED
+    /// guest's forward arm (ring vertices projecting past the wall's far end)
+    /// must not stretch the span beyond the wall's own length.
+    #[test]
+    fn recover_span_clamps_a_merged_forward_arm_to_the_wall() {
+        let doc = square_doc();
+        let (vid, a, b) = doc.outline.floor_plan.perimeter_walls()[0];
+        let len = segment_len(a, b);
+        // A wall over the full bottom edge whose plane continues 1 m past the
+        // far corner (the merged step-riser arm), riding above the floor band.
+        let merged = WallRegion {
+            polygon: Polygon3D::new(vec![
+                Point3f64::new(0.0, 0.0, 0.0),
+                Point3f64::new(4.0, 0.0, 0.0),
+                Point3f64::new(4.0, 0.0, 1.0),
+                Point3f64::new(5.0, 0.0, 1.0),
+                Point3f64::new(5.0, 0.0, 2.4),
+                Point3f64::new(0.0, 0.0, 2.4),
+            ]),
+            ..wall_region(
+                Point2f64::new(0.0, 0.0),
+                Point2f64::new(4.0, 0.0),
+                WallExposure::Exposed,
+            )
+        };
+        let (got_vid, s, e, _) = doc
+            .recover_wall_region_span(&merged)
+            .expect("the merged wall recovers");
+        assert_eq!(got_vid, vid);
+        assert!(
+            s < 1e-3 && (e - len).abs() < 1e-3,
+            "the guest arm never stretches the span past the wall, got [{s}, {e}]"
+        );
     }
 
     /// A flat wall region over base edge `a`→`b` spanning z `z0..z1` with
