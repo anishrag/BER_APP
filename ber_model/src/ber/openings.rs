@@ -242,13 +242,21 @@ pub fn wall_length(storey: &Storey, wall_id: ItemId) -> Option<f32> {
         .map(|(_, _, len, _)| len as f32)
 }
 
-/// The wall FACE height (base → roofline top) at `along_m` — what a
-/// "Full height" opening spans (sill 0 up to the wall top). `None` when the
-/// wall is absent. Degenerate walls report 0 (mirrors `max_sill_for`).
+/// The wall FACE height at `along_m`: UNDERSIDE → roofline top
+/// (`top_z_at_along − base_z_at_along`) — the truly available face there.
+/// Behaviour change (subtract-don't-split, 2026-07): over an inter-storey
+/// NOTCH (a stepped-up underside) the offered height SHRINKS to the exposed
+/// face instead of reporting the full floor→top span; away from a notch (a
+/// flat base — the common case) it is unchanged (`top − base_z`). What a
+/// "Full height" opening spans; the sill DATUM stays the wall's `base_z`
+/// (floor line) everywhere — the min-sill clamp then lifts a sill-0 opening
+/// onto the notch underside, so underside + this height = the wall top.
+/// `None` when the wall is absent. Degenerate walls report 0.
 pub fn wall_face_height(storey: &Storey, wall_id: ItemId, along_m: f32) -> Option<f32> {
-    storey
-        .placeable_wall(wall_id)
-        .map(|r| r.max_sill_for(along_m as f64, 0.0) as f32)
+    storey.placeable_wall(wall_id).map(|r| {
+        let d = along_m as f64;
+        (r.top_z_at_along(d) - r.base_z_at_along(d)).max(0.0) as f32
+    })
 }
 
 /// The NET area (m²) of a wall region's face: the gross wall polygon area
@@ -3748,6 +3756,65 @@ mod tests {
                 assert!(sill_m.abs() < 1e-3, "sill at the floor");
             }
             _ => panic!("expected a wall placement"),
+        }
+    }
+
+    /// Deep-notched wall along y=0 over x [0, 8]: flat top 2.5, underside
+    /// 0.34 over x [0, 4] stepping to 1.29 over x [4, 8] (> the 0.6 m floor
+    /// band). `start_low` picks the ring's canonical start — low run (frame
+    /// truncates to x [0, 4], base_z 0.34) or high shoulder (full-span frame,
+    /// base_z 1.29) — the two orientations of the same physical wall.
+    fn storey_with_notched_wall(start_low: bool) -> (Storey, ItemId) {
+        let wid = ItemId::default();
+        let ring = if start_low {
+            vec![
+                p3(0.0, 0.0, 0.34),
+                p3(4.0, 0.0, 0.34),
+                p3(4.0, 0.0, 1.29),
+                p3(8.0, 0.0, 1.29),
+                p3(8.0, 0.0, 2.5),
+                p3(0.0, 0.0, 2.5),
+            ]
+        } else {
+            vec![
+                p3(8.0, 0.0, 1.29),
+                p3(4.0, 0.0, 1.29),
+                p3(4.0, 0.0, 0.34),
+                p3(0.0, 0.0, 0.34),
+                p3(0.0, 0.0, 2.5),
+                p3(8.0, 0.0, 2.5),
+            ]
+        };
+        let storey = Storey {
+            walls: WallRegions {
+                regions: vec![wall(wid, ring)],
+            },
+            ..Storey::default()
+        };
+        (storey, wid)
+    }
+
+    /// `wall_face_height` is the UNDERSIDE → top face (subtract-don't-split):
+    /// over an inter-storey notch the offered height shrinks to the truly
+    /// available face; away from it (floor-level underside) it is unchanged.
+    /// Pinned on BOTH ring orientations — the along-stations differ per frame
+    /// but the answer at a given plan point must not.
+    #[test]
+    fn wall_face_height_shrinks_over_a_notch_but_not_beside_it() {
+        for start_low in [true, false] {
+            let (s, wid) = storey_with_notched_wall(start_low);
+            let (o, (ux, uy), _len, _bz) = s.placeable_wall(wid).unwrap().base_frame().unwrap();
+            let along_at = |x: f64| ((x - o.x) * ux + (0.0 - o.y) * uy) as f32;
+            let h_low = wall_face_height(&s, wid, along_at(2.0)).expect("wall exists");
+            assert!(
+                (h_low - 2.16).abs() < 1e-3,
+                "start_low={start_low}: away from the notch = top − floor (2.16), got {h_low}"
+            );
+            let h_notch = wall_face_height(&s, wid, along_at(6.0)).expect("wall exists");
+            assert!(
+                (h_notch - 1.21).abs() < 1e-3,
+                "start_low={start_low}: over the notch = top − underside (1.21), got {h_notch}"
+            );
         }
     }
 

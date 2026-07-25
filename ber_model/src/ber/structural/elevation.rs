@@ -71,18 +71,32 @@ pub struct ElevOpening {
 
 /// One facing wall projected onto the side's view plane: its horizontal span
 /// `[x0, x1]`, its base z, and its VISIBLE outline as a set of `(x, z)→(x, z)`
-/// line segments (base edge, top polyline, and end verticals), all in the
-/// composite frame. The segments are the wall's full outline already CLIPPED by
-/// the hidden-line pass — sub-spans lying behind a nearer facing wall are
-/// removed — so a rear wall's edge doesn't draw across the wall in front of it.
-/// A wall with nothing in front contributes its whole outline (base + top
-/// polyline + two verticals), unchanged. Render draws each segment, further
-/// clipping it around openings.
+/// line segments (bottom polyline, top polyline, and end verticals), all in
+/// the composite frame. The segments are the wall's full outline already
+/// CLIPPED by the hidden-line pass — sub-spans lying behind a nearer facing
+/// wall are removed — so a rear wall's edge doesn't draw across the wall in
+/// front of it. A wall with nothing in front contributes its whole outline
+/// (bottom + top polyline + two verticals), unchanged. Render draws each
+/// segment, further clipping it around openings.
 #[derive(Debug, Clone)]
 pub struct ElevPanel {
+    /// Horizontal span of the wall FACE — the extent of the bottom + top
+    /// profiles (for the common rectangular wall, just the base edge's
+    /// projection; a deep-notched remainder whose base FRAME truncates to its
+    /// low run still spans its full drawn face here).
     pub x0: f64,
     pub x1: f64,
+    /// z of the wall's frame origin (`base_frame` base_z + storey offset) —
+    /// the SILL DATUM: an opening draws at `base_z + sill`. NOT necessarily
+    /// the panel's lowest point: a stepped underside is `bottom`'s job.
     pub base_z: f64,
+    /// The wall's UNDERSIDE as a composite `(x, z)` polyline — the mirror of
+    /// the top profile, from [`WallRegion::base_profile`] (the same
+    /// `base_frame` parameterisation as `base_z`/the sill math, so sills and
+    /// the drawn bottom stay consistent on EITHER ring orientation of a
+    /// deep-notched wall). Flat-bottom walls get the 2-point `[(x0, base_z),
+    /// (x1, base_z)]`, matching the old flat base edge exactly.
+    pub bottom: Vec<(f64, f64)>,
     pub segments: Vec<((f64, f64), (f64, f64))>,
 }
 
@@ -145,6 +159,7 @@ impl Ber {
             x1: f64,
             base_z: f64,
             top: Vec<(f64, f64)>,
+            bottom: Vec<(f64, f64)>,
         }
         let mut raw: Vec<RawPanel> = Vec::new();
         let mut openings: Vec<ElevOpening> = Vec::new();
@@ -204,16 +219,21 @@ impl Ber {
                 let xa = h.0 * a.x + h.1 * a.y;
                 let xb = h.0 * b.x + h.1 * b.y;
 
-                // Top edge, mapped to composite (x, z) via along → plan point.
-                let top: Vec<(f64, f64)> = w
-                    .top_profile()
-                    .iter()
-                    .map(|&(along, z)| {
-                        let px = origin.x + along as f64 * fux;
-                        let py = origin.y + along as f64 * fuy;
-                        (h.0 * px + h.1 * py, z as f64 + offset)
-                    })
-                    .collect();
+                // Top + bottom edges, mapped to composite (x, z) via along →
+                // plan point. Both use the SAME base_frame parameterisation as
+                // `bz` (the sill datum), so a stepped underside and the sills
+                // drawn against it stay consistent on either ring orientation.
+                let unroll = |prof: Vec<(f32, f32)>| -> Vec<(f64, f64)> {
+                    prof.iter()
+                        .map(|&(along, z)| {
+                            let px = origin.x + along as f64 * fux;
+                            let py = origin.y + along as f64 * fuy;
+                            (h.0 * px + h.1 * py, z as f64 + offset)
+                        })
+                        .collect()
+                };
+                let top = unroll(w.top_profile());
+                let bottom = unroll(w.base_profile());
 
                 min_x = min_x.min(xa.min(xb));
                 max_x = max_x.max(xa.max(xb));
@@ -221,7 +241,7 @@ impl Ber {
                 // (a degenerate ≤2-vertex wall) still contributes finite bounds.
                 min_z = min_z.min(bz);
                 max_z = max_z.max(bz);
-                for &(tx, tz) in &top {
+                for &(tx, tz) in top.iter().chain(bottom.iter()) {
                     min_x = min_x.min(tx);
                     max_x = max_x.max(tx);
                     min_z = min_z.min(tz);
@@ -245,16 +265,36 @@ impl Ber {
                 }
 
                 let depth = mx * n.0 + my * n.1;
+                // The panel's x-span is the FACE extent — the base edge plus
+                // the profiles, which outspan it on a deep-notched remainder
+                // whose base FRAME truncated to its low run.
+                let (px0, px1) = top
+                    .iter()
+                    .chain(bottom.iter())
+                    .fold((xa.min(xb), xa.max(xb)), |(lo, hi), &(x, _)| {
+                        (lo.min(x), hi.max(x))
+                    });
+                // Occluder box: FLAT top at the peak and FLAT bottom at the
+                // underside's LOWEST point — a stepped/notched bottom only
+                // ever over-covers the notch gap below the face (the
+                // InterStorey band panels fill it anyway), mirroring the
+                // flat-top approximation over a sloped top's peak: it can
+                // hide but never invent a rear edge. Using the profile MIN
+                // (not the frame's `bz`) keeps the box identical on either
+                // ring orientation of a deep-notched wall (`bz` may sit on
+                // the HIGH shoulder). Flat-bottom walls: min == bz, unchanged.
                 let top_z = top.iter().map(|&(_, z)| z).fold(bz, f64::max);
-                occ.push((w.id, depth, xa.min(xb), xa.max(xb), bz, top_z));
+                let bot_z = bottom.iter().map(|&(_, z)| z).fold(bz, f64::min);
+                occ.push((w.id, depth, px0, px1, bot_z, top_z));
 
                 raw.push(RawPanel {
                     id: w.id,
                     depth,
-                    x0: xa.min(xb),
-                    x1: xa.max(xb),
+                    x0: px0,
+                    x1: px1,
                     base_z: bz,
                     top,
+                    bottom,
                 });
             }
         }
@@ -312,16 +352,37 @@ impl Ber {
                     .map(|&(_, _, x0, x1, bz, tz)| (x0, x1, bz, tz))
                     .collect();
 
-                // The wall's full outline as raw edges (mirrors what the
-                // renderer used to reconstruct from base_z + top + the ends).
+                // The wall's full outline as raw edges: the BOTTOM polyline
+                // (the stepped underside — one flat segment for the common
+                // flat base), the top polyline, and the end verticals. The
+                // base runs a→b and the top b→a (the ring contract), so the
+                // seam vertical at `b` joins the top's FIRST point to the
+                // bottom's LAST, and the side at `a` the top's LAST to the
+                // bottom's FIRST.
                 let mut edges: Vec<((f64, f64), (f64, f64))> = Vec::new();
-                edges.push(((panel.x0, panel.base_z), (panel.x1, panel.base_z)));
+                if panel.bottom.len() >= 2 {
+                    for w in panel.bottom.windows(2) {
+                        edges.push((w[0], w[1]));
+                    }
+                } else {
+                    edges.push(((panel.x0, panel.base_z), (panel.x1, panel.base_z)));
+                }
                 for w in panel.top.windows(2) {
                     edges.push((w[0], w[1]));
                 }
                 if let (Some(&first), Some(&last)) = (panel.top.first(), panel.top.last()) {
-                    edges.push((first, (first.0, panel.base_z)));
-                    edges.push((last, (last.0, panel.base_z)));
+                    let seam = panel
+                        .bottom
+                        .last()
+                        .copied()
+                        .unwrap_or((first.0, panel.base_z));
+                    let side = panel
+                        .bottom
+                        .first()
+                        .copied()
+                        .unwrap_or((last.0, panel.base_z));
+                    edges.push((first, seam));
+                    edges.push((last, side));
                 }
 
                 // Clip each edge to the spans no nearer wall covers.
@@ -340,6 +401,7 @@ impl Ber {
                     x0: panel.x0,
                     x1: panel.x1,
                     base_z: panel.base_z,
+                    bottom: panel.bottom.clone(),
                     segments,
                 }
             })

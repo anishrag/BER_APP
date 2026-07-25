@@ -229,6 +229,34 @@ impl WallRegion {
         prof
     }
 
+    /// The wall's BASE (underside) profile in wall-local coordinates: each
+    /// vertex of the base polyline (`exterior[..top_start_index()]`, running
+    /// a→b per the vertex-order contract) as `(along, z)` — the underside
+    /// MIRROR of [`top_profile`](Self::top_profile). THE canonical
+    /// bottom-profile query: `along` is projected onto the SAME
+    /// [`base_frame`](Self::base_frame) parameterisation the sill math and
+    /// [`base_z_at_along`](Self::base_z_at_along) use, so an elevation that
+    /// draws this polyline and places openings at `base_z + sill` can never
+    /// disagree with the underside — INCLUDING on a deep-notched (>
+    /// [`MAX_FLOOR_STEP_M`]) remainder whose ring orientation puts
+    /// `exterior[0]` (and hence `base_z`) on the HIGH shoulder: the profile
+    /// then dips BELOW `base_z`, which is correct. For a FLAT base this is
+    /// exactly `[(0, base_z), (len, base_z)]`. Empty for a degenerate wall
+    /// (no base frame). No closing wrap is needed (unlike `top_profile`):
+    /// the base always starts AT `exterior[0]`, along 0.
+    pub fn base_profile(&self) -> Vec<(f32, f32)> {
+        let Some((origin, (ux, uy), _len, _base_z)) = self.base_frame() else {
+            return Vec::new();
+        };
+        self.polygon.exterior[..self.top_start_index()]
+            .iter()
+            .map(|v| {
+                let along = (v.x - origin.x) * ux + (v.y - origin.y) * uy;
+                (along as f32, v.z as f32)
+            })
+            .collect()
+    }
+
     /// The top-profile z directly above the base point at along-distance `d`
     /// (0..length), interpolating the top polyline (`exterior[2..]`, which runs
     /// b→a per the vertex-order contract). At a vertical jump (a ceiling-step

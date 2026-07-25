@@ -256,9 +256,17 @@ pub struct ElevationOpening {
 /// The unrolled selected wall + its openings, for the elevation overlay.
 pub struct ElevationView {
     pub wall_len_m: f32,
+    /// z of the wall's frame origin — the SILL DATUM: an opening draws at
+    /// `base_z + sill`. Not necessarily the wall's lowest point (a stepped
+    /// underside is `bottom_profile`'s job).
     pub base_z: f32,
     /// The roof-profile top as `(along, z)` points across the wall.
     pub top_profile: Vec<(f32, f32)>,
+    /// The underside as `(along, z)` points across the wall
+    /// ([`WallRegion::base_profile`] — the SAME base-frame parameterisation
+    /// as `base_z`, so a stepped bottom and the sills drawn against it stay
+    /// consistent). Flat walls: the 2-point `[(0, base_z), (len, base_z)]`.
+    pub bottom_profile: Vec<(f32, f32)>,
     pub openings: Vec<ElevationOpening>,
 }
 
@@ -1685,8 +1693,11 @@ impl AppController {
         let storey = self.current_record.as_ref()?.data.storeys.get(idx)?;
         let wall = storey.placeable_wall(wall_id)?;
         let (_, _, len, base_z) = wall.base_frame()?;
-        // The wall-local top profile is the model's projection (WallRegion).
+        // The wall-local top + bottom profiles are the model's projections
+        // (WallRegion) — both in the same base_frame parameterisation as
+        // `base_z`, keeping sill math and the drawn underside consistent.
         let top_profile = wall.top_profile();
+        let bottom_profile = wall.base_profile();
         let openings = self
             .wall_openings(storey, wall_id)
             .into_iter()
@@ -1704,6 +1715,7 @@ impl AppController {
             wall_len_m: len as f32,
             base_z: base_z as f32,
             top_profile,
+            bottom_profile,
             openings,
         })
     }

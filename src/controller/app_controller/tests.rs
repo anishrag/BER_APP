@@ -28057,3 +28057,73 @@ fn legacy_split_with_over_step_remainder_relinks_low_span_windows() {
     }
     assert_no_degenerate_walls_ber(ber);
 }
+
+/// Step 4 (plan §2.2 ElevationView): the per-wall elevation editor's
+/// `bottom_profile` traces the stepped underside of the subtracted wall
+/// (band tops 0.34 → 0.79 → 0.34 on the Elmwood run) — derived from
+/// `base_profile()` in the SAME base frame as `base_z`, so the drawn
+/// underside and the sill math (`base_z + sill`) can never disagree.
+#[test]
+fn elevation_view_bottom_profile_steps_with_the_notch() {
+    let mut c = elmwood_migration_controller(3.49, 2.0, 6.0);
+    place_y4_window(&mut c, 1.5, 0.8);
+    c.materialize();
+
+    // The y=4 host's frame, for plan-x → along mapping.
+    let (o, (ux, uy), _len, hbase) = {
+        let s1 = &c.current_record.as_ref().unwrap().data.storeys[1];
+        let (exposed, _) = y4_run_walls(s1);
+        assert_eq!(exposed.len(), 1, "one exposed y=4 wall");
+        exposed[0].base_frame().unwrap()
+    };
+
+    // Open the wall's elevation (Edit tap just outside the y=4 run).
+    c.set_openings_mode(true);
+    c.set_openings_tool(OpeningToolKind::Edit);
+    c.openings_pointer_down(4.0, 4.2, 0.5);
+    assert!(c.elevation_wall().is_some(), "elevation opened");
+    let ev = c.elevation_view().expect("an elevation view");
+
+    assert!(
+        (ev.base_z as f64 - hbase).abs() < 1e-6,
+        "base_z is the frame origin's z (the sill datum): {} vs {hbase}",
+        ev.base_z
+    );
+    let interp = |along: f32| -> f32 {
+        for w in ev.bottom_profile.windows(2) {
+            let (a0, z0) = w[0];
+            let (a1, z1) = w[1];
+            let (lo, hi) = (a0.min(a1), a0.max(a1));
+            if along >= lo - 1e-6 && along <= hi + 1e-6 && (a1 - a0).abs() > 1e-6 {
+                return z0 + (z1 - z0) * ((along - a0) / (a1 - a0));
+            }
+        }
+        panic!(
+            "along {along} outside the bottom profile {:?}",
+            ev.bottom_profile
+        );
+    };
+    let along_at = |x: f64| ((x - o.x) * ux + (4.0 - o.y) * uy) as f32;
+    // Storey-local band tops: 0.34 outside the raised zone, 0.79 over it.
+    for (x, want) in [(1.0, 0.34f32), (4.0, 0.79), (7.0, 0.34)] {
+        let got = interp(along_at(x));
+        assert!(
+            (got - want).abs() < 1e-3,
+            "underside at x={x}: {got}, want {want} (profile {:?})",
+            ev.bottom_profile
+        );
+    }
+    // The placed window's drawn bottom (base_z + sill) sits on the expected
+    // world line and clears the drawn underside at its along.
+    assert_eq!(ev.openings.len(), 1, "the placed window unrolls");
+    let op = &ev.openings[0];
+    let world_bottom = ev.base_z + op.sill_m;
+    assert!(
+        (world_bottom - 1.14).abs() < 1e-3,
+        "window bottom = 0.34 (base) + 0.8 (sill), got {world_bottom}"
+    );
+    assert!(
+        world_bottom >= interp(op.along_m) - 1e-4,
+        "the window clears the drawn underside"
+    );
+}

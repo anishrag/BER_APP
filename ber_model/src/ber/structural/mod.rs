@@ -5545,6 +5545,321 @@ mod tests {
         );
     }
 
+    /// A deep-notched (> [`MAX_FLOOR_STEP_M`]) FRONT wall along y=10 over
+    /// x [0, 8]: flat top 2.5, underside 0.34 over x [0, 4] stepping to 1.29
+    /// over x [4, 8] — the over-step remainder shape the subtract derivation
+    /// emits. `start_low` picks the ring's canonical start: on the LOW run
+    /// (the base FRAME truncates to x [0, 4], base_z 0.34) or on the HIGH
+    /// shoulder (the frame spans the full footprint, base_z 1.29). The SAME
+    /// physical wall either way. A flat back wall at y=0 pulls the centroid
+    /// inside so the notched wall faces Front in both orientations. Returns
+    /// the Ber + the notched wall's id.
+    fn notched_front_wall_ber(start_low: bool) -> (Ber, ItemId) {
+        let v = |x: f64, z: f64| Point3f64::new(x, 10.0, z);
+        let ring = if start_low {
+            vec![
+                v(0.0, 0.34),
+                v(4.0, 0.34),
+                v(4.0, 1.29),
+                v(8.0, 1.29),
+                v(8.0, 2.5),
+                v(0.0, 2.5),
+            ]
+        } else {
+            vec![
+                v(8.0, 1.29),
+                v(4.0, 1.29),
+                v(4.0, 0.34),
+                v(0.0, 0.34),
+                v(0.0, 2.5),
+                v(8.0, 2.5),
+            ]
+        };
+        let notched = WallRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(ring),
+            exposure: WallExposure::Exposed,
+            opes: Opes::default(),
+            construction_id: ItemId::default(),
+        };
+        let id = notched.id;
+        let back = WallRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(vec![
+                Point3f64::new(0.0, 0.0, 0.0),
+                Point3f64::new(8.0, 0.0, 0.0),
+                Point3f64::new(8.0, 0.0, 2.5),
+                Point3f64::new(0.0, 0.0, 2.5),
+            ]),
+            exposure: WallExposure::Exposed,
+            opes: Opes::default(),
+            construction_id: ItemId::default(),
+        };
+        let mut storey = Storey::default();
+        storey.walls.regions = vec![back, notched];
+        let mut ber = Ber::default();
+        ber.storeys.push(storey);
+        (ber, id)
+    }
+
+    /// Interpolated z of a composite bottom polyline at `x` (sample away from
+    /// vertical jumps).
+    fn bottom_z_at(bottom: &[(f64, f64)], x: f64) -> f64 {
+        for w in bottom.windows(2) {
+            let ((x0, z0), (x1, z1)) = (w[0], w[1]);
+            let (lo, hi) = (x0.min(x1), x0.max(x1));
+            if x >= lo - 1e-9 && x <= hi + 1e-9 && (x1 - x0).abs() > 1e-9 {
+                return z0 + (z1 - z0) * ((x - x0) / (x1 - x0));
+            }
+        }
+        panic!("x {x} outside the bottom polyline {bottom:?}");
+    }
+
+    /// `base_profile` is the underside mirror of `top_profile` IN THE
+    /// BASE-FRAME PARAMETERISATION — pinned on BOTH ring orientations of a
+    /// deep-notched wall, where the frame itself differs (low-run truncated
+    /// vs full-span from the high shoulder): the profile must agree with
+    /// `base_z_at_along` station by station, not with the raw ring order.
+    #[test]
+    fn base_profile_matches_the_frame_on_both_notch_orientations() {
+        for start_low in [true, false] {
+            let (ber, wid) = notched_front_wall_ber(start_low);
+            let w = ber.storeys[0]
+                .walls
+                .regions
+                .iter()
+                .find(|w| w.id == wid)
+                .unwrap();
+            let prof = w.base_profile();
+            // Orientation A: origin at the low end, frame truncated to len 4,
+            // profile still walks the full underside 0.34 → 1.29. Orientation
+            // B: origin on the high shoulder (base_z 1.29), full-span frame,
+            // profile walks 1.29 → 0.34 (along runs AWAY from the shoulder).
+            let want: [(f32, f32); 4] = if start_low {
+                [(0.0, 0.34), (4.0, 0.34), (4.0, 1.29), (8.0, 1.29)]
+            } else {
+                [(0.0, 1.29), (4.0, 1.29), (4.0, 0.34), (8.0, 0.34)]
+            };
+            assert_eq!(prof.len(), want.len(), "start_low={start_low}: {prof:?}");
+            for (g, e) in prof.iter().zip(want.iter()) {
+                assert!(
+                    (g.0 - e.0).abs() < 1e-6 && (g.1 - e.1).abs() < 1e-6,
+                    "start_low={start_low}: got {prof:?}, want {want:?}"
+                );
+            }
+            // The polyline agrees with THE underside query at mid-run stations.
+            for (d, z) in [
+                (2.0, if start_low { 0.34 } else { 1.29 }),
+                (6.0, if start_low { 1.29 } else { 0.34 }),
+            ] {
+                assert!(
+                    (w.base_z_at_along(d) - z).abs() < 1e-9,
+                    "start_low={start_low}: base_z_at_along({d}) = {}, want {z}",
+                    w.base_z_at_along(d)
+                );
+            }
+        }
+    }
+
+    /// Stepped-base `side_elevation`: the panel's `bottom` is the notch
+    /// polyline and its segments trace it (low run, step riser, high run — no
+    /// flat full-span base stroke), the underside folds into the z-bounds,
+    /// and the panel spans the full FACE even when the base frame truncated
+    /// to the low run.
+    #[test]
+    fn side_elevation_stepped_base_draws_the_bottom_polyline() {
+        use crate::ber::common::ExternalSide;
+
+        let (ber, _) = notched_front_wall_ber(true);
+        let front = ber.side_elevation(ExternalSide::Front);
+        assert_eq!(front.panels.len(), 1, "only the notched wall faces Front");
+        let p = &front.panels[0];
+        assert_eq!(
+            p.bottom.len(),
+            4,
+            "the step's 4 base vertices: {:?}",
+            p.bottom
+        );
+        let has = |x0: f64, z0: f64, x1: f64, z1: f64| {
+            p.segments.iter().any(|&((ax, az), (bx, bz))| {
+                let fwd = (ax - x0).abs() < 1e-6
+                    && (az - z0).abs() < 1e-6
+                    && (bx - x1).abs() < 1e-6
+                    && (bz - z1).abs() < 1e-6;
+                let rev = (ax - x1).abs() < 1e-6
+                    && (az - z1).abs() < 1e-6
+                    && (bx - x0).abs() < 1e-6
+                    && (bz - z0).abs() < 1e-6;
+                fwd || rev
+            })
+        };
+        assert!(
+            has(0.0, 0.34, 4.0, 0.34),
+            "low-run bottom: {:?}",
+            p.segments
+        );
+        assert!(has(4.0, 0.34, 4.0, 1.29), "step riser: {:?}", p.segments);
+        assert!(
+            has(4.0, 1.29, 8.0, 1.29),
+            "high-run bottom: {:?}",
+            p.segments
+        );
+        assert!(
+            !has(0.0, 0.34, 8.0, 0.34),
+            "the bottom is no longer one flat stroke: {:?}",
+            p.segments
+        );
+        // End verticals reach the true underside at each end.
+        assert!(has(0.0, 0.34, 0.0, 2.5), "a-end vertical: {:?}", p.segments);
+        assert!(
+            has(8.0, 1.29, 8.0, 2.5),
+            "seam vertical at b: {:?}",
+            p.segments
+        );
+        // Bounds fold the underside and the full face extent; base_z stays
+        // the frame origin's z (the sill datum).
+        assert!((front.min_z - 0.34).abs() < 1e-6, "min_z {}", front.min_z);
+        assert!((front.max_z - 2.5).abs() < 1e-6, "max_z {}", front.max_z);
+        assert!((front.min_x - 0.0).abs() < 1e-6 && (front.max_x - 8.0).abs() < 1e-6);
+        assert!(
+            (p.x0 - 0.0).abs() < 1e-6 && (p.x1 - 8.0).abs() < 1e-6,
+            "panel spans the face, not the truncated frame: [{}, {}]",
+            p.x0,
+            p.x1
+        );
+        assert!((p.base_z - 0.34).abs() < 1e-6);
+    }
+
+    /// CRITICAL orientation pin (subtract-don't-split Step 4 handoff): a
+    /// deep-notched remainder's canonical ring start is orientation-dependent
+    /// — `base_z` can sit on the HIGH shoulder (1.29) or the low run (0.34).
+    /// The drawn bottom and the sill placement must come out WORLD-identical
+    /// on both, because `bottom` derives from the SAME base frame the sill
+    /// math uses (never from `base_edge`'s ring walk).
+    #[test]
+    fn side_elevation_notch_sill_and_bottom_agree_on_both_ring_orientations() {
+        use crate::ber::common::ExternalSide;
+        use crate::ber::openings::add_wall_window;
+
+        // (sill_z, bottom@x2, bottom@x6, min_z) per orientation.
+        let mut worlds: Vec<(f64, f64, f64, f64)> = Vec::new();
+        for start_low in [true, false] {
+            let (mut ber, wid) = notched_front_wall_ber(start_low);
+            // One window at plan x=2 (over the LOW run) with WORLD bottom at
+            // z 1.5. The stored sill is frame-relative — it DIFFERS per
+            // orientation (1.16 vs 0.21); the projected elevation must not.
+            let (o, (ux, uy), _len, bz) = ber.storeys[0]
+                .walls
+                .regions
+                .iter()
+                .find(|w| w.id == wid)
+                .unwrap()
+                .base_frame()
+                .unwrap();
+            let along = ((2.0 - o.x) * ux + (10.0 - o.y) * uy) as f32;
+            add_wall_window(
+                &mut ber.storeys[0],
+                wid,
+                along,
+                1.0,
+                0.8,
+                (1.5 - bz) as f32,
+                ItemId::default(),
+            )
+            .expect("window places");
+            let front = ber.side_elevation(ExternalSide::Front);
+            assert_eq!(front.panels.len(), 1, "start_low={start_low}");
+            assert_eq!(front.openings.len(), 1, "start_low={start_low}");
+            let p = &front.panels[0];
+            let op = &front.openings[0];
+            assert!(
+                (op.x_center - 2.0).abs() < 1e-6,
+                "start_low={start_low}: x_center {}",
+                op.x_center
+            );
+            worlds.push((
+                op.sill_z,
+                bottom_z_at(&p.bottom, 2.0),
+                bottom_z_at(&p.bottom, 6.0),
+                front.min_z,
+            ));
+        }
+        let (a, b) = (worlds[0], worlds[1]);
+        assert!(
+            (a.0 - 1.5).abs() < 1e-6 && (b.0 - 1.5).abs() < 1e-6,
+            "world sill z 1.5 on both orientations: {worlds:?}"
+        );
+        assert!(
+            (a.1 - 0.34).abs() < 1e-6 && (b.1 - 0.34).abs() < 1e-6,
+            "underside at x=2 is the low run on both: {worlds:?}"
+        );
+        assert!(
+            (a.2 - 1.29).abs() < 1e-6 && (b.2 - 1.29).abs() < 1e-6,
+            "underside at x=6 is the high run on both: {worlds:?}"
+        );
+        assert!(
+            (a.3 - b.3).abs() < 1e-6,
+            "bounds orientation-independent: {worlds:?}"
+        );
+        // And the window clears the drawn underside at its station.
+        assert!(a.0 >= a.1 - 1e-6, "sill above the underside: {worlds:?}");
+    }
+
+    /// The occluder box stays a FLAT rect over a stepped bottom — anchored at
+    /// the underside's LOWEST point, so a rear edge behind the notch GAP is
+    /// still hidden (documented over-cover, mirroring the flat-top-at-the-
+    /// peak rule: it can hide but never invent a rear edge) — and identically
+    /// so on both ring orientations.
+    #[test]
+    fn side_elevation_occluder_box_stays_flat_over_a_notch() {
+        use crate::ber::common::ExternalSide;
+
+        for start_low in [true, false] {
+            let (mut ber, _) = notched_front_wall_ber(start_low);
+            let wall = |a: (f64, f64), b: (f64, f64), h: f64| WallRegion {
+                id: ItemId::default(),
+                polygon: Polygon3D::new(vec![
+                    Point3f64::new(a.0, a.1, 0.0),
+                    Point3f64::new(b.0, b.1, 0.0),
+                    Point3f64::new(b.0, b.1, h),
+                    Point3f64::new(a.0, a.1, h),
+                ]),
+                exposure: WallExposure::Exposed,
+                opes: Opes::default(),
+                construction_id: ItemId::default(),
+            };
+            // A rear wall whose top edge (z=1.0) sits in the notch GAP
+            // (x [4.5, 7.5]: the notched wall's face only starts at 1.29
+            // there) — and a far wall pulling the centroid below y=3 so the
+            // rear wall faces Front too.
+            ber.storeys[0]
+                .walls
+                .regions
+                .push(wall((4.5, 3.0), (7.5, 3.0), 1.0));
+            ber.storeys[0]
+                .walls
+                .regions
+                .push(wall((0.0, -10.0), (8.0, -10.0), 2.5));
+            let front = ber.side_elevation(ExternalSide::Front);
+            assert_eq!(front.panels.len(), 2, "start_low={start_low}");
+            let rear = front
+                .panels
+                .iter()
+                .min_by(|a, b| (a.x1 - a.x0).partial_cmp(&(b.x1 - b.x0)).unwrap())
+                .unwrap();
+            let top_line = rear
+                .segments
+                .iter()
+                .any(|&((_, za), (_, zb))| (za - 1.0).abs() < 1e-6 && (zb - 1.0).abs() < 1e-6);
+            assert!(
+                !top_line,
+                "rear top edge behind the notch gap is hidden by the flat \
+                 occluder box (documented over-cover), start_low={start_low}: {:?}",
+                rear.segments
+            );
+        }
+    }
+
     #[test]
     fn storey_json_without_roof_apexes_deserializes_to_empty() {
         // JSON produced by the OLD shape (no `ceiling_apexes` field): serialize

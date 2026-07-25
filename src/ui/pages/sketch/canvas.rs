@@ -4920,13 +4920,28 @@ fn elevation_overlay<F: FnMut(UiEvent)>(
         .iter()
         .map(|(_, z)| *z as f64)
         .fold(base + 0.5, f64::max);
-    // World frame: x = along (0..len), y = -z (so height grows UP on screen),
-    // with a small margin so the wall sits off the panel edges.
-    let margin = (top_max - base).max(0.5) * 0.12;
+    // The underside's lowest point — below `base` on a deep-notched wall
+    // whose frame origin sits on the high shoulder — and the profiles' along
+    // extent, which can outspan the frame length on the same shape. Both
+    // fold into the fit so the whole face stays on the panel.
+    let bottom_min = elev
+        .bottom_profile
+        .iter()
+        .map(|(_, z)| *z as f64)
+        .fold(base, f64::min);
+    let along_max = elev
+        .top_profile
+        .iter()
+        .chain(elev.bottom_profile.iter())
+        .map(|(a, _)| *a as f64)
+        .fold(len, f64::max);
+    // World frame: x = along (0..along_max), y = -z (so height grows UP on
+    // screen), with a small margin so the wall sits off the panel edges.
+    let margin = (top_max - bottom_min).max(0.5) * 0.12;
     let t = render::fit_transform(
         rect,
-        (-len * 0.05, -(top_max + margin)),
-        (len * 1.05, -(base - margin)),
+        (-along_max * 0.05, -(top_max + margin)),
+        (along_max * 1.05, -(bottom_min - margin)),
         vp,
     );
     let p = |along: f64, z: f64| t.apply(along, -z);
@@ -4950,8 +4965,25 @@ fn elevation_overlay<F: FnMut(UiEvent)>(
     let wline = |a: (f64, f64), b: (f64, f64), w: f32, c: egui::Color32| {
         render::elevation::draw_clipped_wall_line(&painter, &p, a, b, &open_rects, w, c);
     };
-    // Base, top profile, and the two side edges connecting them.
-    wline((0.0, base), (len, base), 2.0, wall_col);
+    // Bottom profile (the underside — no longer one flat stroke over a
+    // stepped base), top profile, and the two side edges connecting them.
+    let (bottom_a, bottom_b) = if elev.bottom_profile.len() >= 2 {
+        for w in elev.bottom_profile.windows(2) {
+            wline(
+                (w[0].0 as f64, w[0].1 as f64),
+                (w[1].0 as f64, w[1].1 as f64),
+                2.0,
+                wall_col,
+            );
+        }
+        // The bottom runs a→b (along 0→len): first is the `a` end, last `b`.
+        let bf = elev.bottom_profile.first().unwrap();
+        let bl = elev.bottom_profile.last().unwrap();
+        ((bf.0 as f64, bf.1 as f64), (bl.0 as f64, bl.1 as f64))
+    } else {
+        wline((0.0, base), (len, base), 2.0, wall_col);
+        ((0.0, base), (len, base))
+    };
     if elev.top_profile.len() >= 2 {
         for w in elev.top_profile.windows(2) {
             wline(
@@ -4961,11 +4993,11 @@ fn elevation_overlay<F: FnMut(UiEvent)>(
                 wall_col,
             );
         }
-        // The profile runs b→a (along len→0); join the base ends to it.
+        // The top profile runs b→a (along len→0); join the bottom ends to it.
         let first = elev.top_profile.first().unwrap();
         let last = elev.top_profile.last().unwrap();
-        wline((len, base), (first.0 as f64, first.1 as f64), 2.0, wall_col);
-        wline((0.0, base), (last.0 as f64, last.1 as f64), 2.0, wall_col);
+        wline(bottom_b, (first.0 as f64, first.1 as f64), 2.0, wall_col);
+        wline(bottom_a, (last.0 as f64, last.1 as f64), 2.0, wall_col);
     } else {
         wline((0.0, base), (0.0, top_max), 2.0, wall_col);
         wline((len, base), (len, top_max), 2.0, wall_col);
