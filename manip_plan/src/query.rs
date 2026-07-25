@@ -259,6 +259,37 @@ impl FloorPlan {
             .collect()
     }
 
+    /// Reorder each suggestion so side A — the merge TARGET whose position is
+    /// KEPT by `apply_collinear_suggestion` (it rewrites B onto A) — is a
+    /// SETTLED wall: one whose perpendicular position the user has already
+    /// fixed, either by dimensioning its movable param (it's in `known`) or
+    /// because the wall is anchored to a constant (tied to V0's position).
+    /// Accepting a normalized suggestion therefore never moves settled
+    /// geometry — the new/unknown wall is the one pulled onto the settled
+    /// line. When NEITHER side is settled (new × new) the detector's order is
+    /// preserved; when BOTH are settled A already qualifies, so it's kept too.
+    pub fn anchor_suggestions_to_known(
+        &self,
+        mut suggestions: Vec<CollinearitySuggestion>,
+        known: &HashSet<ParameterId>,
+    ) -> Vec<CollinearitySuggestion> {
+        let settled = |ring: usize, edge: usize| -> bool {
+            match self.parametric.wall_movable_param(ring, edge) {
+                Some((p, _)) => known.contains(&p),
+                // No movable param: either an anchor-constant wall (settled by
+                // construction) or a degenerate/non-axis-aligned edge (the
+                // detector never emits those) — treat as settled either way.
+                None => self.parametric.wall_anchor_constant(ring, edge).is_some(),
+            }
+        };
+        for s in &mut suggestions {
+            if !settled(s.ring_a, s.edge_a) && settled(s.ring_b, s.edge_b) {
+                s.swap_sides();
+            }
+        }
+        suggestions
+    }
+
     /// Apply a collinearity decision returned from `suggest_collinear`.
     /// Merges the two edges so they share a single coordinate expression.
     pub fn apply_collinear_suggestion(&mut self, suggestion: &CollinearitySuggestion) {
@@ -805,5 +836,115 @@ mod along_fraction_tests {
     #[test]
     fn surface_ref_wall_accessor() {
         assert_eq!(SurfaceRef::wall(7).wall_start(), Some(7));
+    }
+}
+
+#[cfg(test)]
+mod anchor_suggestions_tests {
+    use super::*;
+
+    /// Step-top plan: two horizontal top walls at y=3.0 (x∈[2,4]) and y=2.5
+    /// (x∈[0,2]), both parameter-movable; the bottom wall (y=0, through V0)
+    /// is anchor-constant.
+    fn step_plan() -> FloorPlan {
+        let pts = [
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(4.0, 0.0),
+            Point2f32::new(4.0, 3.0),
+            Point2f32::new(2.0, 3.0),
+            Point2f32::new(2.0, 2.5),
+            Point2f32::new(0.0, 2.5),
+        ];
+        FloorPlan::from_points_to_orthogonal(&pts, 0.01, true).unwrap()
+    }
+
+    /// Edge index of the horizontal wall lying at `y`.
+    fn h_edge_at(plan: &FloorPlan, y: f32) -> usize {
+        let ring = &plan.polygons()[0];
+        let n = ring.len();
+        (0..n)
+            .find(|&i| {
+                let (a, b) = (ring[i], ring[(i + 1) % n]);
+                (a.y - y).abs() < 1e-4 && (b.y - y).abs() < 1e-4
+            })
+            .unwrap_or_else(|| panic!("no horizontal wall at y={y}"))
+    }
+
+    fn h_suggestion(plan: &FloorPlan, a_y: f32, b_y: f32) -> CollinearitySuggestion {
+        CollinearitySuggestion {
+            ring_a: 0,
+            edge_a: h_edge_at(plan, a_y),
+            ring_b: 0,
+            edge_b: h_edge_at(plan, b_y),
+            axis: Axis::Horizontal,
+            coord_a: a_y,
+            coord_b: b_y,
+        }
+    }
+
+    /// A dimensioned (known-param) side in the B slot is swapped into the A
+    /// slot, so `apply_collinear_suggestion` (which rewrites B onto A) keeps
+    /// the settled wall in place.
+    #[test]
+    fn known_param_side_is_swapped_into_the_a_slot() {
+        let plan = step_plan();
+        let (p3, _) = plan
+            .wall_movable_param(0, h_edge_at(&plan, 3.0))
+            .expect("y=3 wall is parameter-movable");
+        let known: HashSet<ParameterId> = [p3].into_iter().collect();
+        let out = plan
+            .anchor_suggestions_to_known(vec![h_suggestion(&plan, 2.5, 3.0)], &known)
+            .remove(0);
+        assert_eq!(out.coord_a, 3.0, "settled side moved to the A slot");
+        assert_eq!(out.coord_b, 2.5);
+        assert_eq!(out.edge_a, h_edge_at(&plan, 3.0));
+        assert_eq!(out.edge_b, h_edge_at(&plan, 2.5));
+    }
+
+    /// Already-settled side A stays put — no swap.
+    #[test]
+    fn settled_a_side_is_kept() {
+        let plan = step_plan();
+        let (p3, _) = plan
+            .wall_movable_param(0, h_edge_at(&plan, 3.0))
+            .expect("y=3 wall is parameter-movable");
+        let known: HashSet<ParameterId> = [p3].into_iter().collect();
+        let out = plan
+            .anchor_suggestions_to_known(vec![h_suggestion(&plan, 3.0, 2.5)], &known)
+            .remove(0);
+        assert_eq!(out.coord_a, 3.0);
+        assert_eq!(out.coord_b, 2.5);
+    }
+
+    /// New × new (neither side dimensioned): the detector's order is kept.
+    #[test]
+    fn both_unknown_keeps_the_detector_order() {
+        let plan = step_plan();
+        assert!(plan.wall_movable_param(0, h_edge_at(&plan, 2.5)).is_some());
+        assert!(plan.wall_movable_param(0, h_edge_at(&plan, 3.0)).is_some());
+        let known: HashSet<ParameterId> = HashSet::new();
+        let out = plan
+            .anchor_suggestions_to_known(vec![h_suggestion(&plan, 2.5, 3.0)], &known)
+            .remove(0);
+        assert_eq!(out.coord_a, 2.5, "no settled side — order preserved");
+        assert_eq!(out.coord_b, 3.0);
+    }
+
+    /// An anchor-constant wall (tied to V0) counts as settled even with an
+    /// empty known set.
+    #[test]
+    fn anchor_constant_side_counts_as_settled() {
+        let plan = step_plan();
+        let bottom = h_edge_at(&plan, 0.0);
+        assert!(
+            plan.wall_movable_param(0, bottom).is_none(),
+            "bottom wall is anchor-constant"
+        );
+        let known: HashSet<ParameterId> = HashSet::new();
+        let out = plan
+            .anchor_suggestions_to_known(vec![h_suggestion(&plan, 3.0, 0.0)], &known)
+            .remove(0);
+        assert_eq!(out.coord_a, 0.0, "anchored side moved to the A slot");
+        assert_eq!(out.coord_b, 3.0);
     }
 }

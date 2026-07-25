@@ -10,7 +10,23 @@ use std::sync::OnceLock;
 /// `BER_SPLICE_DEBUG=1` to see it. Cached like `BER_TOUCH`.
 fn splice_debug_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("BER_SPLICE_DEBUG").is_ok_and(|v| v != "0"))
+    *ENABLED.get_or_init(|| {
+        if std::env::var("BER_SPLICE_DEBUG").is_ok_and(|v| v != "0") {
+            return true;
+        }
+        // Android field instrumentation: env vars don't reach the app
+        // process, so a MARKER FILE toggles the overlay instead —
+        //   adb shell run-as ie.cannygreen.berapp touch files/splice_debug
+        // (remove the file to disable; read once per app launch, like the
+        // env var).
+        #[cfg(target_os = "android")]
+        {
+            return std::path::Path::new("/data/data/ie.cannygreen.berapp/files/splice_debug")
+                .exists();
+        }
+        #[allow(unreachable_code)]
+        false
+    })
 }
 
 /// A completed stroke that's waiting for the user to confirm what to do with it.
@@ -687,10 +703,20 @@ impl AppController {
         // a new porch front lines up with an earlier one. We never assume it;
         // and we don't re-surface pairs among the pre-existing walls. (Extend
         // uses this param-scoped review, so it can't share `commit_review_redimension`.)
-        let suggestions = self
+        // Normalized so side A — the merge target an accept KEEPS in place
+        // (`apply_collinear_suggestion` rewrites B onto A) — is the SETTLED
+        // wall (dimensioned param or anchor constant): accepting must pull the
+        // fresh porch wall onto the settled line, never deform settled
+        // geometry (the field accept-all that moved a dimensioned plan by
+        // metres). New×new pairs keep the detector's order.
+        let raw = self
             .document
             .floor_plan
             .collinear_suggestions_for_params(&minted);
+        let suggestions = self
+            .document
+            .floor_plan
+            .anchor_suggestions_to_known(raw, &self.document.dimensioning.known_params);
         if !suggestions.is_empty() {
             self.review = Some(CollinearityReview {
                 suggestions,

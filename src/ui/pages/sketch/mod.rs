@@ -50,6 +50,7 @@ use ber_model::ber::final_details::{FloorKind, HeatingKind, WallFinish};
 use ber_model::ber::objects::{ObjectCategory, ObjectKind};
 use ber_model::ber::structural::{SurfaceCounts, WallExposure};
 use ber_model::ber::systems::HeatingSystemType;
+use domain::points::Point2f32;
 use domain::sketch::{DisplayMode, EditTools, SketchMode};
 use manip_plan::CollinearitySuggestion;
 use std::collections::HashSet;
@@ -1199,6 +1200,10 @@ pub struct SketchView<'a> {
     pub ber: Option<&'a Ber>,
     pub current_storey_idx: Option<usize>,
     pub review: Option<&'a CollinearitySuggestion>,
+    /// The current review pair's two edges as world segments, resolved by the
+    /// controller from the LIVE parametric plan (never from committed regions
+    /// — those are empty/stale mid-review). Drawn as the canvas highlight.
+    pub review_segments: Option<[(Point2f32, Point2f32); 2]>,
     pub review_remaining: usize,
     pub has_floor_plan: bool,
     pub pending_redraw: bool,

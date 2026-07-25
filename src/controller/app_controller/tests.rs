@@ -28127,3 +28127,224 @@ fn elevation_view_bottom_profile_steps_with_the_notch() {
         "the window clears the drawn underside"
     );
 }
+
+/// EXTEND-path collinearity review, settled-anchor rule: accepting a
+/// suggestion must NEVER move a settled (dimensioned) wall — the fresh porch
+/// wall is the one pulled onto the settled line. Field regression: the raw
+/// detector order could put the settled wall in the B slot, and
+/// `apply_collinear_suggestion` rewrites B onto A — an accept-all then
+/// deformed a dimensioned plan by metres. The extend path now normalizes each
+/// suggestion (`anchor_suggestions_to_known`) so side A is the settled one.
+#[test]
+fn extend_review_accept_never_moves_the_settled_wall() {
+    let mut c = dimensioned_square_controller(); // 10×10, fully dimensioned
+    c.set_edit_mode(EditTools::ExtendOrtho);
+    // Porch off the RIGHT wall whose TOP run lands at y=8.5 — above the splice
+    // snap leveller (~6% of the ring diagonal, ≈1.0 here — a smaller offset is
+    // auto-flattened before any review) but within the 12% collinearity
+    // tolerance (≈2.0) of the SETTLED top wall (y=10).
+    c.apply_extend_stroke(&[
+        Point2f32::new(10.0, 5.0),
+        Point2f32::new(13.0, 5.0),
+        Point2f32::new(13.0, 8.5),
+        Point2f32::new(10.0, 8.5),
+    ])
+    .expect("porch extend");
+
+    let sug = c
+        .current_review_suggestion_clone()
+        .expect("the y=8.5 run near the y=10 top wall raises a review");
+    // Normalized: side A (the merge target that KEEPS its position) is the
+    // settled top wall; side B is the fresh porch run.
+    assert!(
+        (sug.coord_a - 10.0).abs() < 1e-3,
+        "settled wall must sit in the A slot, got coord_a={}",
+        sug.coord_a
+    );
+    assert!((sug.coord_b - 8.5).abs() < 1e-3);
+
+    c.accept_current_review().expect("accept the merge");
+
+    let ring = &c.document.floor_plan.polygons()[0];
+    // The DIMENSIONED top wall did not move: its corners are still at y=10...
+    for corner in [(0.0, 10.0), (13.0, 10.0)] {
+        assert!(
+            ring.iter()
+                .any(|p| (p.x - corner.0).abs() < 1e-3 && (p.y - corner.1).abs() < 1e-3),
+            "settled top line must survive at {corner:?}, ring={ring:?}"
+        );
+    }
+    // ...and the fresh porch run moved ONTO it (nothing left at y≈8.5).
+    assert!(
+        !ring.iter().any(|p| (p.y - 8.5).abs() < 0.05),
+        "the unknown porch wall must be pulled onto the settled line, ring={ring:?}"
+    );
+    assert!(c.document.floor_plan.validate_simple().is_ok());
+}
+
+/// EXTEND-path review with BOTH sides unknown (two freshly-minted runs of the
+/// same porch near each other): no side is settled, the detector's order is
+/// preserved, and accepting still applies — the two runs merge onto one line.
+#[test]
+fn extend_review_both_unknown_still_applies() {
+    let mut c = dimensioned_square_controller(); // 10×10, fully dimensioned
+    c.set_edit_mode(EditTools::ExtendOrtho);
+    // Stepped bump off the BOTTOM wall: two horizontal runs at y=-4.6 and
+    // y=-3.2 — 1.4 apart (above the splice snap leveller ≈1.1, inside the 12%
+    // review tolerance ≈2.1), and everything else out of tolerance: the runs
+    // sit 3.2+ from the settled y=0 wall, the bump's verticals 2.5 from each
+    // other and from the side walls.
+    c.apply_extend_stroke(&[
+        Point2f32::new(2.5, 0.0),
+        Point2f32::new(2.5, -4.6),
+        Point2f32::new(5.0, -4.6),
+        Point2f32::new(5.0, -3.2),
+        Point2f32::new(7.5, -3.2),
+        Point2f32::new(7.5, 0.0),
+    ])
+    .expect("stepped bump extend");
+
+    let sug = c
+        .current_review_suggestion_clone()
+        .expect("the two bump runs raise a review");
+    let ys = [sug.coord_a, sug.coord_b];
+    assert!(
+        ys.iter().any(|y| (y + 4.6).abs() < 1e-3) && ys.iter().any(|y| (y + 3.2).abs() < 1e-3),
+        "the pair is the two minted runs, got {ys:?}"
+    );
+
+    c.accept_current_review().expect("accept the merge");
+    // The merge applied: the two runs share one line now (only ONE of the two
+    // y-levels survives), and the settled y=0 wall is untouched.
+    let ring = &c.document.floor_plan.polygons()[0];
+    let has_y = |y: f32| ring.iter().any(|p| (p.y - y).abs() < 0.05);
+    assert!(
+        has_y(-4.6) ^ has_y(-3.2),
+        "exactly one of the two runs' lines survives the merge, ring={ring:?}"
+    );
+    for corner in [(0.0, 0.0), (2.5, 0.0)] {
+        assert!(
+            ring.iter()
+                .any(|p| (p.x - corner.0).abs() < 1e-3 && (p.y - corner.1).abs() < 1e-3),
+            "the settled bottom wall stays at y=0, ring={ring:?}"
+        );
+    }
+    assert!(c.document.floor_plan.validate_simple().is_ok());
+}
+
+/// The review highlight is resolved from the LIVE parametric plan — never
+/// from the committed `storey.floors.regions`. Committed regions are EMPTY
+/// during the deferred-derivation window (the assessor answered a whole
+/// review blind when the highlight read them), and even when present their
+/// ring/vertex layout differs from the live plan's. Pins:
+///   * segments == the current suggestion's edge endpoints in the live plan,
+///     with NO committed record at all (the hardest deferred window);
+///   * the segments advance with the review cursor;
+///   * None once the review drains.
+#[test]
+fn review_highlight_segments_come_from_the_live_plan() {
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    // A live plan with NO committed record — current_record is None, so any
+    // regions-based highlight resolution would find nothing to draw.
+    c.document.floor_plan = FloorPlan::from_points_to_orthogonal(
+        &[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(10.0, 0.0),
+            Point2f32::new(10.0, 10.0),
+            Point2f32::new(0.0, 10.0),
+            Point2f32::new(0.05, 0.05),
+        ],
+        0.1,
+        true,
+    )
+    .unwrap();
+    assert!(
+        c.current_record.is_none(),
+        "the deferred window: nothing committed"
+    );
+
+    // Two hand-built suggestions over real square edges (the highlight only
+    // reads ring/edge indices; the review machinery only skips pairs that are
+    // already collinear or degenerate — neither applies here).
+    let ring = c.document.floor_plan.polygons()[0].clone();
+    let n = ring.len();
+    let edge_where = |pred: &dyn Fn(Point2f32, Point2f32) -> bool| -> usize {
+        (0..n)
+            .find(|&i| pred(ring[i], ring[(i + 1) % n]))
+            .expect("edge")
+    };
+    let bottom = edge_where(&|a, b| a.y.abs() < 1e-3 && b.y.abs() < 1e-3);
+    let top = edge_where(&|a, b| (a.y - 10.0).abs() < 1e-3 && (b.y - 10.0).abs() < 1e-3);
+    let left = edge_where(&|a, b| a.x.abs() < 1e-3 && b.x.abs() < 1e-3);
+    let right = edge_where(&|a, b| (a.x - 10.0).abs() < 1e-3 && (b.x - 10.0).abs() < 1e-3);
+    let s1 = CollinearitySuggestion {
+        ring_a: 0,
+        edge_a: bottom,
+        ring_b: 0,
+        edge_b: top,
+        axis: Axis::Horizontal,
+        coord_a: 0.0,
+        coord_b: 10.0,
+    };
+    let s2 = CollinearitySuggestion {
+        ring_a: 0,
+        edge_a: left,
+        ring_b: 0,
+        edge_b: right,
+        axis: Axis::Vertical,
+        coord_a: 0.0,
+        coord_b: 10.0,
+    };
+    c.review = Some(CollinearityReview {
+        suggestions: vec![s1, s2],
+        cursor: 0,
+        rejections: Vec::new(),
+    });
+
+    let expect_edge = |e: usize| (ring[e], ring[(e + 1) % n]);
+    let segs = c
+        .review_highlight_segments()
+        .expect("highlight resolves with an empty committed record");
+    assert_eq!(segs[0], expect_edge(bottom), "A = the live bottom edge");
+    assert_eq!(segs[1], expect_edge(top), "B = the live top edge");
+
+    // Advance the cursor: the highlight follows the CURRENT suggestion.
+    c.reject_current_review();
+    let segs = c
+        .review_highlight_segments()
+        .expect("second suggestion still pending");
+    assert_eq!(segs[0], expect_edge(left), "A = the live left edge");
+    assert_eq!(segs[1], expect_edge(right), "B = the live right edge");
+
+    // Drained review → no highlight.
+    c.reject_current_review();
+    assert!(c.review.is_none());
+    assert!(c.review_highlight_segments().is_none());
+}
+
+/// EXTEND-path variant of the highlight test: the review raised by a real
+/// extend resolves its highlight from the live plan, and the segments lie on
+/// the suggestion's own coordinates — proving the (ring, edge) index space of
+/// the suggestions and the live-plan lookup agree by construction.
+#[test]
+fn review_highlight_segments_match_the_extend_suggestion_coords() {
+    let mut c = dimensioned_square_controller();
+    c.set_edit_mode(EditTools::ExtendOrtho);
+    c.apply_extend_stroke(&[
+        Point2f32::new(10.0, 5.0),
+        Point2f32::new(13.0, 5.0),
+        Point2f32::new(13.0, 8.5),
+        Point2f32::new(10.0, 8.5),
+    ])
+    .expect("porch extend");
+
+    let sug = c.current_review_suggestion_clone().expect("review raised");
+    let [seg_a, seg_b] = c.review_highlight_segments().expect("highlight resolves");
+    // Horizontal pair: each segment's endpoints sit on its side's y coord.
+    for (seg, coord) in [(seg_a, sug.coord_a), (seg_b, sug.coord_b)] {
+        assert!(
+            (seg.0.y - coord).abs() < 1e-3 && (seg.1.y - coord).abs() < 1e-3,
+            "segment {seg:?} must lie on the suggestion's y={coord}"
+        );
+    }
+}

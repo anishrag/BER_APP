@@ -1973,7 +1973,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             current_storey_idx,
             mode,
             display,
-            view.review,
+            view.review_segments,
             dimensioned_walls,
             vp,
             view.structure_selected,

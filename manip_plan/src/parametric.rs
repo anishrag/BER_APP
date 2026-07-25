@@ -81,6 +81,17 @@ pub struct CollinearitySuggestion {
     pub coord_b: f32,
 }
 
+impl CollinearitySuggestion {
+    /// Swap sides A and B. `apply_collinear_suggestion` rewrites edge B's
+    /// coordinate onto edge A's — side A is the merge TARGET that keeps its
+    /// position — so callers use this to control which wall an accept moves.
+    pub fn swap_sides(&mut self) {
+        std::mem::swap(&mut self.ring_a, &mut self.ring_b);
+        std::mem::swap(&mut self.edge_a, &mut self.edge_b);
+        std::mem::swap(&mut self.coord_a, &mut self.coord_b);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum CoordinateExpression {

@@ -42,6 +42,30 @@ impl AppController {
         self.current_review_suggestion().cloned()
     }
 
+    /// The CURRENT suggestion's two edges as world segments `[A, B]`, resolved
+    /// from the LIVE parametric plan — the same index space the suggestions
+    /// were generated against (`suggest_collinear` walks the plan's rings), so
+    /// the lookup is correct BY CONSTRUCTION. The canvas hands these to the
+    /// renderer, which draws them verbatim: the committed `storey.floors.
+    /// regions` must never be consulted for this highlight — they're EMPTY (or
+    /// stale) during the deferred-derivation window, and their ring/vertex
+    /// layout differs from the live plan's, which painted the highlight on the
+    /// wrong walls or not at all. Covers both review surfaces (extend-path and
+    /// draw-outline), which share the same review cursor.
+    pub fn review_highlight_segments(&self) -> Option<[(Point2f32, Point2f32); 2]> {
+        let sug = self.current_review_suggestion()?;
+        let polys = self.document.floor_plan.polygons();
+        let edge = |ring: usize, e: usize| -> Option<(Point2f32, Point2f32)> {
+            let r = polys.get(ring)?;
+            let n = r.len();
+            if n < 2 || e >= n {
+                return None;
+            }
+            Some((r[e], r[(e + 1) % n]))
+        };
+        Some([edge(sug.ring_a, sug.edge_a)?, edge(sug.ring_b, sug.edge_b)?])
+    }
+
     /// Number of suggestions still to be considered (including the current).
     pub fn review_remaining(&self) -> usize {
         let Some(review) = self.review.as_ref() else {

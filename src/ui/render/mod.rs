@@ -45,13 +45,14 @@ use crate::controller::app_controller::{
 use ber_model::ber::ber_struct::Ber;
 use ber_model::ber::common::ItemId;
 use ber_model::ber::structural::WallExposure;
+use domain::points::Point2f32;
 use domain::sketch::{DisplayMode, SketchMode};
 use eframe::egui;
-use manip_plan::CollinearitySuggestion;
 
 /// Render the appropriate BER view into `rect`. Silent no-op if `ber` is None.
-/// `highlight` is the current collinearity-review suggestion (if any) — its
-/// two candidate edges get a bright overlay so the user sees what they're
+/// `highlight_segments` is the current collinearity-review pair (if any) as
+/// two world segments, resolved by the controller from the LIVE parametric
+/// plan — they get a bright overlay so the user sees which walls they're
 /// being asked about. Only applies to a single-storey 2D view.
 ///
 /// `current_storey_idx == None` → All-storeys overview (2D row, or 3D stack).
@@ -62,7 +63,7 @@ pub fn render_ber(
     current_storey_idx: Option<usize>,
     sketch_mode: SketchMode,
     display_mode: DisplayMode,
-    highlight: Option<&CollinearitySuggestion>,
+    highlight_segments: Option<[(Point2f32, Point2f32); 2]>,
     // Walls the user has explicitly dimensioned, as (ring_idx, edge_start)
     // tuples for the current storey. Other walls' length labels are suppressed.
     dimensioned_walls: &[(usize, usize)],
@@ -151,7 +152,7 @@ pub fn render_ber(
                             rect,
                             storey,
                             display_mode,
-                            highlight,
+                            highlight_segments,
                             dimensioned_walls,
                             view,
                             watermark.as_deref(),
@@ -170,7 +171,7 @@ pub fn render_ber(
                             rect,
                             storey,
                             display_mode,
-                            highlight,
+                            highlight_segments,
                             dimensioned_walls,
                             view,
                             watermark.as_deref(),

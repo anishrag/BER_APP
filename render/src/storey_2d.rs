@@ -11,18 +11,18 @@ use std::collections::HashSet;
 use ber_model::ber::common::ItemId;
 use ber_model::ber::fenestration::{Door, OpeningPlacement, Window};
 use ber_model::ber::structural::{CeilingRegion, FloorRegion, Storey};
-use domain::points::Point2f64;
+use domain::points::{Point2f32, Point2f64};
 use domain::sketch::DisplayMode;
 use geo::Coord;
-use manip_plan::CollinearitySuggestion;
 
 use domain::view::PhaseDisplayRegion;
 
 use crate::{color_for, draw_dashed_segment, fit_transform, style, Transform2d, ViewParams};
 
-/// Render the storey. If `highlight` is set, the two edges named in the
-/// suggestion are drawn on top in a contrasting style so the user can see
-/// which walls are being asked about.
+/// Render the storey. If `highlight_segments` is set (the collinearity
+/// review's two candidate edges, resolved by the CONTROLLER from the live
+/// parametric plan), they are drawn on top in a contrasting style so the user
+/// can see which walls are being asked about.
 ///
 /// `watermark_ring` is an optional outline (the PREVIOUS storey's footprint)
 /// drawn first in a faint grey dashed style — a drawing aid when starting a
@@ -47,7 +47,7 @@ pub fn render(
     rect: egui::Rect,
     storey: &Storey,
     display_mode: DisplayMode,
-    highlight: Option<&CollinearitySuggestion>,
+    highlight_segments: Option<[(Point2f32, Point2f32); 2]>,
     dimensioned_walls: &[(usize, usize)],
     view: ViewParams,
     watermark_ring: Option<&[(f64, f64)]>,
@@ -190,15 +190,17 @@ pub fn render(
 
     // Collinearity-review highlight: paint the two candidate edges on top in
     // a bright contrasting color so the user can see what they're being asked.
-    // Each edge lives in a (possibly different) ring → look up the region by
-    // suggestion's ring index. Cross-ring suggestions highlight one edge in
-    // each polygon.
-    if let Some(s) = highlight {
-        if let Some(region) = storey.floors.regions.get(s.ring_a) {
-            draw_highlight_edge(painter, &t, region, s.edge_a);
-        }
-        if let Some(region) = storey.floors.regions.get(s.ring_b) {
-            draw_highlight_edge(painter, &t, region, s.edge_b);
+    // The segments arrive pre-resolved from the LIVE parametric plan (the
+    // controller owns that lookup) — the committed floor regions must NOT be
+    // consulted here: they're empty/stale during the deferred-derivation
+    // window and their ring/vertex layout differs from the live plan's.
+    if let Some(segments) = highlight_segments {
+        let highlight = egui::Color32::from_rgb(255, 140, 30); // warm orange
+        let stroke = egui::Stroke::new(4.0, highlight);
+        for (a, b) in segments {
+            let pa = t.apply(a.x as f64, a.y as f64);
+            let pb = t.apply(b.x as f64, b.y as f64);
+            painter.line_segment([pa, pb], stroke);
         }
     }
 
@@ -267,34 +269,6 @@ fn draw_selection_overlay(
             }
         }
     }
-}
-
-fn draw_highlight_edge(
-    painter: &egui::Painter,
-    t: &Transform2d,
-    region: &FloorRegion,
-    edge_start: usize,
-) {
-    let coords: Vec<Coord<f64>> = region.polygon.exterior().coords().cloned().collect();
-    // The polygon's exterior may or may not include the closing duplicate;
-    // for indexing, we want the unique vertex count.
-    let n_unique = if coords.len() >= 2 && coords[0] == coords[coords.len() - 1] {
-        coords.len() - 1
-    } else {
-        coords.len()
-    };
-    if n_unique < 3 {
-        return;
-    }
-
-    let highlight = egui::Color32::from_rgb(255, 140, 30); // warm orange
-    let stroke = egui::Stroke::new(4.0, highlight);
-
-    let a = coords[edge_start % n_unique];
-    let b = coords[(edge_start + 1) % n_unique];
-    let pa = t.apply(a.x, a.y);
-    let pb = t.apply(b.x, b.y);
-    painter.line_segment([pa, pb], stroke);
 }
 
 pub fn ring_bbox(ring: &[(f64, f64)]) -> Option<((f64, f64), (f64, f64))> {
