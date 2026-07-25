@@ -33,11 +33,12 @@ use crate::controller::app_controller::FinalDetails;
 use crate::controller::app_controller::{
     ActiveObjectRoomView, AssessmentPhase, ChecklistItem, ComplexWindowPlacement,
     DimensionPromptUiData, DoorSidelightsPlacement, EditDragPromptUiData, ElevationView,
-    ExistingGroup, ExistingWindowType, ExposureSelection, FinalMode, NewStoreyPromptUiData,
-    ObjectPinView, ObjectReviewView, OpeningFieldsPrompt, OpeningToolKind, PartitionView,
-    PhaseDisplayRegion, PhotoView, PositionPromptUiData, ReviewView, RiserView, SelectMode,
-    SnapTagView, StructureEdit, StructureReviewView, SurfaceKind, VertexDropPromptUiData,
-    WallExposureView, WallFinishField, WallInclusionPromptView, WindowTypeChoice,
+    ExistingGroup, ExistingWindowType, ExposureSelection, FinalMode, FloorStepZoneView,
+    NewStoreyPromptUiData, ObjectPinView, ObjectReviewView, OpeningFieldsPrompt, OpeningToolKind,
+    PartitionView, PhaseDisplayRegion, PhotoView, PositionPromptUiData, ReviewView, RiserView,
+    SelectMode, SnapTagView, StructureEdit, StructureReviewView, SurfaceKind,
+    VertexDropPromptUiData, WallExposureView, WallFinishField, WallInclusionPromptView,
+    WindowTypeChoice,
 };
 use crate::ui::pages::events::UiEvent;
 use crate::ui::render::ViewParams;
@@ -1290,6 +1291,10 @@ pub struct SketchView<'a> {
     /// string for the amount input.
     pub step_mode: bool,
     pub step_region_polygons: &'a [(Vec<(f64, f64)>, String)],
+    /// The RESOLVED floor-step zones, always drawn on the plan (subtle
+    /// outline + level label; junction-mismatch zones in the warning colour
+    /// with the gap in their label, shown even when the toggle is off).
+    pub floor_step_zones: &'a [FloorStepZoneView],
     pub pending_step_polygon: &'a [(f64, f64)],
     pub pending_step_cut_regions: &'a [Vec<(f64, f64)>],
     pub step_pick_pending: bool,

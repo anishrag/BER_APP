@@ -11,6 +11,21 @@
 //! from those (`document::step_regions_from_floors`).
 use super::*;
 
+/// One RESOLVED floor-step zone projected for the always-visible plan
+/// display: its ring, an interior label anchor, the formatted label
+/// ("▲ 0.59 m" / "▼ 0.25 m", plus the junction gap when flagged), and
+/// whether it carries a junction-mismatch warning (drawn in the warning
+/// colour, shown even when the step display toggle is off).
+#[derive(Debug, Clone)]
+pub struct FloorStepZoneView {
+    pub ring: Vec<(f64, f64)>,
+    pub label_pos: (f64, f64),
+    pub label: String,
+    /// A junction mismatch was flagged inside this zone (Feature: the floor
+    /// does not rest on the ceiling below — the label carries the gap).
+    pub warning: bool,
+}
+
 impl AppController {
     /// True when the editor is tagging floor-step areas (drives the UI toggle
     /// and routes `DrawPerpWalls` strokes to step carving).
@@ -315,6 +330,57 @@ impl AppController {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// The current storey's floor-step zones for the ALWAYS-VISIBLE plan
+    /// display, derived from the RESOLVED floors (`level_m ≠ 0` regions) the
+    /// way [`phase_region_polygons`](Self::phase_region_polygons) reads the
+    /// resolved phase zones — NOT the raw session `self.step_regions` (which
+    /// keep driving carving / deletion untouched). Zones flagged by the
+    /// junction check (the floor not resting on the ceiling below —
+    /// `ber_model::ber::structural::junction_floor_ceiling_mismatches`, gated
+    /// on both storeys being dimensioned like the inter-storey derive) come
+    /// back with `warning` set and the gap in their label, so a mis-stepped
+    /// floor is visible on the plan itself. Empty when nothing is stepped.
+    pub fn floor_step_zone_polygons(&self) -> Vec<FloorStepZoneView> {
+        use ber_model::ber::structural::{
+            junction_floor_ceiling_mismatches, storey_floor_step_zones,
+        };
+        let idx = self.current_storey_idx.unwrap_or(0);
+        let Some(ber) = self.current_record.as_ref().map(|r| &r.data) else {
+            return Vec::new();
+        };
+        let dimensioned: Vec<bool> = self
+            .document
+            .storeys
+            .iter()
+            .map(StoreyDoc::measurements_complete)
+            .collect();
+        let mismatches = junction_floor_ceiling_mismatches(ber, &dimensioned);
+        storey_floor_step_zones(ber, idx, &mismatches)
+            .into_iter()
+            .map(|z| {
+                let mut parts: Vec<String> = Vec::new();
+                if z.level_m > 0.0 {
+                    parts.push(format!("▲ {:.2} m", z.level_m));
+                } else if z.level_m < 0.0 {
+                    parts.push(format!("▼ {:.2} m", -z.level_m));
+                }
+                if let Some(gap) = z.gap_m {
+                    parts.push(if gap < 0.0 {
+                        format!("⚠ {:.2} m into the ceiling below", -gap)
+                    } else {
+                        format!("⚠ {:.2} m above the ceiling below", gap)
+                    });
+                }
+                FloorStepZoneView {
+                    ring: z.ring.iter().map(|p| (p.x, p.y)).collect(),
+                    label_pos: (z.label_anchor.x, z.label_anchor.y),
+                    label: parts.join("\n"),
+                    warning: z.gap_m.is_some(),
+                }
+            })
+            .collect()
     }
 
     /// Delete the current storey's step region at `index` and re-commit (the

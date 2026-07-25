@@ -67,7 +67,7 @@ impl AppController {
     /// The Stage A checklist rows, recomputed from the current editing model.
     /// Every row is [`ChecklistStatus::Incomplete`] when no BER is loaded.
     pub fn stage_a_checklist(&self) -> Vec<ChecklistItem> {
-        vec![
+        let mut items = vec![
             ChecklistItem::new(
                 "Measurements",
                 self.checklist_rollup(|s, _| s.measurements_reasons()),
@@ -102,7 +102,36 @@ impl AppController {
             ChecklistItem::new("Windows", self.windows_row()),
             ChecklistItem::new("Living area", self.living_area_row()),
             ChecklistItem::new("External photos", self.external_photos_row()),
-        ]
+        ];
+        // Storey junctions: only a multi-storey dwelling HAS junctions, so the
+        // row appears only then (the porch-checks precedent for a conditional
+        // row) — right after Heights, the concern it extends across storeys.
+        if let Some(row) = self.junction_row() {
+            items.insert(2, ChecklistItem::new("Storey junctions", row));
+        }
+        items
+    }
+
+    /// Per-storey junction gate: red on a storey whose floor does not rest on
+    /// the ceiling below it ([`document::junction_mismatch_reasons_by_storey`]
+    /// — a floor BELOW that ceiling is geometry the inter-storey derive cannot
+    /// bury; it mints wall slivers and churns settled exposure back to Unset).
+    /// Gated per junction on BOTH sides being dimensioned, the same rule the
+    /// derive itself applies. `None` (no row) on single-storey dwellings.
+    fn junction_row(&self) -> Option<(ChecklistStatus, Vec<String>)> {
+        let record = self.current_record.as_ref()?;
+        let n = record.data.storeys.len();
+        if n < 2 {
+            return None;
+        }
+        let dimensioned: Vec<bool> = self
+            .document
+            .storeys
+            .iter()
+            .map(StoreyDoc::measurements_complete)
+            .collect();
+        let per = document::junction_mismatch_reasons_by_storey(&record.data, &dimensioned);
+        Some(self.rollup(n, |i| per.get(i).cloned().unwrap_or_default()))
     }
 
     /// Per-DWELLING external-photos gate: green ([`ChecklistStatus::AllStoreys`])

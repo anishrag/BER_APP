@@ -74,6 +74,7 @@ pub use roof::{
     PendingRoofSectionView, RoofContextRegion, RoofRegionView, RoofSectionStyle, RoofShape,
     RoofStage,
 };
+pub use step_regions::FloorStepZoneView;
 // `ExposureSection` is re-exported above (the controller's public surface).
 
 use chrono::NaiveDate;

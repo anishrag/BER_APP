@@ -62,7 +62,10 @@ pub use resolve::{
     reseed_wall_anchors_on_load, resolve_porch_wall_anchor, resolve_storey, resolve_wall_anchor,
     stamp_horizontal_exposure, stamp_riser_exposure,
 };
-pub use step::{inherited_step_regions, step_regions_from_floors, StepRegion};
+pub use step::{
+    inherited_step_regions, junction_mismatch_reasons_by_storey, step_regions_from_floors,
+    StepRegion,
+};
 pub use windows::{windows_complete, windows_issues, WindowsIssue};
 
 use ber_model::ber::common::ConstructionPhase;

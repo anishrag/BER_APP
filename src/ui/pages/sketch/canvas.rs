@@ -2359,24 +2359,23 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             );
         }
 
-        // Floor-step areas: committed regions (teal, labelled with the
-        // signed level), plus the pending carved area / cut candidates. Steps
-        // never carry a hole, so each ring becomes a simple display region.
+        // Floor-step zones: the RESOLVED stepped floor regions, ALWAYS
+        // visible (a subtle dashed outline + "▲/▼" level label — steps are
+        // geometry the assessor must be able to see; field case "56 Elmwood
+        // Road"). The Dimensions-category toggle hides the healthy zones;
+        // junction-mismatch zones (warning colour, gap in the label) draw
+        // regardless. The pending carved area / cut candidates below keep
+        // the step-mode teal.
         let step_tint = egui::Color32::from_rgb(60, 220, 200); // teal
-        let step_display: Vec<PhaseDisplayRegion> = view
-            .step_region_polygons
-            .iter()
-            .map(|(ring, label)| PhaseDisplayRegion::from_ring(ring.clone(), label.clone()))
-            .collect();
-        render::render_phase_regions(
+        render::render_floor_step_zones(
             &painter,
             rect,
             ber,
             current_storey_idx,
             mode,
             vp,
-            &step_display,
-            step_tint,
+            view.floor_step_zones,
+            view.cat_state.show_floor_steps,
         );
         render::render_cut_candidates(
             &painter,

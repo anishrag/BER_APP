@@ -74,6 +74,52 @@ pub fn inherited_step_regions(below: &Storey, footprint: &[Point2f32]) -> Vec<St
         .collect()
 }
 
+/// Per-storey junction-mismatch reasons, index-aligned with `ber.storeys`:
+/// for every zone where storey `i`'s floor does not rest on storey `i − 1`'s
+/// ceiling ([`junction_floor_ceiling_mismatches`] — the pure companion of the
+/// inter-storey derive, gated on both sides being `dimensioned`), one reason
+/// on the UPPER storey naming the neighbour, the gap and the zone size. A
+/// storey's list is empty exactly when its junctions are aligned — the
+/// checklist-row contract (`document::*_reasons`). The overlap case (floor
+/// BELOW the ceiling it rests on) is the dangerous one: the junction derive
+/// cannot bury the seam, mints degenerate wall slivers and churns settled
+/// exposure back to Unset (field case "56 Elmwood Road").
+///
+/// [`junction_floor_ceiling_mismatches`]:
+/// ber_model::ber::structural::junction_floor_ceiling_mismatches
+pub fn junction_mismatch_reasons_by_storey(ber: &Ber, dimensioned: &[bool]) -> Vec<Vec<String>> {
+    use ber_model::ber::structural::junction_floor_ceiling_mismatches;
+    let mut per: Vec<Vec<String>> = vec![Vec::new(); ber.storeys.len()];
+    for m in junction_floor_ceiling_mismatches(ber, dimensioned) {
+        let below = storey_label(ber, m.below_idx);
+        let msg = if m.gap_m < 0.0 {
+            format!(
+                "Floor sits {:.2} m below {below}'s ceiling over a {:.1} m² zone",
+                -m.gap_m, m.area_m2
+            )
+        } else {
+            format!(
+                "Floor floats {:.2} m above {below}'s ceiling over a {:.1} m² zone",
+                m.gap_m, m.area_m2
+            )
+        };
+        if let Some(list) = per.get_mut(m.storey_idx) {
+            list.push(msg);
+        }
+    }
+    per
+}
+
+/// A storey's display label for reason text: its name, or "storey N" (1-based
+/// `storey_number`) when unnamed.
+fn storey_label(ber: &Ber, idx: usize) -> String {
+    match ber.storeys.get(idx) {
+        Some(s) if !s.name.is_empty() => s.name.clone(),
+        Some(s) => format!("storey {}", s.storey_number + 1),
+        None => format!("storey {}", idx + 1),
+    }
+}
+
 /// Twice the unsigned shoelace area of `ring` (so the sliver threshold above
 /// is 1e-6 m²). Local on purpose — `document` has no geo dependency.
 /// `pub(crate)`: the ceiling-step reconstruction applies the same filter, and
@@ -132,6 +178,69 @@ mod tests {
         assert!(regions[0].polygon.iter().any(|p| (p.x - 8.0).abs() < 1e-6));
         // Missing storey → empty.
         assert!(step_regions_from_floors(&ber, 7).is_empty());
+    }
+
+    /// The junction-mismatch reason names the neighbour storey, the gap and
+    /// the zone size — the Elmwood wording — and lands on the UPPER storey.
+    /// Aligned junctions (and the below storey) report nothing.
+    #[test]
+    fn junction_mismatch_reasons_name_gap_neighbour_and_zone() {
+        use ber_model::ber::structural::{CeilingRegions, Storey};
+        use domain::points::Point2f64;
+        let cid = Default::default();
+        let p = Point2f64::new;
+        let footprint = vec![p(0.0, 0.0), p(8.0, 0.0), p(8.0, 4.0), p(0.0, 4.0)];
+        let zone = vec![p(0.66, 0.9), p(3.04, 0.9), p(3.04, 4.0), p(0.66, 4.0)];
+        let remainder = vec![
+            p(0.0, 0.0),
+            p(8.0, 0.0),
+            p(8.0, 4.0),
+            p(3.04, 4.0),
+            p(3.04, 0.9),
+            p(0.66, 0.9),
+            p(0.66, 4.0),
+            p(0.0, 4.0),
+        ];
+        let ground = Storey {
+            floors: FloorRegions::new(footprint.clone(), cid),
+            ceilings: CeilingRegions::default_for_footprint(vec![footprint], 2.548, cid)
+                .with_z_deltas(&[(zone.clone(), -0.59)]),
+            ceiling_height_m: Some(2.548),
+            ..Storey::default()
+        };
+        let mut upper_floors = FloorRegions::from_vertex_lists(vec![zone, remainder], cid);
+        upper_floors.regions[0].level_m = 0.0;
+        upper_floors.regions[1].level_m = 0.59;
+        let upper = Storey {
+            floors: upper_floors,
+            ceiling_height_m: Some(2.4),
+            floor_thickness_m: Some(0.2),
+            ..Storey::default()
+        };
+        let mut ber = Ber::default();
+        ber.storeys = vec![ground, upper];
+
+        // Seeded correctly → every storey's list is empty.
+        let per = junction_mismatch_reasons_by_storey(&ber, &[true, true]);
+        assert!(per.iter().all(|l| l.is_empty()), "aligned: {per:?}");
+
+        // The Elmwood hand-step: anchor zone floor to −0.247.
+        ber.storeys[1].floors.regions[0].level_m = -0.247;
+        let per = junction_mismatch_reasons_by_storey(&ber, &[true, true]);
+        assert!(per[0].is_empty(), "the below storey reports nothing");
+        assert_eq!(
+            per[1],
+            vec!["Floor sits 0.25 m below storey 1's ceiling over a 7.4 m² zone".to_string()]
+        );
+
+        // A named neighbour is named; a void gap reads as floating.
+        ber.storeys[0].name = "Ground Floor".into();
+        ber.storeys[1].floors.regions[0].level_m = 0.3;
+        let per = junction_mismatch_reasons_by_storey(&ber, &[true, true]);
+        assert_eq!(
+            per[1],
+            vec!["Floor floats 0.30 m above Ground Floor's ceiling over a 7.4 m² zone".to_string()]
+        );
     }
 
     /// A finalised square StoreyDoc with the given corner points as its outline.

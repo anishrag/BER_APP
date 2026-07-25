@@ -77,6 +77,10 @@ pub enum Tool {
     FitView,
     /// Wall-length label visibility — pure page state, no controller event.
     WallLengthLabels,
+    /// Floor-step zone visibility (the always-on resolved step outlines +
+    /// level labels) — pure page state like [`Tool::WallLengthLabels`].
+    /// Junction-mismatch warnings stay visible even when this is off.
+    FloorStepLabels,
     /// DEV: save the current plan to the checkpoint file.
     SaveCheckpoint,
     /// DEV: load the checkpoint file, replacing the current sketch session.
@@ -151,7 +155,7 @@ pub const CATEGORIES: &[Category] = &[
     },
     Category {
         name: "Dimensions",
-        tools: &[Tool::WallLengthLabels],
+        tools: &[Tool::WallLengthLabels, Tool::FloorStepLabels],
     },
 ];
 
@@ -189,6 +193,10 @@ pub struct CategoryUiState {
     /// Wall-length label visibility (the Dimensions-category toggle). Gates
     /// the storey + living-area length labels on the canvas.
     pub show_wall_lengths: bool,
+    /// Floor-step zone visibility (Dimensions-category toggle, ON by
+    /// default): the always-on resolved step outlines + "▲/▼" level labels.
+    /// Junction-mismatch warning zones draw even when this is off.
+    pub show_floor_steps: bool,
     /// Backing string for the Heights category's default-ceiling-height
     /// field. Cleared by the shell when a Set succeeds (the field then shows
     /// the stored value as its label); kept on a rejected value so the user
@@ -223,6 +231,7 @@ impl Default for CategoryUiState {
             active_category: 0,
             layout_override: None,   // Auto: pick by aspect ratio
             show_wall_lengths: true, // labels visible by default
+            show_floor_steps: true,  // step zones visible by default
             ceiling_height_input: String::new(),
             floor_thickness_input: String::new(),
             input_mode: super::number_box::InputMode::default(),
@@ -1085,6 +1094,12 @@ fn tool_ui<F: FnMut(UiEvent)>(
             // no controller round-trip.
             ui.toggle_value(&mut state.show_wall_lengths, "📏 Wall lengths")
                 .hint("Show the wall-length labels on the plan");
+        }
+        Tool::FloorStepLabels => {
+            // Pure page state, like the wall-length toggle. Junction
+            // warnings on step zones stay visible even when this is off.
+            ui.toggle_value(&mut state.show_floor_steps, "↕ Floor steps")
+                .hint("Show the floor-step zones and their levels on the plan");
         }
         Tool::SaveCheckpoint => {
             if ui

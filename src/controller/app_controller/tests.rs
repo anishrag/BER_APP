@@ -27262,3 +27262,150 @@ fn structure_review_items_carry_window_and_door_rename_info() {
         _ => panic!("expected a WindowType rename"),
     }
 }
+
+// ----- storey-junction mismatch (floor vs the ceiling below) -------------
+
+/// Field case "56 Elmwood Road": a floor hand-stepped BELOW the ceiling it
+/// rests on (the junction derive can't bury the seam — it mints wall slivers
+/// and churns settled exposure) must be VISIBLE: a "Storey junctions"
+/// checklist row goes red naming the neighbour + gap + zone size, and the
+/// plan's step-zone display flags the zone with the gap in its label.
+/// Deleting the bad step heals both.
+#[test]
+fn junction_mismatch_surfaces_in_checklist_and_plan_zones() {
+    let mut c = dimensioned_square_controller(); // storey 0 = 10×10
+    c.set_default_ceiling_height(2.4).unwrap();
+
+    // Single-storey: no junction row at all (nothing to junction against).
+    assert!(
+        !c.stage_a_checklist()
+            .iter()
+            .any(|i| i.label == "Storey junctions"),
+        "no junction row on a single-storey dwelling"
+    );
+
+    c.add_storey().unwrap();
+    finalise_current_storey_as_square(&mut c, 6.0); // storey 1 = 6×6 over it
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.materialize();
+
+    let junction_row = |c: &AppController| {
+        c.stage_a_checklist()
+            .into_iter()
+            .find(|i| i.label == "Storey junctions")
+            .expect("junction row present on a multi-storey dwelling")
+    };
+    // Aligned junction (flat below ceiling, level-0 floor): green, no zones.
+    let item = junction_row(&c);
+    assert_eq!(
+        item.status,
+        ChecklistStatus::AllStoreys,
+        "aligned: {:?}",
+        item.reasons
+    );
+    assert!(c.floor_step_zone_polygons().is_empty(), "no steps yet");
+
+    // Hand-step part of storey 1's floor 0.25 m DOWN — into the ceiling
+    // below (no matching ceiling step exists under it).
+    let p = |x: f32, y: f32| Point2f32::new(x, y);
+    c.step_regions.entry(1).or_default().push(StepRegion {
+        polygon: vec![p(1.0, 1.0), p(4.0, 1.0), p(4.0, 4.0), p(1.0, 4.0)],
+        level_m: -0.25,
+    });
+    c.mark_dirty().unwrap();
+    c.materialize();
+
+    let item = junction_row(&c);
+    assert_eq!(item.status, ChecklistStatus::Incomplete);
+    assert_eq!(item.reasons.len(), 1, "reasons: {:?}", item.reasons);
+    assert!(
+        item.reasons[0].contains("Floor sits 0.25 m below")
+            && item.reasons[0].contains("ceiling over a 9.0 m² zone"),
+        "reason names gap + neighbour + zone: {}",
+        item.reasons[0]
+    );
+    // A junction mismatch blocks Mapping completion outright.
+    assert!(!c.mapping_complete());
+
+    // The plan display data: the stepped zone shows, flagged, its label
+    // carrying level AND gap (drawn in the warning colour by the canvas).
+    let zones = c.floor_step_zone_polygons();
+    let flagged: Vec<_> = zones.iter().filter(|z| z.warning).collect();
+    assert_eq!(flagged.len(), 1, "zones: {zones:?}");
+    assert!(
+        flagged[0].label.contains("▼ 0.25 m")
+            && flagged[0].label.contains("⚠ 0.25 m into the ceiling below"),
+        "label: {}",
+        flagged[0].label
+    );
+
+    // Deleting the bad step heals the row and clears the warning zone.
+    c.delete_step_region(0);
+    c.materialize();
+    let item = junction_row(&c);
+    assert_eq!(
+        item.status,
+        ChecklistStatus::AllStoreys,
+        "healed: {:?}",
+        item.reasons
+    );
+    assert!(
+        c.floor_step_zone_polygons().iter().all(|z| !z.warning),
+        "no warning zones left"
+    );
+}
+
+/// A LEGITIMATE split-level junction — the below ceiling stepped and the
+/// upper floor seeded to match — shows its step zone on the plan (level
+/// label, no warning) and keeps the junction row green: the display marks
+/// geometry, the warning only physical impossibility.
+#[test]
+fn aligned_floor_step_shows_zone_without_warning() {
+    let mut c = dimensioned_square_controller(); // storey 0 = 10×10
+    c.set_default_ceiling_height(2.4).unwrap();
+    // Step the below ceiling UP by 0.3 over x ≥ 5 (regions-as-truth: apply
+    // straight onto the resolved record, as the ceiling-step flow would).
+    c.materialize();
+    {
+        let record = c.current_record.as_mut().unwrap();
+        let ring = vec![
+            Point2f64::new(5.0, 0.0),
+            Point2f64::new(10.0, 0.0),
+            Point2f64::new(10.0, 10.0),
+            Point2f64::new(5.0, 10.0),
+        ];
+        record.data.storeys[0].ceilings =
+            std::mem::take(&mut record.data.storeys[0].ceilings).with_z_deltas(&[(ring, 0.3)]);
+    }
+
+    c.add_storey().unwrap();
+    finalise_current_storey_as_square(&mut c, 10.0); // full footprint above
+    c.set_default_ceiling_height(2.4).unwrap();
+    // Seed the inherited step the add-storey flow derives: +0.3 over x ≥ 5.
+    let p = |x: f32, y: f32| Point2f32::new(x, y);
+    c.step_regions.entry(1).or_default().push(StepRegion {
+        polygon: vec![p(5.0, 0.0), p(10.0, 0.0), p(10.0, 10.0), p(5.0, 10.0)],
+        level_m: 0.3,
+    });
+    c.mark_dirty().unwrap();
+    c.materialize();
+
+    let item = c
+        .stage_a_checklist()
+        .into_iter()
+        .find(|i| i.label == "Storey junctions")
+        .unwrap();
+    assert_eq!(
+        item.status,
+        ChecklistStatus::AllStoreys,
+        "matched step is aligned: {:?}",
+        item.reasons
+    );
+    let zones = c.floor_step_zone_polygons();
+    assert_eq!(zones.len(), 1, "the raised zone displays: {zones:?}");
+    assert!(
+        zones[0].label.contains("▲ 0.30 m") && !zones[0].warning,
+        "level label, no warning: {:?}",
+        zones[0]
+    );
+}

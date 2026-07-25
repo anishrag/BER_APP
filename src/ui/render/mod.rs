@@ -40,7 +40,7 @@ pub use ber_render::{
 use std::collections::HashSet;
 
 use crate::controller::app_controller::{
-    ExposureSelection, PhaseDisplayRegion, StructureEdit, WallExposureView,
+    ExposureSelection, FloorStepZoneView, PhaseDisplayRegion, StructureEdit, WallExposureView,
 };
 use ber_model::ber::ber_struct::Ber;
 use ber_model::ber::common::ItemId;
@@ -216,7 +216,16 @@ pub fn render_ber(
             all_storeys_2d::render(painter, rect, ber, display_mode, view, selected);
         }
         (SketchMode::Storey3D, None) => {
-            full_house_3d::render(painter, rect, ber, display_mode, view, selected, hotspots, true);
+            full_house_3d::render(
+                painter,
+                rect,
+                ber,
+                display_mode,
+                view,
+                selected,
+                hotspots,
+                true,
+            );
         }
     }
 }
@@ -1049,6 +1058,68 @@ pub fn render_phase_regions(
             egui::FontId::proportional(14.0),
             color,
         );
+    }
+}
+
+/// Draw the RESOLVED floor-step zones — the always-on "steps are geometry"
+/// layer: a thin DASHED outline plus a small level label per zone, a
+/// deliberately lighter weight than the phase / step-mode tints (steps are
+/// geometry, not attribution — outline and label only, no fill). Zones the
+/// junction check flagged (`warning`) draw in the app's warning colour with
+/// a heavier outline, their label carrying the gap — and they draw even when
+/// `show_all` is false (the category toggle only hides the healthy zones;
+/// a physically impossible junction never hides).
+#[allow(clippy::too_many_arguments)]
+pub fn render_floor_step_zones(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    ber: Option<&Ber>,
+    current_storey_idx: Option<usize>,
+    sketch_mode: SketchMode,
+    view: ViewParams,
+    zones: &[FloorStepZoneView],
+    show_all: bool,
+) {
+    // Muted teal — same family as the step-mode overlays, desaturated so the
+    // always-on layer reads as background geometry.
+    const STEP_LINE: egui::Color32 = egui::Color32::from_rgb(64, 165, 152);
+    // The app's warning colour (the number-box ⚠ labels).
+    const WARN: egui::Color32 = egui::Color32::from_rgb(255, 120, 90);
+    if zones.is_empty() {
+        return;
+    }
+    let Some((_storey, t)) = storey_transform(rect, ber, current_storey_idx, sketch_mode, view)
+    else {
+        return;
+    };
+    for zone in zones {
+        if !show_all && !zone.warning {
+            continue;
+        }
+        if zone.ring.len() < 3 {
+            continue;
+        }
+        let (color, width) = if zone.warning {
+            (WARN, 2.5)
+        } else {
+            (STEP_LINE, 1.5)
+        };
+        let stroke = egui::Stroke::new(width, color);
+        let pts: Vec<egui::Pos2> = zone.ring.iter().map(|(x, y)| t.apply(*x, *y)).collect();
+        let n = pts.len();
+        for k in 0..n {
+            draw_dashed_segment(painter, pts[k], pts[(k + 1) % n], stroke);
+        }
+        if !zone.label.is_empty() {
+            let (lx, ly) = zone.label_pos;
+            painter.text(
+                t.apply(lx, ly),
+                egui::Align2::CENTER_CENTER,
+                &zone.label,
+                egui::FontId::proportional(12.0),
+                color,
+            );
+        }
     }
 }
 
