@@ -1645,6 +1645,17 @@ fn nudge_openings_off_buried_pieces(s: &StoreyDoc, storey: &mut Storey) {
                     let max_sill = q
                         .max_sill_for(e0.min(e1), z1 - z0)
                         .min(q.max_sill_for(e0.max(e1), z1 - z0));
+                    // Bottom at/above the piece's UNDERSIDE over the span —
+                    // a stepped-bottom piece's true underside can sit above
+                    // its polygon z-min (`p.z0`), which the coarse box test
+                    // above can't see. Flat bases: underside == p.z0, so
+                    // this changes nothing there.
+                    let under = q
+                        .base_z_at_along(e0.min(e1))
+                        .max(q.base_z_at_along(e0.max(e1)));
+                    if z0 < under - EPS {
+                        return false;
+                    }
                     z0 - p.base_z <= max_sill + 1e-6
                 })
                 .map(|p| {

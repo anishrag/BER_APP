@@ -1237,6 +1237,75 @@ mod tests {
         );
     }
 
+    /// The FLOOR BAND anchors to the base run's MINIMUM z, so `base_edge`
+    /// keeps the FULL footprint span across large base steps:
+    /// (a) an INTERNAL step above `MAX_FLOOR_STEP_M` (0.7 m > 0.6 m) that
+    ///     returns to floor level — the far corner is in-band, full span;
+    /// (b) a ring OPENING on a raised start (0.8 m above the run minimum,
+    ///     out of the old start-anchored band) descending to floor level —
+    ///     the min-anchored band still reaches the floor-level far corner
+    ///     (the old anchoring truncated this frame to the start vertex).
+    #[test]
+    fn base_edge_full_span_survives_a_large_base_step() {
+        let wall = |base_and_top: Vec<(f64, f64)>| WallRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(
+                base_and_top
+                    .into_iter()
+                    .map(|(x, z)| Point3f64::new(x, 0.0, z))
+                    .collect(),
+            ),
+            exposure: WallExposure::Exposed,
+            opes: Opes::default(),
+            construction_id: ItemId::default(),
+        };
+        // (a) internal 0.7 m up-step over x ∈ [2, 4], back down to z = 0.
+        let stepped = wall(vec![
+            (0.0, 0.0),
+            (2.0, 0.0),
+            (2.0, 0.7),
+            (4.0, 0.7),
+            (4.0, 0.0),
+            (6.0, 0.0),
+            (6.0, 2.4),
+            (0.0, 2.4),
+        ]);
+        let (a, b) = stepped.base_edge().expect("a real base edge");
+        assert!(
+            (a.x - 0.0).abs() < 1e-9 && (b.x - 6.0).abs() < 1e-9,
+            "full footprint span across the internal step, got {} → {}",
+            a.x,
+            b.x
+        );
+        let (_, _, len, base_z) = stepped.base_frame().expect("a full-span frame");
+        assert!((len - 6.0).abs() < 1e-9, "frame length 6, got {len}");
+        assert!((base_z - 0.0).abs() < 1e-9);
+        // (b) raised start: base descends 0.8 → 0.8 → 0 → 0 (the step down
+        // exceeds the 0.6 m band width, so a START-anchored band would have
+        // stopped at x = 2).
+        let raised_start = wall(vec![
+            (0.0, 0.8),
+            (2.0, 0.8),
+            (2.0, 0.0),
+            (6.0, 0.0),
+            (6.0, 2.4),
+            (0.0, 2.4),
+        ]);
+        let (a, b) = raised_start.base_edge().expect("a real base edge");
+        assert!(
+            (a.x - 0.0).abs() < 1e-9 && (b.x - 6.0).abs() < 1e-9,
+            "min-anchored band reaches the floor-level far corner, got {} → {}",
+            a.x,
+            b.x
+        );
+        let (_, _, len, base_z) = raised_start.base_frame().expect("a full-span frame");
+        assert!((len - 6.0).abs() < 1e-9, "frame length 6, got {len}");
+        assert!(
+            (base_z - 0.8).abs() < 1e-9,
+            "base_z stays the z at the ring start, got {base_z}"
+        );
+    }
+
     /// A ceiling step crossing the wall base makes a VERTICAL JUMP in the
     /// top: 6 vertices, with the base-edge contract at indices 0 and 1.
     #[test]

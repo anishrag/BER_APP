@@ -39,7 +39,7 @@ use crate::ber::roof::merge_footprint_rings;
 use domain::points::{point_to_segment_distance, Point2f64, Point3f64};
 
 use super::constructions::WallExposure;
-use super::wall_regions::{split_wall_by_line, WallRegion};
+use super::wall_regions::{split_wall_by_line, WallRegion, MAX_FLOOR_STEP_M};
 use super::{CeilingRegions, Polygon3D};
 
 /// How far INSIDE the roof footprint a wall's base midpoint must sit for the
@@ -179,12 +179,18 @@ fn face_area(ext: &[Point3f64]) -> f64 {
 
 /// Normalise a split piece's ring: a BOTTOM base frame or NO frame, never an
 /// inverted one. [`rebase_ring_start`](super::wall_regions::rebase_ring_start)
-/// rotates the ring to the valid frame with minimal base z — right for the
-/// horizontal cuts it was built for, but a piece above a DIAGONAL roof cut
-/// has no horizontal bottom edge, and its only valid rotation is an
-/// upside-down "base" along the TOP, which would let an opening re-home
-/// against a frame whose base_z is the piece's top. Keep the raw (frameless)
-/// ring instead — a frameless piece simply can't host an opening.
+/// rotates the ring to a valid floor-band frame — right for the horizontal
+/// cuts it was built for, but a piece above a DIAGONAL roof cut has no
+/// horizontal bottom edge, and its only valid rotation is an upside-down
+/// "base" along the TOP, which would let an opening re-home against a frame
+/// whose base_z is the piece's top. Keep the raw (frameless) ring instead —
+/// a frameless piece simply can't host an opening.
+///
+/// A frame counts as BOTTOM when its `base_z` sits in the piece's floor band
+/// (within [`MAX_FLOOR_STEP_M`](super::wall_regions::MAX_FLOOR_STEP_M) of the
+/// ring's minimum z) — a stepped/sloped underside can open a hair above the
+/// absolute minimum. Top-edge frames on any real-height piece sit a wall
+/// height above the band and stay refused.
 fn rebase_piece(piece: WallRegion) -> WallRegion {
     let z_min = piece
         .polygon
@@ -202,8 +208,8 @@ fn rebase_piece(piece: WallRegion) -> WallRegion {
             ..piece.clone()
         };
         match candidate.base_frame() {
-            // A rotation whose frame sits at the piece's bottom: take it.
-            Some((_, _, _, base_z)) if base_z <= z_min + 1e-6 => return candidate,
+            // A rotation whose frame sits in the piece's floor band: take it.
+            Some((_, _, _, base_z)) if base_z <= z_min + MAX_FLOOR_STEP_M => return candidate,
             // Remember a frameless rotation as the fallback.
             None if frameless.is_none() => frameless = Some(candidate),
             _ => {}

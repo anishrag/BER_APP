@@ -401,12 +401,14 @@ fn draw_fanned_surface(
             let Some(r) = storey.placeable_wall(id) else {
                 return;
             };
-            let v = &r.polygon.exterior;
-            if v.len() < 2 {
+            // The FULL footprint edge (`base_edge`, not raw exterior[0]/[1]) —
+            // a stepped-base wall's highlight must span the whole wall, not
+            // stop at the first step breakpoint.
+            let Some((va, vb)) = r.base_edge() else {
                 return;
-            }
-            let a = t.apply(v[0].x + offset.0, v[0].y + offset.1);
-            let b = t.apply(v[1].x + offset.0, v[1].y + offset.1);
+            };
+            let a = t.apply(va.x + offset.0, va.y + offset.1);
+            let b = t.apply(vb.x + offset.0, vb.y + offset.1);
             // A dark casing under the coloured core so the group highlight reads
             // clearly even when painted over the wall-exposure colours — the
             // selection has to be unmistakable on top of everything below it.

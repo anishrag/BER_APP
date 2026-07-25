@@ -148,12 +148,17 @@ pub fn stamp_wall_phases(ber: &mut Ber, idx: usize) {
     for i in 0..n_walls {
         // Pull the wall's base edge + current construction out as owned values
         // so the floor reads below don't alias the (later) mutable reassign.
+        // `base_edge()` (not raw `exterior[0]/[1]`) so a STEPPED-base wall
+        // samples at its FULL footprint-run midpoint — on a stepped ring
+        // `exterior[1]` is only the first step breakpoint, and the raw
+        // midpoint would sit inside the first sub-span's zone. Identical for
+        // a flat base (`base_edge` returns `exterior[0]/[1]` there).
         let (s1, s2, cur_cid) = {
-            let e = &ber.storeys[idx].walls.regions[i].polygon.exterior;
-            if e.len() < 2 {
+            let r = &ber.storeys[idx].walls.regions[i];
+            let Some((a, b)) = r.base_edge() else {
                 continue;
-            }
-            let (ax, ay, bx, by) = (e[0].x, e[0].y, e[1].x, e[1].y);
+            };
+            let (ax, ay, bx, by) = (a.x, a.y, b.x, b.y);
             let (dx, dy) = (bx - ax, by - ay);
             let len = (dx * dx + dy * dy).sqrt();
             if len < 1e-9 {
@@ -165,7 +170,7 @@ pub fn stamp_wall_phases(ber: &mut Ber, idx: usize) {
             let o = SIDE_SAMPLE_OFFSET_M;
             let s1 = ((mx + nx * o) as f32, (my + ny * o) as f32);
             let s2 = ((mx - nx * o) as f32, (my - ny * o) as f32);
-            (s1, s2, ber.storeys[idx].walls.regions[i].construction_id)
+            (s1, s2, r.construction_id)
         };
         let (ty, makeup, cur_phase, cur_name) = match ber.wall_construction(cur_cid) {
             Some(c) => (
@@ -854,6 +859,95 @@ mod tests {
             wall_phase_by_base(&ber, (5.0, 0.0), (5.0, 5.0)),
             ConstructionPhase::Unassigned,
             "party wall → older structure (unassigned base)"
+        );
+    }
+
+    /// A wall with a FLOOR-STEPPED base samples the phase at its FULL
+    /// footprint-run midpoint: on a stepped ring `exterior[1]` is only the
+    /// first step breakpoint, so the raw `e[0]/e[1]` midpoint (the old code)
+    /// sat inside the FIRST sub-span's zone — here the left zone at x = 2 —
+    /// while the wall's true midpoint (x = 5, via `base_edge()`) is in the
+    /// right zone. Flat-base walls are untouched (`base_edge()` returns
+    /// `exterior[0]/[1]` there — the whole existing suite pins that).
+    #[test]
+    fn stamp_wall_phases_stepped_base_samples_the_full_run_midpoint() {
+        use ber_model::ber::structural::{Opes, Polygon3D, WallRegion};
+        use domain::points::Point3f64;
+        let mut ber = Ber::default();
+        ber.construction_phases
+            .set_year(ConstructionPhase::Extension1, 2008);
+        ber.construction_phases
+            .set_year(ConstructionPhase::Extension2, 1995);
+        let left_cid = ber.ensure_floor_construction(
+            Default::default(),
+            Default::default(),
+            ConstructionPhase::Extension1,
+        );
+        let right_cid = ber.ensure_floor_construction(
+            Default::default(),
+            Default::default(),
+            ConstructionPhase::Extension2,
+        );
+        let wall_cid = ber.ensure_wall_construction(
+            Default::default(),
+            Default::default(),
+            ConstructionPhase::Unassigned,
+        );
+        // Floor zones: left x ∈ [0, 4.5], right x ∈ [4.5, 10], both y ∈ [0, 5].
+        let left = vec![
+            Point2f64::new(0.0, 0.0),
+            Point2f64::new(4.5, 0.0),
+            Point2f64::new(4.5, 5.0),
+            Point2f64::new(0.0, 5.0),
+        ];
+        let right = vec![
+            Point2f64::new(4.5, 0.0),
+            Point2f64::new(10.0, 0.0),
+            Point2f64::new(10.0, 5.0),
+            Point2f64::new(4.5, 5.0),
+        ];
+        let mut floors = FloorRegions::from_vertex_lists(vec![left], left_cid);
+        floors
+            .regions
+            .extend(FloorRegions::from_vertex_lists(vec![right], right_cid).regions);
+        // Perimeter wall along y = 0, x 0 → 10, with a 0.3 m floor step in
+        // its base over x ∈ [4, 6] (the vertex-order contract: base a → b
+        // with the step breakpoints, then the top back).
+        let wall = WallRegion {
+            id: Default::default(),
+            polygon: Polygon3D::new(vec![
+                Point3f64::new(0.0, 0.0, 0.0),
+                Point3f64::new(4.0, 0.0, 0.0),
+                Point3f64::new(4.0, 0.0, 0.3),
+                Point3f64::new(6.0, 0.0, 0.3),
+                Point3f64::new(6.0, 0.0, 0.0),
+                Point3f64::new(10.0, 0.0, 0.0),
+                Point3f64::new(10.0, 0.0, 2.4),
+                Point3f64::new(0.0, 0.0, 2.4),
+            ]),
+            exposure: WallExposure::Exposed,
+            opes: Opes::default(),
+            construction_id: wall_cid,
+        };
+        ber.storeys.push(Storey {
+            floors,
+            walls: WallRegions {
+                regions: vec![wall],
+            },
+            ..Storey::default()
+        });
+        stamp_wall_phases(&mut ber, 0);
+        let phase = ber
+            .wall_construction(ber.storeys[0].walls.regions[0].construction_id)
+            .unwrap()
+            .base
+            .construction_phase
+            .clone();
+        assert_eq!(
+            phase,
+            ConstructionPhase::Extension2,
+            "the stepped-base wall samples at the FULL-run midpoint (x = 5, \
+             right zone), not the first sub-span's midpoint (x = 2, left zone)"
         );
     }
 

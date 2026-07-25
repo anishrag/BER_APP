@@ -90,12 +90,17 @@ impl WallRegion {
     /// for a degenerate wall.
     ///
     /// The footprint `b` is the base vertex at maximum along-distance whose z
-    /// sits in the FLOOR band (within [`MAX_FLOOR_STEP_M`] of the base z) — a
-    /// merged guest that continues the wall LINE past `b` (the L-shape's
-    /// forward arm) is excluded because it rises out of the floor band, so a
-    /// merged wall's base edge stays its original footprint, keeping the amend
-    /// match stable across re-derivation. For a clean fresh ring this is just
-    /// the last base vertex (`exterior[top_start_index() - 1]`).
+    /// sits in the FLOOR band — within [`MAX_FLOOR_STEP_M`] ABOVE the base
+    /// run's MINIMUM z (not the z at `a`: a ring whose start vertex sits on a
+    /// raised part of a stepped/sloped underside — e.g. an inter-storey
+    /// remainder opening at the profile's tall end — must still reach the
+    /// true floor-level far corner, so the band anchors to the run's lowest
+    /// point). A merged guest that continues the wall LINE past `b` (the
+    /// L-shape's forward arm) is excluded because it rises out of the floor
+    /// band, so a merged wall's base edge stays its original footprint,
+    /// keeping the amend match stable across re-derivation. For a clean fresh
+    /// ring this is just the last base vertex
+    /// (`exterior[top_start_index() - 1]`).
     pub fn base_edge(&self) -> Option<(Point3f64, Point3f64)> {
         let e = &self.polygon.exterior;
         let k = self.top_start_index();
@@ -103,11 +108,14 @@ impl WallRegion {
             return None;
         }
         let a = e[0];
-        // The floor band: base z (at `a`) ± the largest plausible floor step.
-        // A merged guest's forward arm sits well above this (it rises toward
-        // the ceiling), so restricting `b` to the band drops it.
-        let lo = a.z - MAX_FLOOR_STEP_M;
-        let hi = a.z + MAX_FLOOR_STEP_M;
+        // The floor band: the base run's minimum z, plus the largest
+        // plausible floor step. A merged guest's forward arm sits well above
+        // this (it rises toward the ceiling), so restricting `b` to the band
+        // drops it, while a genuinely stepped underside (any run of steps
+        // returning to floor level) keeps its full span.
+        let min_z = e[..k].iter().map(|v| v.z).fold(f64::INFINITY, f64::min);
+        let lo = min_z - 1e-9;
+        let hi = min_z + MAX_FLOOR_STEP_M;
         let along = |v: &Point3f64| (v.x - a.x).hypot(v.y - a.y);
         let b = e[1..k]
             .iter()
@@ -280,7 +288,12 @@ impl WallRegion {
     /// [`min_sill_for`](Self::min_sill_for) is 0 and flat-wall behaviour is
     /// unchanged; a stepped/sloped base returns the real per-along underside
     /// (which `min_sill_for` then floors at 0 relative to `base_z`).
-    pub(crate) fn base_z_at_along(&self, d: f64) -> f64 {
+    ///
+    /// Public as THE underside query: `d` is wall-local along-metres (from
+    /// the base origin toward the far endpoint, the `base_frame`
+    /// parameterisation). Out-of-crate callers (the opening re-home nudge)
+    /// use it to test an opening bottom against a stepped underside.
+    pub fn base_z_at_along(&self, d: f64) -> f64 {
         let e = &self.polygon.exterior;
         let Some((origin, (ux, uy), _len, base_z)) = self.base_frame() else {
             return e.first().map(|v| v.z).unwrap_or(0.0);
@@ -645,11 +658,14 @@ pub fn split_wall_by_line(wall: &WallRegion, p0: Point3f64, p1: Point3f64) -> Ve
 /// vertical edge), so `base_edge()` degenerates and the piece can neither
 /// host an opening nor recover its painted span. Every cyclic ROTATION of the
 /// ring (never a reversal — orientation is preserved) is scored through the
-/// real `base_frame()`; the rotation with a valid frame at MINIMAL `base_z`
-/// wins (an upper piece's ring also admits an upside-down "base" along its
-/// TOP edge — minimal-z rejects it), ties broken by the longest base edge.
-/// Returns the region unchanged when no rotation yields a valid frame (a
-/// degenerate sliver).
+/// real `base_frame()`; only frames anchored in the piece's FLOOR BAND
+/// (`base_z` within [`MAX_FLOOR_STEP_M`] of the ring's minimum z) qualify —
+/// an upper piece's ring also admits an upside-down "base" along its TOP
+/// edge, which the band rejects outright. Among qualifying rotations the
+/// LONGEST base edge wins (the full footprint span, even when a stepped
+/// underside offers shorter in-band fragments), ties broken by minimal
+/// `base_z`. Returns the region unchanged when no rotation yields a
+/// qualifying frame (a degenerate sliver, or a piece with no bottom edge).
 ///
 /// SCOPE: called on every horizontal-cut output — by the InterStorey
 /// derivation AND by the wall-face partition resolve (`document`'s
@@ -664,7 +680,13 @@ pub fn rebase_ring_start(mut region: WallRegion) -> WallRegion {
     if n < 3 || region.base_frame().is_some() {
         return region; // degenerate, or already contract-conforming
     }
-    let mut best: Option<(f64, f64, usize)> = None; // (base_z, -len, rotation)
+    let z_min = region
+        .polygon
+        .exterior
+        .iter()
+        .map(|v| v.z)
+        .fold(f64::MAX, f64::min);
+    let mut best: Option<(f64, f64, usize)> = None; // (-len, base_z, rotation)
     for k in 1..n {
         let mut ring = region.polygon.exterior.clone();
         ring.rotate_left(k);
@@ -673,8 +695,13 @@ pub fn rebase_ring_start(mut region: WallRegion) -> WallRegion {
             ..region.clone()
         };
         if let Some((_, _, len, base_z)) = candidate.base_frame() {
-            if best.is_none_or(|(bz, nl, _)| (base_z, -len) < (bz, nl)) {
-                best = Some((base_z, -len, k));
+            // Only a frame anchored in the piece's floor band qualifies — an
+            // upside-down "base" along the TOP edge sits a wall height above
+            // the band and is rejected regardless of its length.
+            if base_z <= z_min + MAX_FLOOR_STEP_M
+                && best.is_none_or(|(nl, bz, _)| (-len, base_z) < (nl, bz))
+            {
+                best = Some((-len, base_z, k));
             }
         }
     }
@@ -684,16 +711,19 @@ pub fn rebase_ring_start(mut region: WallRegion) -> WallRegion {
     region
 }
 
-/// Half-width (m) of the FLOOR BAND used by [`WallRegion::base_edge`] to tell
-/// a wall's base profile apart from a coplanar-flush-merged riser arm that
-/// continues the wall LINE: a base vertex sits within this of the base z (a
-/// floor STEP), while a merged guest rises toward the ceiling, well above it.
-/// 0.6 m comfortably exceeds any real interior floor step (sub-grade
-/// thresholds, sunken rooms) yet stays far below the wall-to-ceiling rise, so
-/// the band cleanly separates the two. Only `base_edge` uses it — the base
-/// GEOMETRY itself is exact (`floor_profile_base`), this only disambiguates a
-/// post-MERGE ring whose base is a CONVENTION (the host's footprint).
-const MAX_FLOOR_STEP_M: f64 = 0.6;
+/// Height (m) of the FLOOR BAND above a ring's lowest base z, used by
+/// [`WallRegion::base_edge`] to tell a wall's base profile apart from a
+/// coplanar-flush-merged riser arm that continues the wall LINE: a base
+/// vertex sits within this of the run's minimum z (a floor STEP), while a
+/// merged guest rises toward the ceiling, well above it. 0.6 m comfortably
+/// exceeds any real interior floor step (sub-grade thresholds, sunken rooms)
+/// yet stays far below the wall-to-ceiling rise, so the band cleanly
+/// separates the two. The base GEOMETRY itself is exact
+/// (`floor_profile_base`) — the band only disambiguates ring CONVENTIONS:
+/// `base_edge`'s far endpoint on a post-MERGE ring, and which rotations
+/// [`rebase_ring_start`] / the roof-void `rebase_piece` accept as a real
+/// bottom frame (vs an upside-down top-edge one).
+pub(crate) const MAX_FLOOR_STEP_M: f64 = 0.6;
 
 // ── Shared-boundary riser extraction (private helpers for `riser_faces`) ──
 

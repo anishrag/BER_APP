@@ -928,8 +928,8 @@ fn clip_wall_by_band_profile(
         .map(|v| Point2f64::new((v.x - origin.x) * ux + (v.y - origin.y) * uy, v.z))
         .collect();
     // The profile only covers the BASE FRAME's span. A ring extending past
-    // it — a floor-band-truncated frame (the steep-profile remainder, see
-    // `steep_profile_truncates_remainder_base_to_the_floor_band`) or a
+    // it — a floor-band-truncated frame (a steep-profile remainder whose
+    // base run rises OUT of the band in the +along direction) or a
     // coplanar-flush merged host whose guest arm continues the line — must
     // not be cut: the band beyond the frame is unscanned, and continuing the
     // profile flat there would carve real wall face (a re-derive over the
@@ -1027,11 +1027,13 @@ fn band_piece_is_degenerate(poly: &Polygon<f64>) -> bool {
 /// that base is the profile polyline itself — a first-class wall that can
 /// host openings; starting at the global z-min could land on a short
 /// bottom-corner scrap instead). CAVEAT: `base_edge()` restricts the far
-/// endpoint to the FLOOR BAND (`MAX_FLOOR_STEP_M` = 0.6 m above the start
-/// vertex), so a remainder whose profile RISES more than that along the
-/// wall gets a frame truncated to the in-band leading run, not the full
-/// plan width — the opening-placement span shrinks accordingly (pinned by
-/// `steep_profile_truncates_remainder_base_to_the_floor_band`). `None` for
+/// endpoint to the FLOOR BAND (`MAX_FLOOR_STEP_M` = 0.6 m above the base
+/// run's MINIMUM z — so a ring opening at a profile's tall end still spans
+/// to the floor-level far corner, see
+/// `steep_profile_remainder_keeps_the_full_plan_span`); a remainder whose
+/// profile rises out of the band in the +along direction still gets a frame
+/// truncated to the in-band run, not the full plan width — the
+/// opening-placement span shrinks accordingly. `None` for
 /// a degenerate ring. Fresh id, parent's construction, `InterStorey` when
 /// `buried`, else the parent's exposure.
 fn wall_piece_from_plane_poly(
@@ -2265,16 +2267,18 @@ mod tests {
         assert_eq!(serde_json::to_string(&ber.storeys).unwrap(), once);
     }
 
-    /// PIN of a known frame limitation, not desired behaviour: a neighbour
-    /// ceiling rising MONOTONICALLY by more than `MAX_FLOOR_STEP_M` (0.6 m)
-    /// along the wall still cuts cleanly into covered piece + remainder, but
-    /// the remainder's `base_frame()` — whose far endpoint `base_edge`
-    /// restricts to the floor band of its start vertex — is TRUNCATED to the
-    /// in-band leading run of the profile, not the full plan span. The
-    /// opening-placement span shrinks accordingly. If the base logic ever
-    /// becomes profile-aware this pin should be updated to the full span.
+    /// A neighbour ceiling rising MONOTONICALLY by more than
+    /// `MAX_FLOOR_STEP_M` (0.6 m) along the wall cuts cleanly into covered
+    /// piece + remainder, and the remainder's `base_frame()` keeps the FULL
+    /// plan span: `base_edge`'s floor band anchors to the base run's MINIMUM
+    /// z, so a ring opening at the profile's TALL end still reaches the
+    /// floor-level far corner. (Before the band was anchored to the START
+    /// vertex's z, which truncated this frame to the in-band leading run —
+    /// a 4 m span. The mirrored orientation — ring opening at the LOW end,
+    /// profile rising out of the band in +along — can still truncate; that
+    /// residual limitation goes away with the profile-aware base work.)
     #[test]
-    fn steep_profile_truncates_remainder_base_to_the_floor_band() {
+    fn steep_profile_remainder_keeps_the_full_plan_span() {
         // Monotonic rise 2.4 → 3.2 → 4.0 abs = local −0.3 → 0.5 → 1.3:
         // base crossing at x = 1.5, total rise 1.6 m ≫ the 0.6 m floor band.
         let mut ber = sloped_back_fixture(2.4, 3.2, 4.0);
@@ -2290,22 +2294,22 @@ mod tests {
             (x0 - 0.0).abs() < 1e-6 && (x1 - 8.0).abs() < 1e-6,
             "the remainder GEOMETRY spans the whole wall, got x [{x0}, {x1}]"
         );
-        // …but its base frame is TRUNCATED. The parent wall's base runs
-        // x = 8 → 0 (perimeter direction), so the ring's leftmost-lowest
-        // start in the wall's own frame is the profile's TALL end (8, 1.3);
-        // the frame then reaches only the ridge vertex (4, 0.5) — a 4 m
-        // span, not the full 8 — because every farther bottom vertex is
-        // outside the 0.6 m floor band of the 1.3 start.
+        // The parent wall's base runs x = 8 → 0 (perimeter direction), so
+        // the ring's leftmost-lowest start in the wall's own frame is the
+        // profile's TALL end (8, 1.3) — `base_frame`'s base_z stays the z
+        // AT that start vertex — but the far endpoint is the floor-level
+        // corner (0, 0): the floor band anchors at the base run's minimum
+        // (z = 0), which the 1.3 start no longer truncates.
         let (_, _, rlen, base_z) = remainder
             .base_frame()
-            .expect("the remainder still has a base frame");
+            .expect("the remainder has a base frame");
         assert!(
             (base_z - 1.3).abs() < 1e-6,
             "frame anchors at the profile's tall end, got base_z {base_z}"
         );
         assert!(
-            (rlen - 4.0).abs() < 1e-6,
-            "frame truncated to the floor-band run (pinned limitation), got {rlen}"
+            (rlen - 8.0).abs() < 1e-6,
+            "full plan span even for a steep profile, got {rlen}"
         );
         // Steep or not, re-derivation stays exact.
         let once = serde_json::to_string(&ber.storeys).unwrap();
