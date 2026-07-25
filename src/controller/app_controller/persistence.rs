@@ -192,17 +192,53 @@ impl AppController {
         BerRepository::new(&self.conn).list().unwrap_or_default()
     }
 
-    /// Delete a saved BER (and its editing-layer snapshot). REFUSES to delete
-    /// the currently-open record — in practice unreachable, since Home (the
-    /// only place delete is offered) is only entered record-free via
-    /// `exit_ber`, but the guard keeps the invariant explicit.
+    /// Delete a saved BER (and its editing-layer snapshot), taking its photo
+    /// files with it. REFUSES to delete the currently-open record — in
+    /// practice unreachable, since Home (the only place delete is offered) is
+    /// only entered record-free via `exit_ber`, but the guard keeps the
+    /// invariant explicit.
+    ///
+    /// The file removal is the ONE sanctioned exception to "no picture left
+    /// behind": an explicit record deletion takes its ingested photo store
+    /// (files + thumbnails + the local satellite copy) along. Only files
+    /// INSIDE the app's photos dir are touched — an Evidence can point
+    /// outside it (a desktop-picked source, or an interim camera-original
+    /// thumbnail), and those must survive: the camera originals in
+    /// files/camera are the last-resort recovery copies and are never
+    /// deleted by anything.
     pub fn delete_ber(&mut self, id: &ItemId) -> Result<(), String> {
         if self.current_record.as_ref().is_some_and(|r| r.id == *id) {
             return Err("cannot delete the currently-open BER".to_string());
         }
-        BerRepository::new(&self.conn)
-            .delete(id)
-            .map_err(|e| format!("delete failed: {}", e))
+        let repo = BerRepository::new(&self.conn);
+        // Collect the record's photo files BEFORE the row goes.
+        let store =
+            std::fs::canonicalize(&self.photos_dir).unwrap_or_else(|_| self.photos_dir.clone());
+        let in_store = |p: &str| std::path::Path::new(p).starts_with(&store);
+        let doomed: Vec<String> = repo
+            .load(id)
+            .map(|record| {
+                record
+                    .data
+                    .all_photos()
+                    .into_iter()
+                    .flat_map(|p| {
+                        std::iter::once(p.file_path.clone()).chain(p.thumbnail_path.clone())
+                    })
+                    .chain(record.data.site_satellite_image.iter().flat_map(|s| {
+                        std::iter::once(s.file_path.clone()).chain(s.thumbnail_path.clone())
+                    }))
+                    .filter(|p| in_store(p))
+                    .collect()
+            })
+            .unwrap_or_default();
+        repo.delete(id)
+            .map_err(|e| format!("delete failed: {}", e))?;
+        // Row is gone — best-effort file cleanup (a missing file is fine).
+        for f in &doomed {
+            let _ = std::fs::remove_file(f);
+        }
+        Ok(())
     }
 
     /// Leave the workspace: flush any pending edits to disk, then clear ALL

@@ -11836,6 +11836,57 @@ fn list_and_delete_bers() {
     assert_eq!(list[0].id, b.id);
 }
 
+/// Deleting a BER takes its ingested photo files (and thumbnails) with it —
+/// the ONE sanctioned exception to "no picture left behind" — while files
+/// OUTSIDE the app's photo store referenced by an Evidence (desktop-picked
+/// sources, camera originals) survive.
+#[test]
+fn delete_ber_removes_its_photo_files_but_spares_out_of_store() {
+    use ber_model::ber::common::Evidence;
+
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    let tmp = std::env::temp_dir().join(format!("ber_delete_{}", ItemId::default().0));
+    let store = tmp.join("photos");
+    std::fs::create_dir_all(&store).unwrap();
+    c.set_photos_dir(store.clone());
+
+    let ber = c.create_ber(
+        "Doomed".to_string(),
+        NaiveDate::from_ymd_opt(2026, 3, 1).unwrap(),
+    );
+    // One in-store photo (+ thumbnail) and one out-of-store "original".
+    let in_file = store.join("shot.jpg");
+    let in_thumb = store.join("shot_thumb.jpg");
+    let outside = tmp.join("camera_original.jpg");
+    for f in [&in_file, &in_thumb, &outside] {
+        std::fs::write(f, b"jpeg").unwrap();
+    }
+    let photo = |file: &std::path::Path, thumb: Option<&std::path::Path>| Evidence {
+        file_path: file.to_string_lossy().into_owned(),
+        thumbnail_path: thumb.map(|t| t.to_string_lossy().into_owned()),
+        ..Default::default()
+    };
+    {
+        let data = &mut c.current_record.as_mut().unwrap().data;
+        data.photos.push(photo(&in_file, Some(&in_thumb)));
+        data.photos.push(photo(&outside, None));
+    }
+    let _ = c.mark_dirty();
+    c.flush_if_dirty().unwrap();
+    c.exit_ber().unwrap();
+
+    c.delete_ber(&ber.id).unwrap();
+    assert!(c.list_bers().is_empty(), "row deleted");
+    assert!(!in_file.exists(), "in-store photo file deleted");
+    assert!(!in_thumb.exists(), "in-store thumbnail deleted");
+    assert!(
+        outside.exists(),
+        "out-of-store file (camera original / picked source) survives"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 /// Key Details live edits (rename + date + phases) write through to the
 /// record and survive an exit → `open_ber` round-trip, i.e. they persisted.
 #[test]
