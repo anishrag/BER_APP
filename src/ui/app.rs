@@ -167,6 +167,11 @@ pub struct SketchState {
     /// target list is open; `Some(Some(target))` awaiting the confirm tap.
     pub structure_merge_phase:
         std::cell::RefCell<Option<Option<ber_model::ber::common::ConstructionPhase>>>,
+    /// In-flight Structure-review WINDOW-TYPE rename: `(type id, buffer)`.
+    pub structure_rename_window_type:
+        std::cell::RefCell<Option<(ber_model::ber::common::ItemId, String)>>,
+    /// In-flight Structure-review DOOR-type rename: `(old label, buffer)`.
+    pub structure_rename_door: std::cell::RefCell<Option<(String, String)>>,
     /// One-shot guard for the prefill above: set when the Height stage's
     /// prefill has been written, cleared when the stage closes, so the user's
     /// in-progress typing isn't clobbered every frame.
@@ -288,15 +293,6 @@ pub struct SketchState {
     /// otherwise-identical types.
     pub wt_gap_input: String,
     pub wt_name_input: String,
-    /// Rename buffer for an EXISTING shared window type selected in the
-    /// placement box's picker (streamed per keystroke), and which type id it
-    /// was last seeded from — a selection change reseeds it from that type's
-    /// stored name.
-    pub wt_rename_input: String,
-    pub wt_rename_for: Option<ber_model::ber::common::ItemId>,
-    /// "Edit door" box: the "rename all" checkbox — Apply also renames every
-    /// door sharing the door's previous type name. Reset per prompt.
-    pub door_rename_all: bool,
     /// Per-window overshading selected in the placement box (defaults to Average).
     /// Persists across placements; applied to each window as it's placed.
     pub overshading: ber_model::ber::fenestration::Overshading,
@@ -1340,7 +1336,6 @@ impl eframe::App for BerApp {
                                 opening_fields_prompt,
                                 opening_dim_error,
                                 existing_window_types,
-                                window_type_rename_error,
                                 elevation_view,
                                 roof_window_selected,
                                 delete_confirm_pending,
@@ -1363,7 +1358,6 @@ impl eframe::App for BerApp {
                                     prompt,
                                     c.opening_dim_error().map(str::to_owned),
                                     existing_types,
-                                    c.window_type_rename_error().cloned(),
                                     c.elevation_view(),
                                     c.roof_window_selection(),
                                     c.delete_confirm_pending(),
@@ -1862,12 +1856,8 @@ impl eframe::App for BerApp {
                                 door_draught_stripped: &mut self.sketch_state.door_draught_stripped,
                                 door_type_name_input: &mut self.sketch_state.door_type_name_input,
                                 door_kind: &mut self.sketch_state.door_kind,
-                                door_rename_all: &mut self.sketch_state.door_rename_all,
                                 wt_gap_input: &mut self.sketch_state.wt_gap_input,
                                 wt_name_input: &mut self.sketch_state.wt_name_input,
-                                wt_rename_input: &mut self.sketch_state.wt_rename_input,
-                                wt_rename_for: &mut self.sketch_state.wt_rename_for,
-                                window_type_rename_error,
                                 overshading: &mut self.sketch_state.overshading,
                                 pending_window_photos: &mut self.sketch_state.pending_window_photos,
                                 existing_window_types,
@@ -1900,6 +1890,10 @@ impl eframe::App for BerApp {
                                 structure_rename_group: &self.sketch_state.structure_rename_group,
                                 structure_rename_phase: &self.sketch_state.structure_rename_phase,
                                 structure_merge_phase: &self.sketch_state.structure_merge_phase,
+                                structure_rename_window_type: &self
+                                    .sketch_state
+                                    .structure_rename_window_type,
+                                structure_rename_door: &self.sketch_state.structure_rename_door,
                                 object_pins,
                                 object_pins_world,
                                 active_object_room,
@@ -2763,7 +2757,6 @@ impl eframe::App for BerApp {
                                             kind,
                                             draught_stripped,
                                             photos,
-                                            rename_all,
                                         } => {
                                             let _ = controller.borrow_mut().apply_door_edit(
                                                 width_m,
@@ -2772,11 +2765,13 @@ impl eframe::App for BerApp {
                                                 kind,
                                                 draught_stripped,
                                                 photos,
-                                                rename_all,
                                             );
                                         }
                                         SketchEvent::RenameWindowType { id, name } => {
                                             controller.borrow_mut().rename_window_type(id, name);
+                                        }
+                                        SketchEvent::RenameDoorType { old, new } => {
+                                            controller.borrow_mut().rename_door_type(old, new);
                                         }
                                         // Sets its own inline error (read back via
                                         // `opening_dim_error()`) — Result dropped like

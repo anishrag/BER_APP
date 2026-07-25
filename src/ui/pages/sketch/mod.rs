@@ -630,16 +630,20 @@ pub enum SketchEvent {
         /// Photos picked in the box, attached to this door (per-door, not a
         /// shared group).
         photos: Vec<(std::path::PathBuf, crate::ui::widgets::PhotoQuality)>,
-        /// Also rename every door sharing this door's PREVIOUS type name to the
-        /// new name (bulk retype across all storeys), not just this one.
-        rename_all: bool,
     },
-    /// Rename the shared window TYPE `id` (streamed per keystroke from the
-    /// placement/edit box's name field when an EXISTING type is selected). The
-    /// controller keeps the last valid name on rejection and parks a hint.
+    /// Structure review: rename the shared window TYPE `id`'s model name
+    /// (committed by the review item's Save button). The controller keeps the
+    /// last valid name on rejection and parks a hint the review shows.
     RenameWindowType {
         id: ItemId,
         name: String,
+    },
+    /// Structure review: rename every door whose `type_name` is `old` to
+    /// `new` (doors group by their free-text type label, so the rename is a
+    /// house-wide bulk retype).
+    RenameDoorType {
+        old: String,
+        new: String,
     },
     /// Apply the elevation window edit (a wall window, or a roof window — the
     /// controller dispatches on what's being edited): resize + retype from the
@@ -1555,16 +1559,6 @@ pub struct SketchView<'a> {
     pub wt_certified: &'a mut bool,
     pub wt_gap_input: &'a mut String,
     pub wt_name_input: &'a mut String,
-    /// Rename buffer for an EXISTING shared window type selected in the picker
-    /// (streamed per keystroke via [`SketchEvent::RenameWindowType`]), plus
-    /// which type id it was last seeded from — a selection change reseeds the
-    /// buffer from that type's stored name. See [`crate::ui::app::SketchState`].
-    pub wt_rename_input: &'a mut String,
-    pub wt_rename_for: &'a mut Option<ItemId>,
-    /// The parked window-type rename rejection (type id + user-facing hint),
-    /// copied from the controller — shown under the rename field while it
-    /// matches the selected type.
-    pub window_type_rename_error: Option<(ItemId, String)>,
     /// Per-window overshading selected in the placement box. See
     /// [`crate::ui::app::SketchState`].
     pub overshading: &'a mut Overshading,
@@ -1576,10 +1570,6 @@ pub struct SketchView<'a> {
     /// seeded from the door being edited. See [`crate::ui::app::SketchState`].
     pub door_type_name_input: &'a mut String,
     pub door_kind: &'a mut DoorKind,
-    /// "Edit door" box: the "rename all" checkbox — when ticked, Apply also
-    /// renames every door sharing the door's PREVIOUS type name. Offered only
-    /// while the typed name differs from the original; reset per prompt.
-    pub door_rename_all: &'a mut bool,
     /// The new-window-type draught-stripped checkbox (default ON).
     pub wt_draught_stripped: &'a mut bool,
     /// Photos picked in the placement box for the window being placed, each
@@ -1670,6 +1660,12 @@ pub struct SketchView<'a> {
     /// In-flight review PHASE-nickname rename: `(target phase, edit buffer)`.
     pub structure_rename_phase:
         &'a std::cell::RefCell<Option<(ber_model::ber::common::ConstructionPhase, String)>>,
+    /// In-flight review WINDOW-TYPE rename: `(type id, edit buffer)` — the
+    /// shared type's model name.
+    pub structure_rename_window_type: &'a std::cell::RefCell<Option<(ItemId, String)>>,
+    /// In-flight review DOOR-type rename: `(old type label, edit buffer)` —
+    /// committing retypes every door sharing the old label.
+    pub structure_rename_door: &'a std::cell::RefCell<Option<(String, String)>>,
     /// Review MERGE-phase picker: `Some(None)` = target list open,
     /// `Some(Some(target))` = confirm stage.
     pub structure_merge_phase:

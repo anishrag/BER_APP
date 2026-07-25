@@ -1659,6 +1659,8 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 view.structure_rename_group,
                 view.structure_rename_phase,
                 view.structure_merge_phase,
+                view.structure_rename_window_type,
+                view.structure_rename_door,
                 on_event,
             );
         }
@@ -5757,8 +5759,11 @@ fn structure_review_overlay<F: FnMut(UiEvent)>(
     rename_group: &std::cell::RefCell<Option<(ber_model::ber::common::ItemId, String)>>,
     rename_phase: &std::cell::RefCell<Option<(ber_model::ber::common::ConstructionPhase, String)>>,
     merge_phase: &std::cell::RefCell<Option<Option<ber_model::ber::common::ConstructionPhase>>>,
+    rename_window_type: &std::cell::RefCell<Option<(ber_model::ber::common::ItemId, String)>>,
+    rename_door: &std::cell::RefCell<Option<(String, String)>>,
     on_event: &mut F,
 ) {
+    use crate::controller::app_controller::StructureReviewRename as Srr;
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, egui::Color32::from_gray(20));
 
@@ -5868,172 +5873,295 @@ fn structure_review_overlay<F: FnMut(UiEvent)>(
                 );
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new(&srv.title).strong().size(20.0));
-                    // Rename affordances (constructions only): the review is
-                    // where survey-time shorthand names get firmed up — they
-                    // feed the letters and every picker.
-                    if let Some(rn) = srv.rename.as_ref() {
-                        let editing =
-                            rename_group.borrow().is_some() || rename_phase.borrow().is_some();
-                        if !editing {
-                            if ui
-                                .small_button("✏ Rename")
-                                .on_hover_text("Rename this group")
-                                .clicked()
-                            {
-                                *rename_group.borrow_mut() =
-                                    Some((rn.group_id, rn.group_name.clone()));
-                            }
-                            if ui
-                                .small_button("✏ Rename phase")
-                                .on_hover_text("Rename the construction phase (house-wide)")
-                                .clicked()
-                            {
-                                *rename_phase.borrow_mut() =
-                                    Some((rn.phase.clone(), rn.phase_name.clone()));
+                    // Rename affordances: the review is where survey-time
+                    // shorthand names get firmed up — they feed the letters
+                    // and every picker. Kind-aware: constructions offer group
+                    // + phase renames; a window type its model name; a door
+                    // its (shared) type label.
+                    match srv.rename.as_ref() {
+                        Some(Srr::Construction(rn)) => {
+                            let editing =
+                                rename_group.borrow().is_some() || rename_phase.borrow().is_some();
+                            if !editing {
+                                if ui
+                                    .small_button("✏ Rename")
+                                    .on_hover_text("Rename this group")
+                                    .clicked()
+                                {
+                                    *rename_group.borrow_mut() =
+                                        Some((rn.group_id, rn.group_name.clone()));
+                                }
+                                if ui
+                                    .small_button("✏ Rename phase")
+                                    .on_hover_text("Rename the construction phase (house-wide)")
+                                    .clicked()
+                                {
+                                    *rename_phase.borrow_mut() =
+                                        Some((rn.phase.clone(), rn.phase_name.clone()));
+                                }
                             }
                         }
-                    }
-                });
-                if let Some(rn) = srv.rename.as_ref() {
-                    // A buffer left over from another item dies here.
-                    if rename_group
-                        .borrow()
-                        .as_ref()
-                        .is_some_and(|(id, _)| *id != rn.group_id)
-                    {
-                        *rename_group.borrow_mut() = None;
-                    }
-                    if rename_phase
-                        .borrow()
-                        .as_ref()
-                        .is_some_and(|(p, _)| *p != rn.phase)
-                    {
-                        *rename_phase.borrow_mut() = None;
-                    }
-                    let mut group_done = false;
-                    if let Some((id, buf)) = rename_group.borrow_mut().as_mut() {
-                        ui.horizontal(|ui| {
-                            ui.add(
-                                egui::TextEdit::singleline(buf)
-                                    .hint_text("group name (blank = type label)")
-                                    .desired_width(220.0),
-                            );
-                            if ui.button("Save").clicked() {
-                                on_event(UiEvent::Sketch(SketchEvent::RenameStructureGroup {
-                                    id: *id,
-                                    name: buf.clone(),
-                                }));
-                                group_done = true;
-                            }
-                            if ui.button("Cancel").clicked() {
-                                group_done = true;
-                            }
-                        });
-                    }
-                    if group_done {
-                        *rename_group.borrow_mut() = None;
-                    }
-                    let mut phase_done = false;
-                    if let Some((phase, buf)) = rename_phase.borrow_mut().as_mut() {
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                egui::RichText::new("Phase:").color(egui::Color32::from_gray(160)),
-                            );
-                            ui.add(
-                                egui::TextEdit::singleline(buf)
-                                    .hint_text(&rn.phase_default)
-                                    .desired_width(180.0),
-                            );
-                            if ui.button("Save").clicked() {
-                                on_event(UiEvent::Sketch(SketchEvent::RenameConstructionPhase {
-                                    phase: phase.clone(),
-                                    name: buf.clone(),
-                                }));
-                                phase_done = true;
-                            }
-                            if ui.button("Cancel").clicked() {
-                                phase_done = true;
-                            }
-                        });
-                        ui.label(
-                            egui::RichText::new(
-                                "Renames the phase everywhere it appears (blank = default).",
-                            )
-                            .size(11.0)
-                            .color(egui::Color32::from_gray(120)),
-                        );
-                    }
-                    if phase_done {
-                        *rename_phase.borrow_mut() = None;
-                    }
-                    // ── Merge phase: picker → confirm → event ──
-                    let phase_label = if rn.phase_name.is_empty() {
-                        rn.phase_default.clone()
-                    } else {
-                        rn.phase_name.clone()
-                    };
-                    let merge_state = merge_phase.borrow().clone();
-                    match merge_state {
-                        None => {
-                            if !rn.merge_targets.is_empty()
-                                && rename_group.borrow().is_none()
-                                && rename_phase.borrow().is_none()
+                        Some(Srr::WindowType { id, name, .. }) => {
+                            if rename_window_type.borrow().is_none()
                                 && ui
-                                    .small_button("⇄ Merge phase…")
-                                    .on_hover_text(
-                                        "Fold this phase into another — everything that \
-                                         points at it re-points",
-                                    )
+                                    .small_button("✏ Rename")
+                                    .on_hover_text("Rename this window type")
                                     .clicked()
                             {
-                                *merge_phase.borrow_mut() = Some(None);
+                                *rename_window_type.borrow_mut() = Some((*id, name.clone()));
                             }
                         }
-                        Some(None) => {
-                            ui.label(
-                                egui::RichText::new(format!("Merge '{phase_label}' into:"))
-                                    .color(egui::Color32::from_gray(160)),
-                            );
-                            ui.horizontal_wrapped(|ui| {
-                                for (target, label) in &rn.merge_targets {
-                                    if ui.button(label).clicked() {
-                                        *merge_phase.borrow_mut() = Some(Some(target.clone()));
-                                    }
+                        Some(Srr::Door { type_name }) => {
+                            if rename_door.borrow().is_none()
+                                && ui
+                                    .small_button("✏ Rename")
+                                    .on_hover_text("Rename this door type (every door sharing it)")
+                                    .clicked()
+                            {
+                                *rename_door.borrow_mut() =
+                                    Some((type_name.clone(), type_name.clone()));
+                            }
+                        }
+                        None => {}
+                    }
+                });
+                match srv.rename.as_ref() {
+                    Some(Srr::Construction(rn)) => {
+                        // A buffer left over from another item dies here.
+                        if rename_group
+                            .borrow()
+                            .as_ref()
+                            .is_some_and(|(id, _)| *id != rn.group_id)
+                        {
+                            *rename_group.borrow_mut() = None;
+                        }
+                        if rename_phase
+                            .borrow()
+                            .as_ref()
+                            .is_some_and(|(p, _)| *p != rn.phase)
+                        {
+                            *rename_phase.borrow_mut() = None;
+                        }
+                        let mut group_done = false;
+                        if let Some((id, buf)) = rename_group.borrow_mut().as_mut() {
+                            ui.horizontal(|ui| {
+                                ui.add(
+                                    egui::TextEdit::singleline(buf)
+                                        .hint_text("group name (blank = type label)")
+                                        .desired_width(220.0),
+                                );
+                                if ui.button("Save").clicked() {
+                                    on_event(UiEvent::Sketch(SketchEvent::RenameStructureGroup {
+                                        id: *id,
+                                        name: buf.clone(),
+                                    }));
+                                    group_done = true;
                                 }
                                 if ui.button("Cancel").clicked() {
-                                    *merge_phase.borrow_mut() = None;
+                                    group_done = true;
                                 }
                             });
                         }
-                        Some(Some(target)) => {
-                            let target_label = rn
-                                .merge_targets
-                                .iter()
-                                .find(|(p, _)| *p == target)
-                                .map(|(_, l)| l.clone())
-                                .unwrap_or_else(|| target.default_name());
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "Merge '{phase_label}' into '{target_label}'? Every \
-                                     surface, year record and follow-up tick moves over."
-                                ))
-                                .color(egui::Color32::from_rgb(210, 150, 60)),
-                            );
+                        if group_done {
+                            *rename_group.borrow_mut() = None;
+                        }
+                        let mut phase_done = false;
+                        if let Some((phase, buf)) = rename_phase.borrow_mut().as_mut() {
                             ui.horizontal(|ui| {
-                                if ui.button(egui::RichText::new("Merge").strong()).clicked() {
+                                ui.label(
+                                    egui::RichText::new("Phase:")
+                                        .color(egui::Color32::from_gray(160)),
+                                );
+                                ui.add(
+                                    egui::TextEdit::singleline(buf)
+                                        .hint_text(&rn.phase_default)
+                                        .desired_width(180.0),
+                                );
+                                if ui.button("Save").clicked() {
                                     on_event(UiEvent::Sketch(
-                                        SketchEvent::MergeConstructionPhase {
-                                            from: rn.phase.clone(),
-                                            to: target,
+                                        SketchEvent::RenameConstructionPhase {
+                                            phase: phase.clone(),
+                                            name: buf.clone(),
                                         },
                                     ));
-                                    *merge_phase.borrow_mut() = None;
-                                } else if ui.button("Cancel").clicked() {
-                                    *merge_phase.borrow_mut() = None;
+                                    phase_done = true;
+                                }
+                                if ui.button("Cancel").clicked() {
+                                    phase_done = true;
+                                }
+                            });
+                            ui.label(
+                                egui::RichText::new(
+                                    "Renames the phase everywhere it appears (blank = default).",
+                                )
+                                .size(11.0)
+                                .color(egui::Color32::from_gray(120)),
+                            );
+                        }
+                        if phase_done {
+                            *rename_phase.borrow_mut() = None;
+                        }
+                        // ── Merge phase: picker → confirm → event ──
+                        let phase_label = if rn.phase_name.is_empty() {
+                            rn.phase_default.clone()
+                        } else {
+                            rn.phase_name.clone()
+                        };
+                        let merge_state = merge_phase.borrow().clone();
+                        match merge_state {
+                            None => {
+                                if !rn.merge_targets.is_empty()
+                                    && rename_group.borrow().is_none()
+                                    && rename_phase.borrow().is_none()
+                                    && ui
+                                        .small_button("⇄ Merge phase…")
+                                        .on_hover_text(
+                                            "Fold this phase into another — everything that \
+                                         points at it re-points",
+                                        )
+                                        .clicked()
+                                {
+                                    *merge_phase.borrow_mut() = Some(None);
+                                }
+                            }
+                            Some(None) => {
+                                ui.label(
+                                    egui::RichText::new(format!("Merge '{phase_label}' into:"))
+                                        .color(egui::Color32::from_gray(160)),
+                                );
+                                ui.horizontal_wrapped(|ui| {
+                                    for (target, label) in &rn.merge_targets {
+                                        if ui.button(label).clicked() {
+                                            *merge_phase.borrow_mut() = Some(Some(target.clone()));
+                                        }
+                                    }
+                                    if ui.button("Cancel").clicked() {
+                                        *merge_phase.borrow_mut() = None;
+                                    }
+                                });
+                            }
+                            Some(Some(target)) => {
+                                let target_label = rn
+                                    .merge_targets
+                                    .iter()
+                                    .find(|(p, _)| *p == target)
+                                    .map(|(_, l)| l.clone())
+                                    .unwrap_or_else(|| target.default_name());
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "Merge '{phase_label}' into '{target_label}'? Every \
+                                     surface, year record and follow-up tick moves over."
+                                    ))
+                                    .color(egui::Color32::from_rgb(210, 150, 60)),
+                                );
+                                ui.horizontal(|ui| {
+                                    if ui.button(egui::RichText::new("Merge").strong()).clicked() {
+                                        on_event(UiEvent::Sketch(
+                                            SketchEvent::MergeConstructionPhase {
+                                                from: rn.phase.clone(),
+                                                to: target,
+                                            },
+                                        ));
+                                        *merge_phase.borrow_mut() = None;
+                                    } else if ui.button("Cancel").clicked() {
+                                        *merge_phase.borrow_mut() = None;
+                                    }
+                                });
+                            }
+                        }
+                    }
+                    // A WINDOW TYPE: one name field for the shared type's
+                    // model name. Save commits (like the construction
+                    // renames); a refused rename parks a hint the controller
+                    // sends back on the item.
+                    Some(Srr::WindowType {
+                        id,
+                        placeholder,
+                        error,
+                        ..
+                    }) => {
+                        // A buffer left over from another type dies here.
+                        if rename_window_type
+                            .borrow()
+                            .as_ref()
+                            .is_some_and(|(bid, _)| bid != id)
+                        {
+                            *rename_window_type.borrow_mut() = None;
+                        }
+                        let mut done = false;
+                        if let Some((tid, buf)) = rename_window_type.borrow_mut().as_mut() {
+                            ui.horizontal(|ui| {
+                                ui.add(
+                                    egui::TextEdit::singleline(buf)
+                                        .hint_text(placeholder.as_str())
+                                        .desired_width(220.0),
+                                );
+                                if ui.button("Save").clicked() {
+                                    on_event(UiEvent::Sketch(SketchEvent::RenameWindowType {
+                                        id: *tid,
+                                        name: buf.clone(),
+                                    }));
+                                    done = true;
+                                }
+                                if ui.button("Cancel").clicked() {
+                                    done = true;
                                 }
                             });
                         }
+                        if done {
+                            *rename_window_type.borrow_mut() = None;
+                        }
+                        if let Some(hint) = error {
+                            ui.label(
+                                egui::RichText::new(format!("⚠ {hint}"))
+                                    .color(egui::Color32::from_rgb(255, 120, 90)),
+                            );
+                        }
                     }
+                    // A DOOR: one field for its type label — Save retypes
+                    // every door sharing the OLD label (the label is the
+                    // group).
+                    Some(Srr::Door { type_name }) => {
+                        // A buffer keyed to another door's label dies here.
+                        if rename_door
+                            .borrow()
+                            .as_ref()
+                            .is_some_and(|(old, _)| old != type_name)
+                        {
+                            *rename_door.borrow_mut() = None;
+                        }
+                        let mut done = false;
+                        if let Some((old, buf)) = rename_door.borrow_mut().as_mut() {
+                            ui.horizontal(|ui| {
+                                ui.add(
+                                    egui::TextEdit::singleline(buf)
+                                        .hint_text("door type name")
+                                        .desired_width(220.0),
+                                );
+                                if ui.button("Save").clicked() {
+                                    on_event(UiEvent::Sketch(SketchEvent::RenameDoorType {
+                                        old: old.clone(),
+                                        new: buf.clone(),
+                                    }));
+                                    done = true;
+                                }
+                                if ui.button("Cancel").clicked() {
+                                    done = true;
+                                }
+                            });
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "Renames every \"{old}\" door across the house."
+                                ))
+                                .size(11.0)
+                                .color(egui::Color32::from_gray(120)),
+                            );
+                        }
+                        if done {
+                            *rename_door.borrow_mut() = None;
+                        }
+                    }
+                    None => {}
                 }
                 ui.add_space(8.0);
                 for (label, value) in &srv.detail_lines {

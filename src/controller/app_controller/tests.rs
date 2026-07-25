@@ -18364,7 +18364,10 @@ fn structure_review_renames_group_and_phase() {
     c.materialize();
     c.set_structure_review_mode(true);
     let v = c.structure_review_view().expect("review has items");
-    let rn = v.rename.expect("construction item offers renames");
+    let rn = match v.rename.expect("construction item offers renames") {
+        StructureReviewRename::Construction(rn) => rn,
+        _ => panic!("expected a construction rename"),
+    };
     assert_eq!(rn.group_name, "", "no shorthand typed in this fixture");
 
     c.rename_structure_group(rn.group_id, "300mm cavity, pumped".to_string());
@@ -18378,7 +18381,10 @@ fn structure_review_renames_group_and_phase() {
         "phase nickname shows in the Phase line: {:?}",
         v.detail_lines
     );
-    let rn2 = v.rename.expect("still offered");
+    let rn2 = match v.rename.expect("still offered") {
+        StructureReviewRename::Construction(rn) => rn,
+        _ => panic!("expected a construction rename"),
+    };
     assert_eq!(rn2.group_name, "300mm cavity, pumped", "prefill = current");
     assert_eq!(rn2.phase_name, "Main house");
 
@@ -18429,7 +18435,10 @@ fn structure_review_merges_phases() {
     c.materialize();
     c.set_structure_review_mode(true);
     let v = c.structure_review_view().unwrap();
-    let rn = v.rename.expect("construction item");
+    let rn = match v.rename.expect("construction item") {
+        StructureReviewRename::Construction(rn) => rn,
+        _ => panic!("expected a construction rename"),
+    };
     assert_eq!(rn.phase, ConstructionPhase::Extension1);
     assert!(
         rn.merge_targets
@@ -18468,7 +18477,10 @@ fn structure_review_merges_phases() {
         "extension tick retires when merged into Original"
     );
     let v = c.structure_review_view().unwrap();
-    let rn = v.rename.expect("still a construction item");
+    let rn = match v.rename.expect("still a construction item") {
+        StructureReviewRename::Construction(rn) => rn,
+        _ => panic!("expected a construction rename"),
+    };
     assert_eq!(rn.phase, ConstructionPhase::Original);
     assert!(
         !rn.merge_targets
@@ -25796,7 +25808,6 @@ fn editing_a_standalone_door_persists_and_survives_reopen() {
         DoorKind::HalfGlazed,
         false,
         Vec::new(),
-        false,
     )
     .expect("door edit applies");
     c.materialize();
@@ -26577,13 +26588,12 @@ fn vent_unit_add_sets_system_type_delete_reverts() {
     );
 }
 
-/// Renaming a shared WINDOW TYPE from the placement/edit box streams per
-/// keystroke through `AppController::rename_window_type` (mirroring the
-/// structure-group rename): a valid name lands on the type and clears any
-/// parked hint; a collision with ANOTHER type's name or an empty name is
-/// rejected — the durable name keeps its last valid value and the hint parks
-/// on `window_type_rename_error()` until a valid rename (or a mode/tool
-/// change) clears it.
+/// Renaming a shared WINDOW TYPE from the Structure review drives
+/// `AppController::rename_window_type` (mirroring the group rename): a valid
+/// name lands on the type and clears any parked hint; a collision with
+/// ANOTHER type's name or an empty name is rejected — the durable name keeps
+/// its last valid value and the hint parks on `window_type_rename_error()`
+/// until a valid rename (or a fresh review session) clears it.
 #[test]
 fn rename_window_type_streams_and_parks_rejections() {
     use ber_model::ber::fenestration::{Frame, Glazing};
@@ -26660,23 +26670,23 @@ fn rename_window_type_streams_and_parks_rejections() {
     assert_eq!(name_of(&c, a).as_deref(), Some("Delta"));
     assert!(c.window_type_rename_error().is_none());
 
-    // A stale hint doesn't outlive a tool change.
+    // A stale hint doesn't outlive the review session.
     c.rename_window_type(a, "Beta".into());
     assert!(c.window_type_rename_error().is_some());
-    c.set_openings_tool(OpeningToolKind::Edit);
+    c.set_structure_review_mode(true);
     assert!(
         c.window_type_rename_error().is_none(),
-        "tool change clears the parked hint"
+        "a fresh review session clears the parked hint"
     );
 }
 
 /// The "rename all" tick on the Edit-door box: Apply retypes EVERY door
-/// sharing the edited door's PREVIOUS type name (across the record), while a
-/// door with a different name keeps it. Without the tick only the edited door
-/// changes.
+/// sharing the old trimmed `type_name` (across the record) — doors group by
+/// their free-text label, so renaming the label retypes the group — while a
+/// door with a different name keeps it.
 #[test]
-fn apply_door_edit_rename_all_bulk_renames_matching_doors() {
-    use ber_model::ber::fenestration::{DoorKind, OpeningPlacement, Overshading};
+fn review_rename_door_type_bulk_renames_matching_doors() {
+    use ber_model::ber::fenestration::Overshading;
     let mut c = dimensioned_square_controller();
     c.set_default_ceiling_height(2.8).unwrap();
     c.materialize();
@@ -26703,49 +26713,122 @@ fn apply_door_edit_rename_all_bulk_renames_matching_doors() {
         .expect("door places");
     }
     c.materialize();
-    let (did, along, other_id) = {
+    let other_id = {
         let record = c.current_record.as_mut().unwrap();
         let doors = &mut record.data.storeys[0].doors;
         assert_eq!(doors.len(), 3, "three doors placed");
         assert!(doors.iter().all(|d| d.type_name == "Door"));
         doors[2].type_name = "Other".to_string();
-        let along = match &doors[0].placement {
-            Some(OpeningPlacement::Wall { along_m, .. }) => *along_m,
-            other => panic!("expected a wall placement, got {other:?}"),
-        };
-        (doors[0].id, along, doors[2].id)
+        doors[2].id
     };
-    // Edit the first door via the elevation flow, with "rename all" ticked.
-    c.set_openings_tool(OpeningToolKind::Edit);
-    c.openings_pointer_down(5.0, -0.2, 0.5);
-    assert!(c.elevation_wall().is_some(), "elevation opened");
-    c.elevation_pointer_down(along, 1.0);
-    c.elevation_pointer_up();
-    c.start_edit_selected_door();
-    c.apply_door_edit(
-        0.9,
-        2.0,
-        "Front door".to_string(),
-        DoorKind::Solid,
-        true,
-        Vec::new(),
-        true, // rename all "Door" doors
-    )
-    .expect("door edit applies");
+    // The review-path rename: every "Door" becomes "Front door".
+    c.rename_door_type("Door".to_string(), "Front door".to_string());
     let doors = &c.current_record.as_ref().unwrap().data.storeys[0].doors;
-    assert_eq!(
-        doors.iter().find(|d| d.id == did).unwrap().type_name,
-        "Front door",
-        "the edited door takes the new name"
-    );
     assert_eq!(
         doors.iter().filter(|d| d.type_name == "Front door").count(),
         2,
-        "the OTHER \"Door\" door is bulk-renamed too"
+        "both \"Door\" doors are bulk-renamed"
     );
     assert_eq!(
         doors.iter().find(|d| d.id == other_id).unwrap().type_name,
         "Other",
         "a non-matching door keeps its name"
     );
+}
+
+/// The Structure review offers a rename affordance on WINDOW-TYPE and DOOR
+/// items: the window item carries the type's id + current model name (and the
+/// parked rejection hint when one is targeted at it); the door item carries
+/// its current type label as the bulk-rename key.
+#[test]
+fn structure_review_items_carry_window_and_door_rename_info() {
+    use ber_model::ber::fenestration::Overshading;
+    let mut c = dimensioned_square_controller();
+    c.set_default_ceiling_height(2.8).unwrap();
+    c.materialize();
+    // One window (creating a shared type named "Alpha") + one door.
+    c.select_opening_tool(OpeningToolKind::Window);
+    c.openings_pointer_down(5.0, -0.2, 0.5);
+    c.place_opening(
+        1.2,
+        1.0,
+        false,
+        false,
+        None,
+        None,
+        None,
+        WindowTypeChoice::New {
+            glazing: ber_model::ber::fenestration::Glazing::Double,
+            frame: ber_model::ber::fenestration::Frame::WoodUPVC,
+            year: 2010,
+            certified: false,
+            draught_stripped: true,
+            gap: Vec::new(),
+            name: Some("Alpha".to_string()),
+        },
+        Overshading::Average,
+        None,
+        true,
+        Vec::new(),
+    )
+    .expect("window places");
+    c.select_opening_tool(OpeningToolKind::Door);
+    c.openings_pointer_down(10.2, 5.0, 0.5);
+    c.place_opening(
+        0.9,
+        2.0,
+        false,
+        false,
+        None,
+        None,
+        None,
+        WindowTypeChoice::default(),
+        Overshading::Average,
+        None,
+        true,
+        Vec::new(),
+    )
+    .expect("door places");
+    c.materialize();
+    let type_id = c.current_record.as_ref().unwrap().data.window_types[0].id;
+
+    let items = c.structure_review_items();
+    let window_item = items
+        .iter()
+        .find(|i| i.kind == StructureReviewKind::WindowType)
+        .expect("a window-type review item");
+    match window_item.rename.as_ref() {
+        Some(StructureReviewRename::WindowType {
+            id, name, error, ..
+        }) => {
+            assert_eq!(*id, type_id, "rename targets the shared type");
+            assert_eq!(name, "Alpha", "prefill is the current model name");
+            assert!(error.is_none(), "no hint parked yet");
+        }
+        other => panic!("expected a WindowType rename, got {:?}", other.is_some()),
+    }
+    let door_item = items
+        .iter()
+        .find(|i| i.kind == StructureReviewKind::Door)
+        .expect("a door review item");
+    match door_item.rename.as_ref() {
+        Some(StructureReviewRename::Door { type_name }) => {
+            assert_eq!(type_name, "Door", "prefill/key is the door's label");
+        }
+        other => panic!("expected a Door rename, got {:?}", other.is_some()),
+    }
+
+    // A refused rename parks its hint ON the window item (id-matched).
+    c.rename_window_type(type_id, "   ".into());
+    let items = c.structure_review_items();
+    let window_item = items
+        .iter()
+        .find(|i| i.kind == StructureReviewKind::WindowType)
+        .unwrap();
+    match window_item.rename.as_ref() {
+        Some(StructureReviewRename::WindowType { error, .. }) => {
+            assert!(error.is_some(), "the parked hint rides the review item");
+        }
+        _ => panic!("expected a WindowType rename"),
+    }
 }

@@ -38,11 +38,42 @@ impl StructureReviewKind {
     }
 }
 
-/// Rename affordances for a CONSTRUCTION review item — the review is where
-/// the assessor firms up the shorthand names typed during the survey (the
-/// group's display name and its phase's nickname feed the letters and every
-/// picker). `None` on window/door items.
-pub struct StructureReviewRename {
+/// Rename affordances for a review item — the review is where the assessor
+/// firms up the shorthand names typed during the survey (they feed the
+/// letters and every picker). Kind-aware: a construction offers its group
+/// name + phase nickname + phase merge; a window type / door offers ONE name
+/// field.
+pub enum StructureReviewRename {
+    /// A wall/floor/roof construction group (see
+    /// [`StructureReviewConstructionRename`]).
+    Construction(StructureReviewConstructionRename),
+    /// A shared window TYPE: rename its model name (via
+    /// [`AppController::rename_window_type`] — the model rejects an empty
+    /// name or one held by another type).
+    WindowType {
+        /// The type's id (rename target).
+        id: ItemId,
+        /// Its current model name ("" = none) — the edit-field prefill.
+        name: String,
+        /// What a blank name displays as (the glazing·frame type label) —
+        /// the edit-field placeholder.
+        placeholder: String,
+        /// The parked rejection hint from the last refused rename of THIS
+        /// type, shown next to the field.
+        error: Option<String>,
+    },
+    /// A door: rename its free-text type label — committing retypes EVERY
+    /// door sharing it (doors group by label, not a shared registry).
+    Door {
+        /// The door's current type label — the edit-field prefill AND the
+        /// bulk-rename key.
+        type_name: String,
+    },
+}
+
+/// The construction-group rename targets + prefills
+/// ([`StructureReviewRename::Construction`]).
+pub struct StructureReviewConstructionRename {
     /// The construction group's id (rename target).
     pub group_id: ItemId,
     /// Its current custom name ("" = none, showing the type label) — the
@@ -87,6 +118,9 @@ impl AppController {
     /// the default isometric camera (a clean starting viewpoint to orbit from).
     pub fn set_structure_review_mode(&mut self, on: bool) {
         self.structure_review_mode = on;
+        // A parked window-type rename hint belongs to the closing/last review
+        // session — a fresh session starts clean.
+        self.window_type_rename_error = None;
         if on {
             self.structure_review_cursor = 0;
             self.reset_view();
@@ -119,6 +153,23 @@ impl AppController {
     pub fn rename_structure_group(&mut self, id: ItemId, name: String) {
         if let Some(record) = self.current_record.as_mut() {
             if record.data.rename_construction_group(id, &name) {
+                let _ = self.mark_dirty();
+            }
+        }
+    }
+
+    /// Rename a door TYPE from the review: every door whose trimmed
+    /// `type_name` is `old` takes `new`, across all storeys — doors group by
+    /// their free-text label, so the label IS the group
+    /// ([`Ber::rename_door_type`] owns the rule; empty/unchanged `new` is a
+    /// no-op). Like [`rename_structure_group`](Self::rename_structure_group):
+    /// display-only, no undo snapshot; marks dirty only when something
+    /// actually renamed.
+    ///
+    /// [`Ber::rename_door_type`]: ber_model::ber::ber_struct::Ber
+    pub fn rename_door_type(&mut self, old: String, new: String) {
+        if let Some(record) = self.current_record.as_mut() {
+            if record.data.rename_door_type(&old, &new) > 0 {
                 let _ = self.mark_dirty();
             }
         }
@@ -190,7 +241,7 @@ impl AppController {
     /// Build the flat whole-house review list, in order: wall constructions,
     /// floor constructions, roof constructions, window types, doors. Constructions
     /// / window types not referenced by any surface are skipped (nothing to show).
-    fn structure_review_items(&self) -> Vec<StructureReviewView> {
+    pub(super) fn structure_review_items(&self) -> Vec<StructureReviewView> {
         let Some(record) = self.current_record.as_ref() else {
             return Vec::new();
         };
@@ -217,7 +268,10 @@ impl AppController {
                 ),
                 photos: photo_views(&c.base.photos),
                 highlight: ids,
-                rename: Some(rename_info(&c.base, &data.construction_phases)),
+                rename: Some(StructureReviewRename::Construction(rename_info(
+                    &c.base,
+                    &data.construction_phases,
+                ))),
             });
         }
         for c in &data.floor_constructions {
@@ -239,7 +293,10 @@ impl AppController {
                 ),
                 photos: photo_views(&c.base.photos),
                 highlight: ids,
-                rename: Some(rename_info(&c.base, &data.construction_phases)),
+                rename: Some(StructureReviewRename::Construction(rename_info(
+                    &c.base,
+                    &data.construction_phases,
+                ))),
             });
         }
         for c in &data.ceiling_constructions {
@@ -261,7 +318,10 @@ impl AppController {
                 ),
                 photos: photo_views(&c.base.photos),
                 highlight: ids,
-                rename: Some(rename_info(&c.base, &data.construction_phases)),
+                rename: Some(StructureReviewRename::Construction(rename_info(
+                    &c.base,
+                    &data.construction_phases,
+                ))),
             });
         }
 
@@ -285,7 +345,20 @@ impl AppController {
                 detail_lines: window_type_lines(t, ids.len()),
                 photos: photo_views(&t.photos),
                 highlight: ids,
-                rename: None,
+                rename: Some(StructureReviewRename::WindowType {
+                    id: t.id,
+                    name: t.specifics.name().unwrap_or_default().to_string(),
+                    placeholder: format!(
+                        "{} · {}",
+                        glazing_label(&t.glazing),
+                        frame_label(&t.frame)
+                    ),
+                    error: self
+                        .window_type_rename_error
+                        .as_ref()
+                        .filter(|(eid, _)| *eid == t.id)
+                        .map(|(_, hint)| hint.clone()),
+                }),
             });
         }
 
@@ -315,7 +388,9 @@ impl AppController {
                 ],
                 photos: photo_views(&door.photos),
                 highlight: std::iter::once(door.id).collect(),
-                rename: None,
+                rename: Some(StructureReviewRename::Door {
+                    type_name: door.type_name.clone(),
+                }),
             });
         }
 
@@ -388,8 +463,8 @@ fn group_title(name: &Option<String>, type_label: &str) -> String {
 fn rename_info(
     base: &ber_model::ber::structural::ConstructionBase,
     phases: &ber_model::ber::common::ConstructionPhases,
-) -> StructureReviewRename {
-    StructureReviewRename {
+) -> StructureReviewConstructionRename {
+    StructureReviewConstructionRename {
         group_id: base.id,
         group_name: base.name.clone().unwrap_or_default(),
         phase: base.construction_phase.clone(),

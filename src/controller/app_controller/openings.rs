@@ -349,7 +349,6 @@ impl AppController {
         self.openings_mode = on;
         self.pending_opening = None;
         self.opening_dim_error = None;
-        self.window_type_rename_error = None;
         self.elevation_wall = None;
         self.elevation_drag = None;
         self.elevation_selection = None;
@@ -385,7 +384,6 @@ impl AppController {
         self.openings_mode = false;
         self.pending_opening = None;
         self.opening_dim_error = None;
-        self.window_type_rename_error = None;
         self.elevation_wall = None;
         self.elevation_drag = None;
         self.elevation_selection = None;
@@ -412,7 +410,6 @@ impl AppController {
         self.openings_tool = tool;
         self.pending_opening = None;
         self.opening_dim_error = None;
-        self.window_type_rename_error = None;
         self.confirm_delete = false;
         // Leaving Edit closes any open elevation + clears the surface selection.
         if tool != OpeningToolKind::Edit {
@@ -664,12 +661,13 @@ impl AppController {
             .collect()
     }
 
-    /// Rename the shared window TYPE `id` — streamed per keystroke from the
-    /// placement/edit box's name field (mirrors `set_structure_group_name`).
-    /// The model owns the name-integrity rules (`Ber::rename_window_type`); on
-    /// rejection the durable name keeps its last valid value and the hint is
-    /// parked for the box to show. No undo snapshot (cosmetic); marks dirty so
-    /// an accepted rename persists.
+    /// Rename the shared window TYPE `id` — committed from the Structure
+    /// review's rename field (mirrors `rename_structure_group`). The model
+    /// owns the name-integrity rules (`Ber::rename_window_type`); on rejection
+    /// the durable name keeps its last valid value and the hint is parked for
+    /// the review item to show (cleared on the next valid rename or when the
+    /// review opens/closes). No undo snapshot (cosmetic, like the review's
+    /// other renames); marks dirty so an accepted rename persists.
     pub fn rename_window_type(&mut self, id: ItemId, name: String) {
         let Some(record) = self.current_record.as_mut() else {
             return;
@@ -2056,7 +2054,6 @@ impl AppController {
         kind: DoorKind,
         draught_stripped: bool,
         photos: Vec<(std::path::PathBuf, PhotoQuality)>,
-        rename_all: bool,
     ) -> Result<(), String> {
         let Some(OpeningEdit::Door(did)) = self.opening_edit else {
             return Ok(());
@@ -2075,14 +2072,6 @@ impl AppController {
         let Some(storey) = record.data.storeys.get_mut(idx) else {
             return Ok(());
         };
-        // The door's PREVIOUS type name — the bulk rename below retypes the
-        // doors still sharing it after this door takes the new name.
-        let old_type_name = storey
-            .doors
-            .iter()
-            .find(|d| d.id == did)
-            .map(|d| d.type_name.trim().to_string())
-            .unwrap_or_default();
         // Resize first — it can fail (wall too short); the attributes apply only
         // on success, so a refused edit leaves the door fully untouched.
         if let Err(e) = openings::resize_opening(storey, OpeningRef::Door(did), width_m, height_m) {
@@ -2091,18 +2080,12 @@ impl AppController {
             self.opening_dim_error = Some(msg.clone());
             return Err(msg);
         }
-        let new_type_name = type_name.trim().to_string();
         openings::set_door_attributes(storey, did, type_name, Some(kind), Some(draught_stripped));
         // Door photos are per-door (not a shared window-type group).
         if !stored_photos.is_empty() {
             if let Some(d) = storey.doors.iter_mut().find(|d| d.id == did) {
                 d.photos.extend(stored_photos.iter().cloned());
             }
-        }
-        // "Rename all": retype every OTHER door still carrying the previous
-        // name, across all storeys (`Ber::rename_door_type` owns the rule).
-        if rename_all && !old_type_name.is_empty() && old_type_name != new_type_name {
-            record.data.rename_door_type(&old_type_name, &new_type_name);
         }
         self.opening_edit = None;
         self.opening_dim_error = None;

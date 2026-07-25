@@ -145,7 +145,7 @@ pub use review::CollinearityReview;
 pub use snap::SnapTagView;
 use snap::{LastSnapAction, SnapAction, SubareaFlow};
 pub use strokes::PendingRedraw;
-pub use structure_review::{StructureReviewKind, StructureReviewView};
+pub use structure_review::{StructureReviewKind, StructureReviewRename, StructureReviewView};
 pub use view::{ViewTransform, DEFAULT_PITCH_DEG, DEFAULT_YAW_DEG};
 
 /// Print a stroke as a `vec![p(x,y), …]` literal (matching the curve-debug
@@ -708,10 +708,10 @@ pub struct AppController {
     /// model decision, not the record being momentarily out of view.
     photo_discards: HashSet<ItemId>,
     /// The parked window-type RENAME rejection (type id + user-facing hint).
-    /// Renames stream per keystroke from the placement/edit box; on rejection
-    /// the durable name keeps its last valid value while the assessor keeps
-    /// typing (mirrors `set_structure_group_name`). Cleared on acceptance and
-    /// on openings mode/tool changes.
+    /// Set by [`rename_window_type`](Self::rename_window_type) (driven from
+    /// the Structure review): on rejection the durable name keeps its last
+    /// valid value and the review item shows the hint. Cleared on acceptance
+    /// and when the review opens/closes.
     window_type_rename_error: Option<(ItemId, String)>,
     /// The active ceiling-exposure Select subtool (Click/Carve/All/Remaining), or
     /// `None`. Transient ceiling-exposure interaction state.
