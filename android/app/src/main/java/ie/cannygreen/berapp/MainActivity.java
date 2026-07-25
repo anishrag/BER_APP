@@ -193,6 +193,37 @@ public class MainActivity extends GameActivity {
         super.onCreate(savedInstanceState);
         hideSystemBars();
         registerNetworkWatcher();
+        rescueCachedCaptures();
+    }
+
+    /**
+     * One-time (idempotent) migration for "no picture left behind": captures
+     * taken by earlier builds live in cache/camera, which Android may clear
+     * under storage pressure — move any that survive into the permanent
+     * files/camera dir the capture path now writes to. Best-effort; a file
+     * that fails to move is left where it was.
+     */
+    private void rescueCachedCaptures() {
+        try {
+            File old = new File(getCacheDir(), "camera");
+            File[] files = old.listFiles();
+            if (files == null || files.length == 0) {
+                return;
+            }
+            File dir = new File(getFilesDir(), "camera");
+            dir.mkdirs();
+            int moved = 0;
+            for (File f : files) {
+                File dest = new File(dir, f.getName());
+                if (dest.exists() || f.renameTo(dest)) {
+                    moved++;
+                }
+            }
+            Log.i(TAG, "camera: rescued " + moved + "/" + files.length
+                    + " cached captures into permanent storage");
+        } catch (Exception e) {
+            Log.w(TAG, "camera: cache rescue failed (ignored)", e);
+        }
     }
 
     @Override
@@ -404,9 +435,14 @@ public class MainActivity extends GameActivity {
             nativeOnPhotoCancelled();
             return;
         }
-        // Copy the captured image into private cache, then drop the gallery row.
+        // Copy the captured image into PERMANENT private storage, then drop the
+        // gallery row. files/ (not cache/) — "no picture left behind": these
+        // full-res originals are the last-resort recovery copy when a model
+        // reference is lost, and Android may clear cache/ under storage
+        // pressure (or a "Clear cache" tap). Nothing in the app ever deletes
+        // them; the on-site shot is unrepeatable.
         try {
-            File dir = new File(getCacheDir(), "camera");
+            File dir = new File(getFilesDir(), "camera");
             dir.mkdirs();
             File out = new File(dir, "capture_" + System.currentTimeMillis() + ".jpg");
             try (InputStream in = getContentResolver().openInputStream(uri);
