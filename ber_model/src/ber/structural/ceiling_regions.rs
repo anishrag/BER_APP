@@ -368,6 +368,183 @@ impl CeilingRegions {
         Self { regions }
     }
 
+    /// HEAL redundant flat splits: merge ADJACENT regions that are one physical
+    /// surface — both FLAT at the same z ([`CeilingRegion::flat_z`], 1e-6 m),
+    /// SAME `construction_id`, SAME `exposure`, both opening-free — back into a
+    /// single region. The repair for a persisted ceiling the session phase-carve
+    /// split between two SAME-phase zones (bug report c78ebed1: "assign the rest
+    /// to Original" beside an already-Original area): ceilings are
+    /// regions-as-truth, so unlike the floors (re-partitioned every resolve) the
+    /// redundant boundary survives in stored records and must be healed on
+    /// materialize.
+    ///
+    /// Deliberately narrow, because a same-construction boundary CAN be a real
+    /// division awaiting attribution:
+    ///  - `keep_seams` (the storey's durable split inputs — structure
+    ///    `ceiling_splits`, ceiling-step/divider rings, dormer footprints, the
+    ///    same set `Storey::ceilings_carry_outline_edit_scars` treats as
+    ///    justified) protects them: a pair whose shared boundary has ANY piece
+    ///    lying along a `keep_seams` edge is never merged.
+    ///  - Sloped/fanned faces (non-flat) never merge — their seams belong to the
+    ///    roof shape.
+    ///  - A region carrying openings (a rooflight) never merges — merging would
+    ///    have to re-home its opes onto a fresh region.
+    /// Adjacency is METRIC ([`shared_plan_pieces`], > 1e-3 m of shared collinear
+    /// boundary): the rings are boolean-op output, so a shared edge is never an
+    /// exact vertex match. Merges close transitively (union-find), the merged
+    /// union is decomposed to simple pieces (`split_to_simple` — `Polygon3D` is
+    /// exterior-only), degenerate pieces are dropped, collinear vertices (the
+    /// dissolved seam endpoints) stripped, and each piece takes a fresh id at
+    /// the component's first member's z. Regions that merge with nothing pass
+    /// through VERBATIM (no geo ops).
+    pub fn merge_same_construction_flat(self, keep_seams: &[Vec<Point2f64>]) -> Self {
+        use geo::bool_ops::BooleanOps;
+        /// Minimum shared collinear boundary (m) to count as adjacency — a
+        /// corner touch is not a seam.
+        const MIN_SHARED_M: f64 = 1e-3;
+        /// Plan tolerance (m) for "this shared piece lies along a durable seam".
+        const SEAM_TOL_M: f64 = 1e-3;
+        let n = self.regions.len();
+        if n < 2 {
+            return self;
+        }
+        let plan_ring = |r: &CeilingRegion| -> Vec<Point2f64> {
+            r.polygon
+                .exterior
+                .iter()
+                .map(|v| Point2f64::new(v.x, v.y))
+                .collect()
+        };
+        let eligible: Vec<Option<f64>> = self
+            .regions
+            .iter()
+            .map(|r| {
+                (r.opes.doors.is_empty() && r.opes.windows.is_empty())
+                    .then(|| r.flat_z())
+                    .flatten()
+            })
+            .collect();
+        let rings: Vec<Vec<Point2f64>> = self.regions.iter().map(plan_ring).collect();
+        let keep_edges: Vec<(Point2f64, Point2f64)> = keep_seams
+            .iter()
+            .flat_map(|ring| {
+                let n = ring.len();
+                (0..n).map(move |i| (ring[i], ring[(i + 1) % n]))
+            })
+            .collect();
+        let on_keep_seam = |a: Point2f64, b: Point2f64| -> bool {
+            keep_edges.iter().any(|(ja, jb)| {
+                point_to_segment_distance(a.x, a.y, ja.x, ja.y, jb.x, jb.y) < SEAM_TOL_M
+                    && point_to_segment_distance(b.x, b.y, ja.x, ja.y, jb.x, jb.y) < SEAM_TOL_M
+            })
+        };
+        // Union-find over mergeable pairs (transitive closure).
+        let mut parent: Vec<usize> = (0..n).collect();
+        fn find(parent: &mut Vec<usize>, i: usize) -> usize {
+            if parent[i] != i {
+                let root = find(parent, parent[i]);
+                parent[i] = root;
+            }
+            parent[i]
+        }
+        for i in 0..n {
+            let Some(zi) = eligible[i] else { continue };
+            for j in (i + 1)..n {
+                let Some(zj) = eligible[j] else { continue };
+                if (zi - zj).abs() > 1e-6
+                    || self.regions[i].construction_id != self.regions[j].construction_id
+                    || self.regions[i].exposure != self.regions[j].exposure
+                {
+                    continue;
+                }
+                let pieces = shared_plan_pieces(&rings[i], &rings[j]);
+                let shared_len: f64 = pieces
+                    .iter()
+                    .map(|(a, b)| ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt())
+                    .sum();
+                if shared_len < MIN_SHARED_M {
+                    continue; // not adjacent
+                }
+                if pieces.iter().any(|(a, b)| on_keep_seam(*a, *b)) {
+                    continue; // a durable (deliberate) division — keep it
+                }
+                let (ri, rj) = (find(&mut parent, i), find(&mut parent, j));
+                if ri != rj {
+                    parent[rj] = ri;
+                }
+            }
+        }
+        // Collect components; only multi-member components re-union.
+        let mut comp_members: Vec<(usize, Vec<usize>)> = Vec::new();
+        for i in 0..n {
+            let root = find(&mut parent, i);
+            match comp_members.iter_mut().find(|(r, _)| *r == root) {
+                Some((_, m)) => m.push(i),
+                None => comp_members.push((root, vec![i])),
+            }
+        }
+        let mut merged_at: Vec<Option<Vec<CeilingRegion>>> = vec![None; n];
+        let mut absorbed: Vec<bool> = vec![false; n];
+        for (_, members) in &comp_members {
+            if members.len() < 2 {
+                continue;
+            }
+            let first = &self.regions[members[0]];
+            let z = eligible[members[0]].expect("component members are eligible");
+            let mut acc: Option<MultiPolygon<f64>> = None;
+            for &i in members {
+                let p: Polygon<f64> = self.regions[i].polygon.clone().into();
+                acc = Some(match acc {
+                    None => MultiPolygon::new(vec![p]),
+                    Some(mp) => mp.union(&p),
+                });
+            }
+            let mp = acc.expect("members.len() >= 2");
+            let mut pieces: Vec<CeilingRegion> = Vec::new();
+            for poly in mp.0.iter().flat_map(split_to_simple) {
+                if plan_piece_is_degenerate(&poly) {
+                    continue;
+                }
+                let mut pts: Vec<Point2f64> = poly
+                    .exterior()
+                    .coords()
+                    .map(|c| Point2f64::new(c.x, c.y))
+                    .collect();
+                if pts.len() > 1 && pts.first() == pts.last() {
+                    pts.pop();
+                }
+                let pts = strip_collinear(&pts);
+                if pts.len() < 3 {
+                    continue;
+                }
+                pieces.push(CeilingRegion {
+                    id: ItemId::default(),
+                    polygon: Polygon3D::new(
+                        pts.iter().map(|p| Point3f64::new(p.x, p.y, z)).collect(),
+                    ),
+                    opes: Opes::default(),
+                    construction_id: first.construction_id,
+                    exposure: first.exposure,
+                });
+            }
+            merged_at[members[0]] = Some(pieces);
+            for &i in &members[1..] {
+                absorbed[i] = true;
+            }
+        }
+        let mut out: Vec<CeilingRegion> = Vec::with_capacity(n);
+        for (i, r) in self.regions.into_iter().enumerate() {
+            if absorbed[i] {
+                continue;
+            }
+            match merged_at[i].take() {
+                Some(pieces) => out.extend(pieces),
+                None => out.push(r),
+            }
+        }
+        Self { regions: out }
+    }
+
     /// Split the regions by each of `rings` (world plan rings) WITHOUT changing
     /// the surface: every output vertex's z is read from the source region's
     /// own plane ([`region_plane`]), so a sloped fan/ridge face splits into
@@ -2095,4 +2272,140 @@ pub struct CeilingPlaneZone {
     /// e.g. the report's per-zone mean-height working (vertex heights,
     /// triangle/trapezoid centroid rules).
     pub plane: (f64, f64, f64, f64),
+}
+
+#[cfg(test)]
+mod heal_same_construction_tests {
+    use super::*;
+
+    /// A flat rectangular ceiling region at height `z`.
+    fn flat_region(x0: f64, x1: f64, z: f64, cid: ItemId) -> CeilingRegion {
+        CeilingRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(vec![
+                Point3f64::new(x0, 0.0, z),
+                Point3f64::new(x1, 0.0, z),
+                Point3f64::new(x1, 4.0, z),
+                Point3f64::new(x0, 4.0, z),
+            ]),
+            opes: Opes::default(),
+            construction_id: cid,
+            exposure: CeilingExposure::default(),
+        }
+    }
+
+    /// The bug-record shape (c78ebed1): two ADJACENT flat regions at one z with
+    /// ONE construction id — a redundant same-phase carve — heal into a single
+    /// region with the seam's collinear vertices stripped.
+    #[test]
+    fn adjacent_flat_same_construction_regions_merge() {
+        let cid = ItemId::default();
+        let regions = CeilingRegions {
+            regions: vec![
+                flat_region(0.0, 5.0, 2.4, cid),
+                flat_region(5.0, 8.0, 2.4, cid),
+            ],
+        };
+        let healed = regions.merge_same_construction_flat(&[]);
+        assert_eq!(healed.regions.len(), 1, "one physical surface, one region");
+        assert_eq!(
+            healed.regions[0].polygon.exterior.len(),
+            4,
+            "the x=5 seam dissolved: {:?}",
+            healed.regions[0].polygon.exterior
+        );
+        assert!(
+            healed.regions[0]
+                .polygon
+                .exterior
+                .iter()
+                .all(|v| (v.z - 2.4).abs() < 1e-9),
+            "the merged surface keeps its exact height"
+        );
+        assert_eq!(healed.regions[0].construction_id, cid);
+    }
+
+    /// DIFFERENT construction ids (a genuine phase boundary, already stamped)
+    /// never merge — and the untouched regions pass through verbatim.
+    #[test]
+    fn different_constructions_never_merge() {
+        let regions = CeilingRegions {
+            regions: vec![
+                flat_region(0.0, 5.0, 2.4, ItemId::default()),
+                flat_region(5.0, 8.0, 2.4, ItemId::default()),
+            ],
+        };
+        let before: Vec<Vec<Point3f64>> = regions
+            .regions
+            .iter()
+            .map(|r| r.polygon.exterior.clone())
+            .collect();
+        let healed = regions.merge_same_construction_flat(&[]);
+        assert_eq!(healed.regions.len(), 2);
+        let after: Vec<Vec<Point3f64>> = healed
+            .regions
+            .iter()
+            .map(|r| r.polygon.exterior.clone())
+            .collect();
+        assert_eq!(after, before, "kept regions are bit-identical");
+    }
+
+    /// A z difference (a ceiling step) blocks the merge even under one
+    /// construction id, and a SLOPED neighbour is never a candidate at all.
+    #[test]
+    fn steps_and_slopes_never_merge() {
+        let cid = ItemId::default();
+        // Step: same cid, different flat heights.
+        let stepped = CeilingRegions {
+            regions: vec![
+                flat_region(0.0, 5.0, 2.4, cid),
+                flat_region(5.0, 8.0, 2.1, cid),
+            ],
+        };
+        assert_eq!(stepped.merge_same_construction_flat(&[]).regions.len(), 2);
+        // Slope: same cid, same construction — but the right face is fanned.
+        let mut sloped_face = flat_region(5.0, 8.0, 2.4, cid);
+        sloped_face.polygon.exterior[2].z = 3.4;
+        let sloped = CeilingRegions {
+            regions: vec![flat_region(0.0, 5.0, 2.4, cid), sloped_face],
+        };
+        assert_eq!(sloped.merge_same_construction_flat(&[]).regions.len(), 2);
+    }
+
+    /// A durable split ring passed as a keep-seam protects a deliberate,
+    /// not-yet-attributed division: the same-construction pair straddling it
+    /// stays two regions.
+    #[test]
+    fn keep_seams_protect_deliberate_divisions() {
+        let cid = ItemId::default();
+        let regions = CeilingRegions {
+            regions: vec![
+                flat_region(0.0, 5.0, 2.4, cid),
+                flat_region(5.0, 8.0, 2.4, cid),
+            ],
+        };
+        // The structure-split ring that carved the left piece: its x=5 edge IS
+        // the shared seam.
+        let split_ring = vec![
+            Point2f64::new(0.0, 0.0),
+            Point2f64::new(5.0, 0.0),
+            Point2f64::new(5.0, 4.0),
+            Point2f64::new(0.0, 4.0),
+        ];
+        let healed = regions.merge_same_construction_flat(&[split_ring]);
+        assert_eq!(healed.regions.len(), 2, "the deliberate division survives");
+    }
+
+    /// A region carrying an opening (rooflight) never merges — its opes can't
+    /// ride a re-minted region.
+    #[test]
+    fn openings_block_the_merge() {
+        let cid = ItemId::default();
+        let mut with_window = flat_region(0.0, 5.0, 2.4, cid);
+        with_window.opes.windows.push(ItemId::default());
+        let regions = CeilingRegions {
+            regions: vec![with_window, flat_region(5.0, 8.0, 2.4, cid)],
+        };
+        assert_eq!(regions.merge_same_construction_flat(&[]).regions.len(), 2);
+    }
 }

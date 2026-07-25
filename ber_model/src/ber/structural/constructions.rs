@@ -1137,33 +1137,7 @@ impl Ber {
     /// records, never the bare seed, which any unclassified surface references
     /// anyway); dropping one breaks the derive pipeline.
     pub fn prune_orphaned_constructions(&mut self) -> usize {
-        // Gather EVERY construction_id any region references, across all storeys
-        // and all region collections that carry one. ItemIds are UUID-unique, so
-        // a single combined set can't cross-keep between the three registries.
-        // Collections walked (the complete set of region carriers):
-        //   * placeable_wall_regions() — perimeter/riser `walls` AND porch inner
-        //     `porch_walls`, the full opening-placeable wall set.
-        //   * floors.regions, living_areas.regions, porches.regions — every
-        //     FloorRegion carrier (each FloorRegion has a construction_id).
-        //   * ceilings.regions — the CeilingRegion carrier.
-        let mut referenced: std::collections::HashSet<ItemId> = std::collections::HashSet::new();
-        for s in &self.storeys {
-            for w in s.placeable_wall_regions() {
-                referenced.insert(w.construction_id);
-            }
-            for f in s
-                .floors
-                .regions
-                .iter()
-                .chain(s.living_areas.regions.iter())
-                .chain(s.porches.regions.iter())
-            {
-                referenced.insert(f.construction_id);
-            }
-            for c in &s.ceilings.regions {
-                referenced.insert(c.construction_id);
-            }
-        }
+        let mut referenced = self.referenced_construction_ids();
         // Never drop the base seed the resolve pipeline looks up read-only.
         for id in [
             self.wall_construction_id(Default::default(), Default::default(), Default::default()),
@@ -1202,6 +1176,152 @@ impl Ber {
             );
         }
         total
+    }
+
+    /// Gather EVERY construction_id any region references, across all storeys
+    /// and all region collections that carry one. ItemIds are UUID-unique, so
+    /// a single combined set can't cross-keep between the three registries.
+    /// Collections walked (the complete set of region carriers):
+    ///   * placeable_wall_regions() — perimeter/riser `walls` AND porch inner
+    ///     `porch_walls`, the full opening-placeable wall set.
+    ///   * floors.regions, living_areas.regions, porches.regions — every
+    ///     FloorRegion carrier (each FloorRegion has a construction_id).
+    ///   * ceilings.regions — the CeilingRegion carrier.
+    fn referenced_construction_ids(&self) -> std::collections::HashSet<ItemId> {
+        let mut referenced: std::collections::HashSet<ItemId> = std::collections::HashSet::new();
+        for s in &self.storeys {
+            for w in s.placeable_wall_regions() {
+                referenced.insert(w.construction_id);
+            }
+            for f in s
+                .floors
+                .regions
+                .iter()
+                .chain(s.living_areas.regions.iter())
+                .chain(s.porches.regions.iter())
+            {
+                referenced.insert(f.construction_id);
+            }
+            for c in &s.ceilings.regions {
+                referenced.insert(c.construction_id);
+            }
+        }
+        referenced
+    }
+
+    /// The base of construction `id`, whichever registry holds it.
+    fn construction_base_mut(&mut self, id: ItemId) -> Option<&mut ConstructionBase> {
+        if let Some(c) = self.wall_constructions.iter_mut().find(|c| c.base.id == id) {
+            return Some(&mut c.base);
+        }
+        if let Some(c) = self
+            .floor_constructions
+            .iter_mut()
+            .find(|c| c.base.id == id)
+        {
+            return Some(&mut c.base);
+        }
+        if let Some(c) = self
+            .ceiling_constructions
+            .iter_mut()
+            .find(|c| c.base.id == id)
+        {
+            return Some(&mut c.base);
+        }
+        None
+    }
+
+    /// Carry a construction's EVIDENCE across a find-or-create re-point: when a
+    /// stamp re-points regions from construction `old` to `new` (a spec, phase
+    /// or name change re-`ensure`s a fresh construction) and `old` ends up
+    /// referenced by NO region, its build-up photos — and a ceiling's
+    /// insulation spec, when `new` has none — move onto `new`. The group
+    /// EVOLVED; evidence recorded on it must ride along rather than die with
+    /// the orphan at the next [`prune_orphaned_constructions`]. (Field flow:
+    /// photograph the build-up FIRST, then set the spec to match — without the
+    /// carry, that exact order strands the photo on the doomed orphan.)
+    ///
+    /// A still-referenced `old` keeps its evidence: a SUBSET of members forked
+    /// away, and the evidence belongs to the stay-behind group. Pairs are
+    /// processed in re-point order, so a chain (a→b, b→c) within one pass
+    /// ferries the evidence to the terminal construction. Photos merge with
+    /// dedup by `Evidence` id; `assessed_u_value` and the name deliberately do
+    /// NOT carry (both describe the OLD identity — the office resolved the old
+    /// build-up's U, and the name axis is handled by the rename flow). A
+    /// re-point onto the unclassified base seed (= a group RESET) never
+    /// carries — see the seed guard in the body.
+    /// Called by the `document` stamp functions after their re-point loops.
+    pub fn carry_evidence_from_orphans(&mut self, repoints: &[(ItemId, ItemId)]) {
+        if repoints.is_empty() {
+            return;
+        }
+        let referenced = self.referenced_construction_ids();
+        // Never carry ONTO the unclassified base seed: that re-point is a
+        // RESET ("forget this group's attribution"), and the seed is shared by
+        // every unclassified surface — evidence landing there would surface on
+        // unrelated groups.
+        let seeds: Vec<ItemId> = [
+            self.wall_construction_id(Default::default(), Default::default(), Default::default()),
+            self.floor_construction_id(Default::default(), Default::default(), Default::default()),
+            self.ceiling_construction_id(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+            ),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        for &(old, new) in repoints {
+            if old == new || referenced.contains(&old) || seeds.contains(&new) {
+                continue;
+            }
+            let photos = match self.construction_base_mut(old) {
+                Some(from) if !from.photos.is_empty() => std::mem::take(&mut from.photos),
+                _ => Vec::new(),
+            };
+            let insulation = self
+                .ceiling_constructions
+                .iter_mut()
+                .find(|c| c.base.id == old)
+                .and_then(|c| c.insulation.take());
+            if photos.is_empty() && insulation.is_none() {
+                continue;
+            }
+            let Some(to) = self.construction_base_mut(new) else {
+                // No successor registered (shouldn't happen) — restore the
+                // orphan's state rather than dropping evidence.
+                if let Some(from) = self.construction_base_mut(old) {
+                    from.photos = photos;
+                }
+                if insulation.is_some() {
+                    if let Some(c) = self
+                        .ceiling_constructions
+                        .iter_mut()
+                        .find(|c| c.base.id == old)
+                    {
+                        c.insulation = insulation;
+                    }
+                }
+                continue;
+            };
+            for p in photos {
+                if !to.photos.iter().any(|q| q.id == p.id) {
+                    to.photos.push(p);
+                }
+            }
+            if insulation.is_some() {
+                if let Some(c) = self
+                    .ceiling_constructions
+                    .iter_mut()
+                    .find(|c| c.base.id == new)
+                {
+                    if c.insulation.is_none() {
+                        c.insulation = insulation;
+                    }
+                }
+            }
+        }
     }
 
     /// The `(kind-tagged type, make-up, phase)` attributes of the `kind`
@@ -2126,6 +2246,132 @@ mod tests {
 
         // Idempotent: a second prune drops nothing.
         assert_eq!(ber.prune_orphaned_constructions(), 0);
+    }
+
+    /// `carry_evidence_from_orphans`: a re-point that leaves the old
+    /// construction UNREFERENCED moves its photos (and a ceiling's insulation
+    /// spec) onto the successor — including across a chain (a→b, b→c) in one
+    /// pass — while a still-referenced old (a subset forked away) keeps its
+    /// evidence with the stay-behind group.
+    #[test]
+    fn carry_evidence_from_orphans_moves_photos_only_off_unreferenced() {
+        use crate::ber::structural::{Storey, SurfaceKind, WallExposure, WallRegion, WallRegions};
+        use domain::points::Point3f64;
+
+        let mut ber = Ber::default();
+        // Wall chain: a (photo, orphaned) → b (orphaned) → c (referenced).
+        let a = ber.ensure_wall_construction(
+            WallConstructionType::CavityWall,
+            ConstructionMakeup::Default,
+            ConstructionPhase::default(),
+        );
+        let b = ber.ensure_wall_construction(
+            WallConstructionType::FilledCavityWall,
+            ConstructionMakeup::Default,
+            ConstructionPhase::default(),
+        );
+        let c = ber.ensure_wall_construction(
+            WallConstructionType::TimberConstruction,
+            ConstructionMakeup::Default,
+            ConstructionPhase::default(),
+        );
+        let photo_a = Evidence::default();
+        ber.add_construction_photo(SurfaceKind::Walls, a, photo_a.clone());
+        // A subset fork: `kept` stays referenced, so its photo must NOT move.
+        let kept = ber.ensure_wall_construction(
+            WallConstructionType::ICF,
+            ConstructionMakeup::Default,
+            ConstructionPhase::default(),
+        );
+        let fork = ber.ensure_wall_construction(
+            WallConstructionType::ConcreteHollowBlocks,
+            ConstructionMakeup::Default,
+            ConstructionPhase::default(),
+        );
+        let photo_kept = Evidence::default();
+        ber.add_construction_photo(SurfaceKind::Walls, kept, photo_kept.clone());
+        // Ceilings: insulation + photo carried onto the successor.
+        let ceil_old = ber.ensure_ceiling_construction(
+            CeilingConstructionType::FlatRoof,
+            ConstructionMakeup::Default,
+            ConstructionPhase::default(),
+        );
+        let ceil_new = ber.ensure_ceiling_construction(
+            CeilingConstructionType::SlopedInsOnRafter,
+            ConstructionMakeup::Default,
+            ConstructionPhase::default(),
+        );
+        let photo_ceil = Evidence::default();
+        ber.add_construction_photo(SurfaceKind::Ceilings, ceil_old, photo_ceil.clone());
+        ber.set_ceiling_insulation(ceil_old, Some(CeilingInsulation::ThicknessMm(100.0)));
+
+        let wall = |construction_id| WallRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(vec![
+                Point3f64::new(0.0, 0.0, 0.0),
+                Point3f64::new(1.0, 0.0, 0.0),
+                Point3f64::new(1.0, 0.0, 2.4),
+                Point3f64::new(0.0, 0.0, 2.4),
+            ]),
+            exposure: WallExposure::Exposed,
+            opes: Opes::default(),
+            construction_id,
+        };
+        ber.storeys = vec![Storey {
+            walls: WallRegions {
+                regions: vec![wall(c), wall(kept), wall(fork)],
+            },
+            ceilings: CeilingRegions::new(
+                vec![
+                    Point3f64::new(0.0, 0.0, 2.4),
+                    Point3f64::new(2.0, 0.0, 2.4),
+                    Point3f64::new(2.0, 2.0, 2.4),
+                    Point3f64::new(0.0, 2.0, 2.4),
+                ],
+                ceil_new,
+            ),
+            ..Storey::default()
+        }];
+
+        ber.carry_evidence_from_orphans(&[(a, b), (b, c), (kept, fork), (ceil_old, ceil_new)]);
+
+        let photos_of = |ber: &Ber, id| ber.wall_construction(id).unwrap().base.photos.clone();
+        assert!(photos_of(&ber, a).is_empty(), "a drained");
+        assert!(photos_of(&ber, b).is_empty(), "b only ferried");
+        assert_eq!(
+            photos_of(&ber, c).iter().map(|p| p.id).collect::<Vec<_>>(),
+            vec![photo_a.id],
+            "the chain lands a's photo on the terminal construction"
+        );
+        assert_eq!(
+            photos_of(&ber, kept)
+                .iter()
+                .map(|p| p.id)
+                .collect::<Vec<_>>(),
+            vec![photo_kept.id],
+            "a still-referenced old keeps its evidence (subset fork)"
+        );
+        assert!(photos_of(&ber, fork).is_empty());
+        let cn = ber.ceiling_construction(ceil_new).unwrap();
+        assert_eq!(
+            cn.base.photos.iter().map(|p| p.id).collect::<Vec<_>>(),
+            vec![photo_ceil.id]
+        );
+        assert_eq!(
+            cn.insulation,
+            Some(CeilingInsulation::ThicknessMm(100.0)),
+            "the insulation spec rides along too"
+        );
+        assert!(ber
+            .ceiling_construction(ceil_old)
+            .unwrap()
+            .base
+            .photos
+            .is_empty());
+
+        // Re-running with the same pairs is a no-op (evidence already moved).
+        ber.carry_evidence_from_orphans(&[(a, b), (b, c)]);
+        assert_eq!(photos_of(&ber, c).len(), 1);
     }
 
     /// A construction referenced ONLY via the extra region collections

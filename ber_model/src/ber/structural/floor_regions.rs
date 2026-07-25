@@ -487,6 +487,91 @@ impl FloorRegions {
         Self { regions }
     }
 
+    /// RE-UNION partition output: merge regions that reference the SAME
+    /// construction (and share `level_m`/`exposure`) back into single regions.
+    /// [`partition`](Self::partition) emits one region per input area piece with
+    /// no re-union, so two ADJACENT areas that resolve to the same construction
+    /// id — the "assign the rest to Original" flow pushing a leftover strip
+    /// beside an already-Original area (bug report c78ebed1) — leave a redundant
+    /// interior boundary between two regions that are one physical floor. A
+    /// boundary only exists to separate DIFFERENT fabric; same construction on
+    /// both sides means no boundary.
+    ///
+    /// Strictly conservative about geometry: a group is re-unioned ONLY when the
+    /// union actually reduces its piece count (i.e. some pieces were adjacent /
+    /// overlapping). Disjoint same-construction pieces — and every singleton
+    /// group — pass through VERBATIM (no geo ops, stored points round-trip
+    /// exactly). Merged rings get collinear vertices stripped (the dissolved
+    /// seam's endpoints) on the exterior AND any interior hole rings; merged
+    /// regions take a fresh id and the group's first-seen `height_m`. First-seen
+    /// region order is preserved (merged pieces land at the group's first slot).
+    pub fn merge_same_construction(self) -> Self {
+        use geo::bool_ops::BooleanOps;
+        // Group by full property identity — merging across a level or exposure
+        // difference would erase a real division (a step, a mapped exposure).
+        type Key = (ItemId, u64, FloorExposure);
+        let key_of =
+            |r: &FloorRegion| -> Key { (r.construction_id, r.level_m.to_bits(), r.exposure) };
+        let mut groups: Vec<(Key, Vec<usize>)> = Vec::new();
+        for (i, r) in self.regions.iter().enumerate() {
+            let k = key_of(r);
+            match groups.iter_mut().find(|(gk, _)| *gk == k) {
+                Some((_, idxs)) => idxs.push(i),
+                None => groups.push((k, vec![i])),
+            }
+        }
+        // Merged pieces per group-leader index; None = keep members verbatim.
+        let mut merged_at: Vec<Option<Vec<FloorRegion>>> = vec![None; self.regions.len()];
+        let mut absorbed: Vec<bool> = vec![false; self.regions.len()];
+        for (_, idxs) in &groups {
+            if idxs.len() < 2 {
+                continue;
+            }
+            let mut acc: Option<MultiPolygon<f64>> = None;
+            for &i in idxs {
+                let p = &self.regions[i].polygon;
+                if p.exterior().0.len() < 4 {
+                    continue;
+                }
+                acc = Some(match acc {
+                    None => MultiPolygon::new(vec![p.clone()]),
+                    Some(mp) => mp.union(p),
+                });
+            }
+            let Some(mp) = acc else { continue };
+            if mp.0.len() >= idxs.len() {
+                continue; // all disjoint — keep every stored piece verbatim
+            }
+            let first = &self.regions[idxs[0]];
+            let pieces: Vec<FloorRegion> =
+                mp.0.iter()
+                    .map(|poly| FloorRegion {
+                        id: ItemId::default(),
+                        polygon: strip_polygon_collinear(poly),
+                        construction_id: first.construction_id,
+                        level_m: first.level_m,
+                        exposure: first.exposure,
+                        height_m: first.height_m,
+                    })
+                    .collect();
+            merged_at[idxs[0]] = Some(pieces);
+            for &i in &idxs[1..] {
+                absorbed[i] = true;
+            }
+        }
+        let mut out: Vec<FloorRegion> = Vec::with_capacity(self.regions.len());
+        for (i, r) in self.regions.into_iter().enumerate() {
+            if absorbed[i] {
+                continue;
+            }
+            match merged_at[i].take() {
+                Some(pieces) => out.extend(pieces),
+                None => out.push(r),
+            }
+        }
+        Self { regions: out }
+    }
+
     /// Re-partition the regions by step `areas` (ring + floor level in metres
     /// from the storey datum; + raised, − lowered): each region is split along
     /// the area boundaries, intersected pieces take the area's level, the
@@ -657,6 +742,119 @@ impl FloorRegions {
     }
 }
 
+/// Strip collinear vertices from every ring of a boolean-op output polygon —
+/// the exterior AND any interior holes — so a dissolved seam's endpoints don't
+/// survive as phantom vertices. Ring order/orientation is preserved.
+fn strip_polygon_collinear(poly: &Polygon<f64>) -> Polygon<f64> {
+    let clean = |ls: &LineString<f64>| -> LineString<f64> {
+        let mut pts: Vec<Point2f64> = ls.coords().map(|c| Point2f64::new(c.x, c.y)).collect();
+        if pts.len() > 1 && pts.first() == pts.last() {
+            pts.pop();
+        }
+        let pts = strip_collinear(&pts);
+        LineString::from(pts.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>())
+    };
+    Polygon::new(
+        clean(poly.exterior()),
+        poly.interiors().iter().map(clean).collect(),
+    )
+}
+
+/// Union same-phase session rings into canonical per-phase rings — the input
+/// the CUT consumers (the resolve's ceiling phase-carve and phase wall-splits)
+/// should see. Two session areas of ONE phase drawn adjacent (the drawn area +
+/// the "assign the rest" leftover, bug report c78ebed1) carry their shared
+/// boundary as an edge of each ring; fed raw to a cut pass, that boundary
+/// splits walls/ceilings between two SAME-phase zones — a division that
+/// separates nothing. The union dissolves exactly those internal edges while
+/// keeping every real boundary (against another phase, the untagged remainder,
+/// or the outline).
+///
+/// CUT semantics only — deliberately NOT for the floor `partition` feed: the
+/// partition's latest-tag-wins overlap ordering (`.rev()` at the call site)
+/// depends on per-tag entries, and collapsing same-phase tags around a
+/// different-phase tag can flip an overlap's owner. Cut edges have no such
+/// ordering (a cut either exists or not), and an edge internal to a same-phase
+/// union can never be a final zone boundary — zones are per-phase unions.
+///
+/// Conservative like [`FloorRegions::merge_same_construction`]: a phase's rings
+/// are replaced by union output ONLY when the union reduces the ring count;
+/// singleton phases and fully-disjoint groups pass through VERBATIM (no geo
+/// ops, bit-identical rings — the reconstructed-on-load zones are already one
+/// ring per phase, so reload paths are untouched). Union output emits the
+/// exterior AND any interior hole rings (a hole boundary is a real cut against
+/// whatever the hole contains), open (no closing duplicate) with collinear
+/// vertices stripped, matching [`FloorRegions::phase_zone_rings`].
+pub fn merge_same_phase_rings(
+    rings: &[(Vec<Point2f64>, ConstructionPhase)],
+) -> Vec<(Vec<Point2f64>, ConstructionPhase)> {
+    use geo::bool_ops::BooleanOps;
+    let mut groups: Vec<(ConstructionPhase, Vec<usize>)> = Vec::new();
+    for (i, (_, phase)) in rings.iter().enumerate() {
+        match groups.iter_mut().find(|(p, _)| p == phase) {
+            Some((_, idxs)) => idxs.push(i),
+            None => groups.push((phase.clone(), vec![i])),
+        }
+    }
+    let to_poly = |ring: &[Point2f64]| {
+        Polygon::new(
+            LineString::from(ring.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>()),
+            vec![],
+        )
+    };
+    let open_ring = |ls: &LineString<f64>| -> Vec<Point2f64> {
+        let mut pts: Vec<Point2f64> = ls.coords().map(|c| Point2f64::new(c.x, c.y)).collect();
+        if pts.len() > 1 && pts.first() == pts.last() {
+            pts.pop();
+        }
+        strip_collinear(&pts)
+    };
+    let mut out: Vec<(Vec<Point2f64>, ConstructionPhase)> = Vec::new();
+    for (phase, idxs) in groups {
+        let usable: Vec<usize> = idxs
+            .iter()
+            .copied()
+            .filter(|&i| rings[i].0.len() >= 3)
+            .collect();
+        if usable.len() < 2 {
+            for &i in &idxs {
+                out.push(rings[i].clone()); // verbatim — nothing to union
+            }
+            continue;
+        }
+        let mut acc: Option<MultiPolygon<f64>> = None;
+        for &i in &usable {
+            let p = to_poly(&rings[i].0);
+            acc = Some(match acc {
+                None => MultiPolygon::new(vec![p]),
+                Some(mp) => mp.union(&p),
+            });
+        }
+        let mp = acc.expect("usable.len() >= 2");
+        if mp.0.len() >= usable.len() {
+            // Fully disjoint — keep the stored rings verbatim (bit-identical).
+            for &i in &idxs {
+                out.push(rings[i].clone());
+            }
+            continue;
+        }
+        for poly in &mp.0 {
+            let ext = open_ring(poly.exterior());
+            if ext.len() >= 3 {
+                out.push((ext, phase.clone()));
+            }
+            for hole in poly.interiors() {
+                let h = open_ring(hole);
+                if h.len() >= 3 {
+                    out.push((h, phase.clone()));
+                }
+            }
+        }
+        // Degenerate (< 3-vertex) members of a merged group are dropped with it.
+    }
+    out
+}
+
 impl Default for FloorRegion {
     fn default() -> Self {
         Self {
@@ -714,6 +912,114 @@ mod boundary_overlap_tests {
         let r = region(&[(0., 0.), (5., 0.), (10., 0.), (10., 6.), (0., 6.)]);
         let out = r.boundary_overlaps(&[seg((0., 0.), (10., 0.))]);
         assert!((out[0] - 10.0).abs() < 1e-6, "got {}", out[0]);
+    }
+}
+
+#[cfg(test)]
+mod same_construction_merge_tests {
+    use super::*;
+
+    fn rect(x0: f64, y0: f64, x1: f64, y1: f64) -> Vec<Point2f64> {
+        vec![
+            Point2f64::new(x0, y0),
+            Point2f64::new(x1, y0),
+            Point2f64::new(x1, y1),
+            Point2f64::new(x0, y1),
+        ]
+    }
+
+    /// Two ADJACENT partition pieces with the SAME construction id (the
+    /// "assign the rest to Original" leftover beside an already-Original area,
+    /// bug c78ebed1) merge into ONE region with the dissolved seam's collinear
+    /// vertices stripped.
+    #[test]
+    fn adjacent_same_construction_pieces_merge_into_one() {
+        let cid = ItemId::default();
+        let mut floors = FloorRegions::from_vertex_lists(vec![rect(0.0, 0.0, 5.0, 4.0)], cid);
+        floors
+            .regions
+            .extend(FloorRegions::from_vertex_lists(vec![rect(5.0, 0.0, 8.0, 4.0)], cid).regions);
+        let merged = floors.merge_same_construction();
+        assert_eq!(merged.regions.len(), 1, "one physical floor, one region");
+        assert_eq!(
+            merged.to_vertex_lists()[0].len(),
+            4,
+            "the x=5 seam dissolved and its collinear endpoints were stripped"
+        );
+        assert_eq!(merged.regions[0].construction_id, cid);
+    }
+
+    /// DIFFERENT construction ids never merge — and their stored points pass
+    /// through verbatim (no geo ops on the untouched groups).
+    #[test]
+    fn different_constructions_stay_split_verbatim() {
+        let (cid_a, cid_b) = (ItemId::default(), ItemId::default());
+        let mut floors = FloorRegions::from_vertex_lists(vec![rect(0.0, 0.0, 5.0, 4.0)], cid_a);
+        floors
+            .regions
+            .extend(FloorRegions::from_vertex_lists(vec![rect(5.0, 0.0, 8.0, 4.0)], cid_b).regions);
+        let before = floors.to_vertex_lists();
+        let merged = floors.merge_same_construction();
+        assert_eq!(merged.regions.len(), 2, "a real phase boundary stays");
+        assert_eq!(merged.to_vertex_lists(), before, "points bit-identical");
+    }
+
+    /// DISJOINT same-construction pieces (a genuinely split footprint) stay two
+    /// regions with bit-identical points — the union is only accepted when it
+    /// actually reduces the piece count.
+    #[test]
+    fn disjoint_same_construction_pieces_stay_verbatim() {
+        let cid = ItemId::default();
+        let mut floors = FloorRegions::from_vertex_lists(vec![rect(0.0, 0.0, 3.0, 4.0)], cid);
+        floors
+            .regions
+            .extend(FloorRegions::from_vertex_lists(vec![rect(5.0, 0.0, 8.0, 4.0)], cid).regions);
+        let before = floors.to_vertex_lists();
+        let merged = floors.merge_same_construction();
+        assert_eq!(merged.regions.len(), 2);
+        assert_eq!(merged.to_vertex_lists(), before, "points bit-identical");
+    }
+
+    /// A `level_m` difference is a REAL division (a step) even under one
+    /// construction id — never merged.
+    #[test]
+    fn level_difference_blocks_the_merge() {
+        let cid = ItemId::default();
+        let mut floors = FloorRegions::from_vertex_lists(vec![rect(0.0, 0.0, 5.0, 4.0)], cid);
+        floors
+            .regions
+            .extend(FloorRegions::from_vertex_lists(vec![rect(5.0, 0.0, 8.0, 4.0)], cid).regions);
+        floors.regions[1].level_m = -0.3;
+        assert_eq!(floors.merge_same_construction().regions.len(), 2);
+    }
+
+    /// `merge_same_phase_rings`: two ADJACENT same-phase rings union into one
+    /// canonical ring (seam edges gone); disjoint same-phase rings and
+    /// different-phase singletons pass through verbatim.
+    #[test]
+    fn same_phase_rings_union_only_when_adjacent() {
+        // Adjacent Original pair → one 4-corner ring.
+        let merged = merge_same_phase_rings(&[
+            (rect(0.0, 0.0, 5.0, 4.0), ConstructionPhase::Original),
+            (rect(5.0, 0.0, 8.0, 4.0), ConstructionPhase::Original),
+        ]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].1, ConstructionPhase::Original);
+        assert_eq!(merged[0].0.len(), 4, "seam dissolved, collinear stripped");
+
+        // Disjoint Original pair → verbatim (bit-identical rings).
+        let input = vec![
+            (rect(0.0, 0.0, 3.0, 4.0), ConstructionPhase::Original),
+            (rect(5.0, 0.0, 8.0, 4.0), ConstructionPhase::Original),
+        ];
+        assert_eq!(merge_same_phase_rings(&input), input, "disjoint verbatim");
+
+        // Mixed phases, one ring each → verbatim in first-seen order.
+        let input = vec![
+            (rect(0.0, 0.0, 4.0, 4.0), ConstructionPhase::Original),
+            (rect(4.0, 0.0, 8.0, 4.0), ConstructionPhase::Extension1),
+        ];
+        assert_eq!(merge_same_phase_rings(&input), input, "singletons verbatim");
     }
 }
 

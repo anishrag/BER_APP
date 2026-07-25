@@ -7,7 +7,7 @@
 //! snapshot); the logic over the regions — stamping walls, rebuilding regions
 //! from persisted floors — lives here.
 use ber_model::ber::ber_struct::Ber;
-use ber_model::ber::common::ConstructionPhase;
+use ber_model::ber::common::{ConstructionPhase, ItemId};
 use domain::points::{to_f32, Point2f32, Point2f64};
 
 /// Durable geometric key for an AREA region (floor / ceiling): its plan centroid
@@ -144,6 +144,7 @@ pub fn stamp_wall_phases(ber: &mut Ber, idx: usize) {
         return;
     }
     let n_walls = ber.storeys[idx].walls.regions.len();
+    let mut repoints: Vec<(ItemId, ItemId)> = Vec::new();
     for i in 0..n_walls {
         // Pull the wall's base edge + current construction out as owned values
         // so the floor reads below don't alias the (later) mutable reassign.
@@ -195,9 +196,16 @@ pub fn stamp_wall_phases(ber: &mut Ber, idx: usize) {
             // name is part of the construction identity now).
             let cid =
                 ber.ensure_wall_construction_named(ty, makeup, new_phase, cur_name.as_deref());
+            if cid != cur_cid {
+                repoints.push((cur_cid, cid));
+            }
             ber.storeys[idx].walls.regions[i].construction_id = cid;
         }
     }
+    // A re-point that left its old construction unreferenced carries the
+    // group's evidence (photos) onto the successor — see
+    // `Ber::carry_evidence_from_orphans`.
+    ber.carry_evidence_from_orphans(&repoints);
 }
 
 /// Stamp the construction PHASE onto storey `idx`'s ROOF/CEILING regions from
@@ -215,6 +223,7 @@ pub fn stamp_ceiling_phases(ber: &mut Ber, idx: usize) {
         return;
     }
     let n = ber.storeys[idx].ceilings.regions.len();
+    let mut repoints: Vec<(ItemId, ItemId)> = Vec::new();
     for i in 0..n {
         let (c, cur_cid) = {
             let r = &ber.storeys[idx].ceilings.regions[i];
@@ -239,9 +248,14 @@ pub fn stamp_ceiling_phases(ber: &mut Ber, idx: usize) {
         if new_phase != cur_phase {
             let cid =
                 ber.ensure_ceiling_construction_named(ty, makeup, new_phase, cur_name.as_deref());
+            if cid != cur_cid {
+                repoints.push((cur_cid, cid));
+            }
             ber.storeys[idx].ceilings.regions[i].construction_id = cid;
         }
     }
+    // Evidence rides the re-point when the old construction is left orphaned.
+    ber.carry_evidence_from_orphans(&repoints);
 }
 
 /// Compose each perimeter wall's ASSIGNED construction (type + make-up, from
@@ -261,6 +275,7 @@ pub fn stamp_wall_constructions(ber: &mut Ber, idx: usize, doc: &crate::StoreyDo
     const TOL_M: f32 = 0.05;
     let plan = &doc.outline.floor_plan;
     let n = ber.storeys[idx].walls.regions.len();
+    let mut repoints: Vec<(ItemId, ItemId)> = Vec::new();
     for i in 0..n {
         // A wall/riser the cross-storey derive buried is `InterStorey` — the
         // derivation's own stamp on an out-of-scope junction band (never an
@@ -295,6 +310,10 @@ pub fn stamp_wall_constructions(ber: &mut Ber, idx: usize, doc: &crate::StoreyDo
                 phase.clone(),
                 name.as_deref(),
             );
+            let old = ber.storeys[idx].walls.regions[i].construction_id;
+            if cid != old {
+                repoints.push((old, cid));
+            }
             ber.storeys[idx].walls.regions[i].construction_id = cid;
         }
     }
@@ -317,9 +336,17 @@ pub fn stamp_wall_constructions(ber: &mut Ber, idx: usize, doc: &crate::StoreyDo
                 phase.clone(),
                 name.as_deref(),
             );
+            let old = ber.storeys[idx].porch_walls.regions[i].construction_id;
+            if cid != old {
+                repoints.push((old, cid));
+            }
             ber.storeys[idx].porch_walls.regions[i].construction_id = cid;
         }
     }
+    // Evidence rides the re-point when the old construction is left orphaned
+    // (field flow: photograph the build-up FIRST, then set the spec to match —
+    // the photo must follow the group onto its re-ensured construction).
+    ber.carry_evidence_from_orphans(&repoints);
 }
 
 /// Apply each FLOOR region's ASSIGNED construction (type + make-up + phase, from
@@ -334,6 +361,7 @@ pub fn stamp_floor_constructions(ber: &mut Ber, idx: usize, doc: &crate::StoreyD
         return;
     }
     let n = ber.storeys[idx].floors.regions.len();
+    let mut repoints: Vec<(ItemId, ItemId)> = Vec::new();
     for i in 0..n {
         // Out-of-scope floors (derived inter-storey / party) never take a
         // construction — the ceilings arm's stale-share guard, mirrored.
@@ -358,9 +386,15 @@ pub fn stamp_floor_constructions(ber: &mut Ber, idx: usize, doc: &crate::StoreyD
                 phase.clone(),
                 name.as_deref(),
             );
+            let old = ber.storeys[idx].floors.regions[i].construction_id;
+            if cid != old {
+                repoints.push((old, cid));
+            }
             ber.storeys[idx].floors.regions[i].construction_id = cid;
         }
     }
+    // Evidence rides the re-point when the old construction is left orphaned.
+    ber.carry_evidence_from_orphans(&repoints);
 }
 
 /// Apply each CEILING/ROOF region's ASSIGNED construction (type + make-up +
@@ -372,6 +406,7 @@ pub fn stamp_ceiling_constructions(ber: &mut Ber, idx: usize, doc: &crate::Store
         return;
     }
     let n = ber.storeys[idx].ceilings.regions.len();
+    let mut repoints: Vec<(ItemId, ItemId)> = Vec::new();
     for i in 0..n {
         // OUT-OF-SCOPE regions (derived inter-storey / party) never take a
         // construction: a stale centroid key from a session that once
@@ -403,9 +438,16 @@ pub fn stamp_ceiling_constructions(ber: &mut Ber, idx: usize, doc: &crate::Store
                 phase.clone(),
                 name.as_deref(),
             );
+            let old = ber.storeys[idx].ceilings.regions[i].construction_id;
+            if cid != old {
+                repoints.push((old, cid));
+            }
             ber.storeys[idx].ceilings.regions[i].construction_id = cid;
         }
     }
+    // Evidence (photos + insulation spec) rides the re-point when the old
+    // construction is left orphaned.
+    ber.carry_evidence_from_orphans(&repoints);
 }
 
 /// The phase regions a NEW upper storey INHERITS from the storey below it: the
@@ -593,6 +635,85 @@ mod tests {
         assert_ne!(
             ber.storeys[0].ceilings.regions[1].construction_id, nil,
             "the in-scope region is stamped normally"
+        );
+    }
+
+    /// The field flow is photograph FIRST, then set the spec to match: a
+    /// make-up change re-`ensure`s a fresh construction and re-points the
+    /// whole group, so the stamp must carry the old (now orphaned)
+    /// construction's evidence — photos and the ceiling insulation spec —
+    /// onto the successor instead of leaving it to die at the next prune.
+    /// (The lost "insulated back" wall photo, 2026-07-25.)
+    #[test]
+    fn construction_stamp_carries_evidence_across_a_full_repoint() {
+        use ber_model::ber::common::Evidence;
+        use ber_model::ber::structural::{
+            CeilingConstructionType, CeilingExposure, CeilingInsulation, CeilingRegion,
+            ConstructionMakeup, Opes, Polygon3D, SurfaceKind,
+        };
+        use domain::points::Point3f64;
+        let mut ber = Ber::default();
+        let old = ber.ensure_ceiling_construction(
+            CeilingConstructionType::FlatRoof,
+            ConstructionMakeup::Default,
+            ConstructionPhase::default(),
+        );
+        let photo = Evidence::default();
+        ber.add_construction_photo(SurfaceKind::Ceilings, old, photo.clone());
+        ber.set_ceiling_insulation(old, Some(CeilingInsulation::ThicknessMm(80.0)));
+        ber.storeys.push(Storey {
+            ceilings: CeilingRegions {
+                regions: vec![CeilingRegion {
+                    id: Default::default(),
+                    polygon: Polygon3D::new(vec![
+                        Point3f64::new(0.0, 0.0, 2.4),
+                        Point3f64::new(4.0, 0.0, 2.4),
+                        Point3f64::new(4.0, 2.0, 2.4),
+                        Point3f64::new(0.0, 2.0, 2.4),
+                    ]),
+                    opes: Opes::default(),
+                    construction_id: old,
+                    exposure: CeilingExposure::ExposedRoof,
+                }],
+            },
+            ..Storey::default()
+        });
+        // The assessor's new spec for the SAME (whole) group — different
+        // make-up, so the stamp find-or-creates a fresh construction.
+        let mut doc = crate::StoreyDoc::default();
+        doc.ceiling_constructions.insert(
+            centroid_key(Point2f64::new(2.0, 1.0)),
+            (
+                CeilingConstructionType::FlatRoof,
+                ConstructionMakeup::DefaultPlus {
+                    extra_insulation_mm: 80,
+                    plasterboard: false,
+                },
+                ConstructionPhase::default(),
+                None,
+            ),
+        );
+        stamp_ceiling_constructions(&mut ber, 0, &doc);
+        let new = ber.storeys[0].ceilings.regions[0].construction_id;
+        assert_ne!(new, old, "the spec change re-pointed the region");
+        let nc = ber.ceiling_construction(new).unwrap();
+        assert_eq!(
+            nc.base.photos.iter().map(|p| p.id).collect::<Vec<_>>(),
+            vec![photo.id],
+            "the photo rode the re-point onto the successor"
+        );
+        assert_eq!(
+            nc.insulation,
+            Some(CeilingInsulation::ThicknessMm(80.0)),
+            "the insulation spec rode along"
+        );
+        assert!(
+            ber.ceiling_construction(old)
+                .unwrap()
+                .base
+                .photos
+                .is_empty(),
+            "the orphan is drained, not duplicated"
         );
     }
 

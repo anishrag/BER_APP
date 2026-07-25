@@ -209,6 +209,8 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             // or edit — starts from typed measurements).
             *view.opening_full_width = false;
             *view.opening_full_height = false;
+            // The door edit's "rename all" tick is a per-edit decision.
+            *view.door_rename_all = false;
             // Photos are per-window, so a fresh placement starts with none (unlike
             // the window type / overshading, which persist across placements).
             view.pending_window_photos.clear();
@@ -334,6 +336,14 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         let is_door_edit = prompt.door_edit.is_some();
         let door_type_name = view.door_type_name_input.clone();
         let door_kind = view.door_kind.clone();
+        let door_rename_all = *view.door_rename_all;
+        // The door's ORIGINAL type name (non-empty, trimmed) — the "rename all"
+        // tick is offered only while the typed name differs from it.
+        let door_orig_name = prompt
+            .door_edit
+            .as_ref()
+            .map(|d| d.type_name.trim().to_string())
+            .filter(|s| !s.is_empty());
         // Photos picked so far for this placement, captured by value into the
         // events (the photo button below adds to the list for a later frame).
         let photos = view.pending_window_photos.clone();
@@ -357,6 +367,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                         kind: door_kind.clone(),
                         draught_stripped: door_draught_stripped,
                         photos: apply_photos.clone(),
+                        rename_all: door_rename_all,
                     }
                 },
             )
@@ -694,6 +705,11 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         // body. Captures the wt_* state fields (disjoint from the box fields).
         let existing_types = view.existing_window_types.clone();
         let offer_wt = prompt.offer_window_type;
+        // A rename typed into the picker this frame — the picker has no event
+        // sink, so it parks the (id, name) here and `render` emits the
+        // RenameWindowType event after the box-show call returns.
+        let mut pending_rename: Option<(ItemId, String)> = None;
+        let wt_rename_error = view.window_type_rename_error.clone();
         let mut picker = |ui: &mut egui::Ui| {
             // "Edit door" box: the door has no window-type picker — instead it
             // collects its own type name / kind / draught-stripped flag.
@@ -702,6 +718,15 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     ui.label("type").hint("A name for this door type");
                     text_input(ui, view.door_type_name_input, KEY, "Door");
                 });
+                // Bulk retype: offered once the typed name differs from the
+                // door's original — Apply then renames every door still
+                // carrying the original name, not just this one.
+                match &door_orig_name {
+                    Some(orig) if view.door_type_name_input.trim() != orig => {
+                        ui.checkbox(view.door_rename_all, format!("rename all \"{orig}\" doors"));
+                    }
+                    _ => *view.door_rename_all = false,
+                }
                 door_kind_picker(ui, &mut *view.door_kind);
                 ui.checkbox(view.door_draught_stripped, "draught stripped");
                 window_photo_picker(ui, &mut *view.pending_window_photos, false);
@@ -719,6 +744,10 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 &mut *view.wt_certified,
                 &mut *view.wt_draught_stripped,
                 &mut *view.wt_name_input,
+                &mut *view.wt_rename_input,
+                &mut *view.wt_rename_for,
+                wt_rename_error.as_ref(),
+                &mut pending_rename,
             );
             // Overshading is per-WINDOW (not per type), so it shows for every
             // window placement regardless of the type choice above.
@@ -795,6 +824,12 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             edit_token.as_deref(),
             on_event,
         );
+        // A rename typed in the picker this frame — stream it per keystroke
+        // (the controller keeps the last valid name and parks a hint on
+        // rejection; the picker shows it next frame).
+        if let Some((id, name)) = pending_rename {
+            on_event(UiEvent::Sketch(SketchEvent::RenameWindowType { id, name }));
+        }
         return;
     }
 
@@ -1740,6 +1775,13 @@ fn window_type_picker(
     certified: &mut bool,
     draught_stripped: &mut bool,
     name: &mut String,
+    // Rename state for an EXISTING selected type: the streamed buffer + which
+    // id seeded it, the controller's parked rejection hint, and the out-param
+    // the caller turns into a RenameWindowType event (the picker has no sink).
+    rename_input: &mut String,
+    rename_for: &mut Option<ItemId>,
+    rename_error: Option<&(ItemId, String)>,
+    pending_rename: &mut Option<(ItemId, String)>,
 ) {
     ui.separator();
     ui.label(RichText::new("Window type").color(Color32::from_gray(170)));
@@ -1767,6 +1809,29 @@ fn window_type_picker(
             }
             ui.selectable_value(existing_id, None, "New type…");
         });
+    // An EXISTING type selected: offer renaming the SHARED type in place. The
+    // buffer reseeds from the type's stored name whenever the selection
+    // changes; each edit streams out via `pending_rename` (the controller
+    // keeps the last valid name and parks a hint on rejection).
+    if let Some(id) = *existing_id {
+        if *rename_for != Some(id) {
+            *rename_input = existing
+                .iter()
+                .find(|t| t.id == id)
+                .and_then(|t| t.name.clone())
+                .unwrap_or_default();
+            *rename_for = Some(id);
+        }
+        ui.horizontal(|ui| {
+            ui.label("name").hint("Rename this shared window type");
+            if text_input(ui, rename_input, KEY * 3.0, "model").changed {
+                *pending_rename = Some((id, rename_input.clone()));
+            }
+        });
+        if let Some((_, hint)) = rename_error.filter(|(eid, _)| *eid == id) {
+            ui.label(RichText::new(format!("⚠ {hint}")).color(Color32::from_rgb(255, 120, 90)));
+        }
+    }
     // New-type fields: shown only when defining a new type (not reusing one).
     if existing_id.is_none() {
         ui.horizontal(|ui| {

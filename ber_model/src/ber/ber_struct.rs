@@ -697,6 +697,55 @@ impl Ber {
         id
     }
 
+    /// Rename the shared window TYPE `id` — the openings analogue of a
+    /// structure-group rename (`set_construction_name`). NAME-INTEGRITY: the
+    /// model name disambiguates otherwise-identical types, so an empty name is
+    /// rejected (a type REQUIRES one — the placement box enforces the same on
+    /// creation), and a name already held by ANOTHER type is rejected with a
+    /// user-facing hint (renames stream per keystroke; the durable name keeps
+    /// its last valid value while the assessor keeps typing). A missing `id`
+    /// is a successful no-op.
+    pub fn rename_window_type(&mut self, id: ItemId, name: &str) -> Result<(), String> {
+        let n = name.trim();
+        if n.is_empty() {
+            return Err("a window type needs a model name".to_string());
+        }
+        if self
+            .window_types
+            .iter()
+            .any(|t| t.id != id && t.specifics.name().map(str::trim) == Some(n))
+        {
+            return Err(format!(
+                "\"{n}\" is already another window type's name — pick a different one"
+            ));
+        }
+        if let Some(t) = self.window_types.iter_mut().find(|t| t.id == id) {
+            t.specifics = WindowNameSpecifics::Custom(n.to_string());
+        }
+        Ok(())
+    }
+
+    /// Rename every DOOR whose `type_name` matches `old` (trimmed) to `new`,
+    /// across all storeys — the door analogue of a group rename (doors group
+    /// by their free-text type label, not a shared registry). An empty or
+    /// unchanged `new` is a no-op. Returns how many doors were renamed.
+    pub fn rename_door_type(&mut self, old: &str, new: &str) -> usize {
+        let (old_t, new_t) = (old.trim(), new.trim());
+        if new_t.is_empty() || old_t == new_t {
+            return 0;
+        }
+        let mut renamed = 0;
+        for s in &mut self.storeys {
+            for d in &mut s.doors {
+                if d.type_name.trim() == old_t {
+                    d.type_name = new_t.to_string();
+                    renamed += 1;
+                }
+            }
+        }
+        renamed
+    }
+
     /// Stamp the default ceiling height: on storey `storey_idx` when given, else
     /// on every storey that doesn't already have one (the all-storeys 3D prompt —
     /// one typed value fills the gaps, never overwrites a set storey).

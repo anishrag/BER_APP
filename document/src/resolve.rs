@@ -5,8 +5,8 @@ use crate::{CeilingStepRegion, PhaseRegion, StepRegion, StoreyDoc};
 use ber_model::ber::ber_struct::Ber;
 use ber_model::ber::common::{ConstructionPhase, ItemId};
 use ber_model::ber::structural::{
-    rebase_ring_start, split_wall_by_line, CeilingRegions, FloorRegions, Polygon3D, Storey,
-    WallExposure, WallRegions,
+    merge_same_phase_rings, rebase_ring_start, split_wall_by_line, CeilingRegions, FloorRegions,
+    Polygon3D, Storey, WallExposure, WallRegions,
 };
 use domain::points::{to_f32, to_f64, Point2f32, Point2f64, Point3f64};
 
@@ -194,6 +194,20 @@ pub fn resolve_storey(
             (ring.clone(), cid)
         })
         .collect();
+    // CANONICAL CUT RINGS: the session rings unioned PER PHASE — what the CUT
+    // consumers below (the ceiling phase-carve and the phase wall-splits) see.
+    // Two same-phase areas drawn adjacent (drawn area + "assign the rest",
+    // bug c78ebed1) carry their shared boundary as an edge of each raw ring;
+    // cutting along it splits walls/ceilings between two SAME-phase zones — a
+    // division that separates nothing. The union dissolves exactly those
+    // internal edges; every real boundary (vs another phase / the untagged
+    // remainder / the outline) survives as a union edge. The floor PARTITION
+    // deliberately keeps the RAW per-tag feed (latest-wins overlap ordering
+    // depends on it); its same-phase re-union happens on the output instead
+    // (`merge_same_construction` above). Singleton phases and disjoint groups
+    // pass through verbatim, so reload (already one ring per phase) is
+    // byte-identical.
+    let canonical_phase_rings = merge_same_phase_rings(&phase_area_rings);
     // Clone the existing storey (keeps id/name/number/ceilings/openings) and
     // override only the derived geometry — so this RETURNS a Storey rather
     // than mutating the record in place.
@@ -214,7 +228,21 @@ pub fn resolve_storey(
                 let part = FloorRegions::partition(ring, &areas_with_cids, floor_cid);
                 regions.extend(part.regions);
             }
-            FloorRegions { regions }
+            // SAME-PHASE RE-UNION: two session areas that resolved to the SAME
+            // construction id (same phase — e.g. a drawn Original area + the
+            // "assign the rest to Original" leftover strip, bug c78ebed1) come
+            // out of the partition as two adjacent regions split by a boundary
+            // that separates nothing. Merge them back (union + collinear
+            // strip); the latest-wins overlap semantics above are untouched —
+            // the merge runs on the partition's EXCLUSIVE output, after every
+            // claim is settled. NOTE for the centroid-keyed override tables
+            // (`doc.floor_constructions`/`floor_exposure`): keys stamped at the
+            // two OLD (split) centroids both land inside the ONE merged region;
+            // the containment fallback (`centroid_override_by_containment`)
+            // resolves the exact-key miss and its first-match ambiguity is
+            // acceptable here — both keys came from same-phase regions, so
+            // either override is a valid attribution of the merged floor.
+            FloorRegions { regions }.merge_same_construction()
         };
     }
     // Ceilings: once the storey's ceiling height is set, derive the default flat
@@ -326,7 +354,31 @@ pub fn resolve_storey(
             // roof inputs. Skipped when untagged, keeping the no-phase roof
             // byte-identical (no geo ops).
             if !phase_area_rings.is_empty() {
-                let rings: Vec<Vec<Point2f64>> = phase_area_rings
+                // HEAL first (bug c78ebed1): ceilings are regions-as-truth, so a
+                // redundant same-phase carve persisted by an earlier session
+                // survives reload as two adjacent flat same-construction regions
+                // — merge those back before re-carving. Runs BEFORE the carve so
+                // a face split at a GENUINE phase boundary in THIS resolve is
+                // never merge candidates' input in the same pass; by the next
+                // resolve the stamp passes have re-pointed genuine pieces at
+                // per-phase constructions (different ids), which the heal keeps.
+                // Durable divisions are protected explicitly: the storey's split
+                // inputs (structure `ceiling_splits`, step/divider rings, dormer
+                // footprints — the `ceilings_carry_outline_edit_scars` justified
+                // set) are passed as keep-seams, and a storey with ceiling
+                // CONTINUATIONS is skipped wholesale (a continuation legitimately
+                // re-emits a target region coplanar with its source — mirroring
+                // the scar detector's conservatism).
+                if storey.ceiling_continuations.is_empty() {
+                    let mut keep_seams: Vec<Vec<Point2f64>> = storey.ceiling_splits.clone();
+                    keep_seams.extend(storey.ceiling_steps.iter().map(|(ring, _)| ring.clone()));
+                    keep_seams.extend(storey.dormers.iter().map(|d| d.footprint.clone()));
+                    storey.ceilings = std::mem::take(&mut storey.ceilings)
+                        .merge_same_construction_flat(&keep_seams);
+                }
+                // Carve along the CANONICAL per-phase rings (not the raw session
+                // rings): a boundary internal to a same-phase union never cuts.
+                let rings: Vec<Vec<Point2f64>> = canonical_phase_rings
                     .iter()
                     .map(|(ring, _)| ring.clone())
                     .collect();
@@ -451,11 +503,14 @@ pub fn resolve_storey(
     //    the OLDER zone's phase. The ceiling analogue of the floor partition +
     //    roof carve; session-driven, recomputed every resolve like those.
     let mut wall_cuts: Vec<[Point2f64; 2]> = storey.wall_splits.clone();
-    for region in phase_regions {
-        // `interior_cut_edges` works on the f32 outline; narrow the f64 ring
-        // (wall-split precision is unaffected — the sliver fix is the f64
-        // FLOOR partition above, not this cut).
-        let ring: Vec<Point2f32> = region.polygon.iter().copied().map(to_f32).collect();
+    for (ring, _) in &canonical_phase_rings {
+        // CANONICAL rings (same-phase unions), not the raw session rings: the
+        // boundary between two same-phase areas (bug c78ebed1) is internal to
+        // the union, so it no longer splits a perimeter wall into two collinear
+        // same-construction pieces. `interior_cut_edges` works on the f32
+        // outline; narrow the f64 ring (wall-split precision is unaffected —
+        // the sliver fix is the f64 FLOOR partition above, not this cut).
+        let ring: Vec<Point2f32> = ring.iter().copied().map(to_f32).collect();
         wall_cuts.extend(s.outline.floor_plan.interior_cut_edges(&ring));
     }
     let walls = walls.apply_splits(&wall_cuts);
@@ -3038,6 +3093,208 @@ mod tests {
             storey.floors.regions.len(),
             2,
             "the floor partitions in two"
+        );
+    }
+
+    /// Bug c78ebed1 ("7 Pembroke Vale"): the assessor tagged an area Original,
+    /// widened the outline, then used "assign the rest to Original" — TWO
+    /// adjacent session areas of ONE phase. A boundary between two same-phase
+    /// zones separates nothing, so the resolve must not keep it anywhere:
+    /// ONE floor region (partition output re-unioned per construction), NO
+    /// perimeter-wall split at the areas' shared edge (the wall cuts come from
+    /// the canonical per-phase union, whose x=7 edge dissolved), and ONE
+    /// ceiling region (the carve rings are the same canonical union — the
+    /// whole outline — which cuts nothing).
+    #[test]
+    fn same_phase_adjacent_areas_leave_no_interior_split() {
+        let doc = square_doc(&[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(8.0, 0.0),
+            Point2f32::new(8.0, 4.0),
+            Point2f32::new(0.0, 4.0),
+        ]);
+        // The drawn area (the OLD outline extent) + the widened leftover strip,
+        // both Original — exactly what `assign_rest_to_original` pushes.
+        let rect64 = |x0: f64, x1: f64| -> Vec<Point2f64> {
+            vec![
+                Point2f64::new(x0, 0.0),
+                Point2f64::new(x1, 0.0),
+                Point2f64::new(x1, 4.0),
+                Point2f64::new(x0, 4.0),
+            ]
+        };
+        let phase = vec![
+            PhaseRegion {
+                polygon: rect64(0.0, 7.0),
+                phase: ConstructionPhase::Original,
+            },
+            PhaseRegion {
+                polygon: rect64(7.0, 8.0),
+                phase: ConstructionPhase::Original,
+            },
+        ];
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &phase);
+        ber.set_default_ceiling_height(Some(0), 2.4);
+        let storey = resolve_storey(&doc, &ber, 0, &phase, &[], &[]);
+
+        assert_eq!(
+            storey.floors.regions.len(),
+            1,
+            "same-construction partition pieces re-union into one floor"
+        );
+        assert_eq!(
+            storey.floors.to_vertex_lists()[0].len(),
+            4,
+            "the dissolved x=7 seam left no collinear vertices"
+        );
+        assert_eq!(
+            storey.walls.regions.len(),
+            4,
+            "no perimeter wall splits at the same-phase boundary"
+        );
+        assert_eq!(
+            storey.ceilings.regions.len(),
+            1,
+            "the roof is not carved at the same-phase boundary"
+        );
+    }
+
+    /// Canonicalizing the cut rings must NOT swallow REAL boundaries: three
+    /// adjacent strips tagged Original | Extension1 | Original still split the
+    /// floor in three, carve the roof in three, and split the two crossing
+    /// perimeter walls at BOTH genuine phase boundaries (the two disjoint
+    /// Original areas stay separate — union only merges touching rings).
+    #[test]
+    fn different_phase_boundaries_survive_same_phase_canonicalization() {
+        let doc = square_doc(&[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(6.0, 0.0),
+            Point2f32::new(6.0, 4.0),
+            Point2f32::new(0.0, 4.0),
+        ]);
+        let rect64 = |x0: f64, x1: f64| -> Vec<Point2f64> {
+            vec![
+                Point2f64::new(x0, 0.0),
+                Point2f64::new(x1, 0.0),
+                Point2f64::new(x1, 4.0),
+                Point2f64::new(x0, 4.0),
+            ]
+        };
+        let phase = vec![
+            PhaseRegion {
+                polygon: rect64(0.0, 2.0),
+                phase: ConstructionPhase::Original,
+            },
+            PhaseRegion {
+                polygon: rect64(2.0, 4.0),
+                phase: ConstructionPhase::Extension1,
+            },
+            PhaseRegion {
+                polygon: rect64(4.0, 6.0),
+                phase: ConstructionPhase::Original,
+            },
+        ];
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &phase);
+        ber.set_default_ceiling_height(Some(0), 2.4);
+        let storey = resolve_storey(&doc, &ber, 0, &phase, &[], &[]);
+
+        assert_eq!(storey.floors.regions.len(), 3, "three real zones");
+        assert_eq!(storey.ceilings.regions.len(), 3, "roof carves at both");
+        assert_eq!(
+            storey.walls.regions.len(),
+            8,
+            "top+bottom walls split at x=2 and x=4 (3 pieces each) + 2 sides"
+        );
+    }
+
+    /// The ceiling HEAL: a persisted record already damaged by the redundant
+    /// same-phase carve (ceilings are regions-as-truth, so the split survived
+    /// reload) merges back to ONE region on the next resolve — while the same
+    /// shape with DIFFERENT construction ids (a genuine, already-stamped phase
+    /// boundary) and a shape protected by a durable `ceiling_splits` ring both
+    /// keep their two regions.
+    #[test]
+    fn persisted_redundant_ceiling_split_heals_on_resolve() {
+        use ber_model::ber::common::ItemId;
+        use ber_model::ber::structural::{CeilingExposure, CeilingRegion, Opes};
+        use domain::points::Point3f64;
+        let doc = square_doc(&[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(8.0, 0.0),
+            Point2f32::new(8.0, 4.0),
+            Point2f32::new(0.0, 4.0),
+        ]);
+        let flat = |x0: f64, x1: f64, cid: ItemId| CeilingRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(vec![
+                Point3f64::new(x0, 0.0, 2.4),
+                Point3f64::new(x1, 0.0, 2.4),
+                Point3f64::new(x1, 4.0, 2.4),
+                Point3f64::new(x0, 4.0, 2.4),
+            ]),
+            opes: Opes::default(),
+            construction_id: cid,
+            exposure: CeilingExposure::default(),
+        };
+        // The session zone as reload reconstructs it: ONE Original ring over
+        // the whole outline (`phase_regions_from_floors` unions per phase).
+        let phase = vec![PhaseRegion {
+            polygon: vec![
+                Point2f64::new(0.0, 0.0),
+                Point2f64::new(8.0, 0.0),
+                Point2f64::new(8.0, 4.0),
+                Point2f64::new(0.0, 4.0),
+            ],
+            phase: ConstructionPhase::Original,
+        }];
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &phase);
+        ber.set_default_ceiling_height(Some(0), 2.4);
+
+        // (a) Damaged record: both pieces carry the SAME construction — heal.
+        let cid = ItemId::default();
+        ber.storeys[0].ceilings = CeilingRegions {
+            regions: vec![flat(0.0, 7.0, cid), flat(7.0, 8.0, cid)],
+        };
+        let storey = resolve_storey(&doc, &ber, 0, &phase, &[], &[]);
+        assert_eq!(
+            storey.ceilings.regions.len(),
+            1,
+            "the redundant same-construction split heals"
+        );
+
+        // (b) Genuine boundary: DIFFERENT constructions — kept.
+        ber.storeys[0].ceilings = CeilingRegions {
+            regions: vec![
+                flat(0.0, 7.0, ItemId::default()),
+                flat(7.0, 8.0, ItemId::default()),
+            ],
+        };
+        let storey = resolve_storey(&doc, &ber, 0, &phase, &[], &[]);
+        assert_eq!(
+            storey.ceilings.regions.len(),
+            2,
+            "an already-stamped (different-construction) boundary is kept"
+        );
+
+        // (c) Deliberate division: same construction but justified by a durable
+        // structure `ceiling_splits` ring — kept for later attribution.
+        ber.storeys[0].ceilings = CeilingRegions {
+            regions: vec![flat(0.0, 7.0, cid), flat(7.0, 8.0, cid)],
+        };
+        ber.storeys[0].ceiling_splits = vec![vec![
+            Point2f64::new(0.0, 0.0),
+            Point2f64::new(7.0, 0.0),
+            Point2f64::new(7.0, 4.0),
+            Point2f64::new(0.0, 4.0),
+        ]];
+        let storey = resolve_storey(&doc, &ber, 0, &phase, &[], &[]);
+        assert_eq!(
+            storey.ceilings.regions.len(),
+            2,
+            "a durable ceiling_splits division never heals away"
         );
     }
 

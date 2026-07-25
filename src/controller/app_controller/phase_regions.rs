@@ -315,7 +315,30 @@ impl AppController {
             .or_default()
             .push(PhaseRegion { polygon, phase });
         self.abandon_phase_shape(); // discard the live buffer, return to outline
-        let _ = self.mark_dirty();
+        self.canonicalize_phase_regions_after_assign(idx);
+    }
+
+    /// Canonicalize the session phase list right after a tag lands: commit
+    /// eagerly (the resolve partitions the floors — with same-construction
+    /// pieces re-unioned), then rebuild the session zones from the resolved
+    /// floors (`reconstruct_phase_regions_for`) — the SAME canonical form a
+    /// reload produces. Without this the raw list keeps carrying a redundant
+    /// same-phase entry (e.g. "assign the rest to Original" beside an
+    /// already-Original area, bug c78ebed1) that re-seeds a boundary between
+    /// two same-phase zones into every later snap/stamp. Guarded on
+    /// `measurements_complete`: mid-dimensioning the resolve returns the
+    /// PREVIOUS storey untouched, and reconstructing from those stale floors
+    /// would wipe the tag that was just pushed.
+    fn canonicalize_phase_regions_after_assign(&mut self, idx: usize) {
+        let _ = self.commit_to_ber();
+        if self
+            .document
+            .storeys
+            .get(idx)
+            .is_some_and(|sd| sd.measurements_complete())
+        {
+            self.reconstruct_phase_regions_for(idx);
+        }
     }
 
     /// Discard the in-flight phase area / pending cut without tagging.
@@ -435,7 +458,10 @@ impl AppController {
                 phase: ConstructionPhase::Original,
             });
         }
-        let _ = self.mark_dirty();
+        // Canonicalize immediately: the leftover strip usually abuts an
+        // existing same-phase zone, and the raw two-entry list would otherwise
+        // keep re-seeding a boundary between two Original zones (bug c78ebed1).
+        self.canonicalize_phase_regions_after_assign(idx);
     }
 
     /// Delete the current storey's phase region at `index` and re-commit (so

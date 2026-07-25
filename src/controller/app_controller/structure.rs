@@ -1303,10 +1303,11 @@ impl AppController {
 
     /// Drain finished background photo jobs (call each frame): swap each job's
     /// final paths into its photo by id, delete the superseded provisional copy,
-    /// and mark dirty. A job whose photo was meanwhile removed (e.g. a failed
-    /// opening placement) cleans up its produced files instead. A FAILED job
-    /// leaves the provisional copy standing as the photo. Returns `true` if any
-    /// photo changed (so the UI repaints to pick up the new paths).
+    /// and mark dirty. A FAILED job leaves the provisional copy standing as the
+    /// photo. A job whose photo is NOT in the current record right now is
+    /// RETAINED (re-queued) with all its files kept on disk — see below.
+    /// Returns `true` if any photo changed (so the UI repaints to pick up the
+    /// new paths).
     pub fn apply_finished_photos(&mut self) -> bool {
         let drained: Vec<PhotoJobResult> = {
             let Ok(mut q) = self.photo_results.lock() else {
@@ -1318,8 +1319,26 @@ impl AppController {
             std::mem::take(&mut *q)
         };
         let mut changed = false;
+        let mut retained: Vec<PhotoJobResult> = Vec::new();
         for job in drained {
-            let Some((file_path, thumbnail_path)) = job.outcome else {
+            // DELIBERATELY discarded (a failed placement/edit dropped its
+            // freshly-ingested photos): delete the job's produced files —
+            // the provisional was already removed by `discard_stored_photos`.
+            // The one deleting branch left; every other unclaimed job is
+            // retained with its files intact.
+            if self.photo_discards.remove(&job.id) {
+                if let Some((file_path, thumbnail_path)) = &job.outcome {
+                    if *file_path != job.provisional {
+                        let _ = std::fs::remove_file(file_path);
+                    }
+                    if let Some(t) = thumbnail_path {
+                        let _ = std::fs::remove_file(t);
+                    }
+                }
+                let _ = std::fs::remove_file(&job.provisional);
+                continue;
+            }
+            let Some((file_path, thumbnail_path)) = job.outcome.clone() else {
                 // Failed — the provisional copy stands as the photo. Nothing to do.
                 continue;
             };
@@ -1337,20 +1356,23 @@ impl AppController {
                 }
                 changed = true;
             } else {
-                // The photo was removed before the job finished — clean up
-                // orphans. `file_path == provisional` is a thumbnail BACKFILL
-                // job (photos.rs): the "product" is the photo's own
-                // long-standing file, which a removal deliberately leaves on
-                // disk (undo restores the entry pointing at it) — delete only
-                // the freshly produced thumbnail then. Ingest jobs always
-                // name the final file apart from the provisional copy.
-                if file_path != job.provisional {
-                    let _ = std::fs::remove_file(&file_path);
-                    let _ = std::fs::remove_file(&job.provisional);
-                }
-                if let Some(t) = &thumbnail_path {
-                    let _ = std::fs::remove_file(t);
-                }
+                // The photo isn't in the CURRENT record right now: the record
+                // was switched/closed while the job ran (its save keeps the
+                // provisional path), the entry's construction was re-pointed
+                // in the same window, or the photo was removed (and may come
+                // back via undo). Survey photos are irreplaceable evidence —
+                // NEVER delete the files here (a saved record pointing at the
+                // provisional copy must keep resolving, and a removal already
+                // deliberately leaves files on disk for undo). Retain the
+                // result instead, so the path swap still lands the moment the
+                // photo's record/entry is current again this session; a job
+                // never claimed just leaves its files as recoverable orphans.
+                retained.push(job);
+            }
+        }
+        if !retained.is_empty() {
+            if let Ok(mut q) = self.photo_results.lock() {
+                q.extend(retained);
             }
         }
         if changed {

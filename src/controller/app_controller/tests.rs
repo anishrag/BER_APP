@@ -3579,6 +3579,70 @@ fn ingest_photo_upgrades_provisional_in_background() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
+/// A finished photo job whose photo is NOT in the current record when it lands
+/// (the record was switched/closed during the ~seconds of processing, the
+/// entry's construction was re-pointed, or the photo was removed pending undo)
+/// must keep EVERY file on disk — a saved record pointing at the provisional
+/// copy has to keep resolving — and retain the result, so the path swap still
+/// lands the moment the photo shows up in the current record again. (The lost
+/// solar-panel photo, 2026-07-25: leaving the record right after capture used
+/// to delete the files.)
+#[test]
+fn apply_finished_photos_retains_unclaimed_jobs_and_keeps_files() {
+    let mut c = dimensioned_square_controller();
+    let tmp = std::env::temp_dir().join(format!("ber_retain_{}", ItemId::default().0));
+    c.set_photos_dir(tmp.clone());
+
+    let src = tmp.join("src.png");
+    std::fs::create_dir_all(&tmp).unwrap();
+    image::RgbImage::from_pixel(800, 600, image::Rgb([10, 20, 30]))
+        .save(&src)
+        .unwrap();
+
+    let photo = c
+        .ingest_photo(&src, PhotoQuality::Low)
+        .expect("provisional photo");
+    // Deliberately NOT attached to the record — the assessor left the record
+    // before the background job finished.
+    let mut spins = 0;
+    while c.photos_processing() && spins < 2000 {
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        spins += 1;
+    }
+    assert!(spins < 2000, "background job finished");
+
+    assert!(!c.apply_finished_photos(), "no photo in the record yet");
+    let dir = std::path::Path::new(&photo.file_path).parent().unwrap();
+    let final_file = dir.join(format!("{}.jpg", photo.id.0));
+    assert!(
+        std::path::Path::new(&photo.file_path).exists(),
+        "provisional copy KEPT — the saved record still points at it"
+    );
+    assert!(final_file.exists(), "processed file kept too");
+
+    // The photo's record becomes current again (reopen / undo): the retained
+    // result lands and upgrades the paths normally.
+    c.current_record
+        .as_mut()
+        .unwrap()
+        .data
+        .photos
+        .push(photo.clone());
+    assert!(c.apply_finished_photos(), "retained job applied");
+    let stored = &c.current_record.as_ref().unwrap().data.photos[0];
+    assert!(
+        !stored.file_path.contains("_orig"),
+        "upgraded off the provisional copy: {}",
+        stored.file_path
+    );
+    assert!(
+        !std::path::Path::new(&photo.file_path).exists(),
+        "provisional deleted only once the swap actually landed"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 /// Rotating an external photo a quarter turn swaps its stored dimensions (the
 /// manual "which way is up" control), writes a fresh file, and undo reverts to
 /// the original orientation (the prior file is kept on disk).
@@ -25732,6 +25796,7 @@ fn editing_a_standalone_door_persists_and_survives_reopen() {
         DoorKind::HalfGlazed,
         false,
         Vec::new(),
+        false,
     )
     .expect("door edit applies");
     c.materialize();
@@ -26509,5 +26574,178 @@ fn vent_unit_add_sets_system_type_delete_reverts() {
             VentilationSystemType::Natural
         ),
         "removing the ventilation unit reverts to Natural",
+    );
+}
+
+/// Renaming a shared WINDOW TYPE from the placement/edit box streams per
+/// keystroke through `AppController::rename_window_type` (mirroring the
+/// structure-group rename): a valid name lands on the type and clears any
+/// parked hint; a collision with ANOTHER type's name or an empty name is
+/// rejected — the durable name keeps its last valid value and the hint parks
+/// on `window_type_rename_error()` until a valid rename (or a mode/tool
+/// change) clears it.
+#[test]
+fn rename_window_type_streams_and_parks_rejections() {
+    use ber_model::ber::fenestration::{Frame, Glazing};
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    let _ = c.create_ber(
+        "T".into(),
+        chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+    );
+    // Two shared types, distinguished by name.
+    let (a, b) = {
+        let record = c.current_record.as_mut().unwrap();
+        let a = record.data.ensure_window_type(
+            Glazing::Double,
+            Frame::WoodUPVC,
+            2010,
+            false,
+            true,
+            Vec::new(),
+            Some("Alpha".into()),
+        );
+        let b = record.data.ensure_window_type(
+            Glazing::Double,
+            Frame::WoodUPVC,
+            2010,
+            false,
+            true,
+            Vec::new(),
+            Some("Beta".into()),
+        );
+        (a, b)
+    };
+    let name_of = |c: &AppController, id| {
+        c.current_record.as_ref().unwrap().data.window_types[..]
+            .iter()
+            .find(|t| t.id == id)
+            .unwrap()
+            .specifics
+            .name()
+            .map(str::to_owned)
+    };
+
+    // A valid rename lands and parks no hint.
+    c.rename_window_type(a, "Gamma".into());
+    assert_eq!(name_of(&c, a).as_deref(), Some("Gamma"));
+    assert!(c.window_type_rename_error().is_none());
+
+    // Another type's name is rejected: the durable name keeps its last valid
+    // value and the hint parks against the edited type's id.
+    c.rename_window_type(a, "Beta".into());
+    assert_eq!(
+        name_of(&c, a).as_deref(),
+        Some("Gamma"),
+        "rejected rename must not change the stored name"
+    );
+    let (eid, hint) = c.window_type_rename_error().expect("hint parked");
+    assert_eq!(*eid, a);
+    assert!(hint.contains("Beta"), "hint names the clash: {hint}");
+    assert_eq!(
+        name_of(&c, b).as_deref(),
+        Some("Beta"),
+        "the OTHER type is untouched"
+    );
+
+    // Empty (whitespace) is rejected too — a type requires a model name.
+    c.rename_window_type(a, "   ".into());
+    assert_eq!(name_of(&c, a).as_deref(), Some("Gamma"));
+    assert!(
+        c.window_type_rename_error().is_some(),
+        "empty name parks a hint"
+    );
+
+    // The assessor keeps typing to a valid name: it lands and clears the hint.
+    c.rename_window_type(a, "Delta".into());
+    assert_eq!(name_of(&c, a).as_deref(), Some("Delta"));
+    assert!(c.window_type_rename_error().is_none());
+
+    // A stale hint doesn't outlive a tool change.
+    c.rename_window_type(a, "Beta".into());
+    assert!(c.window_type_rename_error().is_some());
+    c.set_openings_tool(OpeningToolKind::Edit);
+    assert!(
+        c.window_type_rename_error().is_none(),
+        "tool change clears the parked hint"
+    );
+}
+
+/// The "rename all" tick on the Edit-door box: Apply retypes EVERY door
+/// sharing the edited door's PREVIOUS type name (across the record), while a
+/// door with a different name keeps it. Without the tick only the edited door
+/// changes.
+#[test]
+fn apply_door_edit_rename_all_bulk_renames_matching_doors() {
+    use ber_model::ber::fenestration::{DoorKind, OpeningPlacement, Overshading};
+    let mut c = dimensioned_square_controller();
+    c.set_default_ceiling_height(2.8).unwrap();
+    c.materialize();
+    // Three plain doors on three walls — all placed with the default type
+    // name "Door"; the third is then retyped "Other" so the bulk rename has a
+    // non-matching bystander.
+    c.select_opening_tool(OpeningToolKind::Door);
+    for (x, y) in [(5.0, -0.2), (10.2, 5.0), (5.0, 10.2)] {
+        c.openings_pointer_down(x, y, 0.5);
+        c.place_opening(
+            0.9,
+            2.0,
+            false,
+            false,
+            None,
+            None,
+            None,
+            WindowTypeChoice::default(),
+            Overshading::Average,
+            None,
+            true,
+            Vec::new(),
+        )
+        .expect("door places");
+    }
+    c.materialize();
+    let (did, along, other_id) = {
+        let record = c.current_record.as_mut().unwrap();
+        let doors = &mut record.data.storeys[0].doors;
+        assert_eq!(doors.len(), 3, "three doors placed");
+        assert!(doors.iter().all(|d| d.type_name == "Door"));
+        doors[2].type_name = "Other".to_string();
+        let along = match &doors[0].placement {
+            Some(OpeningPlacement::Wall { along_m, .. }) => *along_m,
+            other => panic!("expected a wall placement, got {other:?}"),
+        };
+        (doors[0].id, along, doors[2].id)
+    };
+    // Edit the first door via the elevation flow, with "rename all" ticked.
+    c.set_openings_tool(OpeningToolKind::Edit);
+    c.openings_pointer_down(5.0, -0.2, 0.5);
+    assert!(c.elevation_wall().is_some(), "elevation opened");
+    c.elevation_pointer_down(along, 1.0);
+    c.elevation_pointer_up();
+    c.start_edit_selected_door();
+    c.apply_door_edit(
+        0.9,
+        2.0,
+        "Front door".to_string(),
+        DoorKind::Solid,
+        true,
+        Vec::new(),
+        true, // rename all "Door" doors
+    )
+    .expect("door edit applies");
+    let doors = &c.current_record.as_ref().unwrap().data.storeys[0].doors;
+    assert_eq!(
+        doors.iter().find(|d| d.id == did).unwrap().type_name,
+        "Front door",
+        "the edited door takes the new name"
+    );
+    assert_eq!(
+        doors.iter().filter(|d| d.type_name == "Front door").count(),
+        2,
+        "the OTHER \"Door\" door is bulk-renamed too"
+    );
+    assert_eq!(
+        doors.iter().find(|d| d.id == other_id).unwrap().type_name,
+        "Other",
+        "a non-matching door keeps its name"
     );
 }

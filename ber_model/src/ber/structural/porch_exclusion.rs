@@ -337,9 +337,9 @@ fn fully_protruding(ber: &Ber, storey_idx: usize, ring: &[Point2f64]) -> bool {
         let m = outer.len();
         for j in 0..m {
             let (p, q) = (outer[j], outer[(j + 1) % m]);
-            let incident = attachments
-                .iter()
-                .any(|v| point_to_segment_distance(v.x, v.y, p.x, p.y, q.x, q.y) <= CONTAINMENT_TOL_M);
+            let incident = attachments.iter().any(|v| {
+                point_to_segment_distance(v.x, v.y, p.x, p.y, q.x, q.y) <= CONTAINMENT_TOL_M
+            });
             if !incident {
                 continue;
             }
@@ -420,8 +420,7 @@ fn subdivide_by_outline(
             let m = outer.len();
             (0..m).any(|j| {
                 let (p, q) = (outer[j], outer[(j + 1) % m]);
-                point_to_segment_distance(mid.x, mid.y, p.x, p.y, q.x, q.y)
-                    <= CONTAINMENT_TOL_M
+                point_to_segment_distance(mid.x, mid.y, p.x, p.y, q.x, q.y) <= CONTAINMENT_TOL_M
             })
         });
         out.push((
@@ -700,7 +699,9 @@ pub fn derive_porch_exclusions(ber: &mut Ber, dimensioned: &[bool]) {
             storey.walls = std::mem::take(&mut storey.walls).apply_splits(&cuts);
             let mut buried_walls: Vec<usize> = Vec::new();
             for (ri, r) in storey.walls.regions.iter_mut().enumerate() {
-                let Some((a, b)) = r.base_edge() else { continue };
+                let Some((a, b)) = r.base_edge() else {
+                    continue;
+                };
                 let mid = Point2f64::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0);
                 let on_flush = flush_edges.iter().any(|e| {
                     point_to_segment_distance(mid.x, mid.y, e[0].x, e[0].y, e[1].x, e[1].y)
@@ -743,9 +744,7 @@ mod tests {
     use super::*;
     use crate::ber::fenestration::{Door, WallAnchor};
     use crate::ber::objects::{BuildingObject, ObjectRoom, RadiatorTrv};
-    use crate::ber::structural::{
-        derive_inter_storey, CeilingRegion, CeilingRegions, WallRegions,
-    };
+    use crate::ber::structural::{CeilingRegions, WallRegions};
     use domain::points::Point2f32;
     use manip_plan::SurfaceRef;
 
@@ -789,17 +788,14 @@ mod tests {
         ];
         let cid = ItemId::default();
         let floors = FloorRegions::new(outline.clone(), cid);
-        let ceilings =
-            CeilingRegions::default_for_footprint(vec![outline.clone()], 2.4, cid);
-        let walls =
-            WallRegions::regenerate(perimeter(&outline), &ceilings, &floors, 0.0, 2.4, cid);
+        let ceilings = CeilingRegions::default_for_footprint(vec![outline.clone()], 2.4, cid);
+        let walls = WallRegions::regenerate(perimeter(&outline), &ceilings, &floors, 0.0, 2.4, cid);
         let inner_edge = vec![(
             Point2f64::new(6.0, 0.0),
             Point2f64::new(4.0, 0.0),
             WallExposure::Unset,
         )];
-        let porch_walls =
-            WallRegions::regenerate(inner_edge, &ceilings, &floors, 0.0, 2.4, cid);
+        let porch_walls = WallRegions::regenerate(inner_edge, &ceilings, &floors, 0.0, 2.4, cid);
         let mut storey = Storey {
             floors,
             walls,
@@ -1004,8 +1000,10 @@ mod tests {
         let mut ber = porch_house();
         ber.storeys[0].doors.push(separating_door());
         let mut room = ObjectRoom::new(Point2f32::new(5.0, -0.75));
-        room.objects
-            .push(BuildingObject::new(ObjectKind::Radiator(RadiatorTrv::WithTrv), 1));
+        room.objects.push(BuildingObject::new(
+            ObjectKind::Radiator(RadiatorTrv::WithTrv),
+            1,
+        ));
         ber.storeys[0].object_rooms.push(room);
         assert_eq!(porch_verdicts(&ber)[0].2, PorchVerdict::Included);
 
@@ -1060,13 +1058,23 @@ mod tests {
 
         // A radiator turns up after all → included → full retraction.
         let mut room = ObjectRoom::new(Point2f32::new(5.0, -0.75));
-        room.objects
-            .push(BuildingObject::new(ObjectKind::Radiator(RadiatorTrv::WithTrv), 1));
+        room.objects.push(BuildingObject::new(
+            ObjectKind::Radiator(RadiatorTrv::WithTrv),
+            1,
+        ));
         ber.storeys[0].object_rooms.push(room);
         derive_porch_exclusions(&mut ber, &[true]);
         let s = &ber.storeys[0];
-        assert!(s.walls.regions.iter().all(|r| r.exposure != WallExposure::Irrelevant));
-        assert!(s.floors.regions.iter().all(|r| r.exposure != FloorExposure::Irrelevant));
+        assert!(s
+            .walls
+            .regions
+            .iter()
+            .all(|r| r.exposure != WallExposure::Irrelevant));
+        assert!(s
+            .floors
+            .regions
+            .iter()
+            .all(|r| r.exposure != FloorExposure::Irrelevant));
         assert!(s
             .ceilings
             .regions
@@ -1106,8 +1114,10 @@ mod tests {
 
         // Heated → Included → NonHeatLoss → drops OUT of scope.
         let mut room = ObjectRoom::new(Point2f32::new(5.0, -0.75));
-        room.objects
-            .push(BuildingObject::new(ObjectKind::Radiator(RadiatorTrv::WithTrv), 1));
+        room.objects.push(BuildingObject::new(
+            ObjectKind::Radiator(RadiatorTrv::WithTrv),
+            1,
+        ));
         ber.storeys[0].object_rooms.push(room);
         derive_porch_exclusions(&mut ber, &[true]);
         assert!(!ber.storeys[0].surface_in_structure_scope(SurfaceKind::Walls, wall_id));
@@ -1149,14 +1159,20 @@ mod tests {
         ];
         let floors = FloorRegions::new(outline.clone(), cid);
         let ceilings = CeilingRegions::default_for_footprint(vec![outline.clone()], 2.4, cid);
-        let walls =
-            WallRegions::regenerate(perimeter(&outline), &ceilings, &floors, 0.0, 2.4, cid);
+        let walls = WallRegions::regenerate(perimeter(&outline), &ceilings, &floors, 0.0, 2.4, cid);
         let inner_edges = vec![
-            (Point2f64::new(5.0, 10.0), Point2f64::new(5.0, 8.0), WallExposure::Unset),
-            (Point2f64::new(5.0, 8.0), Point2f64::new(2.0, 8.0), WallExposure::Unset),
+            (
+                Point2f64::new(5.0, 10.0),
+                Point2f64::new(5.0, 8.0),
+                WallExposure::Unset,
+            ),
+            (
+                Point2f64::new(5.0, 8.0),
+                Point2f64::new(2.0, 8.0),
+                WallExposure::Unset,
+            ),
         ];
-        let porch_walls =
-            WallRegions::regenerate(inner_edges, &ceilings, &floors, 0.0, 2.4, cid);
+        let porch_walls = WallRegions::regenerate(inner_edges, &ceilings, &floors, 0.0, 2.4, cid);
         let mut ground = Storey {
             floors,
             walls,

@@ -349,6 +349,7 @@ impl AppController {
         self.openings_mode = on;
         self.pending_opening = None;
         self.opening_dim_error = None;
+        self.window_type_rename_error = None;
         self.elevation_wall = None;
         self.elevation_drag = None;
         self.elevation_selection = None;
@@ -384,6 +385,7 @@ impl AppController {
         self.openings_mode = false;
         self.pending_opening = None;
         self.opening_dim_error = None;
+        self.window_type_rename_error = None;
         self.elevation_wall = None;
         self.elevation_drag = None;
         self.elevation_selection = None;
@@ -410,6 +412,7 @@ impl AppController {
         self.openings_tool = tool;
         self.pending_opening = None;
         self.opening_dim_error = None;
+        self.window_type_rename_error = None;
         self.confirm_delete = false;
         // Leaving Edit closes any open elevation + clears the surface selection.
         if tool != OpeningToolKind::Edit {
@@ -659,6 +662,30 @@ impl AppController {
                 }
             })
             .collect()
+    }
+
+    /// Rename the shared window TYPE `id` — streamed per keystroke from the
+    /// placement/edit box's name field (mirrors `set_structure_group_name`).
+    /// The model owns the name-integrity rules (`Ber::rename_window_type`); on
+    /// rejection the durable name keeps its last valid value and the hint is
+    /// parked for the box to show. No undo snapshot (cosmetic); marks dirty so
+    /// an accepted rename persists.
+    pub fn rename_window_type(&mut self, id: ItemId, name: String) {
+        let Some(record) = self.current_record.as_mut() else {
+            return;
+        };
+        match record.data.rename_window_type(id, &name) {
+            Ok(()) => {
+                self.window_type_rename_error = None;
+                let _ = self.mark_dirty();
+            }
+            Err(hint) => self.window_type_rename_error = Some((id, hint)),
+        }
+    }
+
+    /// The parked window-type rename rejection (type id + hint), if any.
+    pub fn window_type_rename_error(&self) -> Option<&(ItemId, String)> {
+        self.window_type_rename_error.as_ref()
     }
 
     /// Place a FULL-SURFACE window — turn the (empty) host wall into a "window
@@ -1343,7 +1370,7 @@ impl AppController {
                 Ok(())
             }
             Err(e) => {
-                discard_stored_photos(&stored_photos); // placement failed — no leak on retry
+                self.discard_stored_photos(&stored_photos); // placement failed — no leak on retry
                 self.pending_opening = Some(pending); // keep the box open
                 let msg = opening_error_msg(e);
                 self.opening_dim_error = Some(msg.clone());
@@ -1421,7 +1448,7 @@ impl AppController {
                 Ok(())
             }
             Err(e) => {
-                discard_stored_photos(&stored_photos); // placement failed — no leak on retry
+                self.discard_stored_photos(&stored_photos); // placement failed — no leak on retry
                 self.pending_opening = Some(pending);
                 let msg = opening_error_msg(e);
                 self.opening_dim_error = Some(msg.clone());
@@ -1910,7 +1937,7 @@ impl AppController {
             openings::resize_opening(storey, OpeningRef::Window(wid), width_m, height_m)
         };
         if let Err(e) = resized {
-            discard_stored_photos(&stored_photos); // edit failed — no leak on retry
+            self.discard_stored_photos(&stored_photos); // edit failed — no leak on retry
             let msg = opening_error_msg(e);
             self.opening_dim_error = Some(msg.clone());
             return Err(msg);
@@ -1983,7 +2010,7 @@ impl AppController {
         // Resize first — the only failure is a non-positive dimension (ZeroSize);
         // an overhang is allowed through. On failure the rooflight is untouched.
         if let Err(e) = openings::resize_roof_window(storey, wid, width_m, height_m) {
-            discard_stored_photos(&stored_photos);
+            self.discard_stored_photos(&stored_photos);
             let msg = opening_error_msg(e);
             self.opening_dim_error = Some(msg.clone());
             return Err(msg);
@@ -2029,6 +2056,7 @@ impl AppController {
         kind: DoorKind,
         draught_stripped: bool,
         photos: Vec<(std::path::PathBuf, PhotoQuality)>,
+        rename_all: bool,
     ) -> Result<(), String> {
         let Some(OpeningEdit::Door(did)) = self.opening_edit else {
             return Ok(());
@@ -2047,20 +2075,34 @@ impl AppController {
         let Some(storey) = record.data.storeys.get_mut(idx) else {
             return Ok(());
         };
+        // The door's PREVIOUS type name — the bulk rename below retypes the
+        // doors still sharing it after this door takes the new name.
+        let old_type_name = storey
+            .doors
+            .iter()
+            .find(|d| d.id == did)
+            .map(|d| d.type_name.trim().to_string())
+            .unwrap_or_default();
         // Resize first — it can fail (wall too short); the attributes apply only
         // on success, so a refused edit leaves the door fully untouched.
         if let Err(e) = openings::resize_opening(storey, OpeningRef::Door(did), width_m, height_m) {
-            discard_stored_photos(&stored_photos);
+            self.discard_stored_photos(&stored_photos);
             let msg = opening_error_msg(e);
             self.opening_dim_error = Some(msg.clone());
             return Err(msg);
         }
+        let new_type_name = type_name.trim().to_string();
         openings::set_door_attributes(storey, did, type_name, Some(kind), Some(draught_stripped));
         // Door photos are per-door (not a shared window-type group).
         if !stored_photos.is_empty() {
             if let Some(d) = storey.doors.iter_mut().find(|d| d.id == did) {
                 d.photos.extend(stored_photos.iter().cloned());
             }
+        }
+        // "Rename all": retype every OTHER door still carrying the previous
+        // name, across all storeys (`Ber::rename_door_type` owns the rule).
+        if rename_all && !old_type_name.is_empty() && old_type_name != new_type_name {
+            record.data.rename_door_type(&old_type_name, &new_type_name);
         }
         self.opening_edit = None;
         self.opening_dim_error = None;
@@ -2194,16 +2236,21 @@ fn tool_label(tool: OpeningToolKind) -> &'static str {
     }
 }
 
-/// Remove photo files copied into the store for a placement that then failed —
-/// so a retry doesn't leave orphaned images (each `ingest_photo` mints fresh
-/// files). Best-effort; missing files are ignored. A still-running background
-/// job for one of these finishes to a now-missing photo and cleans up its own
-/// produced files (see `apply_finished_photos`).
-fn discard_stored_photos(photos: &[Evidence]) {
-    for p in photos {
-        let _ = std::fs::remove_file(&p.file_path);
-        if let Some(t) = &p.thumbnail_path {
-            let _ = std::fs::remove_file(t);
+impl super::AppController {
+    /// Remove photo files copied into the store for a placement that then
+    /// failed — so a retry doesn't leave orphaned images (each `ingest_photo`
+    /// mints fresh files). Best-effort; missing files are ignored. Each id is
+    /// also registered in `photo_discards`, so a still-running background job
+    /// for one of these has its produced files deleted when it lands
+    /// (`apply_finished_photos`) instead of being retained — the discard is an
+    /// explicit model decision, unlike the retained not-in-this-record cases.
+    fn discard_stored_photos(&mut self, photos: &[Evidence]) {
+        for p in photos {
+            let _ = std::fs::remove_file(&p.file_path);
+            if let Some(t) = &p.thumbnail_path {
+                let _ = std::fs::remove_file(t);
+            }
+            self.photo_discards.insert(p.id);
         }
     }
 }
