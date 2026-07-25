@@ -84,6 +84,11 @@ pub struct Ber {
     pub id: ItemId,
     pub address: String,
     pub eircode: String,
+    /// The client's name from the booking (intake sync seeds it) — personalizes
+    /// the follow-up letter's greeting. Empty on records imported before the
+    /// field existed (the greeting then falls back to a bare "Hi,").
+    #[serde(default)]
+    pub client_name: String,
     /// Client booking-form answers not yet mapped into the DEAP model, shown on
     /// the Key Details screen for the assessor to confirm/fill. `#[serde(default)]`
     /// so older records load.

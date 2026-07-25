@@ -62,13 +62,15 @@ pub fn workspace_chrome<F, B>(
         // rects).
         Section::Sketch => body(ui),
         // Form sections scroll. While the native keyboard is up, shrink the
-        // scroll viewport by its inset so `native_ime::attach`'s
-        // scroll_to_rect (a no-op outside a ScrollArea) can bring a covered
-        // field above the keyboard; when the keyboard hides the inset returns
-        // to 0 and the viewport regains full height. Never below 40% of the
-        // panel so an oversized keyboard can't squash the form into nothing.
-        // On desktop the inset is always 0: full-height area, no scrollbar
-        // when the content fits.
+        // scroll viewport by its inset so the shared fields' one-shot
+        // scroll-into-view (`pads::scroll_clear_of_keyboard`) can bring a
+        // covered field above the keyboard; when the keyboard hides the inset
+        // returns to 0 and the viewport regains full height. Never below 40%
+        // of the panel so an oversized keyboard can't squash the form into
+        // nothing — the pages reserve the residue themselves
+        // (`keyboard_scroll_reserve` at their content end). On desktop the
+        // inset is always 0: full-height area, no scrollbar when the content
+        // fits.
         Section::KeyDetails | Section::FollowUps => {
             let inset = crate::ui::widgets::ime_inset_bottom_points(ctx);
             let avail = ui.available_height();

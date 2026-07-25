@@ -83,12 +83,15 @@ pub fn text_input_multiline(
     rows: usize,
     hint: &str,
 ) -> PadResponse {
-    let response = ui.add(
-        egui::TextEdit::multiline(buf)
-            .desired_width(f32::INFINITY)
-            .desired_rows(rows)
-            .hint_text(hint),
-    );
+    // `show` (not `ui.add`) so the output carries the galley + cursor — the
+    // keyboard scroll-into-view targets the CURSOR ROW: a tall body field can
+    // have its cursor under the keyboard while the widget top is visible.
+    let out = egui::TextEdit::multiline(buf)
+        .desired_width(f32::INFINITY)
+        .desired_rows(rows)
+        .hint_text(hint)
+        .show(ui);
+    let response = out.response;
     let mut submitted = false;
     let mut changed = response.changed();
 
@@ -100,6 +103,15 @@ pub fn text_input_multiline(
         changed |= ime.changed;
         submitted |= ime.submitted;
     }
+
+    // Keep the CURSOR ROW above the native keyboard (no-op on desktop); fall
+    // back to the whole widget when no cursor is stored yet.
+    let cursor_rect = out.cursor_range.map(|cr| {
+        out.galley
+            .pos_from_cursor(cr.primary)
+            .translate(out.galley_pos.to_vec2())
+    });
+    scroll_clear_of_keyboard(ui, &response, cursor_rect.unwrap_or(response.rect));
 
     desktop_pad(
         ui,
@@ -188,9 +200,76 @@ fn input_with_pad_opts(
         submitted |= ime.submitted;
     }
 
+    // Keep the focused field above the native keyboard (no-op on desktop).
+    scroll_clear_of_keyboard(ui, &response, response.rect);
+
     desktop_pad(ui, &response, buf, kind, &mut submitted, &mut changed);
 
     PadResponse { submitted, changed }
+}
+
+/// ONE-SHOT edge detector for keyboard scroll-into-view: should THIS frame
+/// try to bring the focused field clear of the native keyboard?
+///
+/// Fires only on the trigger edges — the field gaining focus under a visible
+/// keyboard (focus hop while it's already up), or the keyboard inset
+/// appearing/growing while the field is focused (the keyboard animating up
+/// after the focusing tap, one fire per grown height). It never fires in
+/// steady state (focused field, unchanged inset), so it can't lock the scroll
+/// position against the assessor's own scrolling; with `inset == 0` (desktop,
+/// keyboard hidden) it never fires at all. `prev_inset` is the inset this
+/// field last saw WHILE FOCUSED (0 when it wasn't).
+fn keyboard_scroll_trigger(focused: bool, gained_focus: bool, prev_inset: f32, inset: f32) -> bool {
+    focused && inset > 0.0 && (gained_focus || inset > prev_inset)
+}
+
+/// Breathing room kept between the scrolled-to rect and the keyboard top.
+const KEYBOARD_CLEAR_MARGIN: f32 = 8.0;
+
+/// Keep a focused field visible above the native keyboard: on the one-shot
+/// [`keyboard_scroll_trigger`] edges, scroll the enclosing `ScrollArea` the
+/// MINIMAL amount that puts `rect` (the field — or, for a tall multiline
+/// field, its cursor row) above the keyboard.
+///
+/// Works for both viewport shapes:
+/// - a viewport already shrunk to end at the keyboard top (the workspace form
+///   sections): plain minimal scroll-into-view;
+/// - a viewport that still extends under the keyboard (the canvas overlays'
+///   own ScrollAreas): the target rect is extended downward by the covered
+///   part of the viewport, so "visible" to egui means "above the keyboard".
+///
+/// `scroll_to_rect(.., None)` is a no-op when the target is already visible,
+/// so an uncovered field never jumps; outside a ScrollArea it does nothing.
+/// Strict no-op on desktop (inset 0 — the fast path returns before touching
+/// any state). Pure egui-side scrolling: never touches the IME session, so it
+/// can't re-show the keyboard or fight `suppress_next_show`.
+fn scroll_clear_of_keyboard(ui: &egui::Ui, response: &egui::Response, rect: egui::Rect) {
+    let ctx = ui.ctx();
+    let inset = super::ime_inset_bottom_points(ctx);
+    let key = response.id.with("kb_seen_inset");
+    let prev: f32 = ctx.data(|d| d.get_temp(key)).unwrap_or(0.0);
+    if inset <= 0.0 && prev == 0.0 {
+        return; // desktop / keyboard down: nothing stored, nothing to do
+    }
+    let focused = response.has_focus();
+    // Remember what this field last saw while focused (0 otherwise, so a
+    // re-focus under an already-up keyboard re-triggers).
+    let seen = if focused { inset } else { 0.0 };
+    if seen != prev {
+        ctx.data_mut(|d| d.insert_temp(key, seen));
+    }
+    if !keyboard_scroll_trigger(focused, response.gained_focus(), prev, inset) {
+        return;
+    }
+    // How much of THIS scroll viewport the keyboard covers — 0 when the
+    // viewport already stops at the keyboard top (same span the enclosing
+    // ScrollArea reserves at its content end, so the scroll can always reach).
+    let covered = super::keyboard_scroll_reserve(ui);
+    let target = egui::Rect::from_min_max(
+        rect.min,
+        egui::pos2(rect.max.x, rect.max.y + covered + KEYBOARD_CLEAR_MARGIN),
+    );
+    ui.scroll_to_rect(target, None);
 }
 
 /// The desktop (`BER_TOUCH=1`) on-screen pad half of a field: claim the pad on
@@ -365,4 +444,44 @@ fn qwerty_rows(ctx: &egui::Context, ui: &mut egui::Ui, buf: &mut String) -> PadE
     }
     ctx.data_mut(|d| d.insert_temp(shift_key(), shift));
     event
+}
+
+#[cfg(test)]
+mod tests {
+    use super::keyboard_scroll_trigger;
+
+    /// The two edges that fire: gaining focus while the keyboard is already
+    /// up (focus hop between fields), and the inset appearing/growing while
+    /// focused (the keyboard animating up after the focusing tap).
+    #[test]
+    fn keyboard_scroll_trigger_fires_on_focus_gain_and_inset_growth() {
+        // Focus hop: keyboard up (steady 300pt), field gains focus.
+        assert!(keyboard_scroll_trigger(true, true, 0.0, 300.0));
+        // Keyboard animating up after the tap: 0 → 120 → 300.
+        assert!(keyboard_scroll_trigger(true, false, 0.0, 120.0));
+        assert!(keyboard_scroll_trigger(true, false, 120.0, 300.0));
+    }
+
+    /// Steady state must stay quiet — a per-frame fire would lock the scroll
+    /// position and fight the assessor's own scrolling.
+    #[test]
+    fn keyboard_scroll_trigger_quiet_in_steady_state() {
+        // Focused, keyboard up, inset unchanged: the assessor may now scroll
+        // freely.
+        assert!(!keyboard_scroll_trigger(true, false, 300.0, 300.0));
+        // Keyboard shrinking or hiding never scrolls.
+        assert!(!keyboard_scroll_trigger(true, false, 300.0, 120.0));
+        assert!(!keyboard_scroll_trigger(true, false, 300.0, 0.0));
+    }
+
+    /// Desktop (inset always 0) and unfocused fields never fire.
+    #[test]
+    fn keyboard_scroll_trigger_noop_on_desktop_and_unfocused() {
+        // Desktop: gaining focus with no keyboard inset.
+        assert!(!keyboard_scroll_trigger(true, true, 0.0, 0.0));
+        assert!(!keyboard_scroll_trigger(true, false, 0.0, 0.0));
+        // Unfocused fields ignore every inset movement.
+        assert!(!keyboard_scroll_trigger(false, false, 0.0, 300.0));
+        assert!(!keyboard_scroll_trigger(false, true, 0.0, 300.0));
+    }
 }

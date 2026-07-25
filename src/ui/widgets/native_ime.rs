@@ -16,7 +16,10 @@
 //! and hides the keyboard when no field wants it. The keyboard's inset height
 //! arrives from `MainActivity.onImeInsetsChanged` via [`nativeOnImeInsets`],
 //! so floating windows can be repositioned above the keyboard
-//! ([`inset_bottom_points`]) and covered fields scrolled into view.
+//! ([`inset_bottom_points`]). Scrolling covered fields clear of the keyboard
+//! is NOT this module's job: the shared fields in `pads.rs` own it
+//! (`scroll_clear_of_keyboard` — pure egui-side scrolling on one-shot
+//! focus/inset edges, so it can't fight this module's owner/session logic).
 //!
 //! The CURSOR is mirrored both ways alongside the text: egui's `TextEdit`
 //! keeps its cursor in memory (`TextEditState`, char indices) and the IME
@@ -89,10 +92,6 @@ struct Session {
     /// only read when an input session (re)starts, so a numeric↔text focus
     /// move while the keyboard stays up needs an explicit input restart.
     last_kind: Option<ImeKind>,
-    /// Inset the owner last scrolled itself into view for (px) — re-scroll
-    /// only when the keyboard height actually changes, so the assessor can
-    /// still scroll the form freely while typing.
-    handled_inset_px: i32,
     /// One-shot: the next PROGRAMMATIC focus gain must not raise the keyboard
     /// (set via [`suppress_next_show`] by e.g. the laser auto-advance). A real
     /// tap on the field overrides it — `clicked()` always shows.
@@ -106,7 +105,6 @@ static SESSION: Mutex<Session> = Mutex::new(Session {
     last_egui_cursor: None,
     shown: false,
     last_kind: None,
-    handled_inset_px: 0,
     suppress_next_show: false,
 });
 
@@ -134,8 +132,9 @@ pub fn suppress_next_show() {
 
 /// Attach the native keyboard to a `TextEdit`: call right after `ui.add(...)`
 /// with the response and the field's backing buffer. Shows + seeds the IME on
-/// focus gain, mirrors typed text back into `buf` while focused, and scrolls
-/// the field above the keyboard when covered.
+/// focus gain and mirrors typed text back into `buf` while focused. (Keeping
+/// the field visible above the keyboard is the caller's concern — the shared
+/// fields in `pads.rs` do it via `scroll_clear_of_keyboard`.)
 pub fn attach(
     ui: &mut egui::Ui,
     response: &egui::Response,
@@ -163,7 +162,6 @@ pub fn attach(
         // must be told to restart its input session — a bare show re-uses the
         // bound layout.
         s.owner = Some(response.id);
-        s.handled_inset_px = 0;
         if s.last_kind != Some(kind) {
             set_editor_info(kind);
             // Once any field has bound the IME, a session with the OLD layout
@@ -261,18 +259,6 @@ pub fn attach(
                     s.last_sel = sel;
                     push_state(app, buf, sel);
                 }
-            }
-        }
-
-        // Keyboard covers the field → scroll it into view (no-op outside a
-        // ScrollArea). Once per keyboard-height change, not per frame.
-        let inset_px = IME_INSET_BOTTOM_PX.load(Ordering::Relaxed);
-        if inset_px > 0 && inset_px != s.handled_inset_px {
-            s.handled_inset_px = inset_px;
-            let visible_bottom =
-                ui.ctx().content_rect().bottom() - inset_px as f32 / ui.ctx().pixels_per_point();
-            if response.rect.bottom() > visible_bottom {
-                ui.scroll_to_rect(response.rect, Some(egui::Align::Center));
             }
         }
     } else if !focused && is_owner {

@@ -300,13 +300,13 @@ impl FollowUpPointId {
                 format!(
                     "{intro}\n\n\
                      (1) the Declaration of Performance for the windows, showing the U-value and \
-                     solar transmittance — [window supplier] should be able to provide this if you \
+                     solar transmittance — the window supplier should be able to provide this if you \
                      contact them (I need the standard certified product document, not one generated \
                      specifically for your house; NSAI WEP or BFRC certification also works).\n\n\
                      (2) something linking that model to your house — an invoice, order confirmation \
                      or email from the supplier listing the models supplied to your address.\n\n\
                      If it's not available it's no problem — the default values for the age of the \
-                     house are reasonable, so it won't hurt the rating much."
+                     windows above are pretty good, so it won't affect the rating much."
                 )
             }
             DoorDop => {
@@ -348,7 +348,7 @@ impl FollowUpPointId {
                 };
                 format!(
                     "{intro}\n\n\
-                     (1) {dop} Declaration of Performance showing the U-value — [door supplier] \
+                     (1) {dop} Declaration of Performance showing the U-value — the door supplier \
                      should be able to provide this if you don't have it.\n\n\
                      (2) proof of the model installed at your address, such as an invoice or order \
                      confirmation. If there's a sticker or marking on the door itself showing the \
@@ -357,17 +357,17 @@ impl FollowUpPointId {
             }
             SolarDocs => "Could you send me any documentation you have for the solar panels? The \
                 best document is the Declaration of Works from the installer, as it has \
-                everything required. Otherwise, an invoice or sign-off from [installer] on \
+                everything required. Otherwise, an invoice or sign-off from the installer on \
                 headed paper (or a branded email) stating the make, model and number of panels \
                 installed at the house would work. Without documentation I have to assume \
                 default panels, which understates the benefit."
                 .to_string(),
             HeatPumpData => "For the heat pump, could you check if you have:\n\n\
-                (1) the Designer / Installer sign-off sheet from [installer] — any heat pump \
+                (1) the Designer / Installer sign-off sheet from the installer — any heat pump \
                 installed after 2015 (and all grant installations) should have one, and it \
                 contains values like the design flow temperature that usually give a better \
                 rating than the defaults.\n\n\
-                (2) the Ecodesign label / technical datasheet for [heat pump make/model] — the \
+                (2) the Ecodesign label / technical datasheet for the heat pump make and model — the \
                 manufacturer is required to provide this, and it shows the tested efficiency \
                 figures I need."
                 .to_string(),
@@ -689,9 +689,15 @@ fn default_true() -> bool {
 /// markers, which the intake backend renders as bold in the HTML email and
 /// which read fine in the plain-text fallback / editable preview.
 pub fn assemble_draft(ber: &Ber, fu: &FollowUpRequest) -> String {
-    let mut body = String::from(
-        "Hi,\n\nThanks again for having me out to survey your home for the BER assessment.\n\n",
-    );
+    // Greet by first name when the booking gave us one ("Hi Sarah," beats
+    // "Hi," for a letter asking favours); older imports have no name.
+    let first = ber.client_name.split_whitespace().next().unwrap_or("");
+    let mut body = if first.is_empty() {
+        String::from("Hi,\n\n")
+    } else {
+        format!("Hi {first},\n\n")
+    };
+    body.push_str("Thanks again for having me out to survey your home for the BER assessment.\n\n");
     // Each point is (heading, request paragraph, optional "more details" URL).
     // Built-in points link to their explainer page on the website; custom
     // points have no page, so no link.
@@ -720,8 +726,7 @@ pub fn assemble_draft(ber: &Ber, fu: &FollowUpRequest) -> String {
     } else {
         body.push_str(
             "To finish the assessment as accurately as possible, there are a few details I'd be \
-             grateful for your help with. If you could reply point by point it makes sure \
-             nothing gets missed:\n\n",
+             grateful for your help with:\n\n",
         );
         // Number the points so the client can answer each one: bold heading on
         // the numbered line, the full request underneath, then a "More details"

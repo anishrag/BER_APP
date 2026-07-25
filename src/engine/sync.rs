@@ -89,6 +89,16 @@ struct JobDetail {
     ber_seed: Option<BerSeed>,
     #[serde(rename = "satelliteImageUrl")]
     satellite_image_url: Option<String>,
+    /// The booking's client record — we only read the name (it personalizes
+    /// the follow-up letter's greeting).
+    #[serde(default)]
+    client: Option<JobClient>,
+}
+
+#[derive(Deserialize, Default)]
+struct JobClient {
+    #[serde(default)]
+    name: Option<String>,
 }
 
 /// The client-provided seed fields we surface on the tablet. Address/eircode/
@@ -252,6 +262,11 @@ fn import_one(
         id,
         address: seed.address.unwrap_or_default(),
         eircode: seed.eircode.unwrap_or_default(),
+        client_name: detail
+            .client
+            .and_then(|c| c.name)
+            .map(|n| n.trim().to_string())
+            .unwrap_or_default(),
         ..Ber::new()
     };
     if let Some(n) = seed.number_of_storeys {
@@ -288,7 +303,8 @@ fn import_one(
             None if has_desc => ber.construction_phases.set_year_unknown(phase.clone()),
             None => continue,
         }
-        ber.construction_phases.set_booking_sourced(phase.clone(), true);
+        ber.construction_phases
+            .set_booking_sourced(phase.clone(), true);
         if let Some(desc) = &ext.description {
             if !desc.is_empty() {
                 ber.construction_phases.set_nickname(phase, desc.clone());

@@ -1909,6 +1909,9 @@ impl SketchPage {
                 .show_inside(ui, |ui| {
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         categories::side_panel(ui, &flags, view.cat_state, &mut on_event);
+                        // Room for the Structure-phase name fields to scroll
+                        // clear of the native keyboard (0 on desktop).
+                        ui.add_space(crate::ui::widgets::keyboard_scroll_reserve(ui));
                     });
                 });
         }

@@ -242,5 +242,9 @@ impl FollowUpsPage {
             )
             .weak(),
         );
+        // Room for the bottom fields to scroll clear of the native keyboard
+        // (0 on desktop; ~0 while the workspace viewport shrink covers it —
+        // this catches the residue of its 40%-height floor).
+        ui.add_space(crate::ui::widgets::keyboard_scroll_reserve(ui));
     }
 }

@@ -6193,6 +6193,9 @@ fn structure_review_overlay<F: FnMut(UiEvent)>(
                         }
                     });
                 }
+                // Room for the rename fields to scroll clear of the native
+                // keyboard (0 on desktop / keyboard hidden).
+                ui.add_space(crate::ui::widgets::keyboard_scroll_reserve(ui));
             });
     });
 }
