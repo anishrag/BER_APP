@@ -28641,3 +28641,107 @@ fn live_record_geometry_shows_the_full_provisional_ring() {
         "the extension walls are being prompted for"
     );
 }
+
+/// The dimension prompt's highlight DATA is the live plan's edge for the
+/// prompted param — endpoint COORDINATES, not just length (field report: a
+/// 0.47 m jog prompted with the indicator painted at the wrong LOCATION).
+/// Fixture mirrors the field: extend with a SHORT jog between two longer
+/// near-collinear runs. For EVERY prompt of the loop, the UI data's primary
+/// wall must be exactly the live plan's edge of `prompt.wall_start_vertex`,
+/// and the "currently X m" figure must be that same edge's length. (The
+/// on-screen displacement itself was a fit-transform mismatch, pinned
+/// render-side by `storey_transform_unions_the_view_fit_include_bbox`.)
+#[test]
+fn dimension_prompt_ui_walls_are_the_live_plan_edges() {
+    // A 4×4 dimensioned square: small enough that the splice snap leveller
+    // (~6% of the ring diagonal ≈ 0.42 here) does NOT flatten a 0.5 m jog —
+    // on the 10×10 fixture anything under ≈1.05 is auto-levelled away, so a
+    // field-scale short jog can't exist there.
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    let _ = c.create_ber(
+        "T".into(),
+        chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+    );
+    c.document.floor_plan = FloorPlan::from_points_to_orthogonal(
+        &[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(4.0, 0.0),
+            Point2f32::new(4.0, 4.0),
+            Point2f32::new(0.0, 4.0),
+            Point2f32::new(0.02, 0.02),
+        ],
+        0.1,
+        true,
+    )
+    .unwrap();
+    c.document.dimensioning.scale_set = true;
+    c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
+    c.commit_to_ber().unwrap();
+
+    c.set_edit_mode(EditTools::ExtendOrtho);
+    // Stepped bump: runs y=-1.8 and y=-1.3 joined by a 0.5 m vertical jog at
+    // x=2 — the short wall with longer collinear-ish neighbours (the field's
+    // 0.47 m case).
+    c.apply_extend_stroke(&[
+        Point2f32::new(1.0, 0.0),
+        Point2f32::new(1.0, -1.8),
+        Point2f32::new(2.0, -1.8),
+        Point2f32::new(2.0, -1.3),
+        Point2f32::new(3.0, -1.3),
+        Point2f32::new(3.0, 0.0),
+    ])
+    .expect("stepped bump extend");
+    // The 0.5 m separation pairs the two runs for review — the assessor
+    // keeps them distinct (the field case), which starts the dimension loop.
+    while c.current_review_suggestion().is_some() {
+        c.reject_current_review();
+    }
+
+    let mut prompted_lengths = Vec::new();
+    let mut guard = 0;
+    while let Some(prompt) = c.document.dimensioning.current_prompt.clone() {
+        let ui = c
+            .dimension_prompt_for_ui()
+            .expect("open prompt resolves UI data");
+        // The primary wall == the live plan's edge for the prompted vertex.
+        let (ring, edge) = c
+            .document
+            .floor_plan
+            .find_vertex(prompt.wall_start_vertex)
+            .expect("prompted wall exists in the live plan");
+        let poly = &c.document.floor_plan.polygons()[ring];
+        let n = poly.len();
+        let (pa, pb) = (poly[edge], poly[(edge + 1) % n]);
+        let primary = ui.walls.first().expect("primary wall present");
+        let close = |got: (f64, f64), want: Point2f32| {
+            (got.0 - want.x as f64).abs() < 1e-6 && (got.1 - want.y as f64).abs() < 1e-6
+        };
+        assert!(
+            close(primary.wall_a, pa) && close(primary.wall_b, pb),
+            "prompt highlight endpoints must be the live edge: got {:?}-{:?}, live {:?}-{:?}",
+            primary.wall_a,
+            primary.wall_b,
+            pa,
+            pb
+        );
+        // The "currently X m" figure is that same edge's length — the label
+        // and the endpoints can never describe different walls.
+        let span = ((primary.wall_b.0 - primary.wall_a.0).powi(2)
+            + (primary.wall_b.1 - primary.wall_a.1).powi(2))
+        .sqrt() as f32;
+        assert!(
+            (span - ui.current_length).abs() < 1e-3,
+            "endpoint span {span} == prompted length {}",
+            ui.current_length
+        );
+        prompted_lengths.push(ui.current_length);
+        // Accept the drawn length to advance the loop.
+        c.apply_dimension(ui.current_length).expect("advance loop");
+        guard += 1;
+        assert!(guard < 20, "runaway dimension loop");
+    }
+    assert!(
+        prompted_lengths.iter().any(|l| (l - 0.5).abs() < 0.02),
+        "the short 0.5 m jog was among the prompts: {prompted_lengths:?}"
+    );
+}

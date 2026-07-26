@@ -30,6 +30,16 @@ pub struct ViewParams {
     pub offset_y: f32,
     pub yaw_deg: f32,
     pub pitch_deg: f32,
+    /// Extra world bbox the single-storey auto-fit must include beyond the
+    /// committed storey ∪ watermark — the shell sets it to the LIVE
+    /// provisional outline's bbox while mid-dimensioning. It rides on the
+    /// view because the base plan render AND every overlay pass (dimension
+    /// prompt, snap tags, exposure, …) each recompute the fit transform from
+    /// their inputs independently: one shared field keeps them on ONE
+    /// transform. A fit derived without it while the base includes it paints
+    /// every overlay displaced (the field's "right length, wrong location"
+    /// dimension arrow). `None` outside the mid-dimensioning window.
+    pub fit_include_bbox: Option<((f64, f64), (f64, f64))>,
 }
 
 impl Default for ViewParams {
@@ -46,6 +56,7 @@ impl ViewParams {
             offset_y: 0.0,
             yaw_deg: domain::view::DEFAULT_YAW_DEG,
             pitch_deg: domain::view::DEFAULT_PITCH_DEG,
+            fit_include_bbox: None,
         }
     }
 

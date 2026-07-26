@@ -1702,16 +1702,77 @@ pub(crate) fn storey_transform(
     let idx = current_storey_idx?;
     let storey = ber.storeys.get(idx)?;
     // Use the SAME fit box the plan was drawn with — storey ∪ previous-storey
-    // watermark on any upper storey. Fitting the storey alone here (while the
-    // plan fit includes the watermark) gives the dimension-prompt arrow a
-    // different scale/origin than the geometry, so it lands off the wall.
-    let (min_xy, max_xy) = fit_bbox_for_storey(ber, idx)?;
+    // watermark on any upper storey, ∪ the view's `fit_include_bbox` (the
+    // provisional live-outline bbox while mid-dimensioning). Fitting to less
+    // here (while the plan fit includes it) gives the dimension-prompt arrow
+    // and every other overlay a different scale/origin than the geometry, so
+    // they land off the wall — the field's "right length, wrong location".
+    let (min_xy, max_xy) = union_bbox(fit_bbox_for_storey(ber, idx), view.fit_include_bbox)?;
     Some((storey, fit_transform(rect, min_xy, max_xy, view)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The overlay preamble (`storey_transform`) must fit to the SAME box the
+    /// base plan render does — committed storey ∪ `view.fit_include_bbox`
+    /// (the provisional live-outline bbox while mid-dimensioning). Regression
+    /// for the field's displaced dimension-prompt arrow: the overlays fitted
+    /// to the committed-only box while the base included the provisional
+    /// bump, so every prompt/highlight painted at the right length but the
+    /// wrong location.
+    #[test]
+    fn storey_transform_unions_the_view_fit_include_bbox() {
+        use ber_model::ber::ber_struct::Ber;
+        use ber_model::ber::common::ItemId;
+        use ber_model::ber::structural::{FloorRegions, Storey};
+        use domain::points::Point2f64;
+
+        let pt = |x: f64, y: f64| Point2f64::new(x, y);
+        let mut ber = Ber::default();
+        ber.storeys.push(Storey {
+            floors: FloorRegions::from_vertex_lists(
+                vec![vec![pt(0., 0.), pt(10., 0.), pt(10., 10.), pt(0., 10.)]],
+                ItemId::default(),
+            ),
+            ..Default::default()
+        });
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(300.0, 300.0));
+
+        // A provisional bump extends the fit 4 m below the committed shape.
+        let include = ((0.0, -4.0), (10.0, 10.0));
+        let view = ViewParams {
+            fit_include_bbox: Some(include),
+            ..ViewParams::identity()
+        };
+        let (_s, t) = storey_transform(rect, Some(&ber), Some(0), SketchMode::Storey2D, view)
+            .expect("fittable");
+        let expected = fit_transform(rect, include.0, include.1, view);
+        for (x, y) in [(0.0, -4.0), (5.0, 3.0), (10.0, 10.0)] {
+            assert_eq!(
+                t.apply(x, y),
+                expected.apply(x, y),
+                "overlay transform == fit over the UNIONED bbox at ({x},{y})"
+            );
+        }
+        // And it genuinely differs from the committed-only fit — the include
+        // box is load-bearing, not a no-op.
+        let committed_only = storey_transform(
+            rect,
+            Some(&ber),
+            Some(0),
+            SketchMode::Storey2D,
+            ViewParams::identity(),
+        )
+        .expect("fittable")
+        .1;
+        assert_ne!(
+            t.apply(5.0, 3.0),
+            committed_only.apply(5.0, 3.0),
+            "mid-dimensioning fit must move with the provisional bbox"
+        );
+    }
 
     /// The fit scale is inversely proportional to footprint size, so a storey
     /// twice as large fits at half the scale. This is what lets the "All

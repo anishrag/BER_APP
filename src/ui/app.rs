@@ -1204,8 +1204,27 @@ impl eframe::App for BerApp {
                                         offset_y: v.offset_y,
                                         yaw_deg: v.yaw_deg,
                                         pitch_deg: v.pitch_deg,
+                                        fit_include_bbox: None, // filled below
                                     },
                                 )
+                            };
+                            // Mid-dimensioning: fold the provisional live-outline
+                            // rings' bbox into the view so the base plan render and
+                            // every overlay pass (dimension prompt, snap tags, …)
+                            // fit to the SAME box — one transform, no displaced
+                            // arrows/highlights during the in-flux window.
+                            let view_params = {
+                                let mut vp = view_params;
+                                vp.fit_include_bbox =
+                                    provisional_outline.as_ref().and_then(|rings| {
+                                        rings.iter().fold(None, |acc, ring| {
+                                            crate::ui::render::union_bbox(
+                                                acc,
+                                                crate::ui::render::storey_2d::ring_bbox(ring),
+                                            )
+                                        })
+                                    });
+                                vp
                             };
 
                             // Prefill the position-prompt textbox with the prompt's drawn

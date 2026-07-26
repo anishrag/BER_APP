@@ -83,14 +83,17 @@ pub fn render(
         None => {
             let storey_bb = bounding_box(storey);
             let watermark_bb = watermark_ring.and_then(ring_bbox);
-            let mut bb = crate::union_bbox(storey_bb, watermark_bb);
-            // Mid-dimensioning: the live rings are the authoritative preview —
-            // include them in the fit so the provisional geometry (and every
-            // highlight/prompt target on it) is on screen, not off-canvas.
-            for ring in provisional_rings.unwrap_or(&[]) {
-                bb = crate::union_bbox(bb, ring_bbox(ring));
-            }
-            bb
+            // Mid-dimensioning: the live provisional rings are the
+            // authoritative preview — their bbox arrives on the VIEW
+            // (`fit_include_bbox`) so this base fit and every overlay pass
+            // (which recompute the fit independently via `storey_transform`)
+            // union the SAME box and land on one transform. Deriving it here
+            // from `provisional_rings` instead would leave the overlays on a
+            // smaller box — every prompt/highlight then paints displaced.
+            crate::union_bbox(
+                crate::union_bbox(storey_bb, watermark_bb),
+                view.fit_include_bbox,
+            )
         }
     };
     let Some((min_xy, max_xy)) = bb else {

@@ -1081,6 +1081,9 @@ fn compute_structure_edit_layout(
         offset_y: inner.center().y - rect.center().y,
         yaw_deg: base.yaw_deg,
         pitch_deg: base.pitch_deg,
+        // Structure edit never coincides with mid-dimensioning; the layout's
+        // fit is the committed storey's own.
+        fit_include_bbox: None,
     };
 
     Some(StructureEditLayout {
