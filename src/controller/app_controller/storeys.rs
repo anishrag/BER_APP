@@ -488,6 +488,44 @@ impl AppController {
         self.document.floor_plan.get_points().len() >= 3
     }
 
+    /// The ACTIVE storey's LIVE outline rings (world coords) while the outline
+    /// is MID-DIMENSIONING on a BUILT storey — the provisional preview the
+    /// canvas draws over the committed regions, so an extend's bump is visible
+    /// at its drawn/estimated position (and every dimension prompt / review
+    /// highlight aimed at it lands on drawn geometry). The parametric plan
+    /// re-solves as each dimension is accepted, so re-reading this per frame
+    /// gives the "shape amends itself as I dimension" behaviour of the
+    /// fresh-draw flow. `None` outside that window:
+    ///   * measurements complete — the committed regions ARE the live shape;
+    ///   * no record / no active storey — nothing is being previewed over;
+    ///   * the committed storey has NO resolved walls AND no ceilings — then
+    ///     `resolve_storey`'s fresh-outline exception already projects the
+    ///     live rings as a bare display floor (this getter is exactly its
+    ///     complement: the in-flux guard returns the PREVIOUS projection
+    ///     untouched on a built storey, leaving the live rings undrawn).
+    /// Reads the outline SLOT (like `measurements_complete`) — callers run
+    /// after `materialize`, which syncs the live buffer into it.
+    pub fn provisional_outline_rings(&self) -> Option<Vec<Vec<(f64, f64)>>> {
+        let idx = self.current_storey_idx?;
+        let storey = self.current_record.as_ref()?.data.storeys.get(idx)?;
+        if storey.walls.regions.is_empty() && storey.ceilings.regions.is_empty() {
+            return None; // the fresh-outline display projection covers this
+        }
+        if self.document.measurements_complete() {
+            return None;
+        }
+        let rings: Vec<Vec<(f64, f64)>> = self
+            .document
+            .outline
+            .floor_plan
+            .polygons()
+            .into_iter()
+            .filter(|r| r.len() >= 3)
+            .map(|r| r.into_iter().map(|p| (p.x as f64, p.y as f64)).collect())
+            .collect();
+        (!rings.is_empty()).then_some(rings)
+    }
+
     /// Project current in-memory state into `self.current_record` and persist.
     /// No-op when no BER is loaded. Called by handler methods that complete a
     /// logical user action (stroke end, wall drag end, etc.) — not from

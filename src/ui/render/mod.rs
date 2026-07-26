@@ -64,6 +64,10 @@ pub fn render_ber(
     sketch_mode: SketchMode,
     display_mode: DisplayMode,
     highlight_segments: Option<[(Point2f32, Point2f32); 2]>,
+    // The active storey's live outline rings while mid-dimensioning on a built
+    // storey — drawn as the provisional preview over the committed regions and
+    // included in the fit bbox. See `AppController::provisional_outline_rings`.
+    provisional_rings: Option<&[Vec<(f64, f64)>]>,
     // Walls the user has explicitly dimensioned, as (ring_idx, edge_start)
     // tuples for the current storey. Other walls' length labels are suppressed.
     dimensioned_walls: &[(usize, usize)],
@@ -153,6 +157,7 @@ pub fn render_ber(
                             storey,
                             display_mode,
                             highlight_segments,
+                            provisional_rings,
                             dimensioned_walls,
                             view,
                             watermark.as_deref(),
@@ -172,6 +177,7 @@ pub fn render_ber(
                             storey,
                             display_mode,
                             highlight_segments,
+                            provisional_rings,
                             dimensioned_walls,
                             view,
                             watermark.as_deref(),

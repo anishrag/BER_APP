@@ -119,6 +119,9 @@ pub fn render(
             storey,
             display_mode,
             None,
+            // No provisional live-outline preview either — that's an
+            // active-storey mid-dimensioning aid.
+            None,
             &[],
             view,
             None,

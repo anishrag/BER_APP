@@ -48,6 +48,12 @@ pub fn render(
     storey: &Storey,
     display_mode: DisplayMode,
     highlight_segments: Option<[(Point2f32, Point2f32); 2]>,
+    // The ACTIVE storey's LIVE outline rings while it's mid-dimensioning on a
+    // BUILT storey (controller-supplied): drawn over the committed regions in
+    // the same faint floor fill a fresh not-yet-dimensioned outline shows, and
+    // included in the fit bbox so the not-yet-dimensioned geometry (an
+    // extend's bump at its drawn position) is on screen. None otherwise.
+    provisional_rings: Option<&[Vec<(f64, f64)>]>,
     dimensioned_walls: &[(usize, usize)],
     view: ViewParams,
     watermark_ring: Option<&[(f64, f64)]>,
@@ -77,7 +83,14 @@ pub fn render(
         None => {
             let storey_bb = bounding_box(storey);
             let watermark_bb = watermark_ring.and_then(ring_bbox);
-            crate::union_bbox(storey_bb, watermark_bb)
+            let mut bb = crate::union_bbox(storey_bb, watermark_bb);
+            // Mid-dimensioning: the live rings are the authoritative preview —
+            // include them in the fit so the provisional geometry (and every
+            // highlight/prompt target on it) is on screen, not off-canvas.
+            for ring in provisional_rings.unwrap_or(&[]) {
+                bb = crate::union_bbox(bb, ring_bbox(ring));
+            }
+            bb
         }
     };
     let Some((min_xy, max_xy)) = bb else {
@@ -127,6 +140,17 @@ pub fn render(
             // as an interior division, not an outline wall.
             painter.add(egui::Shape::dashed_line(&[pa, pb], wall_stroke, 6.0, 4.0));
         }
+    }
+
+    // PROVISIONAL live outline (mid-dimensioning on a built storey): the live
+    // parametric rings at their drawn/estimated positions, filled in the same
+    // faint floor style a fresh not-yet-dimensioned outline shows (resolve's
+    // bare-floor projection), OVER the committed regions — which stay visible
+    // as context. The plan re-solves as each dimension lands, so redrawing per
+    // frame gives the "shape amends itself as I dimension" behaviour. Drawn
+    // before the review highlight so the questioned walls paint on top of it.
+    if let Some(rings) = provisional_rings {
+        draw_provisional_rings(painter, &t, rings, display_mode);
     }
 
     // Roof regions (when populated) — drawn as dashed outlines above the floor.
@@ -267,6 +291,40 @@ fn draw_selection_overlay(
                     egui::Stroke::new(4.0, style::SELECTION_LINE),
                 );
             }
+        }
+    }
+}
+
+/// Fill the live parametric rings in the same faint floor style the resolve
+/// layer's bare-floor projection gives a fresh not-yet-dimensioned outline —
+/// so the mid-dimensioning preview of a built storey looks identical to the
+/// fresh-draw flow. Earcut per ring (rings are separate sections, not holes).
+fn draw_provisional_rings(
+    painter: &egui::Painter,
+    t: &Transform2d,
+    rings: &[Vec<(f64, f64)>],
+    display_mode: DisplayMode,
+) {
+    let fill = color_for(DisplayMode::Floors, display_mode, style::FLOOR_FILL);
+    for ring in rings {
+        if ring.len() < 3 {
+            continue;
+        }
+        let screen_pts: Vec<egui::Pos2> = ring.iter().map(|&(x, y)| t.apply(x, y)).collect();
+        let flat: Vec<f64> = ring.iter().flat_map(|&(x, y)| [x, y]).collect();
+        if let Ok(triangles) = earcutr::earcut(&flat, &[], 2) {
+            let mut mesh = egui::Mesh::default();
+            for &p in &screen_pts {
+                mesh.vertices.push(egui::epaint::Vertex {
+                    pos: p,
+                    uv: egui::epaint::WHITE_UV,
+                    color: fill,
+                });
+            }
+            for idx in triangles {
+                mesh.indices.push(idx as u32);
+            }
+            painter.add(egui::Shape::mesh(mesh));
         }
     }
 }

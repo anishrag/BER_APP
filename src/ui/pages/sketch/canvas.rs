@@ -1974,6 +1974,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             mode,
             display,
             view.review_segments,
+            view.provisional_outline,
             dimensioned_walls,
             vp,
             view.structure_selected,
@@ -5315,6 +5316,8 @@ fn final_overlay<F: FnMut(UiEvent)>(
         view.current_storey_idx,
         SketchMode::Storey2D,
         domain::sketch::DisplayMode::AllSurfaces,
+        None,
+        // No provisional live-outline preview — mapping is long done here.
         None,
         &[],
         vp,

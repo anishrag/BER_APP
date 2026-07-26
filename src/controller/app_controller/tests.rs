@@ -28348,3 +28348,264 @@ fn review_highlight_segments_match_the_extend_suggestion_coords() {
         );
     }
 }
+
+/// PROVISIONAL live-outline preview, built-storey path. After an extend on a
+/// dimensioned storey the resolve guard returns the PREVIOUS projection
+/// untouched (the committed regions stay pre-extend — that is the DESIGNED
+/// in-flux behaviour, pinned here), so without a preview the new walls are
+/// invisible until dimensioning completes. `provisional_outline_rings` must
+/// carry the live rings including the bump at its drawn/estimated position
+/// while mid-dimensioning — and go back to None (with the committed regions
+/// caught up) once the minted walls are dimensioned.
+#[test]
+fn extend_on_built_storey_shows_provisional_live_rings() {
+    let mut c = dimensioned_square_controller(); // 10×10, committed, walls resolved
+    c.materialize();
+    assert!(
+        c.provisional_outline_rings().is_none(),
+        "fully dimensioned storey needs no provisional preview"
+    );
+
+    // Dormer bump off the bottom wall (no collinearity pair within tolerance,
+    // so no review interleaves).
+    c.set_edit_mode(EditTools::ExtendOrtho);
+    c.apply_extend_stroke(&[
+        Point2f32::new(3.0, 0.0),
+        Point2f32::new(3.0, -3.0),
+        Point2f32::new(7.0, -3.0),
+        Point2f32::new(7.0, 0.0),
+    ])
+    .expect("dormer extend");
+    c.materialize();
+
+    // The committed regions are STILL the pre-extend square (in-flux guard).
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert!(
+        !storey.walls.regions.is_empty(),
+        "built storey keeps its previous resolve"
+    );
+    let committed_has_bump = storey
+        .floors
+        .regions
+        .iter()
+        .any(|r| r.polygon.exterior().coords().any(|q| q.y < -1.0));
+    assert!(
+        !committed_has_bump,
+        "in-flux guard: committed floors stay pre-extend"
+    );
+
+    // ...but the provisional preview carries the live ring WITH the bump.
+    let rings = c
+        .provisional_outline_rings()
+        .expect("mid-dimensioning on a built storey exposes the live rings");
+    let has = |x: f64, y: f64| {
+        rings.iter().any(|ring| {
+            ring.iter()
+                .any(|&(px, py)| (px - x).abs() < 1e-3 && (py - y).abs() < 1e-3)
+        })
+    };
+    assert!(has(3.0, -3.0) && has(7.0, -3.0), "bump at drawn position");
+    // The preview IS the live plan verbatim (same rings the highlight and
+    // dimension prompts index into).
+    let live: Vec<Vec<(f64, f64)>> = c
+        .document
+        .floor_plan
+        .polygons()
+        .into_iter()
+        .map(|r| r.into_iter().map(|p| (p.x as f64, p.y as f64)).collect())
+        .collect();
+    assert_eq!(rings, live);
+
+    // Dimension the minted walls: the preview retires and the committed
+    // regions catch up.
+    c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
+    c.mark_dirty().unwrap();
+    c.materialize();
+    assert!(
+        c.provisional_outline_rings().is_none(),
+        "preview gone once measurements are complete"
+    );
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert!(
+        storey.floors.regions.iter().any(|r| {
+            r.polygon
+                .exterior()
+                .coords()
+                .any(|q| (q.y - -3.0).abs() < 1e-3)
+        }),
+        "committed floors include the bump after dimensioning"
+    );
+}
+
+/// PROVISIONAL preview, fresh-storey path (the diagnosis pin): on a storey
+/// with NO resolved walls/ceilings, resolve's fresh-outline display exception
+/// projects the LIVE outline as a bare floor each materialize — including
+/// straight after an extend — so the preview channel stays None (overlaying
+/// it would double the fill) and the display projection is NOT stale.
+#[test]
+fn fresh_storey_display_projection_tracks_an_extend() {
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    let _ = c.create_ber(
+        "T".into(),
+        chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+    );
+    // Undimensioned outline (pixel space) — the fresh-draw window.
+    c.document.floor_plan = FloorPlan::from_points_to_orthogonal(
+        &[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(10.0, 0.0),
+            Point2f32::new(10.0, 10.0),
+            Point2f32::new(0.0, 10.0),
+            Point2f32::new(0.05, 0.05),
+        ],
+        0.1,
+        true,
+    )
+    .unwrap();
+    c.commit_to_ber().unwrap();
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert!(
+        !storey.floors.regions.is_empty() && storey.walls.regions.is_empty(),
+        "fresh outline shows via the bare-floor display projection"
+    );
+    assert!(
+        c.provisional_outline_rings().is_none(),
+        "display projection already draws the live outline — no overlay"
+    );
+
+    // Extend the still-undimensioned outline: the projection must RE-FIRE
+    // with the extended live ring (not stay on the pre-extend shape).
+    c.set_edit_mode(EditTools::ExtendOrtho);
+    c.apply_extend_stroke(&[
+        Point2f32::new(3.0, 0.0),
+        Point2f32::new(3.0, -3.0),
+        Point2f32::new(7.0, -3.0),
+        Point2f32::new(7.0, 0.0),
+    ])
+    .expect("extend on the fresh outline");
+    c.materialize();
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert!(
+        storey.floors.regions.iter().any(|r| {
+            r.polygon
+                .exterior()
+                .coords()
+                .any(|q| (q.y - -3.0).abs() < 1e-2)
+        }),
+        "the display projection tracks the extended live outline"
+    );
+    assert!(
+        c.provisional_outline_rings().is_none(),
+        "still covered by the display projection — no overlay"
+    );
+}
+
+/// ACCEPTANCE geometry from the live tablet record (57f413ef…): the
+/// 14-vertex post-extend ring with the P9/P10/P11 extension section
+/// (y −0.659…1.741) undimensioned. Mid-dimensioning, the provisional preview
+/// must carry the FULL ring — extension at its estimated coords, min-y down
+/// to −0.659 (the datum the render-side fit bbox unions in; the fit itself is
+/// pure paint, verified live) — and the dimension loop must be prompting for
+/// the extension's params.
+#[test]
+fn live_record_geometry_shows_the_full_provisional_ring() {
+    let p = |x: f32, y: f32| Point2f32::new(x, y);
+    let ring14 = [
+        p(4.917, 15.220),
+        p(7.917, 15.220),
+        p(7.917, 14.220),
+        p(9.917, 14.220),
+        p(9.917, 14.720),
+        p(12.917, 14.720),
+        p(12.917, 6.720),
+        p(12.417, 6.720),
+        p(12.417, 5.220),
+        p(11.917, 5.220),
+        p(11.917, -0.659),
+        p(7.704, -0.659),
+        p(7.704, 1.741),
+        p(4.917, 1.741),
+    ];
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    let _ = c.create_ber(
+        "T".into(),
+        chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+    );
+    c.document.floor_plan = FloorPlan::from_clean_ring(&ring14).unwrap();
+    c.document.dimensioning.scale_set = true;
+    c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
+    // Commit once fully-known so the storey resolves with WALLS (the built
+    // state the in-flux guard preserves)...
+    c.commit_to_ber().unwrap();
+    assert!(
+        !c.current_record.as_ref().unwrap().data.storeys[0]
+            .walls
+            .regions
+            .is_empty(),
+        "built storey"
+    );
+
+    // ...then mark the three extension walls' params unknown — the state the
+    // extend's mint left the tablet in (P9/P10/P11).
+    let edge_at = |c: &AppController, a: (f32, f32), b: (f32, f32)| -> usize {
+        let ring = &c.document.floor_plan.polygons()[0];
+        let n = ring.len();
+        (0..n)
+            .find(|&i| {
+                let (q, r) = (ring[i], ring[(i + 1) % n]);
+                (q.x - a.0).abs() < 1e-3
+                    && (q.y - a.1).abs() < 1e-3
+                    && (r.x - b.0).abs() < 1e-3
+                    && (r.y - b.1).abs() < 1e-3
+            })
+            .expect("extension edge present")
+    };
+    for (a, b) in [
+        ((11.917, -0.659), (7.704, -0.659)), // the P9 run
+        ((7.704, -0.659), (7.704, 1.741)),   // the P10 run
+        ((7.704, 1.741), (4.917, 1.741)),    // the P11 run
+    ] {
+        let e = edge_at(&c, a, b);
+        let (param, _) = c
+            .document
+            .floor_plan
+            .wall_movable_param(0, e)
+            .expect("extension wall is parameter-movable");
+        c.document.dimensioning.known_params.remove(&param);
+    }
+    c.mark_dirty().unwrap();
+    c.materialize();
+    assert!(
+        !c.document.measurements_complete(),
+        "mid-dimensioning: the extension is unknown"
+    );
+
+    let rings = c
+        .provisional_outline_rings()
+        .expect("the full live ring is previewed");
+    assert_eq!(rings.len(), 1);
+    assert_eq!(rings[0].len(), 14, "all 14 vertices at estimated positions");
+    let has = |x: f64, y: f64| {
+        rings[0]
+            .iter()
+            .any(|&(px, py)| (px - x).abs() < 1e-3 && (py - y).abs() < 1e-3)
+    };
+    assert!(
+        has(11.917, -0.659) && has(7.704, -0.659),
+        "extension bottom run"
+    );
+    assert!(has(7.704, 1.741) && has(4.917, 1.741), "extension top run");
+    let min_y = rings[0].iter().map(|&(_, y)| y).fold(f64::MAX, f64::min);
+    assert!(
+        (min_y - -0.659).abs() < 1e-3,
+        "the fit-bbox datum reaches y=-0.659, got {min_y}"
+    );
+
+    // The dimension loop is asking about the extension — the prompt's target
+    // wall is on the previewed ring, not off in empty space.
+    c.compute_next_dimension_prompt();
+    assert!(
+        c.document.dimensioning.current_prompt.is_some(),
+        "the extension walls are being prompted for"
+    );
+}

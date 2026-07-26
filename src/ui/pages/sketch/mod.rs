@@ -1204,6 +1204,11 @@ pub struct SketchView<'a> {
     /// controller from the LIVE parametric plan (never from committed regions
     /// — those are empty/stale mid-review). Drawn as the canvas highlight.
     pub review_segments: Option<[(Point2f32, Point2f32); 2]>,
+    /// The active storey's LIVE outline rings while mid-dimensioning on a
+    /// built storey — the provisional preview drawn over the committed
+    /// regions (and included in the canvas fit), so an extend's new walls
+    /// are visible at their estimated positions before dimensioning lands.
+    pub provisional_outline: Option<&'a [Vec<(f64, f64)>]>,
     pub review_remaining: usize,
     pub has_floor_plan: bool,
     pub pending_redraw: bool,
