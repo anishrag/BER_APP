@@ -14,7 +14,11 @@ fn main() {
         .map(|&(x, y)| Point2f32::new(x as f32, y as f32))
         .collect();
     match manip_plan::FloorPlan::from_clean_ring(&pts) {
-        Ok(p) => println!("OK — {} points, params {}", p.get_points().len(), p.all_active_params().len()),
+        Ok(p) => println!(
+            "OK — {} points, params {}",
+            p.get_points().len(),
+            p.all_active_params().len()
+        ),
         Err(e) => println!("FAILED: {e:?}"),
     }
     // Reversed orientation, in case order matters.

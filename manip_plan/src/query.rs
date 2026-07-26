@@ -7,7 +7,9 @@
 use crate::parametric::{Axis, CollinearitySuggestion, ParameterAxis};
 use crate::{geom, orthogonal, parametric};
 use crate::{Error, FloorPlan, ParameterId, VertexId};
-use domain::points::{point_on_ring_boundary, point_to_segment_distance, to_f64, Point2f32, Point2f64};
+use domain::points::{
+    point_on_ring_boundary, point_to_segment_distance, to_f64, Point2f32, Point2f64,
+};
 use std::collections::HashSet;
 
 impl FloorPlan {

@@ -5,7 +5,9 @@ use ber_model::ber::ber_struct::Ber;
 use ber_model::ber::structural::porch_verdicts;
 
 fn main() {
-    let path = std::env::args().nth(1).expect("usage: porch_check <ber.json>");
+    let path = std::env::args()
+        .nth(1)
+        .expect("usage: porch_check <ber.json>");
     let ber: Ber = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
     println!("{} — {} storeys", ber.address, ber.storeys.len());
     for (idx, facts, verdict) in porch_verdicts(&ber) {
