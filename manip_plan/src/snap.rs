@@ -241,6 +241,27 @@ pub(crate) fn record_grouped_choice(
     chosen.is_some()
 }
 
+/// The `ToEdge` seats of attach decisions resolved AWAY from the corner in the
+/// current action — endpoints the user explicitly kept at the drawn
+/// along-position (a declined corner-swallow, or a corner-vs-edge attach
+/// forced to the edge). `carve::snap_walls` consults these so its
+/// parallel-wall leveling doesn't silently undo the explicit choice by sliding
+/// the minted flank onto the very wall whose corner was just declined.
+pub(crate) fn declined_attach_seats() -> Vec<Point2f32> {
+    SNAP_DECISIONS.with(|d| {
+        d.borrow()
+            .iter()
+            .filter(|dec| {
+                dec.candidates.len() == 2
+                    && dec.candidates[0].kind == SnapKind::ToVertex
+                    && dec.candidates[1].kind == SnapKind::ToEdge
+                    && dec.chosen != Some(0)
+            })
+            .map(|dec| dec.candidates[1].to)
+            .collect()
+    })
+}
+
 /// A located point on a ring's boundary — a vertex, or a position along an edge.
 /// The structural fact a snap targets: [`find_nearest`] produces it; a within-plan
 /// consumer reads it as IDENTITY (`Vertex(i)` → reuse vertex `i`; `Edge` → splice
@@ -488,6 +509,111 @@ pub(crate) fn choose_attach(
     match chosen {
         Some(c) if c.kind == SnapKind::ToVertex => OnRing::Vertex(vi),
         _ => edge_loc,
+    }
+}
+
+/// Record the elective CORNER-SWALLOW at a splice attach: `from` seats either ON
+/// `corner` (merging with it — swallowing the corner into the splice, the
+/// default and the historical silent behaviour) or on the host edge's LINE at
+/// `edge_seat` (the drawn along-position — declining keeps the drawn width and
+/// mints the flank stub back to the corner). Returns `true` to merge onto the
+/// corner, `false` to seat on the edge. SKIPPABLE — "don't snap" is the edge
+/// seat, a legitimate outcome — unlike the in-span attach elective
+/// ([`choose_attach`]), where floating free is not an option. When corner and
+/// edge seat are within [`NOOP_SNAP_EPS_M`] of each other there is no visible
+/// alternative, so the corner is taken silently (no tag, no question).
+///
+/// Both corner-swallow sites route through here — the vertex-arrival one
+/// ([`choose_attach_swallow`]) and the off-span rail-crossing one in
+/// `carve::cut_outline` — with the SAME `from`/candidates, so on a replay the
+/// forced policy resolves them identically and [`commit`]'s duplicate drop
+/// keeps it to ONE tag per endpoint.
+pub(crate) fn corner_swallow_choice(
+    from: Point2f32,
+    corner: Point2f32,
+    edge_seat: Point2f32,
+) -> bool {
+    if geom::segment_len(corner, edge_seat) < NOOP_SNAP_EPS_M {
+        return true;
+    }
+    let chosen = elective_choice(
+        from,
+        vec![
+            SnapCandidate {
+                kind: SnapKind::ToVertex,
+                to: corner,
+                score: geom::segment_len(from, corner),
+            },
+            SnapCandidate {
+                kind: SnapKind::ToEdge,
+                to: edge_seat,
+                score: geom::segment_len(from, edge_seat),
+            },
+        ],
+        true, // declining = seat on the edge at the drawn position (the stub)
+    );
+    matches!(chosen, Some(c) if c.kind == SnapKind::ToVertex)
+}
+
+/// [`choose_attach`] with the CORNER-SWALLOW made elective — the ortho splice
+/// attach (`carve::cut_outline`) routes through this. When a corner is in reach
+/// but NO wall admits a perpendicular foot (the endpoint lies PAST the corner
+/// along its host wall), plain [`choose_attach`] returns the vertex silently
+/// and the splice swallows the corner with no tag — the seating can move the
+/// point by up to the vertex tolerance with no way to decline. Here that
+/// seating is a recorded [`SnapDecision`] with the same shape as the in-span
+/// elective: `ToVertex` (merge onto the corner — the default, i.e. the
+/// historical geometry) vs `ToEdge` (the plain projection onto the host edge's
+/// LINE at the drawn along-position — declining mints the flank stub). The
+/// curve splice keeps plain [`choose_attach`]: its `pin_to_edge` clamp cannot
+/// honour a past-the-corner edge seat, so a decision there would be a lie.
+pub(crate) fn choose_attach_swallow(
+    ring: &[Point2f32],
+    p: Point2f32,
+    found: OnRing,
+    found_dist: f32,
+    edge_tol: f32,
+) -> OnRing {
+    let OnRing::Vertex(vi) = found else {
+        return found; // mid-edge attach — already a perpendicular projection
+    };
+    if find_edge_snap(ring, p, edge_tol).is_some() {
+        // A wall admits a perpendicular foot → the existing in-span elective.
+        return choose_attach(ring, p, found, found_dist, edge_tol);
+    }
+    // Host edge: the incident edge whose LINE p projects onto most closely
+    // (UNCLAMPED foot — it lies past the shared corner, which is exactly why
+    // `find_edge_snap` found nothing).
+    let n = ring.len();
+    let mut host: Option<(usize, f32, Point2f32, f32)> = None; // (edge, t, foot, perp)
+    for edge in [(vi + n - 1) % n, vi] {
+        let a = ring[edge];
+        let b = ring[(edge + 1) % n];
+        let (dx, dy) = (b.x - a.x, b.y - a.y);
+        let len2 = dx * dx + dy * dy;
+        if len2 < 1e-12 {
+            continue; // degenerate edge — nothing to seat on
+        }
+        let t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2;
+        let foot = Point2f32::new(a.x + t * dx, a.y + t * dy);
+        let perp = geom::segment_len(p, foot);
+        if host.is_none_or(|(_, _, _, best)| perp < best) {
+            host = Some((edge, t, foot, perp));
+        }
+    }
+    let Some((edge, t, foot, _)) = host else {
+        return OnRing::Vertex(vi); // both incident edges degenerate
+    };
+    if corner_swallow_choice(p, ring[vi], foot) {
+        OnRing::Vertex(vi)
+    } else {
+        // Topological attach stays on the ring (`t` clamped — the foot itself
+        // is past the corner); the geometric seat at the drawn along-position
+        // is re-derived by the caller from the terminal leg's rail.
+        OnRing::Edge {
+            edge,
+            t: t.clamp(0.0, 1.0),
+        }
     }
 }
 
@@ -1109,6 +1235,88 @@ mod tests {
             take_snap_decisions().is_empty(),
             "no edge alternative → no elective decision recorded"
         );
+    }
+
+    #[test]
+    fn choose_attach_swallow_records_the_corner_swallow_past_a_corner() {
+        let p = |x, y| Point2f32::new(x, y);
+        let ring = unit_square(); // corner (10,10) is vertex 2
+        let _ = take_snap_decisions();
+        // PAST the corner along the top wall: no wall admits a perpendicular
+        // foot (the plain `choose_attach` case above seats silently). The
+        // swallow variant records the elective instead: merge onto the corner
+        // (default — the historical geometry) vs seat on the top wall's LINE
+        // at the drawn along-position.
+        let probe = p(10.3, 10.02);
+        let (found, d) = find_nearest(&ring, probe, 0.5);
+        assert!(found.is_vertex(), "corner in reach");
+        let chosen = choose_attach_swallow(&ring, probe, found, d, 0.5);
+        assert_eq!(chosen, OnRing::Vertex(2), "default still merges the corner");
+        let decisions = take_snap_decisions();
+        assert_eq!(decisions.len(), 1, "the swallow is a recorded decision");
+        let dec = &decisions[0];
+        assert!(
+            dec.skippable,
+            "declining (the edge seat) is a valid outcome"
+        );
+        assert_eq!(dec.chosen, Some(0), "default = the corner");
+        let kinds: Vec<_> = dec.candidates.iter().map(|c| c.kind).collect();
+        assert_eq!(kinds, vec![SnapKind::ToVertex, SnapKind::ToEdge]);
+        assert_eq!(dec.candidates[0].to, p(10.0, 10.0));
+        // The edge seat: projection onto the TOP wall's line (perp 0.02 beats
+        // the right wall's 0.3) at the drawn along-position.
+        let seat = dec.candidates[1].to;
+        assert!(
+            (seat.x - 10.3).abs() < 1e-4 && (seat.y - 10.0).abs() < 1e-4,
+            "edge seat keeps the drawn along-position: {seat:?}"
+        );
+    }
+
+    #[test]
+    fn choose_attach_swallow_decline_returns_the_host_edge() {
+        let p = |x, y| Point2f32::new(x, y);
+        let ring = unit_square();
+        let probe = p(10.3, 10.02);
+        let _ = take_snap_decisions();
+        set_snap_policy(vec![(probe, SnapChoice::Skip)]);
+        let (found, d) = find_nearest(&ring, probe, 0.5);
+        let chosen = choose_attach_swallow(&ring, probe, found, d, 0.5);
+        clear_snap_policy();
+        // Declined → attach on the HOST edge (the top wall, edge 2), t clamped
+        // onto the ring; the caller re-derives the past-the-corner seat.
+        assert_eq!(chosen, OnRing::Edge { edge: 2, t: 0.0 });
+        let decisions = take_snap_decisions();
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(decisions[0].chosen, None, "recorded as declined");
+    }
+
+    #[test]
+    fn choose_attach_swallow_is_silent_for_a_sub_centimetre_overhang() {
+        let p = |x, y| Point2f32::new(x, y);
+        let ring = unit_square();
+        let _ = take_snap_decisions();
+        // 5 mm past the corner: the corner and the edge seat are visually the
+        // same point — no question to ask, seated silently (NOOP_SNAP_EPS_M).
+        let probe = p(10.005, 10.002);
+        let (found, d) = find_nearest(&ring, probe, 0.5);
+        let chosen = choose_attach_swallow(&ring, probe, found, d, 0.5);
+        assert_eq!(chosen, OnRing::Vertex(2));
+        assert!(take_snap_decisions().is_empty(), "invisible → no tag");
+    }
+
+    #[test]
+    fn choose_attach_swallow_handles_degenerate_incident_edges() {
+        let p = |x, y| Point2f32::new(x, y);
+        // Every edge zero-length: no host edge exists — falls back to the
+        // corner silently instead of dividing by a zero edge length.
+        let ring = vec![p(5.0, 0.0), p(5.0, 0.0), p(5.0, 0.0)];
+        let _ = take_snap_decisions();
+        let probe = p(5.2, 0.1);
+        let (found, d) = find_nearest(&ring, probe, 0.5);
+        assert!(found.is_vertex());
+        let chosen = choose_attach_swallow(&ring, probe, found, d, 0.5);
+        assert!(chosen.is_vertex());
+        assert!(take_snap_decisions().is_empty());
     }
 
     #[test]

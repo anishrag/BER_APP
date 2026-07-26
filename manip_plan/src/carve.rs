@@ -580,8 +580,12 @@ pub(crate) fn cut_outline(
             return None;
         }
         // Reach passed → the elective corner-vs-edge choice (records; the chosen
-        // attach drives the placement, so a forced edge wins on replay).
-        let loc = snap::choose_attach(ring, end, loc_raw, d, vertex_tol);
+        // attach drives the placement, so a forced edge wins on replay). The
+        // SWALLOW variant: an endpoint past a corner (no wall admits a
+        // perpendicular foot) is an elective too — merge onto the corner vs
+        // seat on the host edge's line at the drawn along-position — never a
+        // silent consumption of the corner.
+        let loc = snap::choose_attach_swallow(ring, end, loc_raw, d, vertex_tol);
         let (edge, t_snap) = loc.edge_t();
         let leg_horizontal = (end.y - neighbour.y).abs() <= (end.x - neighbour.x).abs();
         if loc.is_vertex() {
@@ -595,25 +599,54 @@ pub(crate) fn cut_outline(
             return Some((edge, 0.0));
         }
         let (a, b) = (ring[edge], ring[(edge + 1) % n]);
+        // Crossing of the terminal leg's rail with the attach edge's LINE — `t`
+        // deliberately UNfiltered; the span check below picks between the
+        // in-span seat, the elective corner-swallow, and the pin fallback.
         let crossing = if leg_horizontal {
             let c = neighbour.y;
             ((b.y - a.y).abs() > 1e-6)
                 .then(|| (c - a.y) / (b.y - a.y))
-                .filter(|t| (0.0f32..=1.0).contains(t))
                 .map(|t| (Point2f32::new(a.x + t * (b.x - a.x), c), t))
         } else {
             let c = neighbour.x;
             ((b.x - a.x).abs() > 1e-6)
                 .then(|| (c - a.x) / (b.x - a.x))
-                .filter(|t| (0.0f32..=1.0).contains(t))
                 .map(|t| (Point2f32::new(c, a.y + t * (b.y - a.y)), t))
         };
         match crossing {
-            Some((pt, t)) => {
+            Some((pt, t)) if (0.0f32..=1.0).contains(&t) => {
                 opath[e_idx] = pt;
                 Some((edge, t))
             }
-            None => {
+            // The rail meets the edge's line just PAST a corner (within the
+            // vertex-snap tolerance along the edge). Seating here either
+            // merges onto that corner (the pin fallback's historical result)
+            // or keeps the drawn width, seating at the line crossing and
+            // minting a flank stub back to the corner. The same elective the
+            // vertex-arrival route records (`choose_attach_swallow`) — ONE
+            // question per endpoint: on a decline replay both sites resolve
+            // identically off the shared policy and the duplicate record is
+            // dropped, and on a first run only one of the two sites fires.
+            Some((pt, t))
+                if {
+                    let margin = vertex_tol / geom::segment_len(a, b).max(1e-6);
+                    (-margin..=1.0 + margin).contains(&t)
+                } =>
+            {
+                let corner = if t > 0.5 {
+                    ring[(edge + 1) % n]
+                } else {
+                    ring[edge]
+                };
+                if snap::corner_swallow_choice(end, corner, pt) {
+                    snap::pin_to_edge(&mut opath[e_idx], ring, edge);
+                    Some((edge, t_snap))
+                } else {
+                    opath[e_idx] = pt;
+                    Some((edge, t.clamp(0.0, 1.0)))
+                }
+            }
+            _ => {
                 snap::pin_to_edge(&mut opath[e_idx], ring, edge);
                 Some((edge, t_snap))
             }
@@ -933,9 +966,23 @@ fn snap_walls(outline: &[Point2f32], pts: &[Point2f32], tol: f32) -> Vec<Point2f
     let min_overlap = -tol;
     let overlaps =
         |alo: f32, ahi: f32, blo: f32, bhi: f32| ahi.min(bhi) - alo.max(blo) > min_overlap;
+    // An attach seat the user explicitly kept OFF a corner (a declined
+    // corner-swallow, or a corner-vs-edge attach forced to the edge) must not
+    // be undone here: leveling the minted flank onto the adjacent house wall
+    // would slide the seat back onto the very corner that was declined. An
+    // edge ending on such a seat is exempt from leveling altogether.
+    let declined = snap::declined_attach_seats();
+    let pinned = |q: Point2f32| {
+        declined
+            .iter()
+            .any(|s| (s.x - q.x).abs() < eps && (s.y - q.y).abs() < eps)
+    };
     for i in 0..n {
         let a = pts[i];
         let b = pts[(i + 1) % n];
+        if pinned(a) || pinned(b) {
+            continue;
+        }
         if (a.x - b.x).abs() < eps {
             let (lo, hi) = (a.y.min(b.y), a.y.max(b.y));
             if let Some((ox, _, _)) = vert

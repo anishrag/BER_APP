@@ -1138,6 +1138,152 @@ mod path_edit_tests {
         assert_ne!(vid, first_vid);
     }
 
+    /// The field case (record dda89150): an extend bump whose two endpoints
+    /// both land near host-outline corners got ASYMMETRIC snap treatment — the
+    /// LEFT endpoint (perpendicular foot in-span) recorded the elective
+    /// ToVertex/ToEdge attach, while the RIGHT endpoint (drawn PAST its
+    /// corner, no wall admits a foot) was seated onto the corner silently and
+    /// undeclinably. Both endpoints must record exactly ONE decision each,
+    /// and the DEFAULT outcome must stay the historical corner-merged ring.
+    #[test]
+    fn extend_corner_swallow_records_one_decision_per_endpoint() {
+        let _ = crate::take_snap_decisions();
+        let mut plan = unit_square_plan(); // 10x10, bottom wall y=0
+                                           // Bump drawn OUTSIDE below the bottom wall. Left endpoint (0.3, 0.02):
+                                           // in-span near corner (0,0). Right endpoint (10.3, -0.02): PAST the
+                                           // corner (10,0) — 0.3 m beyond the wall's end.
+        let stroke = vec![p(0.3, 0.02), p(0.3, -2.0), p(10.3, -2.0), p(10.3, -0.02)];
+        plan.extend_ortho(&stroke).unwrap();
+
+        let decisions = crate::take_snap_decisions();
+        assert_eq!(
+            decisions.len(),
+            2,
+            "one elective per endpoint, none silent: {decisions:?}"
+        );
+        for d in &decisions {
+            let kinds: Vec<_> = d.candidates.iter().map(|c| c.kind).collect();
+            assert_eq!(
+                kinds,
+                vec![crate::SnapKind::ToVertex, crate::SnapKind::ToEdge],
+                "same decision shape at both endpoints"
+            );
+            assert_eq!(d.chosen, Some(0), "default merges the corner");
+        }
+        let right = decisions
+            .iter()
+            .find(|d| (d.from.x - 10.3).abs() < 1e-2)
+            .expect("the previously-silent right endpoint records a decision");
+        assert!(right.skippable, "the corner-swallow is declinable");
+        assert_eq!(right.candidates[0].to, p(10.0, 0.0), "corner candidate");
+        let seat = right.candidates[1].to;
+        assert!(
+            (seat.x - 10.3).abs() < 1e-3 && seat.y.abs() < 1e-3,
+            "edge candidate = drawn along-position on the wall line: {seat:?}"
+        );
+
+        // DEFAULT geometry unchanged from the historical silent behaviour:
+        // both corners consumed, the bump replaced the whole bottom wall.
+        let ring = plan.polygons()[0].clone();
+        assert_eq!(ring.len(), 4, "corner-merged rectangle: {ring:?}");
+        for exp in [p(0.0, -2.0), p(10.0, -2.0), p(10.0, 10.0), p(0.0, 10.0)] {
+            assert!(
+                ring.iter()
+                    .any(|v| (v.x - exp.x).abs() < 1e-3 && (v.y - exp.y).abs() < 1e-3),
+                "expected {exp:?} in {ring:?}"
+            );
+        }
+        assert!(plan.validate_simple().is_ok());
+    }
+
+    /// Declining the corner-swallow ("don't snap" on the right endpoint's tag)
+    /// replays into the edge-seated variant: the endpoint stays at the drawn
+    /// along-position on the wall's line, minting a flank stub back to the
+    /// kept corner — and the cleanup's parallel-wall leveling must not
+    /// silently slide that flank back onto the corner it just declined.
+    #[test]
+    fn extend_corner_swallow_decline_seats_on_the_edge_with_a_stub() {
+        let _ = crate::take_snap_decisions();
+        let mut plan = unit_square_plan();
+        let stroke = vec![p(0.3, 0.02), p(0.3, -2.0), p(10.3, -2.0), p(10.3, -0.02)];
+        crate::set_snap_policy(vec![(p(10.3, -0.02), crate::SnapChoice::Skip)]);
+        let res = plan.extend_ortho(&stroke);
+        crate::clear_snap_policy();
+        res.unwrap();
+
+        // Still ONE decision per endpoint: the second swallow site re-records
+        // the identical decision on the decline path and is deduped.
+        let decisions = crate::take_snap_decisions();
+        assert_eq!(decisions.len(), 2, "no duplicate tags: {decisions:?}");
+        let right = decisions
+            .iter()
+            .find(|d| (d.from.x - 10.3).abs() < 1e-2)
+            .unwrap();
+        assert_eq!(right.chosen, None, "recorded as declined");
+
+        // The stub: seat at (10.3, 0), kept corner (10, 0), flank at x=10.3.
+        let ring = plan.polygons()[0].clone();
+        for exp in [p(10.3, 0.0), p(10.0, 0.0), p(10.3, -2.0), p(0.0, -2.0)] {
+            assert!(
+                ring.iter()
+                    .any(|v| (v.x - exp.x).abs() < 1e-3 && (v.y - exp.y).abs() < 1e-3),
+                "expected {exp:?} in {ring:?}"
+            );
+        }
+        assert!(plan.validate_simple().is_ok());
+        // Area: 100 (square) + 10.3 x 2 (declined-width bump) = 120.6.
+        let area = polygon_area(&plan.polygons()[0]).abs();
+        assert!(
+            (area - 120.6).abs() < 0.05,
+            "stub kept the drawn width: {area}"
+        );
+    }
+
+    /// Re-accepting the corner after a decline (forced Apply(0) on replay)
+    /// restores the corner-merged ring — identical to the default outcome.
+    #[test]
+    fn extend_corner_swallow_reaccept_restores_the_corner_merge() {
+        let _ = crate::take_snap_decisions();
+        let stroke = vec![p(0.3, 0.02), p(0.3, -2.0), p(10.3, -2.0), p(10.3, -0.02)];
+
+        let mut default_plan = unit_square_plan();
+        default_plan.extend_ortho(&stroke).unwrap();
+        let _ = crate::take_snap_decisions();
+
+        let mut forced = unit_square_plan();
+        crate::set_snap_policy(vec![(p(10.3, -0.02), crate::SnapChoice::Apply(0))]);
+        let res = forced.extend_ortho(&stroke);
+        crate::clear_snap_policy();
+        res.unwrap();
+        let _ = crate::take_snap_decisions();
+
+        let a = default_plan.polygons()[0].clone();
+        let b = forced.polygons()[0].clone();
+        assert_eq!(a.len(), b.len());
+        for v in &a {
+            assert!(
+                b.iter()
+                    .any(|w| (w.x - v.x).abs() < 1e-4 && (w.y - v.y).abs() < 1e-4),
+                "forced-accept ring differs: {a:?} vs {b:?}"
+            );
+        }
+    }
+
+    /// An endpoint well clear of any corner keeps the plain (mandatory,
+    /// silent) mid-wall edge attach — no elective decision beyond it.
+    #[test]
+    fn extend_endpoint_clear_of_corners_records_no_decision() {
+        let _ = crate::take_snap_decisions();
+        let mut plan = unit_square_plan();
+        let stroke = vec![p(3.0, 0.02), p(3.0, -2.0), p(6.0, -2.0), p(6.0, 0.02)];
+        plan.extend_ortho(&stroke).unwrap();
+        assert!(
+            crate::take_snap_decisions().is_empty(),
+            "mid-wall attach stays a silent mandatory edge join"
+        );
+        assert!(plan.validate_simple().is_ok());
+    }
+
     #[test]
     fn trim_cuts_corner_into_a_diagonal_wall() {
         let mut plan = unit_square_plan();

@@ -1952,6 +1952,38 @@ fn switching_tools_clears_the_snap_tags() {
     );
 }
 
+/// The field case (record dda89150): an extend-ortho bump whose two endpoints
+/// both land near host-outline corners must surface a snap tag for EACH
+/// endpoint — including the previously-silent corner-swallow one (the
+/// endpoint drawn PAST its corner), which is skippable ("don't snap" seats it
+/// on the wall line at the drawn position instead of merging the corner).
+#[test]
+fn extend_corner_swallow_surfaces_a_tag_per_endpoint() {
+    let mut c = dimensioned_square_controller(); // 10×10 storey, bottom wall y=0
+    c.set_edit_mode(EditTools::ExtendOrtho);
+    // Bump below the bottom wall: left endpoint in-span near corner (0,0);
+    // right endpoint 0.3 m PAST the corner (10,0).
+    c.apply_extend_stroke_event(&[(0.3, 0.02), (0.3, -2.0), (10.3, -2.0), (10.3, -0.02)])
+        .unwrap();
+
+    let tags = c.snap_overlay();
+    assert_eq!(
+        tags.len(),
+        2,
+        "one clickable tag per endpoint, none silent: {tags:?}"
+    );
+    let right = tags
+        .iter()
+        .find(|t| (t.from.0 - 10.3).abs() < 1e-2)
+        .expect("the swallowed right endpoint has a tag");
+    assert!(right.skippable, "the corner-swallow offers 'don't snap'");
+    assert_eq!(
+        right.options.len(),
+        2,
+        "corner and edge-seat alternatives: {right:?}"
+    );
+}
+
 /// The reported case: a living area drawn as a square with a nook, in a
 /// dimensioned (metre-scale) storey. The orthogonalizer's coordinate-merge
 /// is scale-relative, so the nook is PRESERVED (it isn't merged away by a
