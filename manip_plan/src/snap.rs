@@ -241,23 +241,40 @@ pub(crate) fn record_grouped_choice(
     chosen.is_some()
 }
 
-/// The `ToEdge` seats of attach decisions resolved AWAY from the corner in the
-/// current action — endpoints the user explicitly kept at the drawn
-/// along-position (a declined corner-swallow, or a corner-vs-edge attach
-/// forced to the edge). `carve::snap_walls` consults these so its
-/// parallel-wall leveling doesn't silently undo the explicit choice by sliding
-/// the minted flank onto the very wall whose corner was just declined.
+/// The `ToEdge` seats of attach decisions resolved AWAY from their default in
+/// the current action — endpoints the user explicitly seated somewhere other
+/// than the top pick (a declined corner-swallow, a corner-vs-edge attach
+/// forced to the edge, or a multi-edge attach forced onto the farther wall).
+/// `carve::snap_walls` consults these so its parallel-wall leveling doesn't
+/// silently undo the explicit choice by sliding the minted flank onto the very
+/// wall (or corner) that was just declined.
 pub(crate) fn declined_attach_seats() -> Vec<Point2f32> {
     SNAP_DECISIONS.with(|d| {
         d.borrow()
             .iter()
             .filter(|dec| {
-                dec.candidates.len() == 2
-                    && dec.candidates[0].kind == SnapKind::ToVertex
-                    && dec.candidates[1].kind == SnapKind::ToEdge
+                // An ATTACH election: ≥2 candidates, all corner/edge seats,
+                // resolved away from the default (index 0).
+                dec.candidates.len() >= 2
+                    && dec
+                        .candidates
+                        .iter()
+                        .all(|c| matches!(c.kind, SnapKind::ToVertex | SnapKind::ToEdge))
                     && dec.chosen != Some(0)
             })
-            .map(|dec| dec.candidates[1].to)
+            .filter_map(|dec| match dec.chosen {
+                // A forced alternative: pinned if it's an edge seat.
+                Some(i) => {
+                    (dec.candidates[i].kind == SnapKind::ToEdge).then(|| dec.candidates[i].to)
+                }
+                // Declined outright (skippable corner-swallow): the edge seat
+                // is what the decline resolves to.
+                None => dec
+                    .candidates
+                    .iter()
+                    .find(|c| c.kind == SnapKind::ToEdge)
+                    .map(|c| c.to),
+            })
             .collect()
     })
 }
@@ -436,14 +453,13 @@ pub(crate) fn find_nearest(ring: &[Point2f32], p: Point2f32, vertex_tol: f32) ->
     )
 }
 
-/// The closest edge `p` can drop a PERPENDICULAR onto — the foot landing strictly
-/// WITHIN the segment (an "existing part" of the wall, never clamped to an end) and
-/// within `tol`. Returns `(edge, t, perp_dist)`, or `None` when no wall admits a
-/// perpendicular foot in range. Ranks by perpendicular distance, so a point beyond
-/// a near wall's end falls through to the next wall it genuinely lines up with.
-fn find_edge_snap(ring: &[Point2f32], p: Point2f32, tol: f32) -> Option<(usize, f32, f32)> {
+/// EVERY edge `p` can drop a PERPENDICULAR onto — the foot landing strictly
+/// WITHIN the segment (an "existing part" of the wall, never clamped to an end)
+/// and within `tol` — as `(edge, t, perp_dist)`, sorted nearest-first. Empty
+/// when no wall admits a perpendicular foot in range.
+fn find_edge_candidates(ring: &[Point2f32], p: Point2f32, tol: f32) -> Vec<(usize, f32, f32)> {
     let n = ring.len();
-    let mut best: Option<(usize, f32, f32)> = None;
+    let mut out: Vec<(usize, f32, f32)> = Vec::new();
     for i in 0..n {
         let a = ring[i];
         let b = ring[(i + 1) % n];
@@ -457,11 +473,16 @@ fn find_edge_snap(ring: &[Point2f32], p: Point2f32, tol: f32) -> Option<(usize, 
         if dist > tol {
             continue; // too far to project onto
         }
-        if best.is_none_or(|(_, _, bd)| dist < bd) {
-            best = Some((i, t, dist));
-        }
+        out.push((i, t, dist));
     }
-    best
+    out.sort_by(|a, b| a.2.total_cmp(&b.2));
+    out
+}
+
+/// The closest edge `p` can drop a PERPENDICULAR onto (see
+/// [`find_edge_candidates`]), or `None` when no wall admits a foot in range.
+fn find_edge_snap(ring: &[Point2f32], p: Point2f32, tol: f32) -> Option<(usize, f32, f32)> {
+    find_edge_candidates(ring, p, tol).into_iter().next()
 }
 
 /// Resolve a splice ATTACH location into an elective choice between snapping to a
@@ -575,7 +596,11 @@ pub(crate) fn choose_attach_swallow(
     edge_tol: f32,
 ) -> OnRing {
     let OnRing::Vertex(vi) = found else {
-        return found; // mid-edge attach — already a perpendicular projection
+        // Mid-edge attach (no corner in reach). More than one wall in range is
+        // a genuine choice — elect it rather than silently seating on the
+        // nearest (field case 2026-07-26: left wall 0.285 m vs bottom wall
+        // 0.300 m — a 1.5 cm margin decided the seat with no tag).
+        return elect_edge_attach(ring, p, found, edge_tol);
     };
     if find_edge_snap(ring, p, edge_tol).is_some() {
         // A wall admits a perpendicular foot → the existing in-span elective.
@@ -614,6 +639,67 @@ pub(crate) fn choose_attach_swallow(
             edge,
             t: t.clamp(0.0, 1.0),
         }
+    }
+}
+
+/// A MID-EDGE attach with more than one wall in range: when ≥2 distinct walls
+/// admit an in-span perpendicular foot within `edge_tol`, seating is a genuine
+/// choice (different walls → materially different splice results), so it is
+/// ELECTED: one decision, `ToEdge` candidates nearest-first, default = the
+/// nearest foot (exactly the historical silent pick, so default geometry is
+/// unchanged). The attach itself is MANDATORY — the decision is NOT skippable
+/// ("don't snap" is never offered; a forced Skip falls to the last candidate).
+///
+/// Stays SILENT (per the user ruling) when there is no real choice: a single
+/// candidate, seats within [`NOOP_SNAP_EPS_M`] of each other (two collinear
+/// half-walls are the same target), or a `found` seat that isn't the nearest
+/// in-span foot (a clamped/corner-region nearest — electing would change the
+/// default seat, so it passes through untouched).
+fn elect_edge_attach(ring: &[Point2f32], p: Point2f32, found: OnRing, edge_tol: f32) -> OnRing {
+    let cands = find_edge_candidates(ring, p, edge_tol);
+    if cands.len() < 2 {
+        return found;
+    }
+    // Distinct seats only — drop a foot within NOOP eps of a nearer one.
+    let mut distinct: Vec<(usize, f32, Point2f32, f32)> = Vec::new(); // (edge, t, seat, dist)
+    for (e, t, dist) in cands {
+        let seat = OnRing::Edge { edge: e, t }.point(ring);
+        if !distinct
+            .iter()
+            .any(|(_, _, s, _)| geom::segment_len(*s, seat) < NOOP_SNAP_EPS_M)
+        {
+            distinct.push((e, t, seat, dist));
+        }
+    }
+    if distinct.len() < 2 {
+        return found;
+    }
+    // Guard: the default (nearest foot) must BE today's seat, or electing
+    // would silently change the default geometry — bail to the silent path.
+    if geom::segment_len(distinct[0].2, found.point(ring)) >= NOOP_SNAP_EPS_M {
+        return found;
+    }
+    let chosen = elective_choice(
+        p,
+        distinct
+            .iter()
+            .map(|(_, _, seat, dist)| SnapCandidate {
+                kind: SnapKind::ToEdge,
+                to: *seat,
+                score: *dist,
+            })
+            .collect(),
+        false, // attach is mandatory — the CHOICE is elective, "don't snap" is not
+    );
+    match chosen {
+        Some(c) => distinct
+            .iter()
+            .find(|(_, _, s, _)| (s.x - c.to.x).abs() < 1e-6 && (s.y - c.to.y).abs() < 1e-6)
+            .map(|(e, t, _, _)| OnRing::Edge { edge: *e, t: *t })
+            .unwrap_or(found),
+        // Unreachable (non-skippable always resolves to a candidate), but the
+        // drawn-nearest seat is the honest fallback.
+        None => found,
     }
 }
 
@@ -1302,6 +1388,71 @@ mod tests {
         let chosen = choose_attach_swallow(&ring, probe, found, d, 0.5);
         assert_eq!(chosen, OnRing::Vertex(2));
         assert!(take_snap_decisions().is_empty(), "invisible → no tag");
+    }
+
+    #[test]
+    fn mid_edge_attach_with_two_walls_in_range_is_elected() {
+        let p = |x, y| Point2f32::new(x, y);
+        let ring = unit_square(); // edge 0 bottom, 3 left; corner (0,0) shared
+        let _ = take_snap_decisions();
+        // Near the bottom-left corner REGION but with the corner itself out of
+        // tol (dist 0.438 > 0.4): two walls admit in-span feet — left wall at
+        // 0.3, bottom wall at 0.32. A 2 cm margin must not decide silently.
+        let probe = p(0.3, 0.32);
+        let (found, d) = find_nearest(&ring, probe, 0.4);
+        assert!(!found.is_vertex(), "corner out of reach");
+        let chosen = choose_attach_swallow(&ring, probe, found, d, 0.4);
+        // Default = the nearest wall (left, edge 3) — the historical pick.
+        assert!(matches!(chosen, OnRing::Edge { edge: 3, .. }), "{chosen:?}");
+        let decisions = take_snap_decisions();
+        assert_eq!(decisions.len(), 1, "the two-wall attach is elected");
+        let dec = &decisions[0];
+        assert!(!dec.skippable, "attach is mandatory — no 'don't snap'");
+        assert_eq!(dec.chosen, Some(0));
+        assert_eq!(dec.candidates.len(), 2);
+        assert!(dec.candidates.iter().all(|c| c.kind == SnapKind::ToEdge));
+        let (c0, c1) = (dec.candidates[0].to, dec.candidates[1].to);
+        assert!(
+            c0.x.abs() < 1e-4 && (c0.y - 0.32).abs() < 1e-3,
+            "nearest: left wall foot: {c0:?}"
+        );
+        assert!(
+            (c1.x - 0.3).abs() < 1e-3 && c1.y.abs() < 1e-4,
+            "alternative: bottom wall foot: {c1:?}"
+        );
+    }
+
+    #[test]
+    fn mid_edge_attach_election_honours_a_forced_alternative() {
+        let p = |x, y| Point2f32::new(x, y);
+        let ring = unit_square();
+        let probe = p(0.3, 0.32);
+        let _ = take_snap_decisions();
+        set_snap_policy(vec![(probe, SnapChoice::Apply(1))]);
+        let (found, d) = find_nearest(&ring, probe, 0.4);
+        let chosen = choose_attach_swallow(&ring, probe, found, d, 0.4);
+        clear_snap_policy();
+        assert!(
+            matches!(chosen, OnRing::Edge { edge: 0, .. }),
+            "forced onto the bottom wall: {chosen:?}"
+        );
+        let decisions = take_snap_decisions();
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(decisions[0].chosen, Some(1));
+    }
+
+    #[test]
+    fn mid_edge_attach_with_one_wall_stays_silent() {
+        let p = |x, y| Point2f32::new(x, y);
+        let ring = unit_square();
+        let _ = take_snap_decisions();
+        // Mid-wall, far from every other wall: one candidate, no choice — the
+        // mandatory attach stays silent (user ruling: no box without options).
+        let probe = p(5.0, 0.3);
+        let (found, d) = find_nearest(&ring, probe, 0.4);
+        let chosen = choose_attach_swallow(&ring, probe, found, d, 0.4);
+        assert_eq!(chosen, found, "passthrough");
+        assert!(take_snap_decisions().is_empty());
     }
 
     #[test]

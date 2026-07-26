@@ -1269,6 +1269,165 @@ mod path_edit_tests {
         }
     }
 
+    /// The pre-extend outline of field record "Untitled BER" (tablet DB,
+    /// stroke of 2026-07-26 08:24:44), decoded from the dimensioning log +
+    /// splice-stage dumps: a 10-vertex storey whose bottom-left corner sits at
+    /// (2.3109376, -1.0249996).
+    fn field_ring_20260726() -> Vec<Point2f32> {
+        vec![
+            p(2.3109376, 9.475),
+            p(5.310938, 9.475),
+            p(5.310938, 8.475),
+            p(7.310938, 8.475),
+            p(7.310938, 8.975),
+            p(10.310938, 8.975),
+            p(10.310938, 0.9750004),
+            p(9.810938, 0.9750004),
+            p(9.810938, -1.0249996),
+            p(2.3109376, -1.0249996),
+        ]
+    }
+
+    /// The 08:24:44 extend stroke, as orthogonalized by the pipeline (the
+    /// "snapped to H/V" splice stage — byte-exact from the tablet log).
+    fn field_stroke_20260726() -> Vec<Point2f32> {
+        vec![
+            p(2.5962546, -0.72472566),
+            p(2.5962546, -4.1841345),
+            p(4.5817246, -4.1841345),
+            p(4.5817246, -5.6118383),
+            p(7.306596, -5.6118383),
+            p(7.306596, -3.9696214),
+            p(10.032696, -3.9696214),
+            p(10.032696, -0.88600135),
+        ]
+    }
+
+    /// Field regression (2026-07-26 08:24, "only one snap rather than 2"):
+    /// the LEFT endpoint (2.596, -0.725) had NO corner in reach (nearest
+    /// corner 0.414 m > tol 0.396) but TWO walls in range — the left wall
+    /// (perp 0.285 m) and the bottom wall (perp 0.300 m) — and was seated on
+    /// the left wall silently by a 1.5 cm margin. Both endpoints must now be
+    /// elected: the left as a two-wall ToEdge choice, the right as the
+    /// existing corner-vs-edge choice — and the DEFAULT result must stay
+    /// byte-identical to the ring the tablet actually produced.
+    #[test]
+    fn field_extend_two_wall_left_attach_is_elected_and_default_ring_matches() {
+        let _ = crate::take_snap_decisions();
+        let mut plan = FloorPlan::from_clean_ring(&field_ring_20260726()).unwrap();
+        plan.extend_ortho(&field_stroke_20260726()).unwrap();
+
+        let decisions = crate::take_snap_decisions();
+        assert_eq!(decisions.len(), 2, "one tag per endpoint: {decisions:?}");
+
+        // LEFT: the previously-silent two-wall election.
+        let left = decisions
+            .iter()
+            .find(|d| (d.from.x - 2.5962546).abs() < 1e-3)
+            .expect("left endpoint decision");
+        assert!(!left.skippable, "attach mandatory — no 'don't snap'");
+        assert_eq!(left.chosen, Some(0), "default = nearest wall");
+        assert_eq!(left.candidates.len(), 2);
+        assert!(left
+            .candidates
+            .iter()
+            .all(|c| c.kind == crate::SnapKind::ToEdge));
+        let (c0, c1) = (left.candidates[0].to, left.candidates[1].to);
+        assert!(
+            (c0.x - 2.3109376).abs() < 1e-4 && (c0.y + 0.72472566).abs() < 1e-4,
+            "nearest: left wall foot at 0.285 m: {c0:?}"
+        );
+        assert!(
+            (c1.x - 2.5962546).abs() < 1e-4 && (c1.y + 1.0249996).abs() < 1e-4,
+            "alternative: bottom wall foot at 0.300 m: {c1:?}"
+        );
+
+        // RIGHT: the corner-vs-edge election (the field's `[snap]` line).
+        let right = decisions
+            .iter()
+            .find(|d| (d.from.x - 10.032696).abs() < 1e-3)
+            .expect("right endpoint decision");
+        assert_eq!(right.chosen, Some(0));
+        assert_eq!(right.candidates[0].kind, crate::SnapKind::ToVertex);
+        assert_eq!(right.candidates[0].to, p(9.810938, -1.0249996));
+
+        // DEFAULT ring = the tablet's "cleaned ring" stage, byte-exact.
+        let expected = vec![
+            p(2.3109376, 9.475),
+            p(5.310938, 9.475),
+            p(5.310938, 8.475),
+            p(7.310938, 8.475),
+            p(7.310938, 8.975),
+            p(10.310938, 8.975),
+            p(10.310938, 0.9750004),
+            p(9.810938, 0.9750004),
+            p(9.810938, -3.9696214),
+            p(7.306596, -3.9696214),
+            p(7.306596, -5.6118383),
+            p(4.5817246, -5.6118383),
+            p(4.5817246, -4.1841345),
+            p(2.3109376, -4.1841345),
+        ];
+        let ring = plan.polygons()[0].clone();
+        assert_eq!(ring.len(), expected.len(), "ring: {ring:?}");
+        for exp in &expected {
+            assert!(
+                ring.iter()
+                    .any(|v| (v.x - exp.x).abs() < 1e-3 && (v.y - exp.y).abs() < 1e-3),
+                "expected {exp:?} in {ring:?}"
+            );
+        }
+        assert!(plan.validate_simple().is_ok());
+    }
+
+    /// Flipping the left endpoint's new tag to the bottom-wall candidate
+    /// replays into the bottom-wall seat: the bump keeps its drawn x (2.596),
+    /// a 0.285 m jog of the old bottom wall survives — and the cleanup's
+    /// parallel-wall leveling must NOT slide the flank back onto the left
+    /// wall the user just declined.
+    #[test]
+    fn field_extend_left_attach_flip_to_bottom_wall_keeps_the_jog() {
+        let _ = crate::take_snap_decisions();
+        let mut plan = FloorPlan::from_clean_ring(&field_ring_20260726()).unwrap();
+        crate::set_snap_policy(vec![(
+            p(2.5962546, -0.72472566),
+            crate::SnapChoice::Apply(1),
+        )]);
+        let res = plan.extend_ortho(&field_stroke_20260726());
+        crate::clear_snap_policy();
+        res.unwrap();
+
+        let decisions = crate::take_snap_decisions();
+        assert_eq!(decisions.len(), 2);
+        let left = decisions
+            .iter()
+            .find(|d| (d.from.x - 2.5962546).abs() < 1e-3)
+            .unwrap();
+        assert_eq!(left.chosen, Some(1), "forced onto the bottom wall");
+
+        let ring = plan.polygons()[0].clone();
+        // The seat, the kept old corner (the jog), and the un-slid flank.
+        for exp in [
+            p(2.5962546, -1.0249996),
+            p(2.3109376, -1.0249996),
+            p(2.5962546, -4.1841345),
+        ] {
+            assert!(
+                ring.iter()
+                    .any(|v| (v.x - exp.x).abs() < 1e-3 && (v.y - exp.y).abs() < 1e-3),
+                "expected {exp:?} in {ring:?}"
+            );
+        }
+        // The flank was NOT leveled onto the left wall (x=2.311) at the bump.
+        assert!(
+            !ring
+                .iter()
+                .any(|v| (v.x - 2.3109376).abs() < 1e-3 && (v.y + 4.1841345).abs() < 1e-3),
+            "flank must keep the drawn x, not slide onto the left wall: {ring:?}"
+        );
+        assert!(plan.validate_simple().is_ok());
+    }
+
     /// An endpoint well clear of any corner keeps the plain (mandatory,
     /// silent) mid-wall edge attach — no elective decision beyond it.
     #[test]
