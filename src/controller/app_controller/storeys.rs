@@ -296,6 +296,7 @@ impl AppController {
         // Same for a half-finished ceiling-step line (its coordinate is in the
         // outgoing storey's space); the mode resets like the other area tools.
         self.pending_ceiling_step = None;
+        self.ceiling_step_notice = None;
         self.ceiling_step_mode = false;
         // And a half-finished roof point / ridge (same coordinate space
         // argument) — plus the last ridge's auto-resolve notice (it names the
@@ -448,6 +449,7 @@ impl AppController {
         // An in-flight ceiling-step line too (its coordinate is that storey's),
         // and an in-flight roof point / ridge for the same reason.
         self.pending_ceiling_step = None;
+        self.ceiling_step_notice = None;
         self.ceiling_step_mode = false;
         self.pending_roof_point = None;
         self.pending_centre_between = None;

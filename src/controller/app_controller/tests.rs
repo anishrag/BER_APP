@@ -7352,6 +7352,123 @@ fn ceiling_carve_closed_stroke_dimensions_then_takes_the_delta() {
     assert!(zs.iter().any(|z| (z - 2.4).abs() < 1e-6), "{zs:?}");
 }
 
+/// NESTING: a ceiling section drawn WHOLLY INSIDE an existing one is carved,
+/// not refused. Ceiling sections aren't mutually exclusive — the deltas
+/// compose and canonicalization clips each ring only to the footprint — so a
+/// raised area inside an already-divided area is legitimate geometry (and a
+/// stepped ceiling is just that, repeated).
+///
+/// Elmwood Road field failure: the assessor divided off the rear protrusion
+/// as a same-height section, then drew the raised rectangle inside it and
+/// NOTHING happened — the carve ran against the outline MINUS the committed
+/// sections, so the inside of a section was undrawable, and the rejection was
+/// `log::error!`-only. Both halves are asserted here: the carve succeeds, and
+/// the inner area really is smaller than the section containing it (i.e. it
+/// wasn't snapped back out onto the section's own edges).
+#[test]
+fn ceiling_section_drawn_inside_an_existing_section_carves() {
+    let mut c = ceiling_ready_controller();
+    // A same-height DIVIDER over the right half (x ≥ 4), delta 0 — the "divide
+    // it off first" step. It must REACH the outline to reproduce the failure:
+    // subtracting a section that touches the boundary genuinely removes it,
+    // whereas a fully-interior section punched an interior hole that
+    // `subtract_all` discards (it keeps exteriors only), so the fence never
+    // engaged there. That asymmetry is why the same action worked on one side
+    // of the Elmwood plan and not the other.
+    ceiling_step_to_amount_at_x4(&mut c);
+    c.assign_ceiling_step_delta(0.0).expect("divider applies");
+    assert_eq!(c.ceiling_step_regions[&0].len(), 1, "divider committed");
+    assert!(c.ceiling_step_regions[&0][0].is_divider());
+
+    // Now the raised rectangle INSIDE it, clear of the divider's edges.
+    c.apply_ceiling_step_stroke_event(&[
+        (6.0, 3.2),
+        (7.6, 3.2),
+        (7.6, 4.8),
+        (6.0, 4.8),
+        (6.05, 3.25),
+    ]);
+    assert_eq!(
+        c.ceiling_step_notice(),
+        None,
+        "the stroke was accepted — no refusal message"
+    );
+    assert!(
+        c.ceiling_step_pending(),
+        "a section inside a section is carved, not swallowed"
+    );
+    let mut guard = 0;
+    while c.dimensioning_active() && guard < 12 {
+        c.apply_dimension(1.6).expect("dimension applies");
+        guard += 1;
+    }
+    assert!(guard < 12, "length loop didn't terminate");
+    skip_position_prompts(&mut c);
+    assert!(c.ceiling_step_amount_pending(), "the delta stage opens");
+    c.assign_ceiling_step_delta(0.3).expect("delta applies");
+
+    let session = &c.ceiling_step_regions[&0];
+    assert_eq!(session.len(), 2, "divider + the nested raise: {session:?}");
+    let raised = session
+        .iter()
+        .find(|r| !r.is_divider())
+        .expect("a raised region");
+    let area = session_ring_area(&raised.polygon);
+    assert!(
+        (area - 2.56).abs() < 0.2,
+        "the nested 1.6×1.6 area, NOT snapped out to the enclosing section: {area}"
+    );
+    // The composed result: the nested area is 0.3 above the divider, which
+    // itself sits at the storey default.
+    let zs = ceiling_flat_zs(&c);
+    assert!(zs.iter().any(|z| (z - 2.7).abs() < 1e-6), "{zs:?}");
+    assert!(zs.iter().any(|z| (z - 2.4).abs() < 1e-6), "{zs:?}");
+}
+
+/// The amount prompt's reference height is FLOOR-TO-CEILING, not ceiling-z.
+/// Both are stored against the same storey floor datum, so over a raised floor
+/// the ceiling z overstates the height by the step — and the assessor is
+/// reading a laser off the floor they're standing on. The absolute ("At
+/// height") entry converts by DIFFERENCE against this same number, so the
+/// floor level cancels there and the stored delta is unaffected.
+#[test]
+fn ceiling_section_height_reads_floor_to_ceiling_over_a_raised_floor() {
+    let mut c = ceiling_ready_controller();
+    // Raise the floor over the interior 4×4 by 0.3.
+    c.set_step_mode(true);
+    c.apply_step_region_stroke_event(&[(2.0, 2.0), (6.0, 2.0), (6.0, 6.0), (2.0, 6.0), (2.1, 2.1)]);
+    complete_interior_length_loop(&mut c);
+    skip_position_prompts(&mut c);
+    assert!(c.step_pick_pending(), "floor amount stage open");
+    c.assign_step_level_to_pending(0.3)
+        .expect("floor step applies");
+
+    // A ceiling section over the SAME area: the ceiling is still at the 2.4
+    // default (no ceiling step yet), but the floor under it is 0.3 up.
+    c.set_ceiling_step_mode(true);
+    ceiling_carve_to_amount(&mut c);
+    c.materialize(); // the height reads the RESOLVED regions
+    let h = c
+        .ceiling_step_current_height()
+        .expect("a resolved height over the area");
+    assert!(
+        (h - 2.1).abs() < 1e-6,
+        "2.4 m ceiling over a +0.3 m floor = 2.1 m floor-to-ceiling, got {h}"
+    );
+
+    // "At height 2.5" means 2.5 floor-to-ceiling → the ceiling rises 0.4,
+    // i.e. the floor level cancels out of the delta.
+    c.assign_ceiling_step_absolute(2.5)
+        .expect("absolute entry applies");
+    let session = &c.ceiling_step_regions[&0];
+    assert_eq!(session.len(), 1, "one section: {session:?}");
+    assert!(
+        (session[0].delta_m - 0.4).abs() < 1e-6,
+        "Δ = typed − current = 2.5 − 2.1: {:?}",
+        session[0].delta_m
+    );
+}
+
 /// An OPEN cut with three drawn sides whose ends meet the outline — NOT a
 /// closed loop and NOT a single straight line — must be accepted through the
 /// SAME cut pipeline the floor step uses (a two-region side-pick), not rejected

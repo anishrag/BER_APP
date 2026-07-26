@@ -4,28 +4,46 @@
 //! coordinate via a position prompt, then enters the step amount (metres,
 //! relative to the storey's default ceiling height; + raised, − lowered).
 //!
-//! A CLOSED stroke instead CARVES an area — floor-step parity: the same
-//! carve-against-the-available-region machinery, dimensioned (wall lengths +
-//! position prompts) as the active `StepArea` shape, then the SAME amount
-//! stage as the line flow. The carve has NO session tag of its own: modes are
-//! mutually exclusive, so an active `StepArea` shape while ceiling-step mode
-//! is on IS the in-flight ceiling carve
-//! ([`AppController::ceiling_carve_in_flight`]) — which keeps undo clean (the
-//! document snapshot is the whole pending state).
+//! A CLOSED stroke instead CARVES an area — the floor step's carve/dimension
+//! machinery, dimensioned (wall lengths + position prompts) as the active
+//! `StepArea` shape, then the SAME amount stage as the line flow. The carve
+//! has NO session tag of its own: modes are mutually exclusive, so an active
+//! `StepArea` shape while ceiling-step mode is on IS the in-flight ceiling
+//! carve ([`AppController::ceiling_carve_in_flight`]) — which keeps undo clean
+//! (the document snapshot is the whole pending state).
 //!
-//! Like floor steps, a ceiling step is NOT persisted as a record of its own.
-//! It's session-only controller state whose job is to re-split the resolved
-//! ceiling regions at commit (`CeilingRegions::with_z_deltas`, applied in
-//! `document::resolve_storey`): the durable record is the per-vertex z on the
-//! roof regions the split produces, and on reload the session regions are
-//! rebuilt from those (`document::ceiling_step_regions_from_roofs`).
+//! WHERE IT DIVERGES FROM THE FLOOR STEP: the carve runs against the whole
+//! outline, NOT the outline minus the sections already drawn. Ceiling sections
+//! are not mutually exclusive — the deltas compose in
+//! `CeilingRegions::with_z_deltas` and canonicalization clips each ring only to
+//! the footprint — so a section INSIDE an existing one is legitimate (a raised
+//! area within a divided-off area; a stepped ceiling is that, repeated). The
+//! existing sections bound a stroke by SNAPPING it
+//! ([`StoreyDoc::ceiling_section_edges`]), which is what keeps the wall pins
+//! and the dimension prompts behaving as they did when the region was fenced.
+//!
+//! Like floor steps, a ceiling step is NOT persisted as a record of its own —
+//! it's session-only controller state whose job is to re-split the resolved
+//! ceiling regions at commit (`CeilingRegions::with_z_deltas`). The durable
+//! input is `Storey::ceiling_steps`, restored verbatim on reload
+//! (`reconstruct_ceiling_step_regions_for` — no geometry inference), so
+//! overlapping/nested rings round-trip as drawn.
 //!
 //! The line (axis + coordinate + side) is input UX only — the session record
-//! is the REGION. After each assign the shell CANONICALIZES: materialize, then
-//! rebuild the session list from the derived ceilings, so the in-session list
-//! equals the post-reload reconstruction (idempotent reload by construction).
+//! is the REGION. After each assign the shell CANONICALIZES
+//! (`reconstruct_ceiling_step_regions_for`): clip each drawn ring to the
+//! outline and mirror the result into the durable field. Clipping is against
+//! the FOOTPRINT only, never against the sibling sections — which is what lets
+//! a nested section survive as its own ring rather than being differenced away.
 use super::*;
 use document::{LinePositionPrompt, LineSide};
+
+/// Containment slop (metres) for reading the FLOOR level under a ceiling
+/// section's representative point. The point is strictly interior to the
+/// section by construction (`ring_interior_point`), so this is not a tap
+/// tolerance — it only absorbs boundary round-off when the section's interior
+/// point happens to sit on a floor-region seam.
+const FLOOR_LEVEL_SAMPLE_TOL_M: f64 = 1e-3;
 
 /// The elective wall snap a pending step line is carrying: the line's
 /// `coord_m` already HOLDS the snapped (reference wall's) coordinate; this
@@ -112,6 +130,13 @@ impl AppController {
         self.ceiling_step_mode
     }
 
+    /// Why the last "Divide ceiling" stroke was refused, if it was — shown
+    /// inline under the tool button so no refusal is silent. Cleared by the
+    /// next stroke, a stage advance, and mode toggle / cancel.
+    pub fn ceiling_step_notice(&self) -> Option<&str> {
+        self.ceiling_step_notice.as_deref()
+    }
+
     /// Enter/leave ceiling-step mode. Entering is a NO-OP while the tool is
     /// unavailable (see [`ceiling_step_available`](Self::ceiling_step_available));
     /// otherwise it drops into draw mode (a stroke draws the line straight
@@ -195,6 +220,8 @@ impl AppController {
         // LINE route keeps its own bespoke tag and leaves no generic capture.
         self.begin_snap_capture();
         let before = self.current_history_snapshot();
+        // A fresh stroke supersedes the last one's refusal message.
+        self.ceiling_step_notice = None;
         // Flush the live buffer to its slot: both the fit and the carve work
         // against `document.outline`, which is only synced on shape switches.
         self.sync_active();
@@ -212,34 +239,51 @@ impl AppController {
         }
         match self.document.fit_ceiling_step_line(&pts) {
             Ok((axis, coord_m)) => self.begin_ceiling_step_side(axis, coord_m),
-            Err(e) => log::error!("ceiling-step line: {}", e),
+            Err(e) => {
+                log::error!("ceiling-step line: {}", e);
+                self.ceiling_step_notice = Some(e);
+            }
         }
     }
 
-    /// Carve a ceiling-step AREA against the AVAILABLE region — the outline
-    /// minus the ceiling steps already committed — exactly as the floor step
-    /// does (shared edges snap, no overlap), and start dimensioning it as the
-    /// active `StepArea` shape: wall lengths, then the position prompts
-    /// (snapped-to-wall axes skip the question via the pinned slot's
-    /// `position_free_axes`). Handles both a CLOSED loop and an OPEN cut whose
-    /// ends meet the outline (the carve resolves the latter to an auto-picked
-    /// area). The SAME delta prompt as the line flow follows once dimensioning
-    /// resolves. Rejections are logged; nothing is mutated on failure.
+    /// Carve a ceiling-step AREA against the storey OUTLINE — the whole
+    /// footprint is drawable, with the existing sections supplied as SNAP
+    /// references rather than subtracted out (see the reference-set comment in
+    /// the body and [`StoreyDoc::ceiling_section_edges`]) — and start
+    /// dimensioning it as the active `StepArea` shape: wall lengths, then the
+    /// position prompts (snapped-to-wall axes skip the question via the pinned
+    /// slot's `position_free_axes`). Handles both a CLOSED loop and an OPEN cut
+    /// whose ends meet the outline (the carve resolves the latter to an
+    /// auto-picked area). The SAME delta prompt as the line flow follows once
+    /// dimensioning resolves. Rejections surface via `ceiling_step_notice`;
+    /// nothing is mutated on failure.
     fn apply_ceiling_carve_stroke(&mut self, pts: &[Point2f32], before: HistorySnapshot) {
         let idx = self.current_storey_idx.unwrap_or(0);
-        let step_rings: Vec<Vec<Point2f32>> = self
+        let steps = self
             .ceiling_step_regions
             .get(&idx)
-            .map(|rs| rs.iter().map(|r| r.polygon.clone()).collect())
+            .cloned()
             .unwrap_or_default();
         // Level onto (and pin to) the construction-phase lines, so a ceiling step
-        // drawn beside a phase "year" boundary lands on it — same as living areas.
-        let ref_walls = self.phase_reference_walls();
+        // drawn beside a phase "year" boundary lands on it — same as living areas
+        // — PLUS every existing ceiling section's own edges.
+        //
+        // The sections are references, NOT holes: unlike floor steps / phases /
+        // living areas, ceiling sections are not mutually exclusive (the deltas
+        // compose, and canonicalization clips each ring only to the footprint),
+        // so a section drawn inside an existing one is legitimate — a raised
+        // area within a divided-off area, or the next tier of a stepped
+        // ceiling. Subtracting them made the inside of any section undrawable
+        // and the refusal was silent. See `ceiling_section_edges` for why the
+        // reference set is what keeps the snapping and the dimension prompts
+        // behaving exactly as they did when the region was fenced.
+        let mut ref_walls = self.phase_reference_walls();
+        ref_walls.extend(self.document.ceiling_section_edges(&steps));
         let action_points: Vec<(f32, f32)> = pts.iter().map(|p| (p.x, p.y)).collect();
         let wall_snap_tol = self.snap_tol_carve();
         match self.document.carve_or_cut_in_available(
             pts,
-            &step_rings,
+            &[], // no holes — the whole outline is drawable (see above)
             &self.tuning.subarea,
             &ref_walls,
             wall_snap_tol,
@@ -247,6 +291,10 @@ impl AppController {
             Ok((boundary, SubareaOutcome::Area(plan))) => {
                 if let Err(e) = plan.validate_simple() {
                     log::warn!("ceiling step area rejected (walls cross): {:?}", e);
+                    self.ceiling_step_notice = Some(
+                        "That area's walls cross each other — redraw it as a simple loop."
+                            .to_string(),
+                    );
                     // Nothing committed — drop the rejected carve's decisions.
                     let _ = manip_plan::take_snap_decisions();
                     return;
@@ -286,6 +334,9 @@ impl AppController {
             }
             Err(e) => {
                 log::error!("ceiling-step carve: {}", e);
+                self.ceiling_step_notice = Some(format!(
+                    "Couldn't use that stroke as a ceiling section: {e}"
+                ));
                 let _ = manip_plan::take_snap_decisions();
             }
         }
@@ -612,19 +663,39 @@ impl AppController {
             })
     }
 
-    /// The RESOLVED ceiling height (m, storey-local) over the pending step's
-    /// target area — the reference the amount prompt shows, and the base the
-    /// ABSOLUTE entry converts against. The representative point is the
-    /// chosen side's half-rect centre (line), the carved area's interior
-    /// point, or the selected region's interior point (edit). `None` when no
-    /// amount stage is open / nothing resolves there.
+    /// The RESOLVED FLOOR-TO-CEILING height (m) over the pending step's target
+    /// area — the reference the amount prompt shows, and the base the ABSOLUTE
+    /// entry converts against. The representative point is the chosen side's
+    /// half-rect centre (line), the carved area's interior point, or the
+    /// selected region's interior point (edit). `None` when no amount stage is
+    /// open / nothing resolves there.
+    ///
+    /// Ceiling z and floor `level_m` are both stored against the same storey
+    /// floor DATUM, so over a stepped floor the ceiling z alone is NOT the
+    /// height anyone measures — a room over a raised floor reads too TALL by
+    /// the step. Subtracting the floor level at the SAME point gives what an
+    /// assessor gets off a laser. `None` from `copy_height_floor_at` (a point
+    /// off every floor region) means the unstepped datum, i.e. 0.
+    ///
+    /// Both consumers stay correct: the prompt's "Area currently at …" becomes
+    /// the true floor-to-ceiling reading, and
+    /// [`assign_ceiling_step_absolute`](Self::assign_ceiling_step_absolute)
+    /// takes a DIFFERENCE against it (`typed − current`), in which the floor
+    /// level cancels — so a typed "At height" now means floor-to-ceiling too,
+    /// and the stored delta is unchanged.
     pub fn ceiling_step_current_height(&self) -> Option<f64> {
         let idx = self.current_storey_idx.unwrap_or(0);
         let pt = self.ceiling_step_target_point()?;
-        self.current_record
+        let storey = self
+            .current_record
             .as_ref()
-            .and_then(|r| r.data.storeys.get(idx))
-            .and_then(|s| s.ceilings.top_z_at(pt))
+            .and_then(|r| r.data.storeys.get(idx))?;
+        let ceiling_z = storey.ceilings.top_z_at(pt)?;
+        // The point is interior by construction, so this needs no tap slop.
+        let floor_level = storey
+            .copy_height_floor_at(pt.x, pt.y, FLOOR_LEVEL_SAMPLE_TOL_M)
+            .unwrap_or(0.0);
+        Some(ceiling_z - floor_level)
     }
 
     /// The representative plan point of the pending step's target area (see
@@ -941,6 +1012,7 @@ impl AppController {
             self.abandon_step_shape();
         }
         self.pending_ceiling_step = None;
+        self.ceiling_step_notice = None;
     }
 
     /// The current storey's committed step regions, as `(ring, label)` in

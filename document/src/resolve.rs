@@ -602,33 +602,45 @@ pub fn resolve_storey(
     storey
 }
 
-/// Boundary tolerance (metres) for reading the known ceiling height over a
-/// living area. Only affects the ridge/apex/wall proximity checks inside
-/// [`ber_model::ber::structural::Storey::copy_height_ceiling_at`]; a living
-/// area's centroid is strictly interior to the ceiling region above it, so the
-/// flat-ceiling containment test that carries the common case is tolerance-free.
+/// Boundary tolerance (metres) for reading the known ceiling height — and the
+/// floor level — over a living area. Only affects the ridge/apex/wall
+/// proximity checks inside
+/// [`ber_model::ber::structural::Storey::copy_height_ceiling_at`]; the sample
+/// point is strictly interior to the region ([`manip_plan::ring_interior_point`]),
+/// so the flat-ceiling containment test that carries the common case is
+/// tolerance-free.
 const LIVING_AREA_SNAP_TOL_M: f64 = 1e-3;
 
-/// The ceiling height (metres above the storey floor datum) a LIVING AREA snaps
-/// to: the KNOWN flat ceiling height directly above the area, evaluated at its
-/// centroid `at` via the same
+/// The FLOOR-TO-CEILING height (metres) a LIVING AREA snaps to at `at`: the
+/// KNOWN flat ceiling height directly above the area — via the same
 /// [`copy_height_ceiling_at`](ber_model::ber::structural::Storey::copy_height_ceiling_at)
-/// "known height" primitive the copy-height and ceiling-step tools use. Falls
-/// back to the storey's default `ceiling_height_m` when the centroid sits under
-/// a sloped / ridged face where no single height is readable; `None` when the
-/// storey has no ceiling height at all — nothing to snap to yet.
+/// "known height" primitive the copy-height and ceiling-step tools use — MINUS
+/// the floor level at the same point. Falls back to the storey's default
+/// `ceiling_height_m` when `at` sits under a sloped / ridged face where no
+/// single height is readable; `None` when the storey has no ceiling height at
+/// all — nothing to snap to yet.
 ///
-/// NON-UNIFORM ceilings: the snap is a POINT PICK at the area's centroid (its
-/// representative interior point), NOT an area-weighted average — deliberately
-/// mirroring the copy-height tool's tap. A room wholly under one flat ceiling
-/// snaps to exactly that height; a room straddling a ceiling step snaps to the
-/// ceiling over its centroid; a room under a slope falls back to the storey
-/// default. `storey.ceilings` and `storey.walls` must be resolved before this
-/// is called (the resolve pass calls it once both are final).
+/// THE FLOOR SUBTRACTION: ceiling z and floor `level_m` are both measured from
+/// the same storey floor DATUM, so over a stepped floor the ceiling z is not
+/// the height of the room — a living area over a raised floor would read too
+/// TALL by the step (and one over a sunken floor too short). `height_m` is
+/// documented and consumed as the room's floor-to-ceiling height (it feeds the
+/// room volume downstream), so the step has to come off. A point off every
+/// floor region reads the unstepped datum, i.e. 0.
+///
+/// NON-UNIFORM ceilings: the snap is a POINT PICK at the area's representative
+/// interior point, NOT an area-weighted average — deliberately mirroring the
+/// copy-height tool's tap. A room wholly under one flat ceiling snaps to
+/// exactly that height; a room straddling a ceiling step snaps to the ceiling
+/// over that point; a room under a slope falls back to the storey default.
+/// `storey.ceilings`, `storey.floors` and `storey.walls` must be resolved
+/// before this is called (the resolve pass calls it once they are final).
 pub fn living_area_ceiling_height(storey: &Storey, at: Point2f64, tol: f64) -> Option<f64> {
-    storey
+    let ceiling_z = storey
         .copy_height_ceiling_at(at.x, at.y, tol)
-        .or(storey.ceiling_height_m)
+        .or(storey.ceiling_height_m)?;
+    let floor_level = storey.copy_height_floor_at(at.x, at.y, tol).unwrap_or(0.0);
+    Some(ceiling_z - floor_level)
 }
 
 /// Snap every [`Storey::living_areas`](ber_model::ber::structural::Storey)
@@ -644,7 +656,19 @@ fn stamp_living_area_heights(storey: &mut Storey) {
     // `storey` (inside the helper) doesn't collide with mutating them.
     let mut regions = std::mem::take(&mut storey.living_areas).regions;
     for r in &mut regions {
-        r.height_m = living_area_ceiling_height(storey, r.centroid(), LIVING_AREA_SNAP_TOL_M);
+        // The area centroid can fall OUTSIDE its own region — an L-shaped room,
+        // or the band a carve leaves around a raised area — and would then read
+        // the ceiling/floor of somewhere the room isn't (or nothing at all).
+        // `ring_interior_point` still prefers the centroid whenever it IS
+        // inside, so convex rooms are unchanged.
+        let ring: Vec<Point2f64> = r
+            .polygon
+            .exterior()
+            .coords()
+            .map(|c| Point2f64::new(c.x, c.y))
+            .collect();
+        let at = manip_plan::ring_interior_point(&ring).unwrap_or_else(|| r.centroid());
+        r.height_m = living_area_ceiling_height(storey, at, LIVING_AREA_SNAP_TOL_M);
     }
     storey.living_areas = FloorRegions { regions };
 }
@@ -1962,6 +1986,65 @@ mod tests {
             storey.living_areas.regions[0].height_m,
             Some(2.55),
             "living area snaps to the flat ceiling above it"
+        );
+    }
+
+    /// `height_m` is the room's FLOOR-TO-CEILING height, so a living area over
+    /// a RAISED floor is shorter by the step — ceiling z and floor `level_m`
+    /// share the storey floor datum, and the ceiling z alone would overstate
+    /// the room. It feeds the room volume downstream, so the step has to come
+    /// off.
+    #[test]
+    fn living_area_height_subtracts_the_floor_step_under_it() {
+        let pts = vec![
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(6.0, 0.0),
+            Point2f32::new(6.0, 6.0),
+            Point2f32::new(0.0, 6.0),
+        ];
+        let plan = FloorPlan::from_clean_ring(&pts).unwrap();
+        let mut doc = StoreyDoc::default();
+        doc.dimensioning.scale_set = true;
+        doc.dimensioning.known_params = plan.all_active_params();
+        doc.floor_plan = plan.clone();
+        doc.outline = ShapeSlot {
+            floor_plan: plan,
+            dimensioning: doc.dimensioning.clone(),
+        };
+        // The same centred 2×2 room as the flat case.
+        let la = vec![
+            Point2f32::new(2.0, 2.0),
+            Point2f32::new(4.0, 2.0),
+            Point2f32::new(4.0, 4.0),
+            Point2f32::new(2.0, 4.0),
+        ];
+        doc.living_areas.push(ShapeSlot {
+            floor_plan: FloorPlan::from_clean_ring(&la).unwrap(),
+            dimensioning: Default::default(),
+        });
+
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &[]);
+        ber.set_default_ceiling_height(Some(0), 2.55);
+        // A floor step covering the room, raised 0.25.
+        let step = StepRegion {
+            polygon: vec![
+                Point2f32::new(1.0, 1.0),
+                Point2f32::new(5.0, 1.0),
+                Point2f32::new(5.0, 5.0),
+                Point2f32::new(1.0, 5.0),
+            ],
+            level_m: 0.25,
+        };
+        let storey = resolve_storey(&doc, &ber, 0, &[], std::slice::from_ref(&step), &[]);
+
+        assert_eq!(storey.living_areas.regions.len(), 1);
+        let h = storey.living_areas.regions[0]
+            .height_m
+            .expect("a snapped height");
+        assert!(
+            (h - 2.30).abs() < 1e-9,
+            "2.55 ceiling − 0.25 floor step = 2.30 floor-to-ceiling, got {h}"
         );
     }
 

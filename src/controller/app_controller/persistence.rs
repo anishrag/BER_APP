@@ -280,6 +280,7 @@ impl AppController {
         self.ceiling_step_mode = false;
         self.ceiling_step_regions.clear();
         self.pending_ceiling_step = None;
+        self.ceiling_step_notice = None;
         self.ceiling_point_mode = false;
         self.pending_roof_point = None;
         self.pending_centre_between = None;
@@ -371,6 +372,7 @@ impl AppController {
         // prompt holds VertexIds into that record's outline plan. A pending
         // roof point's / ridge's prompt does too.
         self.pending_ceiling_step = None;
+        self.ceiling_step_notice = None;
         self.ceiling_step_mode = false;
         self.pending_roof_point = None;
         self.pending_centre_between = None;
@@ -1015,6 +1017,7 @@ impl AppController {
         self.reconstruct_session_state_from_record();
         // Same as open_ber: drop any line/point state from the previous session.
         self.pending_ceiling_step = None;
+        self.ceiling_step_notice = None;
         self.ceiling_step_mode = false;
         self.pending_roof_point = None;
         self.pending_centre_between = None;

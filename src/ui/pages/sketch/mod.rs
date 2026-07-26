@@ -1318,6 +1318,11 @@ pub struct SketchView<'a> {
     /// whether ANY stage is pending, and the amount input's backing string.
     pub ceiling_step_mode: bool,
     pub ceiling_step_available: bool,
+    /// Why the last "Divide ceiling" stroke was refused — shown inline under
+    /// the tool button. No refused stroke may be silent (the Elmwood field
+    /// failure: a rejected carve was `log::error!`-only, so on the tablet it
+    /// looked identical to a stroke that never registered).
+    pub ceiling_step_notice: Option<&'a str>,
     pub ceiling_step_region_polygons: &'a [(Vec<(f64, f64)>, String)],
     /// Same-height divider cut segments (world coords) — drawn as a faint
     /// dashed pass, visually distinct from the amber-solid height steps.

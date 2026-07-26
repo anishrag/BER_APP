@@ -283,6 +283,9 @@ pub struct ToolFlags {
     pub step_mode: bool,
     pub ceiling_step_mode: bool,
     pub ceiling_step_available: bool,
+    /// Why the last "Divide ceiling" stroke was refused (shown under the tool
+    /// button) — see `SketchView::ceiling_step_notice`.
+    pub ceiling_step_notice: Option<String>,
     pub ceiling_point_mode: bool,
     pub ceiling_point_available: bool,
     /// The destructive "Reset heights" button is ARMED (two-step confirm).
@@ -359,6 +362,7 @@ impl ToolFlags {
             step_mode: view.step_mode,
             ceiling_step_mode: view.ceiling_step_mode,
             ceiling_step_available: view.ceiling_step_available,
+            ceiling_step_notice: view.ceiling_step_notice.map(str::to_owned),
             ceiling_point_mode: view.ceiling_point_mode,
             ceiling_point_available: view.ceiling_point_available,
             reset_ceiling_pending: view.reset_ceiling_pending,
@@ -916,6 +920,13 @@ fn tool_ui<F: FnMut(UiEvent)>(
                 on_event(UiEvent::Sketch(SketchEvent::SetCeilingStepMode(
                     !flags.ceiling_step_mode,
                 )));
+            }
+            // A refused stroke must say so — it used to fail into the log only.
+            if let Some(notice) = &flags.ceiling_step_notice {
+                ui.label(
+                    egui::RichText::new(format!("⚠ {}", notice))
+                        .color(egui::Color32::from_rgb(255, 120, 90)),
+                );
             }
         }
         Tool::CeilingPoints => {

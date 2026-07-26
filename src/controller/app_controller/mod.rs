@@ -753,6 +753,16 @@ pub struct AppController {
     /// the next ridge action / cancel / mode exit / storey switch / record
     /// load. Read via `roof_ridge_notice()`. See `ceiling_ridges.rs`.
     roof_ridge_notice: Option<String>,
+    /// Transient inline message for the "Divide ceiling" tool: why the last
+    /// STROKE was refused (the carve rejected it, or the carved walls crossed).
+    /// These were `log::error!`-only, so on the tablet a refused stroke was
+    /// indistinguishable from a stroke that never registered — the Elmwood
+    /// field failure (a raised rectangle drawn inside an already-divided
+    /// section did nothing, with nothing on screen to say why). Set by
+    /// `apply_ceiling_step_stroke_event` / `apply_ceiling_carve_stroke`;
+    /// cleared on the next ceiling-step stroke, on a stage advance, and on
+    /// mode toggle / cancel. Read via `ceiling_step_notice()`.
+    ceiling_step_notice: Option<String>,
     /// Transient inline message for the CONTINUE-ceiling tools: why the last
     /// pick tap was REFUSED (missed every region, no lateral source on the
     /// neighbour storey, source == target …) or what to do next. NO refused
@@ -918,6 +928,7 @@ impl AppController {
             copy_height_pick: None,
             copy_height_error: None,
             roof_ridge_notice: None,
+            ceiling_step_notice: None,
             ceiling_continuation_notice: None,
             ceiling_continuation_confirm: None,
         }

@@ -1353,6 +1353,11 @@ impl eframe::App for BerApp {
                                 .borrow()
                                 .roof_ridge_notice()
                                 .map(str::to_owned);
+                            let ceiling_step_notice = self
+                                .app_controller
+                                .borrow()
+                                .ceiling_step_notice()
+                                .map(str::to_owned);
                             let ceiling_continuation_notice = self
                                 .app_controller
                                 .borrow()
@@ -1768,6 +1773,7 @@ impl eframe::App for BerApp {
                                 step_error: step_error.as_deref(),
                                 ceiling_step_mode,
                                 ceiling_step_available,
+                                ceiling_step_notice: ceiling_step_notice.as_deref(),
                                 ceiling_step_region_polygons: &ceiling_step_region_polygons,
                                 ceiling_divider_lines: &ceiling_divider_lines,
                                 ceiling_step_editing: ceiling_step_editing.clone(),

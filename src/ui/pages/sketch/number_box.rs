@@ -1479,12 +1479,12 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             view.ceiling_step_current_height,
         ) {
             (Some((delta, _)), Some(h)) if delta.abs() < 1e-3 => Some(format!(
-                "Currently: no step (same height) · area at {h:.2} m"
+                "Currently: no step (same height) · {h:.2} m floor to ceiling"
             )),
-            (Some((delta, _)), Some(h)) => {
-                Some(format!("Currently: {delta:+.2} m · area at {h:.2} m"))
-            }
-            (None, Some(h)) => Some(format!("Area currently at {h:.2} m")),
+            (Some((delta, _)), Some(h)) => Some(format!(
+                "Currently: {delta:+.2} m · {h:.2} m floor to ceiling"
+            )),
+            (None, Some(h)) => Some(format!("Area currently {h:.2} m floor to ceiling")),
             _ => None,
         };
         show_box(

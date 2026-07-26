@@ -396,6 +396,53 @@ impl StoreyDoc {
             .collect()
     }
 
+    /// EVERY edge of EVERY ceiling-step region in `steps`, as world-metre
+    /// reference segments — the snap/pin references for a stroke drawn while
+    /// ceiling sections already exist.
+    ///
+    /// Ceiling sections are NOT mutually exclusive: a raised area may sit
+    /// wholly inside an existing section (a divider, or another raised area) —
+    /// the deltas compose in `CeilingRegions::with_z_deltas`, and
+    /// [`canonicalize_ceiling_steps`] clips each ring only to the footprint,
+    /// never against its siblings. So the carve runs against the WHOLE outline
+    /// and the existing sections bound the stroke by SNAPPING it, not by being
+    /// subtracted out of the drawable region (which would make the inside of a
+    /// section undrawable — field report: a raised rectangle inside an
+    /// already-divided area silently did nothing).
+    ///
+    /// This is the pairing that keeps that safe. The carve levels a drawn wall
+    /// onto the nearest parallel, overlapping reference within tolerance, and
+    /// the same set drives [`StoreyDoc::pinned_slot_for`] — so a wall laid on
+    /// an existing section's edge is pinned pre-known, and any wall that did
+    /// NOT land on one stays free and raises its dimension prompt. Without
+    /// these references a stroke inside a section would meet no boundary at
+    /// all and every edge would fall to the drawn approximation.
+    ///
+    /// Contrast [`ceiling_divider_segments`](Self::ceiling_divider_segments),
+    /// which returns ONE bbox-spanning line per same-height divider (the
+    /// dashed line the canvas draws, for the porch carve to pre-snap onto).
+    /// This returns the regions' own edges, dividers and height-steps alike.
+    /// Degenerate rings (< 3 points) and zero-length edges contribute nothing.
+    pub fn ceiling_section_edges(&self, steps: &[CeilingStepRegion]) -> Vec<[Point2f32; 2]> {
+        let mut out = Vec::new();
+        for step in steps {
+            let ring = &step.polygon;
+            let n = ring.len();
+            if n < 3 {
+                continue;
+            }
+            for i in 0..n {
+                let (a, b) = (ring[i], ring[(i + 1) % n]);
+                // A repeated point carries no direction — it would level a drawn
+                // wall onto a coordinate with no extent to overlap.
+                if (a.x - b.x).abs() > f32::EPSILON || (a.y - b.y).abs() > f32::EPSILON {
+                    out.push([a, b]);
+                }
+            }
+        }
+        out
+    }
+
     /// Snap a ridge coordinate — the CROSS coordinate (on `axis`) or an EXTENT
     /// END (on the ALONG axis `axis.other()`, callers pass that axis directly) —
     /// onto the nearest parallel reference within `tol` (metres, viewport-relative),
@@ -753,6 +800,56 @@ mod tests {
                 .unwrap_err(),
             LINE_OFF_FOOTPRINT_MSG
         );
+    }
+
+    /// Every section edge becomes a reference segment — dividers AND height
+    /// steps alike, which is the difference from `ceiling_divider_segments`
+    /// (dividers only, one bbox-spanning line each). These are what a stroke
+    /// drawn INSIDE a section snaps and pins against now the section is no
+    /// longer subtracted out of the drawable region.
+    #[test]
+    fn ceiling_section_edges_returns_every_edge_of_every_section() {
+        let doc = storey_10x6();
+        let steps = vec![
+            CeilingStepRegion {
+                polygon: vec![p(4., 0.), p(10., 0.), p(10., 6.), p(4., 6.)],
+                delta_m: 0.0, // a divider
+            },
+            CeilingStepRegion {
+                polygon: vec![p(0., 0.), p(2., 0.), p(2., 3.), p(0., 3.)],
+                delta_m: 0.3, // a height step
+            },
+        ];
+        let edges = doc.ceiling_section_edges(&steps);
+        assert_eq!(edges.len(), 8, "4 edges each, both kinds: {edges:?}");
+        // The divider's interior edge (x = 4) is present as a real segment —
+        // this is the one a stroke drawn inside the right-hand section levels
+        // onto, and the pin that keeps its dimension prompt from re-asking.
+        assert!(
+            edges
+                .iter()
+                .any(|[a, b]| (a.x - 4.0).abs() < 1e-6 && (b.x - 4.0).abs() < 1e-6),
+            "{edges:?}"
+        );
+        // The height step contributes too (dividers aren't the only bound).
+        assert!(
+            edges
+                .iter()
+                .any(|[a, b]| (a.x - 2.0).abs() < 1e-6 && (b.x - 2.0).abs() < 1e-6),
+            "{edges:?}"
+        );
+        // Degenerate rings and repeated points contribute nothing.
+        let junk = vec![
+            CeilingStepRegion {
+                polygon: vec![p(1., 1.), p(2., 2.)],
+                delta_m: 0.5,
+            },
+            CeilingStepRegion {
+                polygon: vec![p(1., 1.), p(1., 1.), p(1., 1.)],
+                delta_m: 0.5,
+            },
+        ];
+        assert!(doc.ceiling_section_edges(&junk).is_empty());
     }
 
     /// The half-rect covers exactly the chosen side of the line, overhanging
