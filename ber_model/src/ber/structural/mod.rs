@@ -101,6 +101,21 @@ mod tests {
             .fold(0.0, f64::max)
     }
 
+    /// The ceiling height the solve puts at plan point `p` — the HIGHEST z
+    /// among the loft vertices sitting there. Several faces meet at a ring
+    /// vertex; where they disagree (a riser foot) the surface is the top one,
+    /// which is what "how high is the ceiling here?" means.
+    fn z_at_vertex(c: &CeilingRegions, p: Point2f64) -> Option<f64> {
+        c.regions
+            .iter()
+            .flat_map(|r| r.polygon.exterior.iter())
+            .filter(|v| (v.x - p.x).abs() < 1e-6 && (v.y - p.y).abs() < 1e-6)
+            .map(|v| v.z)
+            .fold(None, |acc: Option<f64>, z| {
+                Some(acc.map_or(z, |a| a.max(z)))
+            })
+    }
+
     fn square(x0: f64, y0: f64, x1: f64, y1: f64) -> Vec<Point2f64> {
         vec![
             Point2f64::new(x0, y0),
@@ -4240,6 +4255,77 @@ mod tests {
                     && r.polygon.exterior.iter().any(|v| (v.z - 3.0).abs() < 1e-9)
             }),
             "a face rakes from the bay's outer wall up to the plateau"
+        );
+    }
+
+    /// TAP-TO-UNFAN ON A PAVILION: unfanning a boundary vertex drops it from
+    /// the eave, so the surface carries STRAIGHT OVER it instead of being
+    /// pinned to it at wall-head height — the "roof continues over the bay"
+    /// reading, which no floor plan can decide on the assessor's behalf.
+    ///
+    /// Same live 6×6 storey with a 2×1 bay and a 1×5 plateau. Unfanning the
+    /// bay's two INNER corners (the pair nearest the plateau) makes the roof
+    /// slope only to the bay's OUTER corners; the ceiling then passes 0.444 m
+    /// above those inner corners, and the wall beneath rises to meet it —
+    /// which the wall solve already handles, wall tops being a per-position
+    /// profile rather than one height.
+    ///
+    /// Additive by construction: the empty set leaves the loft untouched,
+    /// which every other pavilion test in this module pins.
+    #[test]
+    fn pavilion_unfanned_vertex_lets_the_plane_carry_over_it() {
+        use geo::Area;
+        let ring = vec![
+            Point2f64::new(3.39, 11.41),
+            Point2f64::new(3.39, 5.41),
+            Point2f64::new(5.39, 5.41),
+            Point2f64::new(5.39, 4.41),
+            Point2f64::new(7.39, 4.41),
+            Point2f64::new(7.39, 5.41),
+            Point2f64::new(9.39, 5.41),
+            Point2f64::new(9.39, 11.41),
+        ];
+        let apexes: Vec<CeilingApex> = [(5.89, 6.41), (6.89, 6.41), (6.89, 11.41), (5.89, 11.41)]
+            .into_iter()
+            .map(|(x, y)| CeilingApex {
+                point: Point2f64::new(x, y),
+                z_m: 3.0,
+            })
+            .collect();
+        // The bay's inner corners — nearest the plateau, at the main wall line.
+        let unfanned = [Point2f64::new(5.39, 5.41), Point2f64::new(7.39, 5.41)];
+        let base =
+            || CeilingRegions::default_for_footprint(vec![ring.clone()], 2.0, ItemId::default());
+
+        // Fanned (the default): the surface is pinned to the wall head there.
+        let fanned = base().with_apexes(&apexes);
+        assert_eq!(
+            z_at_vertex(&fanned, unfanned[0]),
+            Some(2.0),
+            "fanned: the eave sits on the wall head"
+        );
+
+        let lifted = base().with_apexes_hinted_unfanned(&apexes, &[], &unfanned);
+        for u in &unfanned {
+            let z = z_at_vertex(&lifted, *u).expect("the vertex survives in the loft");
+            assert!(
+                (z - 2.444).abs() < 0.01,
+                "unfanned: the plane carries over the corner, got {z}"
+            );
+        }
+        // Still a buildable, complete surface.
+        for r in &lifted.regions {
+            let dev = max_plane_deviation(&r.polygon.exterior);
+            assert!(dev < 1e-9, "face is not planar (deviation {dev} m)");
+        }
+        let total: f64 = lifted
+            .regions
+            .iter()
+            .map(|r| Polygon::<f64>::from(r.polygon.clone()).unsigned_area())
+            .sum();
+        assert!(
+            (total - 38.0).abs() < 1e-9,
+            "faces still tile the 36 m² body + 2 m² bay, got {total}"
         );
     }
 

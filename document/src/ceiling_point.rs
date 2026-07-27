@@ -963,17 +963,25 @@ pub enum CeilingFanTapAction {
 ///   every other vertex is embedded on the side plane (`fanned = false`).
 ///   Tap semantics are anchor selection ([`ceiling_fan_tap_action`]) — the
 ///   stored unfanned set does not apply here;
-/// - any other fan/ridge: `fanned` unless in the stored unfanned set
-///   (embedding semantics in `ceiling_geom::lift_unfanned_fan` /
-///   `lift_unfanned_hip_ridge`); never `anchor`.
+/// - any other fan/ridge, AND the 4-apex PAVILION: `fanned` unless in the
+///   stored unfanned set (embedding semantics in
+///   `ceiling_geom::lift_unfanned_fan` / `lift_unfanned_hip_ridge` /
+///   `lift_unfanned_pavilion`); never `anchor`.
 ///
 /// A group contributes markers only when they are actionable: for a gable,
 /// some vertex genuinely DEVIATES (its embedded z differs from its base —
 /// a plain rectangle gable shows nothing) or an override is stored (it must
-/// stay clearable); for hips/fans, MORE THAN 4 vertices fanned or any
-/// vertex unfanned (the pre-gable rule, unchanged). Only 1-apex (fan) and
-/// 2-apex (ridge) groups participate — the pavilion loft has no per-vertex
-/// fan. Collinear ring vertices are stripped ([`strip_collinear`]): they
+/// stay clearable); for hips/fans/pavilions, MORE THAN 4 vertices fanned or any
+/// vertex unfanned (the pre-gable rule, unchanged). That rule is what keeps a
+/// plateau over a plain RECTANGULAR area silent — its ring has exactly 4
+/// vertices, none worth unfanning — while a plateau over an area with a bay or
+/// an L offers the taps, which is the case the choice exists for.
+///
+/// PAVILIONS participate now that the flat-top loft fans per boundary vertex
+/// (`fan_run_to_side`): unfanning one drops it from the eave and lets the
+/// plane carry over it, exactly as for a fan or ridge. Before that they had no
+/// per-vertex fan for a marker to act on, so 4-apex groups were skipped here.
+/// Collinear ring vertices are stripped ([`strip_collinear`]): they
 /// contribute no fan plane. Empty when the storey has no shaped ceiling.
 pub fn ceiling_fan_markers(storey: &Storey) -> Vec<CeilingFanMarker> {
     if storey.ceiling_apexes.is_empty() {
@@ -986,8 +994,8 @@ pub fn ceiling_fan_markers(storey: &Storey) -> Vec<CeilingFanMarker> {
     };
     let mut out = Vec::new();
     for g in storey.ceiling_apex_groups() {
-        if !matches!(g.apex_idxs.len(), 1 | 2) {
-            continue; // pavilion / degenerate group — no per-vertex fan
+        if !matches!(g.apex_idxs.len(), 1 | 2 | 4) {
+            continue; // degenerate group — no per-vertex fan to act on
         }
         let ridge = (g.apex_idxs.len() == 2).then(|| {
             (
@@ -1074,7 +1082,9 @@ pub fn ceiling_fan_tap_action(
         (a.x - b.x).abs() <= UNFAN_MATCH_EPS_M && (a.y - b.y).abs() <= UNFAN_MATCH_EPS_M
     };
     for g in storey.ceiling_apex_groups() {
-        if !matches!(g.apex_idxs.len(), 1 | 2) {
+        // Must match `ceiling_fan_markers`' group filter exactly — a marker
+        // that renders but resolves to no action is a dead tap.
+        if !matches!(g.apex_idxs.len(), 1 | 2 | 4) {
             continue;
         }
         let ridge = (g.apex_idxs.len() == 2).then(|| {
@@ -2012,6 +2022,77 @@ mod tests {
             Point2f64::new(0.0, 4.0),
             Point2f64::new(-2.0, 2.0),
         ]
+    }
+
+    /// A PAVILION offers the unfan taps too, now the flat-top loft fans per
+    /// boundary vertex. Both the marker list and the tap dispatch must admit
+    /// 4-apex groups — a marker that draws but resolves to no action is a dead
+    /// tap, so the two group filters are asserted together.
+    ///
+    /// The actionable rule still applies: a plateau over a plain RECTANGLE is
+    /// silent (4 ring vertices, nothing worth unfanning), while one over an
+    /// area with a bay offers them — the case where "does the roof carry over
+    /// the bay, or stop at its wall head?" is a real question about the
+    /// building that the plan cannot answer.
+    #[test]
+    fn pavilion_offers_unfan_markers_over_a_bay_but_not_a_plain_rect() {
+        let pavilion = |ring: Vec<Point2f64>| {
+            let mut s = storey_with_flat_ring(ring, 2.0);
+            apply_apexes(
+                &mut s,
+                [(1.0, 1.0), (3.0, 1.0), (3.0, 4.0), (1.0, 4.0)]
+                    .into_iter()
+                    .map(|(x, y)| CeilingApex {
+                        point: Point2f64::new(x, y),
+                        z_m: 3.0,
+                    })
+                    .collect(),
+            );
+            s
+        };
+        // A plain 4×4 rectangle: nothing to unfan, so no markers.
+        let plain = pavilion(vec![
+            Point2f64::new(0.0, 0.0),
+            Point2f64::new(4.0, 0.0),
+            Point2f64::new(4.0, 4.0),
+            Point2f64::new(0.0, 4.0),
+        ]);
+        assert!(
+            ceiling_fan_markers(&plain).is_empty(),
+            "a plateau over a plain rectangle has no actionable vertex"
+        );
+
+        // The same plateau over an area with a 2×1 bay off the bottom: the
+        // bay's corners are the choice, so the markers appear.
+        let bay = pavilion(vec![
+            Point2f64::new(0.0, 0.0),
+            Point2f64::new(1.0, 0.0),
+            Point2f64::new(1.0, -1.0),
+            Point2f64::new(3.0, -1.0),
+            Point2f64::new(3.0, 0.0),
+            Point2f64::new(4.0, 0.0),
+            Point2f64::new(4.0, 4.0),
+            Point2f64::new(0.0, 4.0),
+        ]);
+        let markers = ceiling_fan_markers(&bay);
+        assert!(!markers.is_empty(), "the bay makes the taps actionable");
+        assert!(markers.iter().all(|m| m.fanned), "all fanned by default");
+        // The inner bay corner is offered AND its tap resolves to a real
+        // action — the pair that makes the marker live rather than decorative.
+        let inner = Point2f64::new(1.0, 0.0);
+        assert!(
+            markers
+                .iter()
+                .any(|m| (m.pos.x - inner.x).abs() < 1e-9 && (m.pos.y - inner.y).abs() < 1e-9),
+            "the bay's inner corner is a marker: {markers:?}"
+        );
+        assert!(
+            matches!(
+                ceiling_fan_tap_action(&bay, inner, 1e-3),
+                Some(CeilingFanTapAction::ToggleUnfanned(_))
+            ),
+            "tapping it unfans, rather than resolving to nothing"
+        );
     }
 
     /// [`ceiling_fan_markers`] shows markers only when ACTIONABLE: a true

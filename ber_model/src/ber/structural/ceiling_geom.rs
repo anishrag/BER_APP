@@ -1013,6 +1013,7 @@ pub fn rect_hip_switches(ring: &[Point2f64], lo: Point2f64, hi: Point2f64) -> us
 pub(crate) fn rect_ridge_faces(
     region: CeilingRegion,
     corners: [&CeilingApex; 4],
+    unfanned: &[Point2f64],
 ) -> Vec<CeilingRegion> {
     let cid = region.construction_id;
     let (mut x0, mut y0) = (f64::INFINITY, f64::INFINITY);
@@ -1045,6 +1046,13 @@ pub(crate) fn rect_ridge_faces(
         corner_at(x0, y1),
     ];
     let mut ext = pre_lift(region.polygon.exterior, &corners[..]);
+    // TAP-TO-UNFAN: an unfanned vertex stops anchoring the eave and is
+    // re-embedded on the plane the still-fanned vertices span across it, so the
+    // surface runs straight over it (and the wall below rises to meet it).
+    // Runs right after `pre_lift`, exactly like the fan and ridge siblings, and
+    // BEFORE the winding normalisation / run walk so the decomposition simply
+    // sees the settled z's. Empty set → untouched.
+    ext = lift_unfanned_pavilion(ext, unfanned, corners, &cs, lo, hi);
     // WINDING NORMALISATION — load-bearing, not tidiness. Each side face below
     // is closed back along its rect side in REVERSE (`S_b` then `S_a`) against
     // the canonical CCW corner ring `cs`. That keeps the face simple only while
@@ -1135,6 +1143,72 @@ pub(crate) fn rect_ridge_faces(
     // The flat TOP.
     out.push(mk(cs.to_vec()));
     out
+}
+
+/// The UNFAN EMBED for the PAVILION — the third sibling of
+/// [`lift_unfanned_fan`] (single apex) and [`lift_unfanned_hip_ridge`]
+/// (ridge), for the four-corner flat top.
+///
+/// An unfanned ring vertex stops anchoring the eave: instead of the surface
+/// being pinned to it at the wall-head height, the plane spanned by the
+/// vertices that ARE still fanned carries straight over it. Physically that is
+/// "the roof continues over the bay" — the assessor's reading when a
+/// protrusion has no ceiling of its own. The wall beneath then rises to meet
+/// the plane, which the wall solve already handles: wall tops are a per-position
+/// profile (`WallRegion::top_z_at_along`), not one height.
+///
+/// The plane is the pavilion analogue of the fan's `(u, w, apex)`: the two
+/// nearest still-fanned ring neighbours `u`/`w` at their pre-lift z, plus the
+/// vertex's own FOOT on the rect side it faces — the point of the plateau its
+/// surface runs up to, which is the flat top's stand-in for the fan's single
+/// apex. Evaluating that plane at the vertex's plan position puts it exactly on
+/// the surface the effective solve spans, so the per-edge decomposition then
+/// tiles it watertight and the coplanar merge folds the pieces into one face.
+///
+/// Degenerate cases keep the vertex's current z — a vertical or collinear plane
+/// has nothing to embed on. That is also the re-apply identity: re-running over
+/// a face that already carries the lifted vertex must not move it again.
+fn lift_unfanned_pavilion(
+    mut ext: Vec<Point3f64>,
+    unfanned: &[Point2f64],
+    corners: [&CeilingApex; 4],
+    cs: &[Point3f64; 4],
+    lo: Point2f64,
+    hi: Point2f64,
+) -> Vec<Point3f64> {
+    let Some(target) = unfan_targets(&ext, unfanned, &corners[..]) else {
+        return ext;
+    };
+    let n = ext.len();
+    let orig = ext.clone();
+    for i in 0..n {
+        if !target[i] {
+            continue;
+        }
+        // Nearest still-fanned neighbours, walking the ring each way.
+        let mut j = (i + n - 1) % n;
+        while target[j] {
+            j = (j + n - 1) % n;
+        }
+        let mut k = (i + 1) % n;
+        while target[k] {
+            k = (k + 1) % n;
+        }
+        // The vertex's foot on the plateau side it faces — its "apex".
+        let side = rect_side_sector(Point2f64::new(orig[i].x, orig[i].y), lo, hi);
+        let (a, b) = (cs[side], cs[(side + 1) % 4]);
+        let (dx, dy) = (b.x - a.x, b.y - a.y);
+        let len2 = dx * dx + dy * dy;
+        if len2 < 1e-12 {
+            continue;
+        }
+        let t = (((orig[i].x - a.x) * dx + (orig[i].y - a.y) * dy) / len2).clamp(0.0, 1.0);
+        let foot = Point3f64::new(a.x + t * dx, a.y + t * dy, a.z + t * (b.z - a.z));
+        if let Some(z) = plane_z_at(orig[j], orig[k], foot, ext[i].x, ext[i].y) {
+            ext[i].z = z;
+        }
+    }
+    ext
 }
 
 /// How much of a hip line may stray outside the ceiling area before the

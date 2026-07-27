@@ -1024,7 +1024,9 @@ impl CeilingRegions {
                                      proceeding"
                                 );
                             }
-                            next.extend(merge_coplanar_faces(rect_ridge_faces(region, quad)));
+                            next.extend(merge_coplanar_faces(rect_ridge_faces(
+                                region, quad, unfanned,
+                            )));
                             continue;
                         }
                     }
