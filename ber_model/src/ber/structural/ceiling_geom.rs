@@ -1042,7 +1042,29 @@ pub(crate) fn rect_ridge_faces(
         corner_at(x1, y1),
         corner_at(x0, y1),
     ];
-    let ext = pre_lift(region.polygon.exterior, &corners[..]);
+    let mut ext = pre_lift(region.polygon.exterior, &corners[..]);
+    // WINDING NORMALISATION — load-bearing, not tidiness. Each side face below
+    // is closed back along its rect side in REVERSE (`S_b` then `S_a`) against
+    // the canonical CCW corner ring `cs`. That keeps the face simple only while
+    // the boundary run itself advances CCW. Fed a CLOCKWISE ring the run walks
+    // the other way, the closing pair no longer reverses it, and EVERY side
+    // face comes out a BOW-TIE — self-intersecting, with the hips drawn from
+    // each boundary corner to the FAR rect corner instead of its nearest.
+    //
+    // Ring winding is not something the model guarantees: it follows the
+    // direction the assessor happened to draw the storey outline, so the same
+    // flat top worked or produced crossed faces depending on which way round
+    // the plan was sketched (live session, 5×5 storey with a 3 m plateau: the
+    // three side faces came out at |area| 0.5/1.0/0.5 m² instead of
+    // 4.5/4.0/4.5, covering 14 m² of a 25 m² storey).
+    //
+    // Normalising HERE rather than at the callers keeps the guarantee local to
+    // the one algorithm that needs it. The flat TOP is already emitted from
+    // `cs` (always CCW) whatever the input winding, so the output was mixed
+    // already — this makes the side faces agree with it.
+    if ring_signed_plan_area(&ext) < 0.0 {
+        ext.reverse();
+    }
     let exposure = region.exposure;
     let mk = |verts: Vec<Point3f64>| CeilingRegion {
         id: ItemId::default(),

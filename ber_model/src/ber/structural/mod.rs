@@ -4132,6 +4132,70 @@ mod tests {
         assert!(apexes_form_rect(&apexes.iter().take(3).collect::<Vec<_>>()).is_none());
     }
 
+    /// THE PAVILION LOFT IS WINDING-INDEPENDENT. Ring winding follows whichever
+    /// way round the assessor drew the storey outline — the model guarantees
+    /// nothing about it — so a flat top must come out the same either way.
+    ///
+    /// It didn't: each side face is closed back along its rect side in REVERSE
+    /// against the canonical CCW corner ring, which only reverses the run when
+    /// the run itself advances CCW. Fed a CLOCKWISE ring every side face came
+    /// out a BOW-TIE (hips drawn to the FAR rect corner, an X across each
+    /// eave). Live session, 5×5 storey with a 3 m plateau: side faces at
+    /// |area| 0.5/1.0/0.5 m² instead of 4.5/4.0/4.5, total coverage 14 m² of a
+    /// 25 m² storey.
+    ///
+    /// The invariant asserted here is the one that catches it whatever the
+    /// cause: the faces must TILE the storey (Σ|area| = the footprint) and each
+    /// must be SIMPLE (|shoelace| equals its true area — a bow-tie's cancels).
+    #[test]
+    fn rect_ridge_faces_are_simple_for_either_ring_winding() {
+        fn shoelace(r: &[Point2f64]) -> f64 {
+            let n = r.len();
+            (0..n)
+                .map(|i| {
+                    let (a, b) = (r[i], r[(i + 1) % n]);
+                    a.x * b.y - b.x * a.y
+                })
+                .sum::<f64>()
+                / 2.0
+        }
+        // A 3×4 plateau, flush against the y = 5 wall (the mono-gable side), so
+        // three sides loft and one does not.
+        let apexes: Vec<CeilingApex> = [(1.0, 2.0), (4.0, 2.0), (4.0, 5.0), (1.0, 5.0)]
+            .iter()
+            .map(|&(x, y)| CeilingApex {
+                point: Point2f64::new(x, y),
+                z_m: 3.0,
+            })
+            .collect();
+        let ccw = square(0.0, 0.0, 5.0, 5.0);
+        let mut cw = ccw.clone();
+        cw.reverse();
+        assert!(shoelace(&ccw) > 0.0 && shoelace(&cw) < 0.0, "test setup");
+
+        for (label, ring) in [("CCW", ccw), ("CW", cw)] {
+            let out = CeilingRegions::default_for_footprint(vec![ring], 2.0, ItemId::default())
+                .with_apexes(&apexes);
+            assert_eq!(out.regions.len(), 4, "{label}: 3 slopes + the flat top");
+            let mut total = 0.0;
+            for r in &out.regions {
+                let plan: Vec<Point2f64> = r
+                    .polygon
+                    .exterior
+                    .iter()
+                    .map(|v| Point2f64::new(v.x, v.y))
+                    .collect();
+                let a = shoelace(&plan).abs();
+                assert!(a > 1e-6, "{label}: a face collapsed ({a})");
+                total += a;
+            }
+            assert!(
+                (total - 25.0).abs() < 1e-6,
+                "{label}: faces must tile the 25 m² storey, got {total}"
+            );
+        }
+    }
+
     /// `rect_hip_switches`: a ring whose raw edges (midpoint sector) visit
     /// the four sectors once each switches exactly 4 — equal or unequal
     /// offsets, and a rect side ON the ring (the mono-gable case) included;
