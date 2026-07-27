@@ -56,6 +56,51 @@ use {
 mod tests {
     use super::*;
 
+    /// Worst distance from a face's vertices to the least-squares plane
+    /// `z = ax + by + c` through them — 0 for a flat face, and the size of the
+    /// twist for a warped one. THE test for "could this ceiling be built?": a
+    /// warped face also has no well-defined surface area, and that area feeds
+    /// the heat-loss calculation. `f64::NAN` for a face whose vertices are
+    /// degenerate in plan (no plane to fit).
+    fn max_plane_deviation(face: &[Point3f64]) -> f64 {
+        let (mut s, mut t) = ([[0.0f64; 3]; 3], [0.0f64; 3]);
+        for p in face {
+            let v = [p.x, p.y, 1.0];
+            for i in 0..3 {
+                for j in 0..3 {
+                    s[i][j] += v[i] * v[j];
+                }
+                t[i] += v[i] * p.z;
+            }
+        }
+        let mut a = [[0.0f64; 4]; 3];
+        for i in 0..3 {
+            a[i][..3].copy_from_slice(&s[i]);
+            a[i][3] = t[i];
+        }
+        for i in 0..3 {
+            let piv = (i..3)
+                .max_by(|&r1, &r2| a[r1][i].abs().total_cmp(&a[r2][i].abs()))
+                .unwrap();
+            a.swap(i, piv);
+            if a[i][i].abs() < 1e-12 {
+                return f64::NAN;
+            }
+            for r in 0..3 {
+                if r != i {
+                    let k = a[r][i] / a[i][i];
+                    for c in i..4 {
+                        a[r][c] -= k * a[i][c];
+                    }
+                }
+            }
+        }
+        let c = [a[0][3] / a[0][0], a[1][3] / a[1][1], a[2][3] / a[2][2]];
+        face.iter()
+            .map(|p| (c[0] * p.x + c[1] * p.y + c[2] - p.z).abs())
+            .fold(0.0, f64::max)
+    }
+
     fn square(x0: f64, y0: f64, x1: f64, y1: f64) -> Vec<Point2f64> {
         vec![
             Point2f64::new(x0, y0),
@@ -4132,6 +4177,72 @@ mod tests {
         assert!(apexes_form_rect(&apexes.iter().take(3).collect::<Vec<_>>()).is_none());
     }
 
+    /// A PROTRUSION under the plateau lofts FLAT. The live L-shaped storey: a
+    /// 5×5 body with a 3×1 bay off the front wall and a 3×4 plateau flush to
+    /// the back, drawn on the desktop build.
+    ///
+    /// The boundary run facing the plateau's front side wraps around the bay,
+    /// so lofting it as one polygon warped it by 0.25 m — the surface dipped
+    /// into the bay along a twist no plasterer could build, and whose area (the
+    /// number that reaches the heat-loss calculation) depended on how you chose
+    /// to triangulate it. Split per boundary edge it becomes a hip, a clean
+    /// rake over the bay, and a hip: same 28 m², every part flat, the bay now
+    /// raking from its own outer wall up to the plateau.
+    #[test]
+    fn rect_over_a_protrusion_lofts_flat_faces() {
+        use geo::Area;
+        // 5×5 body, x 5.02..10.02 / y 6.15..11.15, with a 3×1 bay hanging off
+        // the front (y 5.15..6.15, x 6.02..9.02).
+        let ring = vec![
+            Point2f64::new(5.02, 6.15),
+            Point2f64::new(6.02, 6.15),
+            Point2f64::new(6.02, 5.15),
+            Point2f64::new(9.02, 5.15),
+            Point2f64::new(9.02, 6.15),
+            Point2f64::new(10.02, 6.15),
+            Point2f64::new(10.02, 11.15),
+            Point2f64::new(5.02, 11.15),
+        ];
+        let apexes: Vec<CeilingApex> = [(6.02, 7.15), (9.02, 7.15), (9.02, 11.15), (6.02, 11.15)]
+            .into_iter()
+            .map(|(x, y)| CeilingApex {
+                point: Point2f64::new(x, y),
+                z_m: 3.0,
+            })
+            .collect();
+        let out = CeilingRegions::default_for_footprint(vec![ring], 2.0, ItemId::default())
+            .with_apexes(&apexes);
+        for r in &out.regions {
+            let dev = max_plane_deviation(&r.polygon.exterior);
+            assert!(
+                dev < 1e-9,
+                "face is not planar (deviation {dev} m): {:?}",
+                r.polygon.exterior
+            );
+        }
+        let total: f64 = out
+            .regions
+            .iter()
+            .map(|r| Polygon::<f64>::from(r.polygon.clone()).unsigned_area())
+            .sum();
+        assert!(
+            (total - 28.0).abs() < 1e-9,
+            "faces tile the 25 m² body + 3 m² bay, got {total}"
+        );
+        // The bay is genuinely lofted, not left flat at the base height: some
+        // face carries the plateau height over it.
+        assert!(
+            out.regions.iter().any(|r| {
+                r.polygon
+                    .exterior
+                    .iter()
+                    .any(|v| v.y < 6.0 && (v.z - 2.0).abs() < 1e-9)
+                    && r.polygon.exterior.iter().any(|v| (v.z - 3.0).abs() < 1e-9)
+            }),
+            "a face rakes from the bay's outer wall up to the plateau"
+        );
+    }
+
     /// THE PAVILION LOFT IS WINDING-INDEPENDENT. Ring winding follows whichever
     /// way round the assessor drew the storey outline — the model guarantees
     /// nothing about it — so a flat top must come out the same either way.
@@ -4358,13 +4469,24 @@ mod tests {
         assert_eq!(fingerprint(&out), fingerprint(&again), "re-apply identity");
     }
 
-    /// An L-SHAPED region: the two boundary edges facing one rect side form
-    /// a single multi-edge RUN lofting to that side as ONE polygon face (5
-    /// vertices) — still no inserted vertices and no corner wedges — the
-    /// faces tile the L, and the grouping authority's merged ring is the
-    /// original L boundary (no extra vertices).
+    /// An L-SHAPED region: every loft face is PLANAR, they tile the L, no
+    /// boundary vertices are invented, and the grouping authority's merged ring
+    /// is still the original L boundary.
+    ///
+    /// This used to pin the opposite: a boundary RUN of several edges facing
+    /// one rect side lofted to that side as ONE polygon. That polygon cannot be
+    /// flat — its boundary vertices sit at the base height on two different
+    /// lines while the rect side sits at the apex height — and here it was
+    /// WARPED BY 0.636 m. A warped face has no well-defined area (it depends on
+    /// how you triangulate it) and that area feeds the heat-loss calculation,
+    /// so the old vertex-count assertions were pinning a defect. `fan_run_to_side`
+    /// now splits each run per boundary edge, which is flat by construction.
+    ///
+    /// Asserted as PROPERTIES (planar, tiling, no invented vertices) rather
+    /// than a face count, so a future change of decomposition is free to pick
+    /// different cuts as long as the surface stays honest.
     #[test]
-    fn rect_over_l_region_lofts_multi_edge_runs_as_single_faces() {
+    fn rect_over_l_region_lofts_planar_faces_that_tile() {
         use geo::Area;
         let cid = ItemId::default();
         let l_ring = vec![
@@ -4390,18 +4512,17 @@ mod tests {
         );
         let out = CeilingRegions::default_for_footprint(vec![l_ring.clone()], 2.4, cid)
             .with_apexes(&apexes);
-        assert_eq!(out.regions.len(), 5, "4 side faces + the flat top");
-        let mut vertex_counts: Vec<usize> = out
-            .regions
-            .iter()
-            .map(|r| r.polygon.exterior.len())
-            .collect();
-        vertex_counts.sort();
-        assert_eq!(
-            vertex_counts,
-            vec![4, 4, 4, 5, 5],
-            "two single-edge runs + the top are quads; the two-edge runs are 5-gons"
-        );
+        // EVERY face flat. Least-squares plane through each face's vertices;
+        // the worst residual must be numerical noise, not geometry. (The
+        // single-polygon runs this replaced were out by 0.636 m.)
+        for r in &out.regions {
+            let dev = max_plane_deviation(&r.polygon.exterior);
+            assert!(
+                dev < 1e-9,
+                "face is not planar (deviation {dev} m): {:?}",
+                r.polygon.exterior
+            );
+        }
         let allowed: Vec<Point2f64> = l_ring
             .iter()
             .copied()

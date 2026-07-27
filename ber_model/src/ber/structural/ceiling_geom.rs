@@ -1,7 +1,9 @@
 use geo::{LineString, Polygon};
 
 use crate::ber::common::ItemId;
-use domain::points::{point_to_segment_distance, Point2f64, Point3f64, Vector3f64};
+use domain::points::{
+    point_on_ring_boundary, point_to_segment_distance, Point2f64, Point3f64, Vector3f64,
+};
 
 #[allow(unused_imports)]
 use super::*;
@@ -1106,24 +1108,159 @@ pub(crate) fn rect_ridge_faces(
             runs.push((sides[i0], verts));
         }
     }
+    // The region's plan ring — the fence the per-vertex hips must stay inside.
+    let region_plan: Vec<Point2f64> = ext.iter().map(|v| Point2f64::new(v.x, v.y)).collect();
     let mut out = Vec::new();
-    for (side, mut verts) in runs {
-        // Close the run back along its rect side: S_b then S_a.
-        verts.push(cs[(side + 1) % 4]);
-        verts.push(cs[side]);
+    for (side, run) in runs {
+        // The whole-run face — one polygon from the boundary run back along the
+        // rect side. Kept as the FALLBACK, and as the area the finer
+        // decomposition has to reproduce exactly.
+        let mut whole = run.clone();
+        whole.push(cs[(side + 1) % 4]);
+        whole.push(cs[side]);
         // A boundary vertex can coincide with a rect corner (a corner apex
         // ON the ring): drop consecutive duplicates, wrap included.
-        verts.dedup_by(|a, b| merge_pts_eq(a, b));
-        while verts.len() > 1 && merge_pts_eq(&verts[0], verts.last().unwrap()) {
-            verts.pop();
+        whole.dedup_by(|a, b| merge_pts_eq(a, b));
+        while whole.len() > 1 && merge_pts_eq(&whole[0], whole.last().unwrap()) {
+            whole.pop();
         }
-        if verts.len() >= 3 && ring_signed_plan_area(&verts).abs() >= SLIVER_AREA_M2 {
-            out.push(mk(verts));
+        if whole.len() < 3 || ring_signed_plan_area(&whole).abs() < SLIVER_AREA_M2 {
+            continue; // the mono-gable side: the run IS the rect edge, lofts nothing
+        }
+        match fan_run_to_side(&run, side, &cs, &region_plan, &whole) {
+            Some(faces) => out.extend(faces.into_iter().map(&mk)),
+            None => out.push(mk(whole)),
         }
     }
     // The flat TOP.
     out.push(mk(cs.to_vec()));
     out
+}
+
+/// How much of a hip line may stray outside the ceiling area before the
+/// per-vertex decomposition is abandoned, in metres. The samples sit ON the
+/// area boundary wherever a hip runs along an edge, and `ring_contains_point`
+/// is deliberately lenient there, so this is only a guard against a hip
+/// crossing a genuine re-entrant notch — not a precision knob.
+const HIP_OUTSIDE_TOL_M: f64 = 1e-3;
+
+/// Plan-area agreement required between the fine decomposition and the whole-run
+/// face it replaces (m²). They must describe the SAME surface; a mismatch means
+/// the sub-faces gap or overlap, so the whole-run face is kept instead.
+const FAN_AREA_TOL_M2: f64 = 1e-6;
+
+/// Split ONE boundary run into per-vertex faces instead of a single polygon —
+/// the fix for the WARPED loft.
+///
+/// The whole-run face is planar only while the run is a straight line. Let the
+/// run wrap a protrusion (a bay off the front wall) and the single polygon has
+/// to twist to reach it: measured on a live 5×5 storey with a 3 m plateau over
+/// a 3×1 bay, the front face deviated 0.25 m from its own best-fit plane. A
+/// warped face is not just ugly — its AREA is undefined (it depends on how you
+/// triangulate it), and that area feeds the heat-loss calculation. No plasterer
+/// can build it either.
+///
+/// So each boundary vertex is projected onto the rect side it faces (clamped to
+/// that side's extent) and every boundary EDGE becomes its own face: a quad
+/// where the projections differ, collapsing to the classic hip TRIANGLE where
+/// they clamp to the same corner. Each face is planar by construction. On the
+/// same live geometry this turns the one warped 7.00 m² face into a 0.50 m²
+/// hip, a 6.00 m² rake and a 0.50 m² hip — the same 7.00 m² total, every part
+/// flat, with the bay now raking cleanly from its own outer wall up to the
+/// plateau.
+///
+/// It costs nothing in the ordinary case: the caller runs
+/// [`merge_coplanar_faces`] over the result, so a straight run's sub-faces —
+/// all coplanar — fuse straight back into the single quad emitted before.
+///
+/// `None` (keep the whole-run face) when either guard trips:
+/// - a hip line leaves the ceiling AREA. Projection is perpendicular, so this
+///   needs a re-entrant plan — the assessor's case: a plateau much wider than
+///   the bay below it, where the line from the plateau's corner to the bay's
+///   corner cuts across open air. Falling back is right there: the whole-run
+///   face is at least contained.
+/// - the sub-faces don't reproduce the run's plan area, i.e. they gap or
+///   overlap. An outcome check, so it catches causes not thought of here.
+fn fan_run_to_side(
+    run: &[Point3f64],
+    side: usize,
+    cs: &[Point3f64; 4],
+    region_plan: &[Point2f64],
+    whole: &[Point3f64],
+) -> Option<Vec<Vec<Point3f64>>> {
+    if run.len() < 2 {
+        return None;
+    }
+    let region_poly = ring_to_poly(region_plan);
+    let (a, b) = (cs[side], cs[(side + 1) % 4]);
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let len2 = dx * dx + dy * dy;
+    if len2 < 1e-12 {
+        return None; // a degenerate rect side has nothing to project onto
+    }
+    // Perpendicular foot on the side's LINE, clamped to the side itself. The
+    // clamp is what mints the hips: a boundary vertex out past the rect's
+    // corner projects ONTO that corner, so its face closes to a triangle.
+    let project = |v: &Point3f64| -> Point3f64 {
+        let t = (((v.x - a.x) * dx + (v.y - a.y) * dy) / len2).clamp(0.0, 1.0);
+        Point3f64::new(a.x + t * dx, a.y + t * dy, a.z + t * (b.z - a.z))
+    };
+    let feet: Vec<Point3f64> = run.iter().map(project).collect();
+    // GUARD 1 — every hip stays inside the ceiling area.
+    for (v, f) in run.iter().zip(&feet) {
+        if !segment_within_ring(*v, *f, region_plan, &region_poly) {
+            return None;
+        }
+    }
+    let mut faces: Vec<Vec<Point3f64>> = Vec::new();
+    for i in 0..run.len() - 1 {
+        // Forward along the boundary, back along the side — the same sense the
+        // whole-run face uses, so the winding carries over.
+        let mut f = vec![run[i], run[i + 1], feet[i + 1], feet[i]];
+        f.dedup_by(|p, q| merge_pts_eq(p, q));
+        while f.len() > 1 && merge_pts_eq(&f[0], f.last().unwrap()) {
+            f.pop();
+        }
+        // An edge running perpendicular to the side projects to a single point:
+        // a zero-plan-area sliver, carrying no surface.
+        if f.len() >= 3 && ring_signed_plan_area(&f).abs() >= SLIVER_AREA_M2 {
+            faces.push(f);
+        }
+    }
+    if faces.is_empty() {
+        return None;
+    }
+    // GUARD 2 — the pieces must describe the same surface as the face they
+    // replace.
+    let whole_area = ring_signed_plan_area(whole).abs();
+    let sum: f64 = faces.iter().map(|f| ring_signed_plan_area(f).abs()).sum();
+    ((sum - whole_area).abs() <= FAN_AREA_TOL_M2.max(whole_area * 1e-9)).then_some(faces)
+}
+
+/// Does the segment `p`–`q` stay within `ring` (plan)? Sampled at interior
+/// points rather than solved exactly: the endpoints sit ON the ring by
+/// construction (a boundary vertex and its foot on the rect side), so an exact
+/// containment test would have to special-case them, while a hip that escapes a
+/// re-entrant notch leaves by a wide margin and any interior sample catches it.
+fn segment_within_ring(
+    p: Point3f64,
+    q: Point3f64,
+    ring: &[Point2f64],
+    poly: &Polygon<f64>,
+) -> bool {
+    use geo::Contains;
+    /// Interior sample count — the midpoint plus quarters. A notch narrow
+    /// enough to slip between these is far below the sliver threshold.
+    const SAMPLES: usize = 3;
+    if ring.len() < 3 {
+        return true; // nothing to be outside of
+    }
+    (1..=SAMPLES).all(|k| {
+        let t = k as f64 / (SAMPLES + 1) as f64;
+        let (x, y) = (p.x + (q.x - p.x) * t, p.y + (q.y - p.y) * t);
+        poly.contains(&geo::Point::new(x, y))
+            || point_on_ring_boundary(ring, x, y, HIP_OUTSIDE_TOL_M)
+    })
 }
 
 /// Vertex / plane tolerance for the coplanar face merge, in metres — a pure
