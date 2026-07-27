@@ -10727,6 +10727,72 @@ fn rect_stroke() -> Vec<(f32, f32)> {
     ]
 }
 
+/// A THREE-SIDED open stroke against the top wall — down the left side,
+/// across the bottom, back up the right — with the ends running out to the
+/// ceiling area's edge (y = 10 on the 10×10 storey). The shape an assessor
+/// draws for a plateau that sits against a wall: there is nothing to trace
+/// along the fourth side.
+fn three_sided_stroke() -> Vec<(f32, f32)> {
+    vec![
+        (2.0, 10.05),
+        (1.95, 8.0),
+        (2.0, 6.0),
+        (4.0, 5.95),
+        (6.0, 6.0),
+        (6.05, 8.0),
+        (6.0, 10.05),
+    ]
+}
+
+/// A three-sided OPEN stroke is a flat top, not a failed ridge. The fourth
+/// side is the ceiling area's own edge, so there is nothing to draw along it
+/// — closing the loop by hand only invites the stroke to overshoot the wall.
+/// Live session: this stroke was rejected with "that stroke isn't a straight
+/// line", which points at the ridge tool rather than the one that does the
+/// job, and there was no other way to draw a plateau against a wall.
+///
+/// The stroke's BBOX is the rectangle (`fit_axis_rect` already admits a U —
+/// closure was only ever the caller's test), so this is a routing change, not
+/// new geometry.
+#[test]
+fn ceiling_rect_three_sided_open_stroke_routes_to_the_flat_top() {
+    let mut c = ceiling_apex_ready_controller();
+    c.apply_roof_ridge_stroke_event(&three_sided_stroke());
+    assert!(
+        c.ceiling_rect_pending(),
+        "three drawn sides meeting the area edge are a flat top"
+    );
+    assert!(!c.ceiling_ridge_pending(), "not routed to the ridge flow");
+    // The bbox spans x 1.95..6.05 and y 5.95..10.05 — the drawn width fills
+    // the LenX prefill exactly as the closed-stroke path does.
+    assert_eq!(c.ceiling_rect_length_pending(), Some(ParameterAxis::X));
+    let prefill = c.pending_roof_rect_length().expect("drawn width");
+    assert!((prefill - 4.1).abs() < 0.05, "got {prefill}");
+}
+
+/// The routing must not swallow the RIDGE: a single straight stroke is still a
+/// ridge line, and a stroke that is neither straight nor rectangle-like still
+/// falls through to the ridge fitter, so its rejection names the ridge rather
+/// than complaining about rectangles.
+#[test]
+fn ceiling_straight_and_shapeless_strokes_still_route_to_the_ridge() {
+    let mut c = ceiling_apex_ready_controller();
+    c.apply_roof_ridge_stroke_event(&[(3.78, 2.0), (3.82, 5.0), (3.8, 8.0)]);
+    assert!(c.ceiling_ridge_pending(), "a straight stroke is a ridge");
+    assert!(!c.ceiling_rect_pending());
+
+    // A DIAGONAL stroke: not axis-aligned, and its middle sits far from its own
+    // bbox boundary, so `fit_axis_rect` refuses it. The new branch is gated on
+    // that fit SUCCEEDING, so the stroke falls through to the ridge exactly as
+    // it did before — the rect flow must not swallow it.
+    let mut c = ceiling_apex_ready_controller();
+    c.apply_roof_ridge_stroke_event(&[(1.0, 1.0), (3.0, 3.0), (5.0, 5.0), (7.0, 7.0)]);
+    assert!(
+        !c.ceiling_rect_pending(),
+        "a non-rectangle-like stroke must not open the flat top"
+    );
+}
+
 /// THE RECT MULTI-STAGE FLOW incl. CENTRE (design §5): a CLOSED stroke in
 /// roof-point mode routes to the rect flow — LenX (prefilled drawn, typed)
 /// → LenY (typed) → PosX (typed distance, Centre offered) → PosY (the

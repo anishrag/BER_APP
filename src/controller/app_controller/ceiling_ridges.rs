@@ -145,8 +145,14 @@ pub(super) enum PendingCeilingRidge {
 }
 
 impl AppController {
-    /// UI entry point: a ridge stroke (world/metre coords) drawn in
-    /// ceiling-point mode. Fits it to an axis-aligned segment
+    /// UI entry point: a stroke (world/metre coords) drawn in ceiling-point
+    /// mode. THREE shapes route three ways, mirroring the ceiling-step tool:
+    /// - a CLOSED stroke is the flat top (the rect-ridge flow);
+    /// - an OPEN stroke of three sides whose ends run out to the ceiling
+    ///   area's edge is ALSO a flat top — the edge is the fourth side;
+    /// - a single straight stroke is a RIDGE line, handled below.
+    ///
+    /// A ridge stroke fits to an axis-aligned segment
     /// ([`StoreyDoc::fit_roof_ridge_line`] — axis + cross coordinate + the
     /// stroke's own extent), then tries the elective wall snap on all THREE
     /// drawn degrees of freedom — the CROSS coordinate against parallel
@@ -192,6 +198,27 @@ impl AppController {
         if manip_plan::stroke_is_closed(&pts, self.tuning.subarea.close_gap_m) {
             // The flat top EDGE-snaps its sides onto the containing ceiling
             // region's walls (the pavilion analogue of the dormer's side snap).
+            self.apply_pavilion_rect_stroke(&pts, world_points);
+            return;
+        }
+        // An OPEN stroke of THREE drawn sides, its ends run out to the ceiling
+        // area's edge, is ALSO a flat top — the edge supplies the fourth side.
+        // Same shape the ceiling-step tool already accepts as a cut, and the
+        // natural way to draw a plateau that sits against a wall or a divider:
+        // there is nothing to trace along the fourth side, so closing the loop
+        // by hand only invites the stroke to overshoot.
+        //
+        // No new geometry: `fit_axis_rect` takes the stroke's BBOX and already
+        // admits a U (its own docs note an open U passes the near-boundary
+        // heuristic — closure was left as the caller's test), and the drawn
+        // ends land on the edge, so the side snap seats the fourth side flush
+        // and the loft skips it as the mono-gable side.
+        //
+        // Tried BEFORE the ridge fit but gated on the rect fit SUCCEEDING, so
+        // a stroke that is neither straight nor rectangle-like still falls
+        // through to the ridge and reports the ridge's own rejection rather
+        // than a confusing "not rectangle-like".
+        if manip_plan::fit_axis_line(&pts).is_none() && manip_plan::fit_axis_rect(&pts).is_some() {
             self.apply_pavilion_rect_stroke(&pts, world_points);
             return;
         }
