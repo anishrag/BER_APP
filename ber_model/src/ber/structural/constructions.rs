@@ -588,6 +588,25 @@ pub struct ConstructionBase {
     /// keeps records saved under the former field name `description` loadable.
     #[serde(default, alias = "description")]
     pub name: Option<String>,
+    /// PROVISIONAL: a group minted so an UNATTRIBUTED selection can hold
+    /// evidence of its own, before its fabric is specified.
+    ///
+    /// Group identity is otherwise the attribute tuple `(type, make-up, phase,
+    /// name)` — "identical attributes, including the name, means the same
+    /// group". That rule is exactly right for SPECIFIED groups, but it cannot
+    /// tell two UNSPECIFIED selections apart: both are
+    /// `(Uninitialised, Tbd, phase, None)`. So the supported photograph-FIRST-
+    /// then-spec flow had nowhere to put the photo except the bucket every
+    /// un-answered surface of that phase shares, which smeared it across the
+    /// record (field report, 56 Elmwood Road).
+    ///
+    /// A provisional group is never JOINED into by `ensure_*` — it stays the
+    /// private home of that selection's evidence. The moment its fabric is set,
+    /// the surfaces re-point at the real construction, this one is orphaned, and
+    /// `carry_evidence_from_orphans` walks the evidence across — merging into a
+    /// matching group if one exists, exactly as the rule says.
+    #[serde(default)]
+    pub provisional: bool,
 }
 
 /// A wall construction shared by one or more `WallRegion`s.
@@ -899,7 +918,10 @@ impl Ber {
     ) -> ItemId {
         let name = normalized_name(name);
         if let Some(c) = self.wall_constructions.iter().find(|c| {
-            c.construction_type == construction_type
+            // A PROVISIONAL group is the private home of one selection's
+            // evidence — never join into it (see `ConstructionBase::provisional`).
+            !c.base.provisional
+                && c.construction_type == construction_type
                 && c.base.construction_makeup == makeup
                 && c.base.construction_phase == phase
                 && normalized_name(c.base.name.as_deref()) == name
@@ -942,7 +964,10 @@ impl Ber {
     ) -> ItemId {
         let name = normalized_name(name);
         if let Some(c) = self.floor_constructions.iter().find(|c| {
-            c.construction_type == construction_type
+            // A PROVISIONAL group is the private home of one selection's
+            // evidence — never join into it (see `ConstructionBase::provisional`).
+            !c.base.provisional
+                && c.construction_type == construction_type
                 && c.base.construction_makeup == makeup
                 && c.base.construction_phase == phase
                 && normalized_name(c.base.name.as_deref()) == name
@@ -985,7 +1010,10 @@ impl Ber {
     ) -> ItemId {
         let name = normalized_name(name);
         if let Some(c) = self.ceiling_constructions.iter().find(|c| {
-            c.construction_type == construction_type
+            // A PROVISIONAL group is the private home of one selection's
+            // evidence — never join into it (see `ConstructionBase::provisional`).
+            !c.base.provisional
+                && c.construction_type == construction_type
                 && c.base.construction_makeup == makeup
                 && c.base.construction_phase == phase
                 && normalized_name(c.base.name.as_deref()) == name
@@ -1230,7 +1258,7 @@ impl Ber {
     }
 
     /// The base of construction `id`, whichever registry holds it.
-    fn construction_base_mut(&mut self, id: ItemId) -> Option<&mut ConstructionBase> {
+    pub fn construction_base_mut(&mut self, id: ItemId) -> Option<&mut ConstructionBase> {
         if let Some(c) = self.wall_constructions.iter_mut().find(|c| c.base.id == id) {
             return Some(&mut c.base);
         }
@@ -1289,6 +1317,52 @@ impl Ber {
         false
     }
 
+    /// Whether `id` names a PROVISIONAL group — one minted so a single
+    /// unspecified selection can hold its own evidence. `false` for an unknown id.
+    pub fn is_provisional_construction(&self, id: ItemId) -> bool {
+        self.wall_constructions
+            .iter()
+            .map(|c| &c.base)
+            .chain(self.floor_constructions.iter().map(|c| &c.base))
+            .chain(self.ceiling_constructions.iter().map(|c| &c.base))
+            .find(|b| b.id == id)
+            .map(|b| b.provisional)
+            .unwrap_or(false)
+    }
+
+    /// Mint a fresh PROVISIONAL construction of `kind` on `phase` — an
+    /// unspecified group that exists only so ONE selection can hold its own
+    /// evidence before its fabric is set. Nothing else ever joins it; see
+    /// [`ConstructionBase::provisional`].
+    pub fn mint_provisional_construction(
+        &mut self,
+        kind: SurfaceKind,
+        phase: ConstructionPhase,
+    ) -> ItemId {
+        let base = ConstructionBase {
+            construction_phase: phase,
+            provisional: true,
+            ..Default::default()
+        };
+        let id = base.id;
+        match kind {
+            SurfaceKind::Walls => self.wall_constructions.push(WallConstruction {
+                base,
+                construction_type: Default::default(),
+            }),
+            SurfaceKind::Floors => self.floor_constructions.push(FloorConstruction {
+                base,
+                construction_type: Default::default(),
+            }),
+            SurfaceKind::Ceilings => self.ceiling_constructions.push(CeilingConstruction {
+                base,
+                construction_type: Default::default(),
+                insulation: None,
+            }),
+        }
+        id
+    }
+
     /// Strip evidence (and a ceiling's insulation spec) from every UNCLASSIFIED
     /// construction, returning how many constructions were cleaned. The repair
     /// arm of the "unclassified carries no evidence" invariant: records written
@@ -1306,6 +1380,9 @@ impl Ber {
             .chain(self.floor_constructions.iter().map(|c| c.base.id))
             .chain(self.ceiling_constructions.iter().map(|c| c.base.id))
             .filter(|&id| self.is_unclassified_construction(id))
+            // A PROVISIONAL group's evidence is deliberate — it is the private
+            // home of one selection's photos until its fabric is specified.
+            .filter(|&id| !self.is_provisional_construction(id))
             .collect();
         let mut n = 0;
         for id in ids {

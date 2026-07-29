@@ -3196,6 +3196,105 @@ fn characterise_full_rename_keeps_photos_subset_rename_forks() {
     let _ = std::fs::remove_file(&src);
 }
 
+/// OPTION 1 (2026-07-29): an UNSPECIFIED selection that records evidence gets a
+/// PROVISIONAL group of its own, and merges into a matching group the moment its
+/// fabric is set.
+///
+/// The photograph-FIRST-then-spec flow used to put the photo on the bucket every
+/// un-answered surface of that phase shares, so it appeared on walls that were
+/// never photographed — and "vanished" when one of those walls was later
+/// attributed and left the bucket. Group identity is the attribute tuple, which
+/// cannot tell two unspecified selections apart; the provisional flag can.
+///
+/// Pins both halves: the photo stays PRIVATE while unspecified, and specifying
+/// carries it onto the real construction — joining an existing identical group,
+/// per "identical attributes, including the name, means the same group".
+#[test]
+fn photograph_first_keeps_evidence_private_then_merges_on_spec() {
+    use ber_model::ber::structural::{ConstructionMakeup, ConstructionType, WallConstructionType};
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    let tmp = std::env::temp_dir().join(format!("ber_photos_{}", ItemId::default().0));
+    c.set_photos_dir(tmp.clone());
+    let src = std::env::temp_dir().join(format!("ber_src_{}.jpg", ItemId::default().0));
+    std::fs::write(&src, b"jpeg-bytes").unwrap();
+    set_only_kind(&mut c, SurfaceKind::Walls);
+    let mids = square_wall_mids(&c);
+
+    let photos_at = |c: &AppController, m: (f64, f64)| -> usize {
+        let id = wall_at_mid(c, m);
+        let rec = c.current_record.as_ref().unwrap();
+        rec.data.storeys[0]
+            .walls
+            .regions
+            .iter()
+            .find(|r| r.id == id)
+            .and_then(|r| rec.data.wall_construction(r.construction_id))
+            .map(|con| con.base.photos.len())
+            .unwrap_or(0)
+    };
+
+    // A pre-existing group ONE wall belongs to — the merge target later.
+    attribute_wall_at(
+        &mut c,
+        mids[3],
+        WallConstructionType::CavityWall,
+        ConstructionMakeup::Default,
+        ConstructionPhase::Original,
+        None,
+    );
+
+    // PHOTOGRAPH FIRST on a still-unspecified wall.
+    c.clear_structure_surface_selection();
+    let subject = wall_at_mid(&c, mids[0]);
+    c.structure_selected.insert(subject);
+    c.begin_structure_edit();
+    c.add_group_photo(0, &src, PhotoQuality::Full);
+
+    assert_eq!(photos_at(&c, mids[0]), 1, "the photo lands on the subject");
+    assert_eq!(
+        photos_at(&c, mids[1]),
+        0,
+        "…and NOT on the other un-answered walls sharing the bucket \
+         (pre-fix it appeared on every one of them)"
+    );
+    assert_eq!(photos_at(&c, mids[2]), 0);
+
+    // NOW specify it, identically to the group wall 3 is already in.
+    c.set_structure_group_attrs(
+        0,
+        ConstructionType::Wall(WallConstructionType::CavityWall),
+        ConstructionMakeup::Default,
+        ConstructionPhase::Original,
+    );
+    c.end_structure_edit();
+    c.materialize();
+
+    let cid_at = |c: &AppController, m: (f64, f64)| {
+        let id = wall_at_mid(c, m);
+        c.current_record.as_ref().unwrap().data.storeys[0]
+            .walls
+            .regions
+            .iter()
+            .find(|r| r.id == id)
+            .unwrap()
+            .construction_id
+    };
+    assert_eq!(
+        cid_at(&c, mids[0]),
+        cid_at(&c, mids[3]),
+        "specifying MERGES into the existing identical group"
+    );
+    assert_eq!(
+        photos_at(&c, mids[0]),
+        1,
+        "…and the photo rides across onto it"
+    );
+    assert_eq!(photos_at(&c, mids[1]), 0, "still nowhere near the bucket");
+    let _ = std::fs::remove_dir_all(&tmp);
+    let _ = std::fs::remove_file(&src);
+}
+
 // ─── CHARACTERISATION: what the Structure editor groups on ─────────────────
 //
 // These pin the CURRENT, INTENDED behaviour of the group boxes so the planned

@@ -1506,6 +1506,16 @@ impl AppController {
         // Each region in the group shares one construction; the group can
         // span STOREYS (all-storeys lasso), so resolve construction ids
         // across the whole stack.
+        // PHOTOGRAPH-FIRST: if this selection is still UNSPECIFIED it points at
+        // the bucket every un-answered surface of its phase shares, and the
+        // photo would land on all of them (field report, 56 Elmwood Road: it
+        // then "vanished" when one of those walls was attributed and left the
+        // bucket). Give the selection a PROVISIONAL group of its own to hold it.
+        // When its fabric is set the surfaces re-point at the real construction,
+        // this one is orphaned, and `carry_evidence_from_orphans` walks the
+        // photo across — merging into a matching group if one exists, exactly as
+        // "identical attributes means the same group" requires.
+        self.rehome_unspecified_group_for_evidence(kind, &ids);
         let cids = self.construction_ids_for(kind, &ids);
         let Some(record) = self.current_record.as_mut() else {
             return;
@@ -1522,6 +1532,106 @@ impl AppController {
             g.photos.push(photo);
         }
         let _ = self.mark_dirty();
+    }
+
+    /// Move an UNSPECIFIED selection onto a PROVISIONAL construction of its own,
+    /// so evidence recorded on it before its fabric is set stays private to it.
+    ///
+    /// No-op unless the selection actually sits on a SHARED unclassified
+    /// construction — a group that is already specified, or already provisional,
+    /// or whose bucket holds nothing but these very surfaces, has a private home
+    /// already. Snapshot-free: this is plumbing under an evidence write, and the
+    /// re-point is undone with it.
+    fn rehome_unspecified_group_for_evidence(&mut self, kind: SurfaceKind, ids: &[ItemId]) {
+        let Some(record) = self.current_record.as_ref() else {
+            return;
+        };
+        let selected: HashSet<ItemId> = ids.iter().copied().collect();
+        // The (single) unclassified, non-provisional construction these surfaces
+        // share, plus whether anything OUTSIDE the selection also points at it.
+        let cids = self.construction_ids_for(kind, ids);
+        let [cid] = cids[..] else {
+            return; // several homes already — nothing to disambiguate
+        };
+        if !record.data.is_unclassified_construction(cid)
+            || record.data.is_provisional_construction(cid)
+        {
+            return;
+        }
+        let shared = record.data.storeys.iter().any(|s| {
+            let regions: Vec<(ItemId, ItemId)> = match kind {
+                SurfaceKind::Walls => s
+                    .walls
+                    .regions
+                    .iter()
+                    .map(|r| (r.id, r.construction_id))
+                    .collect(),
+                SurfaceKind::Floors => s
+                    .floors
+                    .regions
+                    .iter()
+                    .map(|r| (r.id, r.construction_id))
+                    .collect(),
+                SurfaceKind::Ceilings => s
+                    .ceilings
+                    .regions
+                    .iter()
+                    .map(|r| (r.id, r.construction_id))
+                    .collect(),
+            };
+            regions
+                .into_iter()
+                .any(|(rid, rcid)| rcid == cid && !selected.contains(&rid))
+        });
+        if !shared {
+            return; // the bucket is already private to this selection
+        }
+        let phase = record
+            .data
+            .wall_construction(cid)
+            .map(|c| c.base.construction_phase.clone())
+            .or_else(|| {
+                record
+                    .data
+                    .floor_construction(cid)
+                    .map(|c| c.base.construction_phase.clone())
+            })
+            .or_else(|| {
+                record
+                    .data
+                    .ceiling_construction(cid)
+                    .map(|c| c.base.construction_phase.clone())
+            })
+            .unwrap_or_default();
+        let Some(record) = self.current_record.as_mut() else {
+            return;
+        };
+        let fresh = record.data.mint_provisional_construction(kind, phase);
+        for s in &mut record.data.storeys {
+            match kind {
+                SurfaceKind::Walls => {
+                    for r in s.walls.regions.iter_mut() {
+                        if selected.contains(&r.id) {
+                            r.construction_id = fresh;
+                        }
+                    }
+                }
+                SurfaceKind::Floors => {
+                    for r in s.floors.regions.iter_mut() {
+                        if selected.contains(&r.id) {
+                            r.construction_id = fresh;
+                        }
+                    }
+                }
+                SurfaceKind::Ceilings => {
+                    for r in s.ceilings.regions.iter_mut() {
+                        if selected.contains(&r.id) {
+                            r.construction_id = fresh;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Set (or clear with `None`) a CEILING group's INSULATION spec — the
@@ -2087,6 +2197,14 @@ impl AppController {
             (g.ids.clone(), g.ty.kind())
         };
         let full = self.group_covers_all_members(kind_before, &ids);
+        // Evidence recorded BEFORE the fabric was specified lives on a
+        // PROVISIONAL group (see `rehome_unspecified_group_for_evidence`). The
+        // resolve re-mints every region and re-establishes its construction from
+        // the durable maps, so that link does not survive the materialize below
+        // — the photos have to be carried across by hand, onto whichever
+        // construction the new attributes land on (an existing identical group,
+        // if there is one).
+        let carried = self.take_provisional_evidence(kind_before, &ids);
         let name = {
             let Some(e) = self.structure_edit.as_mut() else {
                 return;
@@ -2109,6 +2227,7 @@ impl AppController {
             }
             g.explicit_name.clone()
         };
+        let (makeup2, phase2, name2) = (makeup.clone(), phase.clone(), name.clone());
         match ty {
             ConstructionType::Wall(t) => {
                 self.set_wall_construction_for(&ids, t, makeup, phase, name)
@@ -2120,6 +2239,64 @@ impl AppController {
                 self.set_ceiling_construction_for(&ids, t, makeup, phase, name)
             }
         }
+        // Re-home the photograph-first evidence onto the construction the new
+        // attributes resolve to. Materialize first so it exists — then find it
+        // BY THOSE ATTRIBUTES, not by the group's region ids, which the resolve
+        // has just re-minted. (`ensure_*` is find-or-create, so this is a find.)
+        if !carried.is_empty() {
+            self.materialize();
+            if let Some(record) = self.current_record.as_mut() {
+                let cid = match ty {
+                    ConstructionType::Wall(t) => record.data.ensure_wall_construction_named(
+                        t,
+                        makeup2,
+                        phase2,
+                        name2.as_deref(),
+                    ),
+                    ConstructionType::Floor(t) => record.data.ensure_floor_construction_named(
+                        t,
+                        makeup2,
+                        phase2,
+                        name2.as_deref(),
+                    ),
+                    ConstructionType::Ceiling(t) => record.data.ensure_ceiling_construction_named(
+                        t,
+                        makeup2,
+                        phase2,
+                        name2.as_deref(),
+                    ),
+                };
+                for photo in carried {
+                    record.data.add_construction_photo(kind_before, cid, photo);
+                }
+            }
+            let _ = self.mark_dirty();
+        }
+    }
+
+    /// Take the evidence off any PROVISIONAL construction the surfaces `ids`
+    /// currently sit on, returning it for the caller to re-attach once the real
+    /// construction exists. Empty unless the selection is photograph-first
+    /// evidence awaiting its spec.
+    fn take_provisional_evidence(
+        &mut self,
+        kind: SurfaceKind,
+        ids: &[ItemId],
+    ) -> Vec<ber_model::ber::common::Evidence> {
+        let cids = self.construction_ids_for(kind, ids);
+        let Some(record) = self.current_record.as_mut() else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for cid in cids {
+            if !record.data.is_provisional_construction(cid) {
+                continue;
+            }
+            if let Some(base) = record.data.construction_base_mut(cid) {
+                out.append(&mut base.photos);
+            }
+        }
+        out
     }
 
     /// Whether the session group's `ids` cover EVERY resolved member of the
