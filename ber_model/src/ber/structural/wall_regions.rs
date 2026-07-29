@@ -534,7 +534,7 @@ impl WallRegions {
     ///
     /// [`merge_coplanar_flush`]: WallRegions::merge_coplanar_flush
     pub fn with_risers(
-        mut self,
+        self,
         faces: Vec<(Polygon3D, WallExposure)>,
         default_construction_id: ItemId,
     ) -> Self {

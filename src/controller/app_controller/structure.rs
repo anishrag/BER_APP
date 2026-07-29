@@ -414,7 +414,6 @@ impl AppController {
                 let Some(sd) = self.document.storeys.get(idx) else {
                     continue;
                 };
-                let plan = &sd.outline.floor_plan;
                 let mut walls: Vec<ber_model::ber::structural::WallRegion> = Vec::new();
                 let mut risers = Vec::new();
                 for r in ids
@@ -439,7 +438,6 @@ impl AppController {
                         Point2f64::new(e1.x, e1.y),
                     ));
                 }
-                let _ = plan;
                 if !walls.is_empty() || !risers.is_empty() {
                     out.push((idx, walls, risers));
                 }
@@ -864,7 +862,6 @@ impl AppController {
             Option<CeilingInsulation>, // ceilings only; None for walls/floors
             InferredRoofType,          // ceilings only; Unknown for walls/floors
         );
-        let document = &self.document;
         let attrs_of = |id: ItemId| -> Option<Attrs> {
             let (idx, storey, kind) = record
                 .data
@@ -2023,7 +2020,6 @@ impl AppController {
                 let mut keys = Vec::new();
                 match kind {
                     SurfaceKind::Walls => {
-                        let plan = &sd.outline.floor_plan;
                         for r in ids
                             .iter()
                             // Spans porch inner walls (riser-key path).

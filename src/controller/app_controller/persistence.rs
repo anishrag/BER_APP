@@ -795,7 +795,6 @@ impl AppController {
                 // Map each resolved wall's base midpoint back to its durable key —
                 // a perimeter SurfaceRef, or (for a riser) its quantized base edge.
                 let sd = &self.document.storeys[idx];
-                let plan = &sd.outline.floor_plan;
                 let mut walls = Vec::new();
                 let mut risers = Vec::new();
                 // Perimeter AND porch inner walls: a porch wall's base midpoint
@@ -839,7 +838,6 @@ impl AppController {
                     );
                     risers.push((key, (ty, mk, ph, nm)));
                 }
-                let _ = plan;
                 let floors = storey
                     .floors
                     .regions
