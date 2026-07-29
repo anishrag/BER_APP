@@ -77,9 +77,7 @@ use ber_model::ber::structural::{
 // Wall-face partition types now live in `ber_model` (so the durable recipe can
 // be a Layer-1 `Storey` field); re-exported here to keep `document::PartitionCut`
 // / `crate::PartitionCut` call sites unchanged.
-pub use ber_model::ber::structural::{
-    face_region_key, wall_face_key, FaceRegionKey, PartitionCut, WallFaceKey, WallFacePartition,
-};
+pub use ber_model::ber::structural::{wall_face_key, PartitionCut, WallFaceKey, WallFacePartition};
 use domain::points::{to_f64, Point2f32, Point2f64};
 use manip_plan::{
     Error, FloorPlan, ParameterAxis, ParameterId, SubareaOutcome, SubareaTuning, SurfaceRef,
@@ -267,6 +265,45 @@ pub struct ExposureSection {
     pub exposure: WallExposure,
 }
 
+/// A wall attribution's value: what the assessor chose, plus the (editable)
+/// construction phase and the group name that completes its identity.
+pub type WallSpanValue = (
+    WallConstructionType,
+    ConstructionMakeup,
+    ConstructionPhase,
+    Option<String>,
+);
+
+/// One stored wall attribution, over the BOX it occupies on its parametric
+/// wall's face in wall-local `(along_m, height_m)`.
+///
+/// A `SurfaceRef` names the WALL; one wall resolves into as many surfaces as the
+/// derivation makes (a face partition, a phase boundary, an inter-storey band, a
+/// roof void), and every one of them shares that ref. The box is what tells them
+/// apart, and matching it by OVERLAP rather than equality is what lets the same
+/// key survive a geometry edit that moves the split.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct WallSpanEntry {
+    pub along_m: (f32, f32),
+    pub height_m: (f32, f32),
+    pub value: WallSpanValue,
+}
+
+impl WallSpanEntry {
+    /// An entry covering the WHOLE wall face — it overlaps every surface on that
+    /// wall, so it is what a wall-wide attribution stores when no particular
+    /// surface is meant. A more specific entry always wins the overlap match
+    /// against it on the surface it actually covers.
+    pub fn whole_wall(value: WallSpanValue) -> Self {
+        const HUGE_M: f32 = 1.0e6;
+        Self {
+            along_m: (-HUGE_M, HUGE_M),
+            height_m: (-HUGE_M, HUGE_M),
+            value,
+        }
+    }
+}
+
 /// One storey's editable shapes and which is active. The building-level
 /// [`Document`] holds one of these per storey; it `Deref`s to the active one, so
 /// per-storey field/method access reads through transparently.
@@ -385,15 +422,7 @@ pub struct StoreyDoc {
     /// parametric home — it survives the wall re-derivation without the
     /// amend-match.
     #[serde(default, skip_serializing)]
-    pub wall_constructions: HashMap<
-        SurfaceRef,
-        (
-            WallConstructionType,
-            ConstructionMakeup,
-            ConstructionPhase,
-            Option<String>,
-        ),
-    >,
+    pub wall_constructions: HashMap<SurfaceRef, Vec<WallSpanEntry>>,
 
     /// Assigned wall CONSTRUCTION of derived RISER (interior step-face) walls,
     /// keyed by the riser's quantized base edge ([`riser_key`]) — the construction
@@ -410,26 +439,6 @@ pub struct StoreyDoc {
     )]
     pub riser_constructions: HashMap<
         RiserKey,
-        (
-            WallConstructionType,
-            ConstructionMakeup,
-            ConstructionPhase,
-            Option<String>,
-        ),
-    >,
-
-    /// Assigned wall CONSTRUCTION of one PIECE of a face-partitioned wall, keyed
-    /// by [`FaceRegionKey`] (the wall's face key + the piece's wall-local
-    /// centroid). Every piece of a wall shares one `SurfaceRef`, so
-    /// [`wall_constructions`](Self::wall_constructions) cannot tell them apart —
-    /// setting one piece's construction set them all (and its evidence rode
-    /// along). This is the per-piece analogue of
-    /// [`riser_constructions`](Self::riser_constructions): a geometric key for a
-    /// surface with no parametric ref of its own. Single-homed on Layer 1
-    /// (seeded from the resolved pieces on load), kept out of the snapshot.
-    #[serde(skip)]
-    pub face_constructions: HashMap<
-        FaceRegionKey,
         (
             WallConstructionType,
             ConstructionMakeup,

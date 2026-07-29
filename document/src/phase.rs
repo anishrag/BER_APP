@@ -272,9 +272,7 @@ pub fn stamp_ceiling_phases(ber: &mut Ber, idx: usize) {
 /// home is the parametric `SurfaceRef` key, not the resolved wall id.
 pub fn stamp_wall_constructions(ber: &mut Ber, idx: usize, doc: &crate::StoreyDoc) {
     if ber.storeys.len() <= idx
-        || (doc.wall_constructions.is_empty()
-            && doc.riser_constructions.is_empty()
-            && doc.face_constructions.is_empty())
+        || (doc.wall_constructions.is_empty() && doc.riser_constructions.is_empty())
     {
         return;
     }
@@ -301,31 +299,22 @@ pub fn stamp_wall_constructions(ber: &mut Ber, idx: usize, doc: &crate::StoreyDo
             continue;
         };
         let mid = Point2f32::new(((e0.x + e1.x) * 0.5) as f32, ((e0.y + e1.y) * 0.5) as f32);
-        // A PIECE of a face-partitioned wall is keyed by its own FaceRegionKey —
-        // checked FIRST because it would otherwise fall into the SurfaceRef arm
-        // shared with its siblings and read back their construction. An ordinary
-        // perimeter wall is keyed by its parametric SurfaceRef; a RISER (interior
-        // step face, no perimeter ref) by its quantized base edge — mirroring
-        // riser exposure. The stored entry carries its own (editable) phase.
-        let face_key = doc.wall_piece_key_of(
-            &ber.storeys[idx].walls.regions[i],
-            &ber.storeys[idx].walls.regions,
-        );
-        let assigned = face_key
-            .and_then(|fk| doc.face_constructions.get(&fk))
-            // No per-piece entry: INHERIT the whole wall's — cutting a face
-            // divides a wall into pieces, it doesn't un-answer it (the same rule
-            // `split_partitioned_wall` applies to exposure via `base_exposure`).
-            // A piece keeps inheriting until it's individually attributed.
-            .or_else(|| {
-                if let Some(sref) = plan.surface_ref_at(mid, TOL_M) {
-                    doc.wall_constructions.get(&sref)
-                } else {
-                    let key =
-                        crate::riser_key(Point2f64::new(e0.x, e0.y), Point2f64::new(e1.x, e1.y));
-                    doc.riser_constructions.get(&key)
-                }
-            });
+        // ONE key for every perimeter wall surface: the parametric wall plus the
+        // BOX this region occupies on its face, matched by greatest OVERLAP.
+        // That single rule covers a whole wall, a face-partition piece, a
+        // phase-split run and an inter-storey band alike — and, being an
+        // overlap, it still fits after an edit moves the split. A RISER (or a
+        // porch inner wall) is genuinely off the outline, so it keeps its own
+        // quantized base-edge key. The stored entry carries its own (editable)
+        // phase.
+        let assigned = match doc.wall_span_lookup(&ber.storeys[idx].walls.regions[i]) {
+            Some(e) => Some(&e.value),
+            None if plan.surface_ref_at(mid, TOL_M).is_some() => None,
+            None => {
+                let key = crate::riser_key(Point2f64::new(e0.x, e0.y), Point2f64::new(e1.x, e1.y));
+                doc.riser_constructions.get(&key)
+            }
+        };
         if let Some((ty, makeup, phase, name)) = assigned {
             let cid = ber.ensure_wall_construction_named(
                 *ty,

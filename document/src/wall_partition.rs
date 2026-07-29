@@ -10,7 +10,7 @@
 //! stores the cuts/exposures and drives the shared region derivation. `len` and
 //! `height` are supplied by the caller (wall length + ceiling height);
 //! `document` does not compute wall geometry here.
-use crate::{PartitionCut, StoreyDoc, WallFacePartition};
+use crate::{PartitionCut, StoreyDoc, WallFacePartition, WallSpanEntry, WallSpanValue};
 use ber_model::ber::structural::{Storey, WallExposure};
 use domain::points::Point2f32;
 use manip_plan::{point_in_polygon, subdivide_face, VertexId};
@@ -115,68 +115,96 @@ impl StoreyDoc {
         self.wall_face_partitions.contains_key(&vid)
     }
 
-    /// The durable [`FaceRegionKey`] of a RESOLVED wall region that is only a
-    /// PIECE of its plan wall — `None` for a riser, and for a region that spans
-    /// its whole plan wall (those keep the parametric `SurfaceRef` /
-    /// `riser_key`, which survives geometry edits).
+    /// A resolved wall region's parametric wall plus the BOX it occupies on that
+    /// wall's face, in wall-local `(along_m, height_m)` — the single durable
+    /// identity of a wall surface.
     ///
-    /// One plan wall can resolve into SEVERAL regions, and `surface_ref_at` maps
-    /// every one of them to the same `SurfaceRef::wall(vid)`. Attributing one
-    /// then writes the whole wall and its siblings read it back. Two ways a wall
-    /// gets split:
+    /// One plan wall resolves into as many regions as the derivation needs: a
+    /// face partition the assessor cut, a phase boundary crossing it, an
+    /// inter-storey band, a roof void. Every one of them maps to the same
+    /// `SurfaceRef`, so a `SurfaceRef` alone names the WALL, never the SURFACE.
+    /// The box is what distinguishes them, and — matched by OVERLAP rather than
+    /// equality ([`wall_span_lookup`](Self::wall_span_lookup)) — it also
+    /// survives a geometry edit that moves the split, which a point-like
+    /// geometric key does not.
     ///
-    /// * a FACE PARTITION (the assessor's own cut), and
-    /// * an ALONG-LENGTH split from the derivation — most often a construction
-    ///   PHASE boundary crossing the middle of a wall.
-    ///
-    /// Field report, 56 Elmwood Road: the left wall runs y 0.46→8.10 with the
-    /// extension boundary at 4.51, so it resolved into two pieces. Attributing
-    /// the extension piece ("2004, unknown, default") silently re-pointed the
-    /// original piece, wiping the "1960s plasterboarded" answer set earlier —
-    /// its construction was orphaned and dropped from the record.
-    ///
-    /// The key is the piece's own wall-local CENTROID on the mm grid, the
-    /// per-piece analogue of a riser's base-edge key.
-    /// `siblings` is the full resolved wall list the region came from — the
-    /// collision test needs it, because a piece key is only warranted when the
-    /// plan wall actually carries MORE THAN ONE attributable region.
-    ///
-    /// That narrowness is deliberate. A geometric key does NOT survive a
-    /// geometry edit the way a `SurfaceRef` does (that is the whole reason
-    /// `SurfaceRef` keying exists — a legacy split record unifies its walls on
-    /// open and must keep its fabric). So a wall that resolves to a single
-    /// region keeps the parametric key, and only a genuinely SPLIT wall — where
-    /// the shared key would otherwise silently overwrite — pays the stability
-    /// cost.
-    ///
-    /// `InterStorey` siblings do not count: the derivation owns them, and
-    /// `stamp_wall_constructions` skips them, so they can never be the region
-    /// that gets clobbered.
-    pub fn wall_piece_key_of(
+    /// `None` for a riser or porch wall: those are genuinely not on the outline,
+    /// and keep their own base-edge key.
+    pub fn wall_face_box(
         &self,
         region: &ber_model::ber::structural::WallRegion,
-        siblings: &[ber_model::ber::structural::WallRegion],
-    ) -> Option<crate::FaceRegionKey> {
-        let (vid, ring) = self.wall_local_face_ring(region)?;
-        if !self.is_wall_partitioned(vid) {
-            let attributable = siblings
-                .iter()
-                .filter(|r| r.exposure != WallExposure::InterStorey)
-                .filter(|r| self.wall_local_face_ring(r).is_some_and(|(v, _)| v == vid))
-                .count();
-            if attributable < 2 {
-                return None; // one region on this plan wall — no collision
-            }
+    ) -> Option<(manip_plan::SurfaceRef, (f32, f32), (f32, f32))> {
+        const TOL_M: f32 = 0.05;
+        let (e0, e1) = region.base_edge()?;
+        let mid = Point2f32::new(((e0.x + e1.x) * 0.5) as f32, ((e0.y + e1.y) * 0.5) as f32);
+        let sref = self.outline.floor_plan.surface_ref_at(mid, TOL_M)?;
+        let (_, ring) = self.wall_local_face_ring(region)?;
+        let (mut a0, mut a1) = (f32::MAX, f32::MIN);
+        let (mut h0, mut h1) = (f32::MAX, f32::MIN);
+        for p in &ring {
+            a0 = a0.min(p.x);
+            a1 = a1.max(p.x);
+            h0 = h0.min(p.y);
+            h1 = h1.max(p.y);
         }
-        let (a, b) = self.outline.floor_plan.wall_endpoints(vid)?;
-        let n = ring.len() as f32;
-        let (sa, sh) = ring
+        Some((sref, (a0, a1), (h0, h1)))
+    }
+
+    /// The stored attribution that best fits `region`: among the entries on its
+    /// parametric wall, the one whose face box OVERLAPS the region's by the
+    /// greatest area, ties broken by insertion order.
+    ///
+    /// Overlap — not equality — is what makes one key scheme serve both jobs a
+    /// wall attribution has to do. A whole wall stores the full span and keeps
+    /// matching after an edit moves its ends. A piece stores its sub-span and is
+    /// still the best fit for the piece that replaces it when a split shifts. And
+    /// when a split DISAPPEARS (a legacy record unifying its walls on open) the
+    /// surviving whole-wall region overlaps the old piece entries and inherits
+    /// from the largest, instead of losing its fabric.
+    pub fn wall_span_lookup(
+        &self,
+        region: &ber_model::ber::structural::WallRegion,
+    ) -> Option<&WallSpanEntry> {
+        let (sref, along, height) = self.wall_face_box(region)?;
+        let entries = self.wall_constructions.get(&sref)?;
+        entries
             .iter()
-            .fold((0.0, 0.0), |(sa, sh), p| (sa + p.x, sh + p.y));
-        Some(crate::face_region_key(
-            crate::wall_face_key(a, b),
-            Point2f32::new(sa / n, sh / n),
-        ))
+            .map(|e| (e, span_overlap_area(along, height, e.along_m, e.height_m)))
+            .filter(|(_, area)| *area > 0.0)
+            .max_by(|(_, x), (_, y)| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(e, _)| e)
+    }
+
+    /// Store `value` against the face box `region` occupies, REPLACING the entry
+    /// that box dominates (≥ [`SAME_SURFACE_FRAC`] of both boxes — the assessor
+    /// re-attributing the same surface) and otherwise adding one.
+    pub fn wall_span_insert(
+        &mut self,
+        region: &ber_model::ber::structural::WallRegion,
+        value: WallSpanValue,
+    ) {
+        let Some((sref, along_m, height_m)) = self.wall_face_box(region) else {
+            return;
+        };
+        let entries = self.wall_constructions.entry(sref).or_default();
+        let area = span_area(along_m, height_m);
+        let replace = entries.iter().position(|e| {
+            let o = span_overlap_area(along_m, height_m, e.along_m, e.height_m);
+            let other = span_area(e.along_m, e.height_m);
+            area > 0.0
+                && other > 0.0
+                && o >= area * SAME_SURFACE_FRAC
+                && o >= other * SAME_SURFACE_FRAC
+        });
+        let entry = WallSpanEntry {
+            along_m,
+            height_m,
+            value,
+        };
+        match replace {
+            Some(i) => entries[i] = entry,
+            None => entries.push(entry),
+        }
     }
 
     /// A RESOLVED wall region's ring in WALL-LOCAL `(along_m, height_m)` coords,
@@ -190,10 +218,10 @@ impl StoreyDoc {
     /// so the local frame agrees with the partition's own cuts and samples — a
     /// flipped `a`/`b` would mirror every piece's `along`.
     ///
-    /// Shared by [`face_region_key_of`](Self::face_region_key_of) (which takes
-    /// the ring's centroid as the piece's durable key) and the Structure face
-    /// view's region tap (which point-in-polygons a tapped sample against it to
-    /// find the piece the assessor means).
+    /// Shared by [`wall_face_box`](Self::wall_face_box) (which bounds the ring
+    /// into the surface's durable face box) and the Structure face view's region
+    /// tap (which point-in-polygons a tapped sample against it to find the piece
+    /// the assessor means).
     pub fn wall_local_face_ring(
         &self,
         region: &ber_model::ber::structural::WallRegion,
@@ -562,4 +590,26 @@ mod tests {
         doc.clear_wall_partition(vid);
         assert!(!doc.is_wall_partitioned(vid));
     }
+}
+
+/// Two face boxes describe the SAME surface when they overlap by at least this
+/// fraction of BOTH their areas — the threshold at which re-attributing is an
+/// update rather than a new sub-surface.
+const SAME_SURFACE_FRAC: f32 = 0.6;
+
+/// Area of a face box, in m².
+fn span_area(along: (f32, f32), height: (f32, f32)) -> f32 {
+    ((along.1 - along.0) * (height.1 - height.0)).max(0.0)
+}
+
+/// Overlap area of two face boxes, in m².
+fn span_overlap_area(
+    a_along: (f32, f32),
+    a_height: (f32, f32),
+    b_along: (f32, f32),
+    b_height: (f32, f32),
+) -> f32 {
+    let along = (a_along.1.min(b_along.1) - a_along.0.max(b_along.0)).max(0.0);
+    let height = (a_height.1.min(b_height.1) - a_height.0.max(b_height.0)).max(0.0);
+    along * height
 }

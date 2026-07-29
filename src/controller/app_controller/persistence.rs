@@ -764,10 +764,9 @@ impl AppController {
                 Option<String>,
             );
             #[allow(clippy::type_complexity)]
-            let (walls, risers, faces, floors, ceilings): (
-                Vec<(manip_plan::SurfaceRef, WallEntry)>,
+            let (walls, risers, floors, ceilings): (
+                Vec<(ber_model::ber::structural::WallRegion, WallEntry)>,
                 Vec<(document::RiserKey, WallEntry)>,
-                Vec<(document::FaceRegionKey, WallEntry)>,
                 Vec<(
                     document::CentroidKey,
                     (
@@ -799,7 +798,6 @@ impl AppController {
                 let plan = &sd.outline.floor_plan;
                 let mut walls = Vec::new();
                 let mut risers = Vec::new();
-                let mut faces = Vec::new();
                 // Perimeter AND porch inner walls: a porch wall's base midpoint
                 // has no outline SurfaceRef, so it seeds into the riser store —
                 // the same base-edge key its attribution writes and
@@ -823,37 +821,25 @@ impl AppController {
                     {
                         continue;
                     }
-                    // A PIECE of a SPLIT wall recovers onto its own
-                    // FaceRegionKey, so a restart can't hand every sibling this
-                    // piece's construction on the first re-resolve.
-                    if let Some(fk) = sd.wall_piece_key_of(r, &storey.walls.regions) {
-                        faces.push((fk, (ty.clone(), mk.clone(), ph.clone(), nm.clone())));
-                        // …and ALSO under the shared SurfaceRef, as the
-                        // FALLBACK. A geometric key does not survive a geometry
-                        // change; the parametric one does, and a legacy split
-                        // record UNIFIES its walls on open — losing the piece key
-                        // and, without this, the fabric with it. The piece
-                        // entries stay authoritative (`stamp_wall_constructions`
-                        // reads them first), so the shared entry is only ever
-                        // consulted by a piece that has none of its own.
+                    // Each wall SURFACE recovers against the face box it
+                    // occupies, so a restart can't hand a sibling piece this
+                    // one's construction on the first re-resolve. Overlap
+                    // matching means the entry keeps fitting even if a later
+                    // edit moves the split that made the piece.
+                    if sd.wall_face_box(r).is_some() {
+                        walls.push((r.clone(), (ty, mk, ph, nm)));
+                        continue;
                     }
                     let Some((e0, e1)) = r.base_edge() else {
                         continue;
                     };
-                    let mid = domain::points::Point2f32::new(
-                        ((e0.x + e1.x) * 0.5) as f32,
-                        ((e0.y + e1.y) * 0.5) as f32,
+                    let key = document::riser_key(
+                        domain::points::Point2f64::new(e0.x, e0.y),
+                        domain::points::Point2f64::new(e1.x, e1.y),
                     );
-                    if let Some(sref) = plan.surface_ref_at(mid, 0.05) {
-                        walls.push((sref, (ty, mk, ph, nm)));
-                    } else {
-                        let key = document::riser_key(
-                            domain::points::Point2f64::new(e0.x, e0.y),
-                            domain::points::Point2f64::new(e1.x, e1.y),
-                        );
-                        risers.push((key, (ty, mk, ph, nm)));
-                    }
+                    risers.push((key, (ty, mk, ph, nm)));
                 }
+                let _ = plan;
                 let floors = storey
                     .floors
                     .regions
@@ -884,17 +870,16 @@ impl AppController {
                         .then(|| (document::centroid_key(r.centroid()), (ty, mk, ph, nm)))
                     })
                     .collect();
-                (walls, risers, faces, floors, ceilings)
+                (walls, risers, floors, ceilings)
             };
             let sd = &mut self.document.storeys[idx];
-            for (k, v) in walls {
-                sd.wall_constructions.entry(k).or_insert(v);
+            for (r, v) in walls {
+                if sd.wall_span_lookup(&r).is_none() {
+                    sd.wall_span_insert(&r, v);
+                }
             }
             for (k, v) in risers {
                 sd.riser_constructions.entry(k).or_insert(v);
-            }
-            for (k, v) in faces {
-                sd.face_constructions.entry(k).or_insert(v);
             }
             for (k, v) in floors {
                 sd.floor_constructions.entry(k).or_insert(v);

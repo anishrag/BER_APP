@@ -1207,12 +1207,12 @@ mod tests {
         doc.set_wall_section(vid, 0.0, len, len, WallExposure::Exposed);
         doc.wall_constructions.insert(
             SurfaceRef::wall(vid),
-            (
+            vec![crate::WallSpanEntry::whole_wall((
                 WallConstructionType::TimberConstruction,
                 ConstructionMakeup::Default,
                 ConstructionPhase::default(),
                 None,
-            ),
+            ))],
         );
 
         // Bump a dormer off the MIDDLE of that wall (outward, y<0): the splice

@@ -72,24 +72,6 @@ fn unset_exposure() -> WallExposure {
 
 pub type WallFaceKey = (i64, i64, i64, i64);
 
-/// Durable identity of ONE REGION of a partitioned wall face: the wall's
-/// [`WallFaceKey`] plus a wall-local `(along_m, height_m)` sample on the mm grid.
-///
-/// A partition piece has no `SurfaceRef` of its own — `surface_ref_at` maps
-/// EVERY piece of a wall to the same `SurfaceRef::wall(vid)` — so, exactly like
-/// a riser's base edge, a geometric key is its durable home. Without one,
-/// attributing a piece wrote the whole wall's entry and every piece read it
-/// back: at 56 Elmwood Road, setting one half's construction (and its photos)
-/// set both halves.
-pub type FaceRegionKey = (WallFaceKey, i64, i64);
-
-/// Quantize a wall-local `(along_m, height_m)` sample into a [`FaceRegionKey`]
-/// on `face`.
-pub fn face_region_key(face: WallFaceKey, sample: Point2f32) -> FaceRegionKey {
-    let q = |v: f32| (v as f64 * 1000.0).round() as i64;
-    (face, q(sample.x), q(sample.y))
-}
-
 /// Quantize a wall's base-edge endpoints `(start, end)` to a [`WallFaceKey`].
 pub fn wall_face_key(start: Point2f32, end: Point2f32) -> WallFaceKey {
     let q = |v: f32| (v as f64 * 1000.0).round() as i64;

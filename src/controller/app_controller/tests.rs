@@ -3295,6 +3295,98 @@ fn photograph_first_keeps_evidence_private_then_merges_on_spec() {
     let _ = std::fs::remove_file(&src);
 }
 
+/// The point of the SPAN key (C): a wall attribution is stored against the face
+/// BOX it occupies and matched by greatest OVERLAP, so it survives the split
+/// MOVING — which a point-like geometric key does not.
+///
+/// Paint a wall in two exposure runs, attribute each piece differently, then
+/// move the boundary. Each piece must keep the fabric of the piece it grew out
+/// of, because the stored boxes still overlap the new ones most.
+#[test]
+fn span_key_survives_the_split_boundary_moving() {
+    use ber_model::ber::structural::{ConstructionMakeup, ConstructionType, WallConstructionType};
+    let mut c = dimensioned_square_controller();
+    let (vid0, a0, b0) = c.document.outline.floor_plan.perimeter_walls()[0];
+    let mid = ((a0.x + b0.x) * 0.5, (a0.y + b0.y) * 0.5);
+    let len = ((b0.x - a0.x).powi(2) + (b0.y - a0.y).powi(2)).sqrt();
+
+    let paint = |c: &mut AppController, cut: f32| {
+        c.set_exposure_mode(true);
+        c.exposure_pointer_down(mid.0 as f64, mid.1 as f64, 0.5);
+        c.set_exposure_section_range(0.0, cut);
+        c.set_wall_exposure(WallExposure::Exposed);
+        c.exposure_pointer_down(mid.0 as f64, mid.1 as f64, 0.5);
+        c.set_exposure_section_range(cut, len);
+        c.set_wall_exposure(WallExposure::SemiExposed);
+        c.set_exposure_mode(false);
+        c.materialize();
+    };
+    paint(&mut c, len * 0.5);
+    assert_eq!(c.selected_exposure_wall.or(Some(vid0)), Some(vid0).or(None));
+
+    let ty_of = |c: &AppController, e: WallExposure| {
+        let rec = c.current_record.as_ref().unwrap();
+        rec.data.storeys[0]
+            .walls
+            .regions
+            .iter()
+            .find(|r| r.exposure == e)
+            .and_then(|r| rec.data.wall_construction(r.construction_id))
+            .map(|con| con.construction_type)
+            .unwrap_or_default()
+    };
+    let attribute = |c: &mut AppController, e: WallExposure, ty| {
+        let id = c.current_record.as_ref().unwrap().data.storeys[0]
+            .walls
+            .regions
+            .iter()
+            .find(|r| r.exposure == e)
+            .unwrap()
+            .id;
+        c.clear_structure_surface_selection();
+        c.structure_selected.insert(id);
+        c.begin_structure_edit();
+        c.set_structure_group_attrs(
+            0,
+            ConstructionType::Wall(ty),
+            ConstructionMakeup::Default,
+            Default::default(),
+        );
+        c.end_structure_edit();
+        c.materialize();
+    };
+
+    set_only_kind(&mut c, SurfaceKind::Walls);
+    attribute(&mut c, WallExposure::Exposed, WallConstructionType::Unknown);
+    attribute(
+        &mut c,
+        WallExposure::SemiExposed,
+        WallConstructionType::ConcreteHollowBlocks,
+    );
+    assert_eq!(
+        ty_of(&c, WallExposure::Exposed),
+        WallConstructionType::Unknown
+    );
+    assert_eq!(
+        ty_of(&c, WallExposure::SemiExposed),
+        WallConstructionType::ConcreteHollowBlocks
+    );
+
+    // MOVE the boundary: 50% -> 65%. Both pieces change shape; each must keep
+    // the fabric of the piece it grew out of (greatest overlap wins).
+    paint(&mut c, len * 0.65);
+    assert_eq!(
+        ty_of(&c, WallExposure::Exposed),
+        WallConstructionType::Unknown,
+        "the near run keeps its fabric across the boundary move"
+    );
+    assert_eq!(
+        ty_of(&c, WallExposure::SemiExposed),
+        WallConstructionType::ConcreteHollowBlocks,
+        "…and the far run keeps its own"
+    );
+}
+
 // ─── CHARACTERISATION: what the Structure editor groups on ─────────────────
 //
 // These pin the CURRENT, INTENDED behaviour of the group boxes so the planned
@@ -3738,10 +3830,10 @@ fn select_all_and_reset_reach_both_pieces_of_a_partitioned_wall() {
 /// and dropped from the record.
 ///
 /// Same collapse as the face-partition case, different cause — hence the shared
-/// `wall_piece_key_of`, which hands a geometric key to any wall carrying more
-/// than one attributable region (and leaves a single-region wall on its stable
-/// parametric `SurfaceRef`). Here the split is made by painting two exposure
-/// sections, which divides the plan wall exactly as a phase boundary does.
+/// the shared span key: every perimeter wall surface is stored against the FACE
+/// BOX it occupies on its parametric wall, matched by greatest overlap. Here the
+/// split is made by painting two exposure sections, which divides the plan wall
+/// exactly as a phase boundary does.
 #[test]
 fn field_split_wall_pieces_keep_distinct_constructions() {
     use ber_model::ber::structural::{ConstructionMakeup, ConstructionType, WallConstructionType};
@@ -25025,9 +25117,8 @@ fn select_all_includes_partitioned_wall_exposed_piece_exactly_once() {
 /// the wall, and the next stamp handed that construction (and, through the
 /// shared construction id, its photos) to the sibling — the assessor set one
 /// half, both halves ticked. The fix gives a piece its own durable home,
-/// `face_constructions` keyed by [`document::FaceRegionKey`] (the wall's face
-/// key + the piece's wall-local centroid) — the per-piece analogue of
-/// `riser_constructions`. Pins both directions: the two pieces take different
+/// a per-surface span entry — the wall's `SurfaceRef` plus the face BOX each
+/// piece occupies, matched by overlap. Pins both directions: the two pieces take different
 /// constructions, and each SURVIVES the materialize + cross-storey derive.
 #[test]
 fn field_partition_pieces_take_distinct_constructions() {

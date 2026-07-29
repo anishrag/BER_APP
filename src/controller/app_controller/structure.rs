@@ -398,9 +398,8 @@ impl AppController {
         #[allow(clippy::type_complexity)]
         let per_storey: Vec<(
             usize,
-            Vec<manip_plan::SurfaceRef>,
+            Vec<ber_model::ber::structural::WallRegion>,
             Vec<document::RiserKey>,
-            Vec<document::FaceRegionKey>,
         )> = {
             let Some(record) = self.current_record.as_ref() else {
                 return;
@@ -412,41 +411,33 @@ impl AppController {
                     continue;
                 };
                 let plan = &sd.outline.floor_plan;
-                let mut refs = Vec::new();
+                let mut walls: Vec<ber_model::ber::structural::WallRegion> = Vec::new();
                 let mut risers = Vec::new();
-                let mut faces = Vec::new();
                 for r in ids
                     .iter()
                     // `placeable_wall` spans perimeter AND porch inner walls; a
-                    // porch wall's base midpoint is off the outline, so it falls
-                    // through `surface_ref_at` to the riser-key branch — its
-                    // durable construction home is `riser_constructions`.
+                    // porch wall's base midpoint is off the outline, so it has no
+                    // `SurfaceRef` and its durable home is `riser_constructions`.
                     .filter_map(|id| storey.placeable_wall(*id))
                 {
-                    // A PIECE of a face-partitioned wall first: its siblings share
-                    // its `SurfaceRef`, so keying it there would write the whole
-                    // wall (the field report — attributing one half of a partition
-                    // set both halves, photos included).
-                    if let Some(fk) = sd.wall_piece_key_of(r, &storey.walls.regions) {
-                        faces.push(fk);
+                    // A perimeter wall SURFACE is stored against the face box it
+                    // occupies (`wall_span_insert`) — the whole wall, one piece of
+                    // a partition, one run of a phase split, all by the same rule.
+                    if sd.wall_face_box(r).is_some() {
+                        walls.push(r.clone());
                         continue;
                     }
                     let Some((e0, e1)) = r.base_edge() else {
                         continue;
                     };
-                    let mid =
-                        Point2f32::new(((e0.x + e1.x) * 0.5) as f32, ((e0.y + e1.y) * 0.5) as f32);
-                    if let Some(sref) = plan.surface_ref_at(mid, 0.05) {
-                        refs.push(sref);
-                    } else {
-                        risers.push(document::riser_key(
-                            Point2f64::new(e0.x, e0.y),
-                            Point2f64::new(e1.x, e1.y),
-                        ));
-                    }
+                    risers.push(document::riser_key(
+                        Point2f64::new(e0.x, e0.y),
+                        Point2f64::new(e1.x, e1.y),
+                    ));
                 }
-                if !refs.is_empty() || !risers.is_empty() || !faces.is_empty() {
-                    out.push((idx, refs, risers, faces));
+                let _ = plan;
+                if !walls.is_empty() || !risers.is_empty() {
+                    out.push((idx, walls, risers));
                 }
             }
             out
@@ -455,18 +446,13 @@ impl AppController {
             return;
         }
         self.record_history();
-        for (idx, refs, riser_keys, face_keys) in per_storey {
+        for (idx, walls, riser_keys) in per_storey {
             let sd = &mut self.document.storeys[idx];
-            for r in refs {
-                sd.wall_constructions
-                    .insert(r, (ty, makeup.clone(), phase.clone(), name.clone()));
+            for r in walls {
+                sd.wall_span_insert(&r, (ty, makeup.clone(), phase.clone(), name.clone()));
             }
             for k in riser_keys {
                 sd.riser_constructions
-                    .insert(k, (ty, makeup.clone(), phase.clone(), name.clone()));
-            }
-            for k in face_keys {
-                sd.face_constructions
                     .insert(k, (ty, makeup.clone(), phase.clone(), name.clone()));
             }
         }
@@ -1964,9 +1950,10 @@ impl AppController {
     /// actually attributed.
     fn detach_construction_for(&mut self, kind: SurfaceKind, ids: &[ItemId]) {
         enum Key {
-            WallRef(manip_plan::SurfaceRef),
+            /// A perimeter wall SURFACE — stored against the face box it
+            /// occupies, so a piece detaches without disturbing its siblings.
+            Wall(Box<ber_model::ber::structural::WallRegion>),
             Riser(document::RiserKey),
-            Face(document::FaceRegionKey),
             Area(document::CentroidKey),
         }
         // Each key with the phase its default entry should carry — the
@@ -1998,18 +1985,10 @@ impl AppController {
                                 .wall_construction(r.construction_id)
                                 .map(|c| c.base.construction_phase.clone())
                                 .unwrap_or_default();
-                            // A partition PIECE detaches on its own key, so a
-                            // reset can't drag its siblings back with it.
-                            if let Some(fk) = sd.wall_piece_key_of(r, &storey.walls.regions) {
-                                keys.push((Key::Face(fk), phase));
-                                continue;
-                            }
-                            let mid = Point2f32::new(
-                                ((e0.x + e1.x) * 0.5) as f32,
-                                ((e0.y + e1.y) * 0.5) as f32,
-                            );
-                            if let Some(sref) = plan.surface_ref_at(mid, 0.05) {
-                                keys.push((Key::WallRef(sref), phase));
+                            // A wall SURFACE detaches on its own face box, so a
+                            // reset can't drag a sibling piece back with it.
+                            if sd.wall_face_box(r).is_some() {
+                                keys.push((Key::Wall(Box::new(r.clone())), phase));
                             } else {
                                 keys.push((
                                     Key::Riser(document::riser_key(
@@ -2095,17 +2074,12 @@ impl AppController {
             let map_attributed = per_storey.iter().any(|(idx, keys)| {
                 let sd = &self.document.storeys[*idx];
                 keys.iter().any(|(k, _)| match k {
-                    Key::WallRef(r) => sd
-                        .wall_constructions
-                        .get(r)
-                        .is_some_and(|(ty, mk, ..)| ty.is_set() || mk.is_set()),
+                    Key::Wall(r) => sd
+                        .wall_span_lookup(r)
+                        .is_some_and(|e| e.value.0.is_set() || e.value.1.is_set()),
                     Key::Riser(rk) => sd
                         .riser_constructions
                         .get(rk)
-                        .is_some_and(|(ty, mk, ..)| ty.is_set() || mk.is_set()),
-                    Key::Face(fk) => sd
-                        .face_constructions
-                        .get(fk)
                         .is_some_and(|(ty, mk, ..)| ty.is_set() || mk.is_set()),
                     Key::Area(ck) => match kind {
                         SurfaceKind::Floors => sd
@@ -2130,17 +2104,15 @@ impl AppController {
             let sd = &mut self.document.storeys[idx];
             for (k, phase) in keys {
                 match k {
-                    Key::WallRef(r) => {
-                        sd.wall_constructions
-                            .insert(r, (Default::default(), Default::default(), phase, None));
+                    Key::Wall(r) => {
+                        sd.wall_span_insert(
+                            &r,
+                            (Default::default(), Default::default(), phase, None),
+                        );
                     }
                     Key::Riser(rk) => {
                         sd.riser_constructions
                             .insert(rk, (Default::default(), Default::default(), phase, None));
-                    }
-                    Key::Face(fk) => {
-                        sd.face_constructions
-                            .insert(fk, (Default::default(), Default::default(), phase, None));
                     }
                     Key::Area(ck) => match kind {
                         SurfaceKind::Floors => {

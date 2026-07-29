@@ -4524,12 +4524,12 @@ mod tests {
         );
         doc.wall_constructions.insert(
             perim_ref,
-            (
+            vec![crate::WallSpanEntry::whole_wall((
                 WallConstructionType::CavityWall,
                 ConstructionMakeup::Default,
                 ConstructionPhase::default(),
                 None,
-            ),
+            ))],
         );
 
         // Simulate the cross-storey derive resetting EVERY wall to the default
@@ -4678,12 +4678,12 @@ mod tests {
         let sref = doc.outline.floor_plan.surface_ref_at(mid, 0.05).unwrap();
         doc.wall_constructions.insert(
             sref,
-            (
+            vec![crate::WallSpanEntry::whole_wall((
                 WallConstructionType::TimberConstruction,
                 ConstructionMakeup::Default,
                 ConstructionPhase::default(),
                 None,
-            ),
+            ))],
         );
 
         // Re-resolve + stamp (mirroring refresh_storey's tail).
