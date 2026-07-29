@@ -3387,6 +3387,88 @@ fn span_key_survives_the_split_boundary_moving() {
     );
 }
 
+/// FIELD REGRESSION (2026-07-29, 56 Elmwood Road): a wall classified EXPOSED
+/// and then face-partitioned for CONSTRUCTION reasons must keep that exposure on
+/// every piece AND stay open to being changed.
+///
+/// The pieces did inherit it (via the partition's `base_exposure`), but the
+/// group's exposure control was LOCKED for any partitioned wall — "it was
+/// exposed when split, it should still be open to being changed". The lock
+/// exists only to stop a bulk set painting over PER-REGION answers, and a
+/// partition cut without painting any has none to protect. So the lock now
+/// applies to a NON-UNIFORM partition only, and a bulk set on a uniform one
+/// moves its `base_exposure`, carrying every piece with it.
+#[test]
+fn uniform_partition_keeps_its_exposure_and_stays_changeable() {
+    use ber_model::ber::structural::SurfaceExposure;
+    use document::PartitionCut;
+    let mut c = dimensioned_square_controller();
+    let (vid, a0, b0) = c.document.outline.floor_plan.perimeter_walls()[2];
+    let mid = (((a0.x + b0.x) * 0.5) as f64, ((a0.y + b0.y) * 0.5) as f64);
+
+    // Classify FIRST, then partition — the field order.
+    c.set_exposure_mode(true);
+    c.exposure_pointer_down(mid.0, mid.1, 0.5);
+    c.set_wall_exposure(WallExposure::Exposed);
+    c.set_exposure_mode(false);
+    c.materialize();
+
+    c.document.commit_partition_cut(
+        vid,
+        PartitionCut {
+            a: Point2f32::new(5.0, 0.0),
+            b: Point2f32::new(5.0, 2.4),
+        },
+    );
+    c.mark_dirty().unwrap();
+    c.materialize();
+
+    let piece_exposures = |c: &AppController| -> Vec<WallExposure> {
+        c.current_record.as_ref().unwrap().data.storeys[0]
+            .walls
+            .regions
+            .iter()
+            .filter(|r| {
+                r.base_edge().is_some_and(|(e0, e1)| {
+                    (e0.y - 10.0).abs() < 0.01 && (e1.y - 10.0).abs() < 0.01
+                })
+            })
+            .map(|r| r.exposure)
+            .collect()
+    };
+    let ex = piece_exposures(&c);
+    assert_eq!(ex.len(), 2, "the cut yields two pieces");
+    assert!(
+        ex.iter().all(|e| *e == WallExposure::Exposed),
+        "both pieces KEEP the exposure the wall had when it was split: {ex:?}"
+    );
+
+    // The group's exposure control is OPEN — the partition is uniform.
+    set_only_kind(&mut c, SurfaceKind::Walls);
+    c.set_structure_select_mode(Some(SelectMode::All));
+    c.begin_structure_edit();
+    let gi = c
+        .structure_edit()
+        .unwrap()
+        .groups
+        .iter()
+        .position(|g| g.exposure == SurfaceExposure::Wall(WallExposure::Exposed))
+        .expect("a group for the exposed pieces");
+    assert!(
+        !c.structure_edit().unwrap().groups[gi].exposure_locked,
+        "a UNIFORM partition does not lock the exposure control"
+    );
+
+    // And changing it actually moves every piece.
+    c.set_structure_group_exposure(gi, SurfaceExposure::Wall(WallExposure::SemiExposed));
+    c.materialize();
+    let ex = piece_exposures(&c);
+    assert!(
+        ex.iter().all(|e| *e == WallExposure::SemiExposed),
+        "the bulk set carries EVERY piece with it: {ex:?}"
+    );
+}
+
 // ─── CHARACTERISATION: what the Structure editor groups on ─────────────────
 //
 // These pin the CURRENT, INTENDED behaviour of the group boxes so the planned
@@ -19210,11 +19292,16 @@ fn structure_group_exposure_repaints_only_targeted_wall_span() {
 
 /// (d) A FACE-PARTITIONED wall's pieces MERGE into the ordinary attribute
 /// group (same fabric/phase/exposure — field decision d78f1e41: the lock no
-/// longer splits attribution grouping), and the merged group is
-/// `exposure_locked`: the bulk exposure dropdown is disabled, because the
-/// per-region partition tool owns the partitioned wall's exposure.
+/// longer splits attribution grouping).
+///
+/// The bulk exposure control is locked ONLY when the partition carries
+/// PER-REGION exposures, which are the partition tool's answers and must not be
+/// painted over. A UNIFORM partition — cut for CONSTRUCTION reasons with no
+/// region painted — has nothing to protect and stays changeable (field
+/// correction, 56 Elmwood Road: "it was exposed when split, it should still be
+/// open to being changed").
 #[test]
-fn face_partitioned_wall_merges_into_group_and_locks_its_exposure() {
+fn face_partitioned_wall_merges_into_group_and_locks_only_when_per_region() {
     use document::PartitionCut;
     let mut c = dimensioned_square_controller();
     let (vid0, ..) = c.document.outline.floor_plan.perimeter_walls()[0];
@@ -19246,8 +19333,32 @@ fn face_partitioned_wall_merges_into_group_and_locks_its_exposure() {
         "3 plain walls + the partitioned wall's 2 pieces"
     );
     assert!(
-        e.groups[0].exposure_locked,
-        "the merged group's exposure dropdown is locked (a member is partitioned)"
+        !e.groups[0].exposure_locked,
+        "a UNIFORM partition leaves the exposure dropdown OPEN — nothing painted \
+         per-region, so a bulk set has nothing to destroy"
+    );
+
+    // Paint ONE region and the lock comes back: now there are per-region
+    // answers, and a bulk set would paint over them.
+    c.end_structure_edit();
+    c.document.set_partition_region_exposure(
+        vid0,
+        Point2f32::new(5.0, 0.5),
+        WallExposure::NonHeatLoss,
+        10.0,
+        2.4,
+    );
+    c.mark_dirty().unwrap();
+    c.materialize();
+    c.set_structure_select_mode(Some(SelectMode::All));
+    c.begin_structure_edit();
+    assert!(
+        c.structure_edit()
+            .unwrap()
+            .groups
+            .iter()
+            .any(|g| g.exposure_locked),
+        "a partition WITH per-region exposures locks the bulk control"
     );
 }
 

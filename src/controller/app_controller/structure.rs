@@ -717,6 +717,9 @@ impl AppController {
         enum WallWrite {
             Section(manip_plan::VertexId, f32, f32, f32), // vid, start_m, end_m, len
             Riser(document::RiserKey),
+            /// A UNIFORM face partition: no per-region answers, so the whole
+            /// face moves together via its `base_exposure`.
+            UniformPartition(manip_plan::VertexId),
         }
         let writes: Vec<(usize, Vec<WallWrite>)> = {
             let Some(record) = self.current_record.as_ref() else {
@@ -732,11 +735,15 @@ impl AppController {
                     .filter_map(|id| storey.walls.regions.iter().find(|r| r.id == *id))
                     .filter_map(|r| match doc.recover_wall_region_span(r) {
                         Some((vid, start_m, end_m, len)) => {
-                            // Face-partitioned walls are owned per-2-D-region — skip.
-                            if doc.is_wall_partitioned(vid) {
-                                None
-                            } else {
+                            // A partition with PER-REGION answers is owned by the
+                            // partition tool — skip it. A UNIFORM one still holds
+                            // the whole wall's single answer, so it moves as one.
+                            if !doc.is_wall_partitioned(vid) {
                                 Some(WallWrite::Section(vid, start_m, end_m, len))
+                            } else if doc.wall_partition_is_uniform(vid) {
+                                Some(WallWrite::UniformPartition(vid))
+                            } else {
+                                None
                             }
                         }
                         // No perimeter match → riser: key by its base edge.
@@ -769,6 +776,9 @@ impl AppController {
                         self.document.storeys[idx]
                             .riser_exposure
                             .insert(key, exposure);
+                    }
+                    WallWrite::UniformPartition(vid) => {
+                        self.document.storeys[idx].set_uniform_partition_exposure(vid, exposure);
                     }
                 }
             }
@@ -843,13 +853,21 @@ impl AppController {
                     // wall's exposure is derivation-owned, so its group locks the
                     // exposure control the same way (the durable exposure write
                     // path can't reach porch walls regardless).
+                    // Only a partition carrying PER-REGION exposures locks the
+                    // bulk control — those are the partition tool's answers and a
+                    // bulk set would paint over them. A UNIFORM partition (cut for
+                    // construction reasons, exposure untouched) has nothing to
+                    // protect, so it stays changeable: the set moves the
+                    // partition's `base_exposure` and every piece follows.
                     let locked = porch
                         || document
                             .storeys
                             .get(idx)
                             .and_then(|doc| {
-                                doc.recover_wall_region_span(r)
-                                    .map(|(vid, ..)| doc.is_wall_partitioned(vid))
+                                doc.recover_wall_region_span(r).map(|(vid, ..)| {
+                                    doc.is_wall_partitioned(vid)
+                                        && !doc.wall_partition_is_uniform(vid)
+                                })
                             })
                             .unwrap_or(false);
                     let (ty, makeup, phase, name, photos) =

@@ -115,6 +115,46 @@ impl StoreyDoc {
         self.wall_face_partitions.contains_key(&vid)
     }
 
+    /// Whether wall `vid`'s partition is UNIFORM in exposure — cut into pieces,
+    /// but with no per-region exposure painted on any of them, so every piece
+    /// still carries the answer the whole wall had ([`base_exposure`]).
+    ///
+    /// A uniform partition has nothing for a bulk exposure set to destroy, so
+    /// the Structure editor leaves that control ENABLED (the lock exists only to
+    /// protect per-region answers). Field report, 56 Elmwood Road: a wall
+    /// classified Exposed and then cut for CONSTRUCTION reasons had its exposure
+    /// frozen — "it was exposed when split, it should still be open to being
+    /// changed".
+    ///
+    /// `false` when `vid` is not partitioned — there is no partition to be
+    /// uniform.
+    ///
+    /// [`base_exposure`]: ber_model::ber::structural::WallFacePartition::base_exposure
+    pub fn wall_partition_is_uniform(&self, vid: VertexId) -> bool {
+        self.wall_face_partitions
+            .get(&vid)
+            .is_some_and(|p| p.regions.is_empty())
+    }
+
+    /// Set the exposure of wall `vid`'s UNIFORM partition — the whole face at
+    /// once, by moving its [`base_exposure`]. No-op on a partition that carries
+    /// per-region answers: those are the partition tool's to change, one region
+    /// at a time.
+    ///
+    /// [`base_exposure`]: ber_model::ber::structural::WallFacePartition::base_exposure
+    pub fn set_uniform_partition_exposure(&mut self, vid: VertexId, exposure: WallExposure) {
+        if exposure == WallExposure::InterStorey {
+            return; // derived-only classification — never assessor-painted
+        }
+        if let Some(p) = self
+            .wall_face_partitions
+            .get_mut(&vid)
+            .filter(|p| p.regions.is_empty())
+        {
+            p.base_exposure = exposure;
+        }
+    }
+
     /// A resolved wall region's parametric wall plus the BOX it occupies on that
     /// wall's face, in wall-local `(along_m, height_m)` — the single durable
     /// identity of a wall surface.
