@@ -3105,6 +3105,97 @@ fn stray_evidence_on_the_unclassified_bucket_is_stripped() {
     assert_eq!(ber.strip_evidence_from_unclassified(), 0);
 }
 
+/// CONTRACT (the one the rework must not break, and the reason the field
+/// report hurt): renaming a group the assessor has FULLY selected keeps its
+/// photos. The whole group moves, so its evidence moves with it.
+///
+/// Renaming a SUBSET is a different act — those members FORK into their own
+/// group, and evidence stays with the group it was recorded on. Both are pinned
+/// here so the stable-id rework reproduces them deliberately.
+#[test]
+fn characterise_full_rename_keeps_photos_subset_rename_forks() {
+    use ber_model::ber::structural::{ConstructionMakeup, ConstructionType, WallConstructionType};
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    let tmp = std::env::temp_dir().join(format!("ber_photos_{}", ItemId::default().0));
+    c.set_photos_dir(tmp.clone());
+    let src = std::env::temp_dir().join(format!("ber_src_{}.jpg", ItemId::default().0));
+    std::fs::write(&src, b"jpeg-bytes").unwrap();
+    set_only_kind(&mut c, SurfaceKind::Walls);
+    let mids = square_wall_mids(&c);
+
+    // TWO walls in one named group, with a photo.
+    c.clear_structure_surface_selection();
+    for m in [mids[0], mids[1]] {
+        let id = wall_at_mid(&c, m);
+        c.structure_selected.insert(id);
+    }
+    c.begin_structure_edit();
+    c.set_structure_group_attrs(
+        0,
+        ConstructionType::Wall(WallConstructionType::CavityWall),
+        ConstructionMakeup::SomeInsulation,
+        ConstructionPhase::Original,
+    );
+    c.set_structure_group_name(0, "warmboarded".to_string());
+    c.add_group_photo(0, &src, PhotoQuality::Full);
+    c.end_structure_edit();
+    c.materialize();
+
+    let photos_at = |c: &AppController, m: (f64, f64)| -> usize {
+        let id = wall_at_mid(c, m);
+        let rec = c.current_record.as_ref().unwrap();
+        rec.data.storeys[0]
+            .walls
+            .regions
+            .iter()
+            .find(|r| r.id == id)
+            .and_then(|r| rec.data.wall_construction(r.construction_id))
+            .map(|con| con.base.photos.len())
+            .unwrap_or(0)
+    };
+    assert_eq!(photos_at(&c, mids[0]), 1, "the group has its photo");
+
+    // FULL rename — both members selected.
+    c.clear_structure_surface_selection();
+    for m in [mids[0], mids[1]] {
+        let id = wall_at_mid(&c, m);
+        c.structure_selected.insert(id);
+    }
+    c.begin_structure_edit();
+    c.set_structure_group_name(0, "warm boarded".to_string());
+    c.end_structure_edit();
+    c.materialize();
+    assert_eq!(
+        photos_at(&c, mids[0]),
+        1,
+        "a FULL rename keeps the group's photo — the whole group moved"
+    );
+    assert_eq!(photos_at(&c, mids[1]), 1, "…for every member");
+
+    // SUBSET rename — one member only: it FORKS, and the fork starts without
+    // the evidence, which stays with the group it was recorded on.
+    c.clear_structure_surface_selection();
+    let id = wall_at_mid(&c, mids[0]);
+    c.structure_selected.insert(id);
+    c.begin_structure_edit();
+    c.set_structure_group_name(0, "just this one".to_string());
+    c.end_structure_edit();
+    c.materialize();
+    assert_eq!(
+        photos_at(&c, mids[0]),
+        0,
+        "the forked member starts with fresh evidence"
+    );
+    assert_eq!(
+        photos_at(&c, mids[1]),
+        1,
+        "…and the stay-behind group KEEPS the photo it was recorded on"
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+    let _ = std::fs::remove_file(&src);
+}
+
 // ─── CHARACTERISATION: what the Structure editor groups on ─────────────────
 //
 // These pin the CURRENT, INTENDED behaviour of the group boxes so the planned
