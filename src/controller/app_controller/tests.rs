@@ -30721,3 +30721,566 @@ fn dimension_prompt_ui_walls_are_the_live_plan_edges() {
         "the short 0.5 m jog was among the prompts: {prompted_lengths:?}"
     );
 }
+
+/// STRUCTURAL: a resolved region's id SURVIVES a materialize.
+///
+/// The resolve mints every wall/floor/ceiling region fresh, and the InterStorey
+/// derive re-splits and re-mints after it — so a region id used to be valid only
+/// until the next materialize. Anything holding one (the Structure selection, an
+/// open "Edit attributes" session, the riser selection, the open elevation) had
+/// to capture a durable key beforehand and re-point afterwards, per caller.
+///
+/// `document::restore_region_identity` gives each re-derived region back the id
+/// its surface held, so a no-op materialize churns NOTHING. This is what makes
+/// `materialize()` safe to call at the point of decision — see
+/// `subset_decision_needs_no_caller_discipline`.
+#[test]
+fn region_ids_survive_a_materialize() {
+    fn ids_by_surface(c: &AppController) -> Vec<(String, ItemId)> {
+        let mut out = Vec::new();
+        let rec = c.current_record.as_ref().unwrap();
+        for (i, s) in rec.data.storeys.iter().enumerate() {
+            for r in s.walls.regions.iter().chain(s.porch_walls.regions.iter()) {
+                let (e0, e1) = r.base_edge().expect("a resolved wall has a base edge");
+                out.push((
+                    format!("{i}/wall/{:?}/{:?}", (e0.x, e0.y, e0.z), (e1.x, e1.y)),
+                    r.id,
+                ));
+            }
+            for (tag, regs) in [
+                ("floor", &s.floors),
+                ("porch", &s.porches),
+                ("living", &s.living_areas),
+            ] {
+                for r in regs.regions.iter() {
+                    out.push((
+                        format!("{i}/{tag}/{:?}", document::centroid_key(r.centroid())),
+                        r.id,
+                    ));
+                }
+            }
+            for r in s.ceilings.regions.iter() {
+                out.push((
+                    format!("{i}/ceiling/{:?}", document::centroid_key(r.centroid())),
+                    r.id,
+                ));
+            }
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    // Fixtures spanning the shapes that re-mint: porches, ceiling steps/apexes,
+    // risers, wall splits, and the multi-storey InterStorey derive.
+    let mut fixtures: Vec<(&str, AppController)> = vec![
+        ("square", dimensioned_square_controller()),
+        ("porch_square", porch_square_controller()),
+        ("ceiling_apex_ready", ceiling_apex_ready_controller()),
+        ("ceiling_ready_notched", ceiling_ready_notched_controller()),
+        ("riser_ready", riser_ready_controller()),
+        ("all_storeys_lasso", all_storeys_lasso_controller()),
+        (
+            "partial_cover_two_storey",
+            partial_cover_two_storey_controller(),
+        ),
+        (
+            "inter_storey_riser",
+            inter_storey_riser_fixture_controller(),
+        ),
+        ("t_plan", dimensioned_t_plan_controller()),
+        ("cd36f510", cd36f510_controller()),
+    ];
+    for (name, c) in fixtures.iter_mut() {
+        c.materialize();
+        let before = ids_by_surface(c);
+        assert!(
+            !before.is_empty(),
+            "{name}: the fixture resolved some regions"
+        );
+        // Mark dirty WITHOUT changing anything, then re-derive: the geometry is
+        // identical, so every id must be too.
+        c.revision = c.revision.wrapping_add(1);
+        c.materialize();
+        assert_eq!(
+            before,
+            ids_by_surface(c),
+            "{name}: every region kept its id"
+        );
+        // Ids stay UNIQUE — the restore hands each out at most once.
+        let all: Vec<ItemId> = ids_by_surface(c).into_iter().map(|(_, id)| id).collect();
+        let uniq: HashSet<ItemId> = all.iter().copied().collect();
+        assert_eq!(all.len(), uniq.len(), "{name}: region ids are unique");
+    }
+}
+
+/// STRUCTURAL: the full-group-vs-subset decision brings the record current
+/// ITSELF — no caller has to remember to materialize first.
+///
+/// This was the actual complaint behind four field bugs: the controller writes
+/// attributes to the durable maps and a region's `construction_id` only catches
+/// up at the next materialize, so a decision made by reading the record mid-edit
+/// answered about the state before the session. The obvious remedy — materialize
+/// before deciding — used to INVALIDATE the caller's ids (every resolve re-minted
+/// them), so it could only go at the top of an operation, before ids were
+/// captured, and it kept being forgotten at one more call site.
+///
+/// With region identity stable across a resolve
+/// (`region_ids_survive_a_materialize`) the remedy is safe where the decision is
+/// made, so `group_covers_all_members` owns it. This pins that: the ids captured
+/// BEFORE the decision are still live AFTER it.
+#[test]
+fn subset_decision_needs_no_caller_discipline() {
+    use ber_model::ber::structural::{ConstructionMakeup, ConstructionType, WallConstructionType};
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    set_only_kind(&mut c, SurfaceKind::Walls);
+    let mids = square_wall_mids(&c);
+
+    c.clear_structure_surface_selection();
+    for m in &mids[0..2] {
+        let id = wall_at_mid(&c, *m);
+        c.structure_selected.insert(id);
+    }
+    c.begin_structure_edit();
+    let held: Vec<ItemId> = c.structure_edit().unwrap().groups[0].ids.clone();
+
+    // The attribute write lands in the durable maps; the record is now behind.
+    c.set_structure_group_attrs(
+        0,
+        ConstructionType::Wall(WallConstructionType::CavityWall),
+        ConstructionMakeup::Default,
+        ConstructionPhase::Original,
+    );
+    c.set_structure_group_name(0, "front pair".to_string());
+    // Each of those brought the record current from inside the decision — and
+    // the ids the session captured before them are STILL the live regions.
+    c.materialize();
+    let live: HashSet<ItemId> = c.current_record.as_ref().unwrap().data.storeys[0]
+        .walls
+        .regions
+        .iter()
+        .map(|r| r.id)
+        .collect();
+    for id in &held {
+        assert!(
+            live.contains(id),
+            "a captured region id outlives the decision"
+        );
+    }
+    assert_eq!(
+        c.structure_edit().unwrap().groups[0]
+            .explicit_name
+            .as_deref(),
+        Some("front pair"),
+        "and the group keeps its name — the decision read a CURRENT record"
+    );
+}
+
+/// STRUCTURAL: a held region id whose SURFACE the re-resolve removed is dropped
+/// from the Structure selection and from any open edit session's group.
+///
+/// Region identity is stable across a resolve, so nothing needs re-pointing any
+/// more — but ids still have to DIE when their surface does. A partition cut
+/// splits one wall into two pieces with new base edges, so the whole wall's id
+/// is no longer any region's: leaving it in `structure_selected` would keep it
+/// counting toward the "N selected" headers, the single-selection gate in the
+/// partition flow and the is-empty checks, all of which are length-sensitive.
+#[test]
+fn a_removed_surface_drops_out_of_the_selection() {
+    use document::PartitionCut;
+
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    set_only_kind(&mut c, SurfaceKind::Walls);
+
+    // Select the whole top wall (and note a second wall the cut won't touch).
+    let mids = square_wall_mids(&c);
+    let doomed = wall_at_mid(&c, mids[2]);
+    let survivor = wall_at_mid(&c, mids[0]);
+    c.clear_structure_surface_selection();
+    c.structure_selected.insert(doomed);
+    c.structure_selected.insert(survivor);
+    c.begin_structure_edit();
+    assert!(
+        c.structure_edit().unwrap().groups[0].ids.contains(&doomed),
+        "the session opened holding the wall about to be split"
+    );
+
+    // Split that wall in two: neither piece is the surface `doomed` named.
+    let (vid, ..) = c.document.outline.floor_plan.perimeter_walls()[2];
+    c.document.commit_partition_cut(
+        vid,
+        PartitionCut {
+            a: Point2f32::new(5.0, 0.0),
+            b: Point2f32::new(5.0, 2.4),
+        },
+    );
+    for a in [2.5_f32, 7.5] {
+        c.document.set_partition_region_exposure(
+            vid,
+            Point2f32::new(a, 1.2),
+            WallExposure::Exposed,
+            10.0,
+            2.4,
+        );
+    }
+    c.mark_dirty().unwrap();
+    c.materialize();
+
+    let live: HashSet<ItemId> = c.current_record.as_ref().unwrap().data.storeys[0]
+        .walls
+        .regions
+        .iter()
+        .map(|r| r.id)
+        .collect();
+    assert!(
+        !live.contains(&doomed),
+        "the split really removed that surface"
+    );
+    assert!(
+        !c.structure_selected.contains(&doomed),
+        "…so its id left the selection rather than lingering as a phantom member"
+    );
+    assert!(
+        !c.structure_edit().unwrap().groups[0].ids.contains(&doomed),
+        "…and left the open edit session's group too"
+    );
+    // The untouched wall is unaffected — the prune drops the dead, not the rest.
+    assert!(
+        live.contains(&survivor),
+        "the other wall is still a surface"
+    );
+    assert!(
+        c.structure_selected.contains(&survivor),
+        "and keeps its place in the selection across the re-resolve"
+    );
+}
+
+/// FIELD REGRESSION (2026-07-29): "when I click Reset in the Structure phase it
+/// resets the construction phase to Unassigned — it should reset to the default
+/// for its location based on the mapping phase."
+///
+/// Reset returns a group box to the two-mode entry, and it used to blank the
+/// phase to `ConstructionPhase::default()` (= `Unassigned`). That is wrong twice
+/// over. The phase axis is DERIVED from the phase-area mapping, so the fabric
+/// default for a surface is whatever zone it sits in — an extension wall's
+/// default is `Extension1`, not "no phase". And the editor stamps `g.phase` onto
+/// the durable store with EVERY attribute pick, so a box left reading
+/// `Unassigned` writes that onto the next pick and strips the wall's phase for
+/// real — the reset would quietly undo the phase mapping.
+#[test]
+fn reset_returns_the_group_to_its_mapping_phase() {
+    use ber_model::ber::structural::{ConstructionMakeup, ConstructionType, WallConstructionType};
+    let p = |x: f32, y: f32| Point2f32::new(x, y);
+    let mut c = dimensioned_square_controller();
+    // Tag the right half Extension1: the right wall's mapping phase is
+    // Extension1, the left wall's is the untagged Unassigned.
+    c.phase_regions.entry(0).or_default().push(PhaseRegion {
+        polygon: (vec![p(5., 0.), p(10., 0.), p(10., 10.), p(5., 10.)])
+            .into_iter()
+            .map(to_f64)
+            .collect(),
+        phase: ConstructionPhase::Extension1,
+    });
+    c.commit_to_ber().unwrap();
+    c.materialize();
+    set_only_kind(&mut c, SurfaceKind::Walls);
+
+    let wall_phase = |c: &AppController, mid: (f64, f64)| {
+        let id = wall_at_mid(c, mid);
+        let rec = c.current_record.as_ref().unwrap();
+        rec.data.storeys[0]
+            .walls
+            .regions
+            .iter()
+            .find(|r| r.id == id)
+            .and_then(|r| rec.data.wall_construction(r.construction_id))
+            .map(|cc| cc.base.construction_phase.clone())
+            .unwrap()
+    };
+    assert_eq!(
+        wall_phase(&c, (10.0, 5.0)),
+        ConstructionPhase::Extension1,
+        "the right wall maps to the tagged zone"
+    );
+
+    c.clear_structure_surface_selection();
+    c.structure_selected.insert(wall_at_mid(&c, (10.0, 5.0)));
+    c.begin_structure_edit();
+    c.set_structure_group_attrs(
+        0,
+        ConstructionType::Wall(WallConstructionType::CavityWall),
+        ConstructionMakeup::SomeInsulation,
+        c.structure_edit().unwrap().groups[0].phase.clone(),
+    );
+    c.materialize();
+
+    c.reset_structure_group(0);
+    assert_eq!(
+        c.structure_edit().unwrap().groups[0].phase,
+        ConstructionPhase::Extension1,
+        "the BOX returns to the mapping phase, not Unassigned — otherwise the \
+         next attribute pick writes Unassigned onto the wall"
+    );
+    assert_eq!(
+        c.structure_edit().unwrap().groups[0].makeup,
+        ConstructionMakeup::Tbd,
+        "and the build-up really is cleared"
+    );
+    c.materialize();
+    assert_eq!(
+        wall_phase(&c, (10.0, 5.0)),
+        ConstructionPhase::Extension1,
+        "the RECORD keeps the mapping phase across the reset too"
+    );
+
+    // The knock-on the box value causes: attribute again straight after the
+    // reset, exactly as the editor does (it passes `g.phase` through).
+    c.set_structure_group_attrs(
+        0,
+        ConstructionType::Wall(WallConstructionType::TimberConstruction),
+        ConstructionMakeup::Default,
+        c.structure_edit().unwrap().groups[0].phase.clone(),
+    );
+    c.materialize();
+    assert_eq!(
+        wall_phase(&c, (10.0, 5.0)),
+        ConstructionPhase::Extension1,
+        "re-attributing after a reset does NOT strip the wall's phase"
+    );
+}
+
+/// Reset is per-BOX, and the boxes already split on phase — so a "Select all"
+/// spanning two zones opens one group per zone, and each returns to ITS OWN
+/// mapping phase. This is the multi-zone shape of the field report: the
+/// extension's box must come back reading `Extension1`, not `Unassigned`.
+#[test]
+fn reset_returns_each_zone_group_to_its_own_phase() {
+    use ber_model::ber::structural::{ConstructionMakeup, ConstructionType, WallConstructionType};
+    let p = |x: f32, y: f32| Point2f32::new(x, y);
+    let mut c = dimensioned_square_controller();
+    c.phase_regions.entry(0).or_default().push(PhaseRegion {
+        polygon: (vec![p(5., 0.), p(10., 0.), p(10., 10.), p(5., 10.)])
+            .into_iter()
+            .map(to_f64)
+            .collect(),
+        phase: ConstructionPhase::Extension1,
+    });
+    c.commit_to_ber().unwrap();
+    c.materialize();
+    set_only_kind(&mut c, SurfaceKind::Walls);
+    c.set_structure_select_mode(Some(SelectMode::All));
+    c.begin_structure_edit();
+
+    // One box per phase zone (the documented group-box split).
+    let opened: Vec<ConstructionPhase> = c
+        .structure_edit()
+        .unwrap()
+        .groups
+        .iter()
+        .map(|g| g.phase.clone())
+        .collect();
+    assert!(
+        opened.contains(&ConstructionPhase::Extension1)
+            && opened.contains(&ConstructionPhase::Unassigned),
+        "the selection opened one box per zone: {opened:?}"
+    );
+
+    for i in 0..c.structure_edit().unwrap().groups.len() {
+        let phase = c.structure_edit().unwrap().groups[i].phase.clone();
+        c.set_structure_group_attrs(
+            i,
+            ConstructionType::Wall(WallConstructionType::CavityWall),
+            ConstructionMakeup::SomeInsulation,
+            phase,
+        );
+    }
+    c.materialize();
+
+    for i in 0..c.structure_edit().unwrap().groups.len() {
+        c.reset_structure_group(i);
+    }
+    let after: Vec<ConstructionPhase> = c
+        .structure_edit()
+        .unwrap()
+        .groups
+        .iter()
+        .map(|g| g.phase.clone())
+        .collect();
+    assert_eq!(
+        after, opened,
+        "every box came back to the phase its surfaces map to"
+    );
+
+    c.materialize();
+    let rec = c.current_record.as_ref().unwrap();
+    let phases: Vec<ConstructionPhase> = rec.data.storeys[0]
+        .walls
+        .regions
+        .iter()
+        .filter_map(|r| rec.data.wall_construction(r.construction_id))
+        .map(|cc| cc.base.construction_phase.clone())
+        .collect();
+    assert!(
+        phases.contains(&ConstructionPhase::Extension1)
+            && phases.contains(&ConstructionPhase::Unassigned),
+        "and the record still carries both zones' phases: {phases:?}"
+    );
+    assert!(
+        rec.data.storeys[0]
+            .walls
+            .regions
+            .iter()
+            .filter_map(|r| rec.data.wall_construction(r.construction_id))
+            .all(|cc| cc.base.construction_makeup == ConstructionMakeup::Tbd),
+        "every member's build-up cleared"
+    );
+}
+
+/// FIELD REGRESSION (2026-07-29): "I reset 3 walls, the boxes went back to
+/// Group 1 / Group 2, but selecting them again opened TWO groups still called
+/// 'w' and 'wb'. They should open as ONE group — everything else about them is
+/// the same — and the name should have been reset."
+///
+/// Two defects, both about the NAME:
+///
+/// 1. Naming a group whose fabric is still unset renamed the shared
+///    UNCLASSIFIED bucket IN PLACE. The bucket reads as a "full group" for the
+///    subset decision (it is not a group at all — there is nothing to be a
+///    subset of), and the rename took that as licence to brand it — so every
+///    OTHER un-answered surface in the house inherited the name too.
+/// 2. Reset then could not clear it: the "did this box actually apply
+///    anything?" gate counted only type and build-up, so a name-only group
+///    looked untouched and the detach returned early. The box cleared to
+///    "Group N" while the record kept the name — the reset was a no-op that
+///    looked like it worked.
+#[test]
+fn reset_clears_a_name_applied_before_any_fabric() {
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    set_only_kind(&mut c, SurfaceKind::Walls);
+    let mids = square_wall_mids(&c);
+    let names = |c: &AppController| -> Vec<String> {
+        let rec = c.current_record.as_ref().unwrap();
+        rec.data.storeys[0]
+            .walls
+            .regions
+            .iter()
+            .filter_map(|r| rec.data.wall_construction(r.construction_id))
+            .map(|cc| cc.base.name.clone().unwrap_or_else(|| "-".into()))
+            .collect()
+    };
+
+    // Label the selection BEFORE choosing its fabric — the assessor's order.
+    c.clear_structure_surface_selection();
+    for m in &mids[0..2] {
+        let id = wall_at_mid(&c, *m);
+        c.structure_selected.insert(id);
+    }
+    c.begin_structure_edit();
+    c.set_structure_group_name(0, "w".to_string());
+    c.materialize();
+    assert_eq!(
+        names(&c).iter().filter(|n| *n == "w").count(),
+        2,
+        "the name reaches the two selected walls and NO others — it must not \
+         brand the unclassified bucket the rest of the house shares: {:?}",
+        names(&c)
+    );
+
+    // Reset must actually clear it, not just blank the box.
+    c.reset_structure_group(0);
+    c.materialize();
+    assert!(
+        names(&c).iter().all(|n| n == "-"),
+        "reset cleared the name from the record: {:?}",
+        names(&c)
+    );
+
+    // …so re-selecting opens ONE fresh unnamed group, not the old named ones.
+    c.end_structure_edit();
+    c.clear_structure_surface_selection();
+    for m in &mids[0..2] {
+        let id = wall_at_mid(&c, *m);
+        c.structure_selected.insert(id);
+    }
+    c.begin_structure_edit();
+    let groups = &c.structure_edit().unwrap().groups;
+    assert_eq!(groups.len(), 1, "one group — the walls are identical again");
+    assert_eq!(groups[0].explicit_name, None, "and it carries no name");
+}
+
+/// Resetting several named groups returns every member to the unattributed
+/// default, so re-selecting them opens ONE group rather than re-offering the
+/// old names — the whole-flow shape of the field report.
+#[test]
+fn reset_of_named_groups_reopens_as_one_unnamed_group() {
+    use ber_model::ber::structural::{ConstructionMakeup, ConstructionType, WallConstructionType};
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    set_only_kind(&mut c, SurfaceKind::Walls);
+    let mids = square_wall_mids(&c);
+
+    let mut name_group = |c: &mut AppController, sel: &[(f64, f64)], name: &str| {
+        c.clear_structure_surface_selection();
+        for m in sel {
+            let id = wall_at_mid(c, *m);
+            c.structure_selected.insert(id);
+        }
+        c.begin_structure_edit();
+        c.set_structure_group_attrs(
+            0,
+            ConstructionType::Wall(WallConstructionType::CavityWall),
+            ConstructionMakeup::Default,
+            ConstructionPhase::Original,
+        );
+        c.set_structure_group_name(0, name.to_string());
+        c.end_structure_edit();
+        c.materialize();
+    };
+    name_group(&mut c, &mids[0..2], "w");
+    name_group(&mut c, &mids[2..3], "wb");
+
+    // The untouched fourth wall never took either name.
+    let rec = c.current_record.as_ref().unwrap();
+    let unnamed = rec.data.storeys[0]
+        .walls
+        .regions
+        .iter()
+        .filter_map(|r| rec.data.wall_construction(r.construction_id))
+        .filter(|cc| cc.base.name.is_none())
+        .count();
+    assert_eq!(unnamed, 1, "the wall outside both groups stayed unnamed");
+
+    // Select all three named walls and reset every box.
+    c.clear_structure_surface_selection();
+    for m in &mids[0..3] {
+        let id = wall_at_mid(&c, *m);
+        c.structure_selected.insert(id);
+    }
+    c.begin_structure_edit();
+    assert_eq!(
+        c.structure_edit().unwrap().groups.len(),
+        2,
+        "two boxes — the names make them distinct groups"
+    );
+    for i in 0..2 {
+        c.reset_structure_group(i);
+    }
+    c.end_structure_edit();
+    c.materialize();
+
+    c.clear_structure_surface_selection();
+    for m in &mids[0..3] {
+        let id = wall_at_mid(&c, *m);
+        c.structure_selected.insert(id);
+    }
+    c.begin_structure_edit();
+    let groups = &c.structure_edit().unwrap().groups;
+    assert_eq!(
+        groups.len(),
+        1,
+        "reset made the three identical again → ONE group, not the old two"
+    );
+    assert_eq!(groups[0].explicit_name, None, "with no name carried over");
+}

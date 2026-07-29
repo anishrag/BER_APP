@@ -128,6 +128,52 @@ fn phase_age(ber: &Ber, phase: &ConstructionPhase) -> u32 {
     }
 }
 
+/// The MAPPING phase of a resolved WALL region — the phase the floor zones
+/// under it imply, independent of whatever construction it currently points at.
+/// `None` when the zones can't answer (a degenerate base edge, or open air on
+/// both sides), which is the caller's cue to keep the current phase.
+///
+/// This is the derivation [`stamp_wall_phases`] applies on every resolve,
+/// factored out so a RESET can ask for it directly: resetting a group's
+/// attribution returns its surfaces to the fabric default for their LOCATION,
+/// which is exactly this — not `Unassigned`, and not whatever phase the
+/// attribution being discarded happened to carry.
+pub fn wall_mapping_phase(
+    ber: &Ber,
+    idx: usize,
+    wall: &ber_model::ber::structural::WallRegion,
+) -> Option<ConstructionPhase> {
+    // `base_edge()` (not raw `exterior[0]/[1]`) so a STEPPED-base wall samples
+    // at its FULL footprint-run midpoint — on a stepped ring `exterior[1]` is
+    // only the first step breakpoint, and the raw midpoint would sit inside the
+    // first sub-span's zone. Identical for a flat base.
+    let (a, b) = wall.base_edge()?;
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let len = (dx * dx + dy * dy).sqrt();
+    if len < 1e-9 {
+        return None;
+    }
+    // Unit normal to the base edge; sample the floor a hair to each side.
+    let (nx, ny) = (-dy / len, dx / len);
+    let (mx, my) = ((a.x + b.x) * 0.5, (a.y + b.y) * 0.5);
+    let o = SIDE_SAMPLE_OFFSET_M;
+    // The zones on each side (open-air samples drop out); the OLDER wins.
+    [
+        floor_phase_at(ber, idx, (mx + nx * o) as f32, (my + ny * o) as f32),
+        floor_phase_at(ber, idx, (mx - nx * o) as f32, (my - ny * o) as f32),
+    ]
+    .into_iter()
+    .flatten()
+    .min_by_key(|p| phase_age(ber, p))
+}
+
+/// The MAPPING phase of a resolved FLOOR or CEILING region — the floor zone
+/// under its centroid. The area analogue of [`wall_mapping_phase`] (and what
+/// [`stamp_ceiling_phases`] derives); `None` when the centroid is over no zone.
+pub fn area_mapping_phase(ber: &Ber, idx: usize, centroid: Point2f64) -> Option<ConstructionPhase> {
+    floor_phase_at(ber, idx, centroid.x as f32, centroid.y as f32)
+}
+
 /// Stamp the construction PHASE onto storey `idx`'s WALLS from the already
 /// phase-partitioned FLOORS (floors are stamped at commit-time partition; this
 /// projects their zones onto the walls). Per wall, sample the floor zone a
@@ -153,24 +199,9 @@ pub fn stamp_wall_phases(ber: &mut Ber, idx: usize) {
         // `exterior[1]` is only the first step breakpoint, and the raw
         // midpoint would sit inside the first sub-span's zone. Identical for
         // a flat base (`base_edge` returns `exterior[0]/[1]` there).
-        let (s1, s2, cur_cid) = {
+        let (mapped, cur_cid) = {
             let r = &ber.storeys[idx].walls.regions[i];
-            let Some((a, b)) = r.base_edge() else {
-                continue;
-            };
-            let (ax, ay, bx, by) = (a.x, a.y, b.x, b.y);
-            let (dx, dy) = (bx - ax, by - ay);
-            let len = (dx * dx + dy * dy).sqrt();
-            if len < 1e-9 {
-                continue;
-            }
-            // Unit normal to the base edge; sample the floor a hair to each side.
-            let (nx, ny) = (-dy / len, dx / len);
-            let (mx, my) = ((ax + bx) * 0.5, (ay + by) * 0.5);
-            let o = SIDE_SAMPLE_OFFSET_M;
-            let s1 = ((mx + nx * o) as f32, (my + ny * o) as f32);
-            let s2 = ((mx - nx * o) as f32, (my - ny * o) as f32);
-            (s1, s2, r.construction_id)
+            (wall_mapping_phase(ber, idx, r), r.construction_id)
         };
         let (ty, makeup, cur_phase, cur_name) = match ber.wall_construction(cur_cid) {
             Some(c) => (
@@ -186,16 +217,8 @@ pub fn stamp_wall_phases(ber: &mut Ber, idx: usize) {
                 None,
             ),
         };
-        // The zones on each side (open-air samples drop out); the OLDER wins.
         // No floor region on either side (degenerate) → keep the current phase.
-        let new_phase = [
-            floor_phase_at(ber, idx, s1.0, s1.1),
-            floor_phase_at(ber, idx, s2.0, s2.1),
-        ]
-        .into_iter()
-        .flatten()
-        .min_by_key(|p| phase_age(ber, p))
-        .unwrap_or_else(|| cur_phase.clone());
+        let new_phase = mapped.unwrap_or_else(|| cur_phase.clone());
         if new_phase != cur_phase {
             // Re-phase keeps the wall in ITS group: the name rides along (the
             // name is part of the construction identity now).
@@ -248,8 +271,7 @@ pub fn stamp_ceiling_phases(ber: &mut Ber, idx: usize) {
                 None,
             ),
         };
-        let new_phase =
-            floor_phase_at(ber, idx, c.x as f32, c.y as f32).unwrap_or_else(|| cur_phase.clone());
+        let new_phase = area_mapping_phase(ber, idx, c).unwrap_or_else(|| cur_phase.clone());
         if new_phase != cur_phase {
             let cid =
                 ber.ensure_ceiling_construction_named(ty, makeup, new_phase, cur_name.as_deref());

@@ -21,6 +21,7 @@ mod debug;
 mod dimensioning;
 mod edit;
 mod exposure;
+mod identity;
 mod load;
 mod phase;
 mod position;
@@ -49,12 +50,14 @@ pub use exposure::{
     riser_key, surfaces_exposure_complete, wall_coverage, wall_exposure_complete,
     wall_exposure_reasons, RiserKey, RiserKind, RiserWall,
 };
+/// Stable region identity across a re-resolve — snapshot before, restore after.
+pub use identity::{region_identity_snapshot, restore_region_identity, IdentitySnapshot};
 pub use phase::{
-    centroid_key, construction_phase_complete, construction_phase_reasons, inherited_phase_regions,
-    inherited_phase_regions_over, phase_regions_from_floors, phase_snap_segments,
-    ring_centroid_key, stamp_ceiling_constructions, stamp_ceiling_phases,
-    stamp_floor_constructions, stamp_wall_constructions, stamp_wall_phases, CentroidKey,
-    PhaseRegion,
+    area_mapping_phase, centroid_key, construction_phase_complete, construction_phase_reasons,
+    inherited_phase_regions, inherited_phase_regions_over, phase_regions_from_floors,
+    phase_snap_segments, ring_centroid_key, stamp_ceiling_constructions, stamp_ceiling_phases,
+    stamp_floor_constructions, stamp_wall_constructions, stamp_wall_phases, wall_mapping_phase,
+    CentroidKey, PhaseRegion,
 };
 pub use position::{PositionOption, PositionPrompt, PositionPromptKind};
 pub use resolve::{

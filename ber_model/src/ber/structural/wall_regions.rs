@@ -449,6 +449,12 @@ impl WallRegions {
     /// against the previous regions to carry ids/opes/exposure/construction; that
     /// is retired now nothing durable rides the wall id.)
     ///
+    /// The fresh id does NOT survive to the caller: the resolve pipeline's tail
+    /// restores each surface's previous id (`document::restore_region_identity`)
+    /// once the last splitting stage is done, so a region id IS stable across a
+    /// materialize from the controller's side. Minting fresh here stays correct —
+    /// the restore is a re-labelling pass over the finished geometry.
+    ///
     /// Runs on every materialize: O(segments × roof vertices), no caching.
     pub fn regenerate(
         segments: Vec<(Point2f64, Point2f64, WallExposure)>,

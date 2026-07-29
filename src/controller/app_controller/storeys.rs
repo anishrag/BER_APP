@@ -2,123 +2,7 @@
 //! into the editor, and the deferred derive (mark-dirty/materialize) pipeline.
 use super::*;
 
-/// The durable, geometry-independent key a Structure-phase SELECTION re-points
-/// by across the id-churning re-resolve: a wall's quantized base edge PLUS its
-/// quantized base z, or a floor/roof area's quantized plan centroid. Walls and
-/// floors mint fresh region ids on EVERY resolve (`WallRegions::regenerate` /
-/// `FloorRegions` partition), so a selection (or open "Edit attributes"
-/// session) keyed by raw id would dangle after any re-derive — silently
-/// dropping later edits. This is the selection analogue of the attribute
-/// side-tables' `SurfaceRef` / `CentroidKey`. (Roof ids are stable —
-/// regions-as-truth — so re-pointing them is a harmless no-op, handled
-/// uniformly.) The base z (mm) disambiguates VERTICALLY STACKED pieces of one
-/// wall — a face-partitioned or InterStorey-split wall resolves to several
-/// regions sharing the same plan base edge, and a plan-only key would remap
-/// every stacked selection onto the first piece.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum SurfaceKey {
-    Wall((i64, i64, i64, i64), i64),
-    Area((i64, i64)),
-}
-
-/// A wall region's base z quantized to mm — the stacked-piece discriminator of
-/// [`SurfaceKey::Wall`].
-fn wall_base_z_mm(e0: &domain::points::Point3f64) -> i64 {
-    (e0.z * 1000.0).round() as i64
-}
-
-/// The live region id of `kind` whose durable [`SurfaceKey`] matches `key`, in
-/// `storey`'s freshly re-derived geometry — the inverse of
-/// [`AppController::structure_surface_key`]. `None` when no region matches (the
-/// surface the edit removed).
-fn structure_id_for_key(storey: &Storey, kind: SurfaceKind, key: SurfaceKey) -> Option<ItemId> {
-    let wall_key = |r: &ber_model::ber::structural::WallRegion| {
-        r.base_edge().map(|(e0, e1)| {
-            (
-                document::riser_key(
-                    domain::points::Point2f64::new(e0.x, e0.y),
-                    domain::points::Point2f64::new(e1.x, e1.y),
-                ),
-                wall_base_z_mm(&e0),
-            )
-        })
-    };
-    match (kind, key) {
-        (SurfaceKind::Walls, SurfaceKey::Wall(k, z)) => storey
-            .walls
-            .regions
-            .iter()
-            .chain(storey.porch_walls.regions.iter())
-            .find(|r| wall_key(r) == Some((k, z)))
-            .map(|r| r.id),
-        (SurfaceKind::Floors, SurfaceKey::Area(k)) => storey
-            .floors
-            .regions
-            .iter()
-            .find(|r| document::centroid_key(r.centroid()) == k)
-            .map(|r| r.id),
-        (SurfaceKind::Ceilings, SurfaceKey::Area(k)) => storey
-            .ceilings
-            .regions
-            .iter()
-            .find(|r| document::centroid_key(r.centroid()) == k)
-            .map(|r| r.id),
-        _ => None,
-    }
-}
-
 impl AppController {
-    /// The durable [`SurfaceKey`] of resolved region `id` of `kind` in storey
-    /// `idx`'s CURRENT geometry — `None` if it isn't a live region of that kind.
-    /// Captured BEFORE a re-resolve so the Structure selection can re-point to
-    /// the region's fresh id afterward.
-    fn structure_surface_key(
-        &self,
-        idx: usize,
-        kind: SurfaceKind,
-        id: ItemId,
-    ) -> Option<SurfaceKey> {
-        let storey = self.current_record.as_ref()?.data.storeys.get(idx)?;
-        match kind {
-            SurfaceKind::Walls => {
-                let (e0, e1) = storey.placeable_wall(id)?.base_edge()?;
-                Some(SurfaceKey::Wall(
-                    document::riser_key(
-                        domain::points::Point2f64::new(e0.x, e0.y),
-                        domain::points::Point2f64::new(e1.x, e1.y),
-                    ),
-                    wall_base_z_mm(&e0),
-                ))
-            }
-            SurfaceKind::Floors => {
-                let r = storey.floors.regions.iter().find(|r| r.id == id)?;
-                Some(SurfaceKey::Area(document::centroid_key(r.centroid())))
-            }
-            SurfaceKind::Ceilings => {
-                let r = storey.ceilings.regions.iter().find(|r| r.id == id)?;
-                Some(SurfaceKey::Area(document::centroid_key(r.centroid())))
-            }
-        }
-    }
-
-    /// Like [`structure_surface_key`](Self::structure_surface_key) but DETECTS
-    /// the kind of `id` (the selection can mix walls / floors / ceilings), returning
-    /// the kind alongside its durable key. `None` if `id` isn't a live region.
-    fn structure_surface_key_any(
-        &self,
-        idx: usize,
-        id: ItemId,
-    ) -> Option<(SurfaceKind, SurfaceKey)> {
-        let kind = self
-            .current_record
-            .as_ref()?
-            .data
-            .storeys
-            .get(idx)?
-            .surface_kind_of(id)?;
-        Some((kind, self.structure_surface_key(idx, kind, id)?))
-    }
-
     /// Which storey the editor is currently acting on. `Some(i)` = storey `i`
     /// is being edited; `None` = the "All storeys" overview (read-only, no
     /// drawing). Default `Some(0)` on create/open.
@@ -558,50 +442,12 @@ impl AppController {
             self.refresh_all_storeys_keeping_selection();
             return;
         };
-        // Capture the selected riser's durable base-edge key BEFORE the
-        // re-resolve mints fresh region ids, so the selection can be re-pointed
-        // to the riser's new id afterward (riser selection survives the
-        // re-derive — its id is otherwise unstable without the amend).
-        let wall_key = |this: &Self, id| -> Option<(i64, i64, i64, i64)> {
-            let storey = this.current_record.as_ref()?.data.storeys.get(idx)?;
-            let r = storey.placeable_wall(id)?;
-            let (e0, e1) = r.base_edge()?;
-            Some(document::riser_key(
-                domain::points::Point2f64::new(e0.x, e0.y),
-                domain::points::Point2f64::new(e1.x, e1.y),
-            ))
-        };
-        let sel_riser_key = self.selected_riser.and_then(|id| wall_key(self, id));
-        // Same for the open elevation's wall — its id is just as unstable.
-        let sel_elev_key = self.elevation_wall.and_then(|id| wall_key(self, id));
-        // Capture the Structure-phase selection + open "Edit attributes" session
-        // by durable key BEFORE the re-resolve mints fresh wall/floor ids, so
-        // both re-point to the new ids afterward (same survival mechanism as the
-        // riser/elevation selection — across an attribute edit the geometry is
-        // identical and only the ids churn, so the selection stays meaningful).
-        // Capture each selected id WITH its kind (the selection can span kinds),
-        // so each re-points by the right durable key after the re-resolve.
-        let sel_struct_keys: Vec<(SurfaceKind, SurfaceKey)> = self
-            .structure_selected
-            .iter()
-            .filter_map(|id| self.structure_surface_key_any(idx, *id))
-            .collect();
-        // Each edit group already knows its kind (from its construction type).
-        let edit_struct_keys: Option<Vec<(SurfaceKind, Vec<SurfaceKey>)>> =
-            self.structure_edit.as_ref().map(|e| {
-                e.groups
-                    .iter()
-                    .map(|g| {
-                        let kind = g.ty.kind();
-                        let keys = g
-                            .ids
-                            .iter()
-                            .filter_map(|id| self.structure_surface_key(idx, kind, *id))
-                            .collect();
-                        (kind, keys)
-                    })
-                    .collect()
-            });
+        // Region identity, captured across the WHOLE stack (the InterStorey
+        // derive below re-splits neighbours too) and restored after the final
+        // derive — so a region id survives a materialize and anything holding
+        // one stays valid. See `document::identity`.
+        let identity =
+            document::region_identity_snapshot(&self.current_record.as_ref().unwrap().data);
         // Flush the active buffer into its slot, then ensure the storey slot + its
         // constructions exist — the two `&mut` prerequisites of the otherwise
         // read-only projection (`document::resolve_storey`).
@@ -643,170 +489,106 @@ impl AppController {
         // Same for FLOOR + CEILING/ROOF area constructions (keyed by centroid).
         document::stamp_floor_constructions(&mut record.data, idx, &self.document.storeys[idx]);
         document::stamp_ceiling_constructions(&mut record.data, idx, &self.document.storeys[idx]);
-        // Re-point the riser selection to the (re-derived) riser with the same
-        // base edge — keeps the selection valid across the fresh ids.
-        if let Some(key) = sel_riser_key {
-            let new_id = record.data.storeys.get(idx).and_then(|s| {
-                s.walls
-                    .regions
-                    .iter()
-                    .find(|r| {
-                        r.base_edge().is_some_and(|(e0, e1)| {
-                            document::riser_key(
-                                domain::points::Point2f64::new(e0.x, e0.y),
-                                domain::points::Point2f64::new(e1.x, e1.y),
-                            ) == key
-                        })
-                    })
-                    .map(|r| r.id)
-            });
-            self.selected_riser = new_id;
-        }
-        // Re-point the open elevation's wall the same way.
-        if let Some(key) = sel_elev_key {
-            let new_id = record.data.storeys.get(idx).and_then(|s| {
-                s.walls
-                    .regions
-                    .iter()
-                    .find(|r| {
-                        r.base_edge().is_some_and(|(e0, e1)| {
-                            document::riser_key(
-                                domain::points::Point2f64::new(e0.x, e0.y),
-                                domain::points::Point2f64::new(e1.x, e1.y),
-                            ) == key
-                        })
-                    })
-                    .map(|r| r.id)
-            });
-            self.elevation_wall = new_id;
-        }
         // FINAL pass over every storey: stamp the assessor exposure maps onto
         // the resolved regions, then run the cross-storey InterStorey
         // derivation (it reads the neighbours' resolved geometry, so it must
-        // run after all per-storey resolves). This pass RE-SPLITS + RE-MINTS
-        // region ids again (junction floors/ceilings, roof-void walls), so the
-        // Structure re-point below must run AFTER it — otherwise the just-
-        // re-pointed ids would go stale a second time before the next read
-        // (the multi-storey bug: a group's ids dangle, and the NEXT keystroke's
-        // capture finds nothing → the group empties to 0). The all-storeys arm
-        // (`refresh_all_storeys_keeping_selection`) already re-points after its
-        // derive for the same reason.
-        self.derive_horizontal_exposure_all();
-        // Re-point the Structure selection + open edit session onto the FINAL
-        // (post-derive) regions by durable key. Without this, the stored ids go
-        // stale on the very next resolve (walls/floors re-mint every time), so a
-        // multi-group "Edit attributes" session would silently drop every edit
-        // after the first (the apply itself triggers the re-resolve) and the
-        // canvas shading would blank out. Group ids that no longer match (the
-        // surface was carved away) drop out.
-        let record = self.current_record.as_ref().unwrap();
-        let new_sel: std::collections::HashSet<ItemId> = record
-            .data
-            .storeys
-            .get(idx)
-            .map(|storey| {
-                sel_struct_keys
-                    .iter()
-                    .filter_map(|(kind, k)| structure_id_for_key(storey, *kind, *k))
-                    .collect()
+        // run after all per-storey resolves). It also restores region identity
+        // (the snapshot above) as its last act before the openings re-link.
+        self.derive_horizontal_exposure_all(Some(&identity));
+        // Region ids now SURVIVE the re-resolve, so nothing needs re-pointing —
+        // only the surfaces this resolve REMOVED (carved away, or split into
+        // pieces that are new surfaces with new ids) have to leave the held
+        // sets. See `prune_dead_surface_ids`.
+        self.prune_dead_surface_ids();
+    }
+
+    /// Drop held region ids whose surface no longer exists after a re-resolve:
+    /// the Structure selection, any open "Edit attributes" session's group
+    /// members, the riser selection and the open elevation's wall.
+    ///
+    /// This is the surviving half of what the capture-and-re-point machinery
+    /// used to do. Re-pointing is obsolete — `document::restore_region_identity`
+    /// gives every surviving surface its id back — but the DROP is not: a
+    /// carve, a split or a storey shrinking removes surfaces, and a stale id
+    /// left in `structure_selected` would keep counting toward the "N selected"
+    /// headers, the single-selection gate in the partition flow and the
+    /// is-empty checks, all of which are length-sensitive.
+    ///
+    /// Liveness is `Storey::surface_kind_of` (walls + porch walls + floors +
+    /// ceilings) — exactly the id space the Structure tools select from.
+    fn prune_dead_surface_ids(&mut self) {
+        let Some(record) = self.current_record.as_ref() else {
+            return;
+        };
+        // The Structure tools act on the active storey, or on the whole stack
+        // from the All-storeys tab — the same scope the selection was seeded in
+        // (`structure_storey_indices`), so an id is live if ANY in-scope storey
+        // still knows it.
+        let scope: Vec<usize> = match self.current_storey_idx {
+            Some(i) => vec![i],
+            None => (0..record.data.storeys.len()).collect(),
+        };
+        let live = |id: ItemId| {
+            scope.iter().any(|i| {
+                record
+                    .data
+                    .storeys
+                    .get(*i)
+                    .is_some_and(|s| s.surface_kind_of(id).is_some())
             })
-            .unwrap_or_default();
-        let new_group_ids: Option<Vec<Vec<ItemId>>> =
-            edit_struct_keys.as_ref().and_then(|groups| {
-                record.data.storeys.get(idx).map(|storey| {
-                    groups
-                        .iter()
-                        .map(|(kind, group_keys)| {
-                            group_keys
-                                .iter()
-                                .filter_map(|k| structure_id_for_key(storey, *kind, *k))
-                                .collect()
-                        })
-                        .collect()
-                })
-            });
-        self.structure_selected = new_sel;
-        if let Some(new_ids) = new_group_ids {
+        };
+        let live_wall = |id: ItemId| {
+            scope.iter().any(|i| {
+                record
+                    .data
+                    .storeys
+                    .get(*i)
+                    .is_some_and(|s| s.placeable_wall(id).is_some())
+            })
+        };
+        let (keep_sel, keep_groups): (Vec<ItemId>, Option<Vec<Vec<ItemId>>>) = (
+            self.structure_selected
+                .iter()
+                .copied()
+                .filter(|id| live(*id))
+                .collect(),
+            self.structure_edit.as_ref().map(|e| {
+                e.groups
+                    .iter()
+                    .map(|g| g.ids.iter().copied().filter(|id| live(*id)).collect())
+                    .collect()
+            }),
+        );
+        let riser = self.selected_riser.filter(|id| live_wall(*id));
+        let elevation = self.elevation_wall.filter(|id| live_wall(*id));
+        self.structure_selected = keep_sel.into_iter().collect();
+        if let Some(groups) = keep_groups {
             if let Some(edit) = self.structure_edit.as_mut() {
-                for (g, ids) in edit.groups.iter_mut().zip(new_ids) {
+                for (g, ids) in edit.groups.iter_mut().zip(groups) {
                     g.ids = ids;
                 }
             }
         }
+        self.selected_riser = riser;
+        self.elevation_wall = elevation;
     }
 
     /// The ALL-STOREYS-tab arm of [`refresh_storey`](Self::refresh_storey):
     /// re-resolve EVERY storey from its (untouched-there) editing doc so
     /// cross-storey Structure writes (constructions / exposure from the lasso
-    /// flow) stamp onto the resolved regions. The Structure selection and any
-    /// open edit session are captured by `(storey, kind, durable key)` first
-    /// and re-pointed after — each per-storey resolve mints fresh region ids,
-    /// same as the single-storey path.
+    /// flow) stamp onto the resolved regions. Region ids survive the re-resolve
+    /// (`document::restore_region_identity`, applied inside the derive), so the
+    /// Structure selection and any open edit session need only have their DEAD
+    /// ids pruned afterwards — house-wide here, since the All-storeys tab's
+    /// tools select across the whole stack.
     fn refresh_all_storeys_keeping_selection(&mut self) {
         if self.current_record.is_none() {
             return;
         }
-        let sel_keys: Vec<(usize, SurfaceKind, SurfaceKey)> = self
-            .structure_selected
-            .iter()
-            .filter_map(|id| self.locate_structure_key(*id))
-            .collect();
-        type GroupKeys = Vec<Vec<(usize, SurfaceKind, SurfaceKey)>>;
-        let edit_keys: Option<GroupKeys> = self.structure_edit.as_ref().map(|e| {
-            e.groups
-                .iter()
-                .map(|g| {
-                    g.ids
-                        .iter()
-                        .filter_map(|id| self.locate_structure_key(*id))
-                        .collect()
-                })
-                .collect()
-        });
         // The existing whole-house resolve+stamp pass (also runs the final
-        // exposure/InterStorey derivation).
+        // exposure/InterStorey derivation and the identity restore).
         self.refresh_all_storeys();
-        // Re-point selection + session groups onto the fresh ids.
-        if let Some(record) = self.current_record.as_ref() {
-            let remap = |(idx, kind, key): &(usize, SurfaceKind, SurfaceKey)| {
-                record
-                    .data
-                    .storeys
-                    .get(*idx)
-                    .and_then(|s| structure_id_for_key(s, *kind, *key))
-            };
-            self.structure_selected = sel_keys.iter().filter_map(remap).collect();
-            let new_group_ids: Option<Vec<Vec<ItemId>>> = edit_keys.as_ref().map(|groups| {
-                groups
-                    .iter()
-                    .map(|keys| keys.iter().filter_map(remap).collect())
-                    .collect()
-            });
-            if let Some(new_ids) = new_group_ids {
-                if let Some(edit) = self.structure_edit.as_mut() {
-                    for (g, ids) in edit.groups.iter_mut().zip(new_ids) {
-                        g.ids = ids;
-                    }
-                }
-            }
-        }
-    }
-
-    /// Locate a selected structure region id ACROSS the stack: its storey,
-    /// kind, and durable re-point key — the all-storeys analogue of
-    /// [`structure_surface_key_any`](Self::structure_surface_key_any) (region
-    /// ids are unique house-wide, so the first storey that knows the id owns
-    /// it).
-    fn locate_structure_key(&self, id: ItemId) -> Option<(usize, SurfaceKind, SurfaceKey)> {
-        let record = self.current_record.as_ref()?;
-        for (idx, s) in record.data.storeys.iter().enumerate() {
-            if let Some(kind) = s.surface_kind_of(id) {
-                return self
-                    .structure_surface_key(idx, kind, id)
-                    .map(|k| (idx, kind, k));
-            }
-        }
-        None
+        self.prune_dead_surface_ids();
     }
 
     /// Recompose storey `idx`'s truth ceilings from its ceiling EDIT inputs — the
@@ -916,6 +698,9 @@ impl AppController {
         if self.current_record.is_none() {
             return;
         }
+        // Region identity across the re-resolve — see `refresh_storey`.
+        let identity =
+            document::region_identity_snapshot(&self.current_record.as_ref().unwrap().data);
         let n = self.document.storeys.len();
         for idx in 0..n {
             let regions: &[PhaseRegion] = self
@@ -962,7 +747,7 @@ impl AppController {
         // maps onto the resolved regions, then run the cross-storey InterStorey
         // derivation (it reads the neighbours' resolved geometry), so the gate
         // settles in one commit.
-        self.derive_horizontal_exposure_all();
+        self.derive_horizontal_exposure_all(Some(&identity));
     }
 
     /// Stamp every storey's assessor floor/ceiling exposure maps onto its
@@ -984,7 +769,15 @@ impl AppController {
     /// derivation splits leaves its openings unlinked in every
     /// post-materialize record (dead opening drag, empty `opes`, pruned on
     /// reload).
-    pub(super) fn derive_horizontal_exposure_all(&mut self) {
+    /// `identity` is the pre-resolve [`document::region_identity_snapshot`]:
+    /// the region ids are restored from it after the LAST region-minting stage
+    /// (the porch-exclusion split) and BEFORE the openings re-link, so every
+    /// placement re-homes onto the id its surface will still carry when the
+    /// pipeline returns. `None` for a tail that follows no resolve.
+    pub(super) fn derive_horizontal_exposure_all(
+        &mut self,
+        identity: Option<&document::IdentitySnapshot>,
+    ) {
         // Junction gate for the cross-storey `derive_inter_storey`: a storey is
         // eligible only when its outline is fully dimensioned
         // (`measurements_complete` — metre scale set AND nothing left to
@@ -1040,6 +833,14 @@ impl AppController {
         // because it splits perimeter walls at porch corners and openings
         // must re-home onto the sub-walls.
         ber_model::ber::structural::derive_porch_exclusions(&mut record.data, &dimensioned);
+        // LAST region-minting stage is done — give every re-derived region back
+        // the id its surface held before the resolve, so a region id survives a
+        // materialize. Must land BEFORE the openings re-link below: a placement
+        // records its host by `wall_id`, and re-homing it onto an id this pass
+        // is about to rewrite would orphan the opening.
+        if let Some(identity) = identity {
+            document::restore_region_identity(&mut record.data, identity);
+        }
         for idx in 0..n {
             // RE-STAMP RISERS: `derive_inter_storey` / `derive_roof_voids` above
             // re-derive and re-split the wall regions, resetting each riser to

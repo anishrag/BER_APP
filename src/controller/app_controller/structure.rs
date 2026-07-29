@@ -1774,10 +1774,6 @@ impl AppController {
     /// group's constructions (`Ber::set_construction_name`). No undo snapshot
     /// (cosmetic); marks dirty so the rename persists.
     pub fn set_structure_group_name(&mut self, group: usize, name: String) {
-        // Bring the record current BEFORE capturing region ids: every decision
-        // below reads it, and a materialize afterwards would re-mint the ids we
-        // are about to hold. (No-op when nothing changed.)
-        self.materialize();
         let (kind, ids, group_attrs) = {
             let Some(e) = self.structure_edit.as_mut() else {
                 return;
@@ -1803,8 +1799,13 @@ impl AppController {
         // that group — the entry write below merges into it on the next
         // stamp. On rejection the durable state keeps its last valid value;
         // the typed session name stands so the assessor can keep typing.
-        let cids = self.construction_ids_for(kind, &ids);
+        // ORDER MATTERS: `group_covers_all_members` brings the record current,
+        // and `cids` must be read from the CURRENT record — the rename writes
+        // through those ids, so reading them pre-materialize would hand back the
+        // construction these surfaces pointed at before this session (for a
+        // fresh selection, the shared unclassified bucket) and brand it.
         let full = self.group_covers_all_members(kind, &ids);
+        let cids = self.construction_ids_for(kind, &ids);
         let rejection: Option<String> = {
             let Some(record) = self.current_record.as_ref() else {
                 return;
@@ -1872,6 +1873,19 @@ impl AppController {
                 return;
             };
             for cid in &cids {
+                // NEVER rename the shared UNCLASSIFIED bucket in place. It reads
+                // as a "full group" for the subset decision (it is not a group —
+                // there is nothing to be a subset of), but it is the home every
+                // un-answered surface of its phase shares, so renaming it brands
+                // all of them: name a two-wall selection before choosing its
+                // fabric and every other bare wall in the house came back
+                // labelled with it. The durable per-surface entries written
+                // below are what carry the name to THESE members; the bucket
+                // holds no photos or insulation to ride along (an unclassified
+                // construction carries no evidence), so nothing is lost.
+                if record.data.is_unclassified_construction(*cid) {
+                    continue;
+                }
                 // Referenced holders were vetted above; orphans don't block.
                 let _ = record
                     .data
@@ -1959,6 +1973,15 @@ impl AppController {
             None => return,
         };
         self.detach_construction_for(kind, &ids);
+        // The phase the box returns to is the group's MAPPING phase — the fabric
+        // default for where these surfaces are — not `Unassigned`. The editor
+        // stamps `g.phase` onto the durable store with every attribute pick, so
+        // a box left reading `Unassigned` would write that onto the next pick
+        // and silently strip an extension's phase; the assessor would have to
+        // re-choose it after every reset. Mixed-phase groups (a selection
+        // spanning zones) have no single answer, so they keep the neutral
+        // default and the per-surface phases the detach just wrote stand.
+        let mapped = self.group_mapping_phase(kind, &ids);
         if let Some(e) = self.structure_edit.as_mut() {
             if e.name_error.as_ref().is_some_and(|(g, _)| *g == group) {
                 e.name_error = None;
@@ -1970,7 +1993,7 @@ impl AppController {
                     SurfaceKind::Ceilings => ConstructionType::Ceiling(Default::default()),
                 };
                 g.makeup = Default::default();
-                g.phase = Default::default();
+                g.phase = mapped.unwrap_or_default();
                 g.name = format!("Group {}", group + 1);
                 g.explicit_name = None;
                 g.photos.clear();
@@ -1979,6 +2002,47 @@ impl AppController {
                 g.fresh = true;
             }
         }
+    }
+
+    /// The MAPPING phase shared by every surface in `ids` — the phase the floor
+    /// zones under them imply — or `None` when they disagree (a selection
+    /// spanning zones) or none can be located. Cross-storey like the other group
+    /// ops. The value a group box returns to on Reset.
+    fn group_mapping_phase(&self, kind: SurfaceKind, ids: &[ItemId]) -> Option<ConstructionPhase> {
+        let record = self.current_record.as_ref()?;
+        let mut found: Option<ConstructionPhase> = None;
+        for (idx, storey) in record.data.storeys.iter().enumerate() {
+            for id in ids {
+                let phase = match kind {
+                    SurfaceKind::Walls => storey
+                        .placeable_wall(*id)
+                        .and_then(|r| document::wall_mapping_phase(&record.data, idx, r)),
+                    SurfaceKind::Floors => storey
+                        .floors
+                        .regions
+                        .iter()
+                        .find(|r| r.id == *id)
+                        .and_then(|r| {
+                            document::area_mapping_phase(&record.data, idx, r.centroid())
+                        }),
+                    SurfaceKind::Ceilings => storey
+                        .ceilings
+                        .regions
+                        .iter()
+                        .find(|r| r.id == *id)
+                        .and_then(|r| {
+                            document::area_mapping_phase(&record.data, idx, r.centroid())
+                        }),
+                };
+                let Some(phase) = phase else { continue };
+                match &found {
+                    Some(seen) if *seen != phase => return None, // mixed
+                    Some(_) => {}
+                    None => found = Some(phase),
+                }
+            }
+        }
+        found
     }
 
     /// Detach the durable per-surface construction ASSIGNMENTS for `ids` — the
@@ -2006,8 +2070,16 @@ impl AppController {
             Area(document::CentroidKey),
         }
         // Each key with the phase its default entry should carry — the
-        // region's CURRENT phase (the phase axis is derived from the zones;
-        // a reset shouldn't shunt an extension wall back to "Original").
+        // surface's MAPPING phase, i.e. the phase the floor zones under it
+        // imply ([`document::wall_mapping_phase`] / `area_mapping_phase`), which
+        // is what the fabric of that LOCATION defaults to. NOT the phase of the
+        // attribution being discarded: the editor writes the group's phase on
+        // every attribute pick, so reading it back would let one bad value
+        // (e.g. the `Unassigned` a fresh box starts on) survive the very reset
+        // meant to clear it — an extension wall would go stateless and stay
+        // that way. Where the zones can't answer (open air both sides, a
+        // centroid over no zone) the current phase stands, matching the
+        // stampers' own fallback.
         let per_storey: Vec<(usize, Vec<(Key, ConstructionPhase)>)> = {
             let Some(record) = self.current_record.as_ref() else {
                 return;
@@ -2028,11 +2100,14 @@ impl AppController {
                             let Some((e0, e1)) = r.base_edge() else {
                                 continue;
                             };
-                            let phase = record
-                                .data
-                                .wall_construction(r.construction_id)
-                                .map(|c| c.base.construction_phase.clone())
-                                .unwrap_or_default();
+                            let phase = document::wall_mapping_phase(&record.data, idx, r)
+                                .unwrap_or_else(|| {
+                                    record
+                                        .data
+                                        .wall_construction(r.construction_id)
+                                        .map(|c| c.base.construction_phase.clone())
+                                        .unwrap_or_default()
+                                });
                             // A wall SURFACE detaches on its own face box, so a
                             // reset can't drag a sibling piece back with it.
                             if sd.wall_face_box(r).is_some() {
@@ -2053,11 +2128,15 @@ impl AppController {
                             .iter()
                             .filter_map(|id| storey.floors.regions.iter().find(|r| r.id == *id))
                         {
-                            let phase = record
-                                .data
-                                .floor_construction(r.construction_id)
-                                .map(|c| c.base.construction_phase.clone())
-                                .unwrap_or_default();
+                            let phase =
+                                document::area_mapping_phase(&record.data, idx, r.centroid())
+                                    .unwrap_or_else(|| {
+                                        record
+                                            .data
+                                            .floor_construction(r.construction_id)
+                                            .map(|c| c.base.construction_phase.clone())
+                                            .unwrap_or_default()
+                                    });
                             keys.push((Key::Area(document::centroid_key(r.centroid())), phase));
                         }
                     }
@@ -2066,11 +2145,15 @@ impl AppController {
                             .iter()
                             .filter_map(|id| storey.ceilings.regions.iter().find(|r| r.id == *id))
                         {
-                            let phase = record
-                                .data
-                                .ceiling_construction(r.construction_id)
-                                .map(|c| c.base.construction_phase.clone())
-                                .unwrap_or_default();
+                            let phase =
+                                document::area_mapping_phase(&record.data, idx, r.centroid())
+                                    .unwrap_or_else(|| {
+                                        record
+                                            .data
+                                            .ceiling_construction(r.construction_id)
+                                            .map(|c| c.base.construction_phase.clone())
+                                            .unwrap_or_default()
+                                    });
                             keys.push((Key::Area(document::centroid_key(r.centroid())), phase));
                         }
                     }
@@ -2086,6 +2169,14 @@ impl AppController {
         // side of the mirror: a non-default doc-map entry (just applied,
         // pre-materialize) or a non-default resolved construction (applied
         // earlier — including regions-as-truth carriers with no map key).
+        //
+        // A NAME counts. Naming is attribution the assessor can see, and a
+        // group can hold one with its type/build-up still unset (labelling the
+        // selection before choosing its fabric). Judging that "nothing applied"
+        // made Reset a silent no-op on the record while the box cleared to
+        // "Group N" — so the surfaces came back still carrying the old name,
+        // and re-selecting them re-opened the old groups instead of one fresh
+        // one (field report, 2026-07-29).
         let attributed = {
             let record = self.current_record.as_ref().unwrap();
             let region_attributed = |id: &ItemId| {
@@ -2097,7 +2188,9 @@ impl AppController {
                         .find(|r| r.id == *id)
                         .and_then(|r| record.data.wall_construction(r.construction_id))
                         .is_some_and(|c| {
-                            c.construction_type.is_set() || c.base.construction_makeup.is_set()
+                            c.construction_type.is_set()
+                                || c.base.construction_makeup.is_set()
+                                || c.base.name.is_some()
                         }),
                     SurfaceKind::Floors => s
                         .floors
@@ -2106,7 +2199,9 @@ impl AppController {
                         .find(|r| r.id == *id)
                         .and_then(|r| record.data.floor_construction(r.construction_id))
                         .is_some_and(|c| {
-                            c.construction_type.is_set() || c.base.construction_makeup.is_set()
+                            c.construction_type.is_set()
+                                || c.base.construction_makeup.is_set()
+                                || c.base.name.is_some()
                         }),
                     SurfaceKind::Ceilings => s
                         .ceilings
@@ -2115,29 +2210,37 @@ impl AppController {
                         .find(|r| r.id == *id)
                         .and_then(|r| record.data.ceiling_construction(r.construction_id))
                         .is_some_and(|c| {
-                            c.construction_type.is_set() || c.base.construction_makeup.is_set()
+                            c.construction_type.is_set()
+                                || c.base.construction_makeup.is_set()
+                                || c.base.name.is_some()
                         }),
                 })
             };
             let map_attributed = per_storey.iter().any(|(idx, keys)| {
                 let sd = &self.document.storeys[*idx];
                 keys.iter().any(|(k, _)| match k {
-                    Key::Wall(r) => sd
-                        .wall_span_lookup(r)
-                        .is_some_and(|e| e.value.0.is_set() || e.value.1.is_set()),
+                    Key::Wall(r) => sd.wall_span_lookup(r).is_some_and(|e| {
+                        e.value.0.is_set() || e.value.1.is_set() || e.value.3.is_some()
+                    }),
                     Key::Riser(rk) => sd
                         .riser_constructions
                         .get(rk)
-                        .is_some_and(|(ty, mk, ..)| ty.is_set() || mk.is_set()),
+                        .is_some_and(|(ty, mk, _, nm)| ty.is_set() || mk.is_set() || nm.is_some()),
                     Key::Area(ck) => match kind {
-                        SurfaceKind::Floors => sd
-                            .floor_constructions
-                            .get(ck)
-                            .is_some_and(|(ty, mk, ..)| ty.is_set() || mk.is_set()),
-                        SurfaceKind::Ceilings => sd
-                            .ceiling_constructions
-                            .get(ck)
-                            .is_some_and(|(ty, mk, ..)| ty.is_set() || mk.is_set()),
+                        SurfaceKind::Floors => {
+                            sd.floor_constructions
+                                .get(ck)
+                                .is_some_and(|(ty, mk, _, nm)| {
+                                    ty.is_set() || mk.is_set() || nm.is_some()
+                                })
+                        }
+                        SurfaceKind::Ceilings => {
+                            sd.ceiling_constructions
+                                .get(ck)
+                                .is_some_and(|(ty, mk, _, nm)| {
+                                    ty.is_set() || mk.is_set() || nm.is_some()
+                                })
+                        }
                         SurfaceKind::Walls => false,
                     },
                 })
@@ -2222,9 +2325,6 @@ impl AppController {
             };
             self.take_provisional_evidence(k, &ids)
         };
-        // Bring the record current BEFORE capturing region ids — see
-        // `set_structure_group_name`. (No-op when nothing changed.)
-        self.materialize();
         let (ids, kind_before) = {
             let Some(e) = self.structure_edit.as_ref() else {
                 return;
@@ -2331,26 +2431,27 @@ impl AppController {
 
     /// Whether the session group's `ids` cover EVERY resolved member of the
     /// construction(s) they currently reference — the full-group-vs-subset
-    /// decision behind name carry and rename forking. A SUBSET edit must
-    /// never mutate/carry what the stay-behind members share.
-    /// Whether `ids` cover EVERY resolved member of the construction(s) they
-    /// reference — the full-group-vs-subset decision behind name carry and
-    /// rename forking. A SUBSET edit must never mutate what the stay-behind
-    /// members share.
+    /// decision behind name carry and rename forking. A SUBSET edit must never
+    /// mutate/carry what the stay-behind members share.
     ///
-    /// CALLER CONTRACT: the record must be CURRENT. The controller writes
-    /// attributes to the DURABLE maps, and a region's `construction_id` only
-    /// catches up at the next materialize, so answering this against a stale
-    /// record answers about the state BEFORE this session — for a fresh
-    /// selection, the shared unclassified bucket, of which three walls are never
-    /// all thirty-three members. That read every attribute change as a subset
-    /// fork and threw the group's name away (field report, 56 Elmwood Road).
+    /// This BRINGS THE RECORD CURRENT itself. The controller writes attributes
+    /// to the DURABLE maps, and a region's `construction_id` only catches up at
+    /// the next materialize, so answering against a stale record answers about
+    /// the state BEFORE this session — for a fresh selection, the shared
+    /// unclassified bucket, of which three walls are never all thirty-three
+    /// members. That read every attribute change as a subset fork and threw the
+    /// group's name away (field report, 56 Elmwood Road).
     ///
-    /// The materialize cannot live in here: it RE-MINTS region ids, so it would
-    /// invalidate the very `ids` the caller is holding. It belongs at the TOP of
-    /// the operation, BEFORE the ids are captured — which is the rule every
-    /// group-editing entry point follows.
-    fn group_covers_all_members(&self, kind: SurfaceKind, ids: &[ItemId]) -> bool {
+    /// The materialize used to be impossible to put here — it re-minted region
+    /// ids, so it invalidated the very `ids` the caller was holding, and the
+    /// only safe home was the TOP of each operation, before ids were captured.
+    /// That was a per-caller discipline, and it kept being forgotten at one more
+    /// call site. Region identity is now stable across a resolve
+    /// (`document::restore_region_identity`), so a materialize no longer
+    /// invalidates anything and the decision can own it. Pinned by
+    /// `subset_decision_needs_no_caller_discipline`.
+    fn group_covers_all_members(&mut self, kind: SurfaceKind, ids: &[ItemId]) -> bool {
+        self.materialize();
         let Some(record) = self.current_record.as_ref() else {
             return false;
         };
@@ -3306,6 +3407,16 @@ impl AppController {
     /// attach / rename / insulation) can act on an all-storeys lasso group
     /// whose surfaces span the stack (region ids are unique house-wide, so
     /// the search never mis-attributes).
+    ///
+    /// READ-ONLY, and deliberately does NOT materialize: `add_group_photo`
+    /// re-points regions in the record itself first
+    /// ([`rehome_unspecified_group_for_evidence`]) and a re-derive here would
+    /// undo that before the photo is written. Callers that need a CURRENT
+    /// answer — the ones reading `construction_id` to decide something — bring
+    /// the record current themselves before asking, which is safe now that a
+    /// materialize preserves region ids.
+    ///
+    /// [`rehome_unspecified_group_for_evidence`]: Self::rehome_unspecified_group_for_evidence
     fn construction_ids_for(&self, kind: SurfaceKind, ids: &[ItemId]) -> Vec<ItemId> {
         let Some(record) = self.current_record.as_ref() else {
             return Vec::new();
