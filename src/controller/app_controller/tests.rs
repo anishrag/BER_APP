@@ -19294,14 +19294,15 @@ fn structure_group_exposure_repaints_only_targeted_wall_span() {
 /// group (same fabric/phase/exposure — field decision d78f1e41: the lock no
 /// longer splits attribution grouping).
 ///
-/// The bulk exposure control is locked ONLY when the partition carries
-/// PER-REGION exposures, which are the partition tool's answers and must not be
-/// painted over. A UNIFORM partition — cut for CONSTRUCTION reasons with no
-/// region painted — has nothing to protect and stays changeable (field
+/// A face-partitioned member does NOT lock the bulk exposure control, whether
+/// its partition is uniform or carries per-region answers. The lock used to be
+/// how per-region answers were protected from a bulk overwrite; the bulk set now
+/// ADDRESSES each selected piece individually, so there is nothing left to
+/// protect against and no reason to refuse the assessor the control (field
 /// correction, 56 Elmwood Road: "it was exposed when split, it should still be
 /// open to being changed").
 #[test]
-fn face_partitioned_wall_merges_into_group_and_locks_only_when_per_region() {
+fn face_partitioned_wall_merges_into_group_without_locking_exposure() {
     use document::PartitionCut;
     let mut c = dimensioned_square_controller();
     let (vid0, ..) = c.document.outline.floor_plan.perimeter_walls()[0];
@@ -19357,8 +19358,9 @@ fn face_partitioned_wall_merges_into_group_and_locks_only_when_per_region() {
             .unwrap()
             .groups
             .iter()
-            .any(|g| g.exposure_locked),
-        "a partition WITH per-region exposures locks the bulk control"
+            .all(|g| !g.exposure_locked),
+        "a partition WITH per-region exposures no longer locks it either — the \
+         bulk set addresses each piece, so it cannot paint over a sibling"
     );
 }
 
@@ -25396,25 +25398,42 @@ fn partitioned_wall_exposed_piece_merges_into_same_phase_group() {
             "the non-heat-loss piece stays out of scope"
         );
         assert!(
-            g.exposure_locked,
-            "the merged group's bulk exposure control is locked"
+            !g.exposure_locked,
+            "a partitioned member no longer locks the bulk exposure control"
         );
     }
 
-    // The retained protection: a group-level exposure set is refused on a
-    // locked group — neither the partition piece nor the plain walls repaint.
+    // The protection is now PRECISION, not refusal: the set reaches the piece
+    // that is IN the group and leaves its sibling's per-region answer alone.
     c.set_structure_group_exposure(0, SurfaceExposure::Wall(WallExposure::SemiExposed));
     c.materialize();
     {
         let storey = &c.current_record.as_ref().unwrap().data.storeys[1];
-        let exposed_count = storey
-            .walls
-            .regions
-            .iter()
-            .filter(|r| r.exposure == WallExposure::Exposed)
-            .count();
-        assert_eq!(exposed_count, 4, "bulk exposure set was a no-op (locked)");
+        assert_eq!(
+            storey
+                .walls
+                .regions
+                .iter()
+                .filter(|r| r.exposure == WallExposure::NonHeatLoss)
+                .count(),
+            1,
+            "the sibling piece KEEPS the non-heat-loss answer it was painted"
+        );
+        assert_eq!(
+            storey
+                .walls
+                .regions
+                .iter()
+                .filter(|r| r.exposure == WallExposure::Exposed)
+                .count(),
+            0,
+            "…and everything that WAS in the group repainted"
+        );
     }
+    // Put it back, so the attribution checks below run on the same shape the
+    // test set up (this also exercises the set a second time).
+    c.set_structure_group_exposure(0, SurfaceExposure::Wall(WallExposure::Exposed));
+    c.materialize();
 
     // Attribution through the merged group reaches the piece.
     c.set_structure_group_attrs(

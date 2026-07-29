@@ -13,6 +13,10 @@
 //! and holds the transient selected set (app-shell interaction state — the
 //! regions live on the BER record, not the editing `Document`).
 use super::*;
+
+/// Flat-top fallback face height (metres) when a storey has no ceiling height —
+/// mirrors the wall-partition tool's own default.
+const DEFAULT_FACE_HEIGHT_M: f32 = 2.4;
 use ber_model::ber::common::{ConstructionPhase, Evidence};
 use ber_model::ber::roof::InferredRoofType;
 use ber_model::ber::structural::{
@@ -720,6 +724,10 @@ impl AppController {
             /// A UNIFORM face partition: no per-region answers, so the whole
             /// face moves together via its `base_exposure`.
             UniformPartition(manip_plan::VertexId),
+            /// ONE piece of a partition that already carries per-region answers:
+            /// addressed by a sample point inside that piece, so the set reaches
+            /// exactly the surfaces in the group and leaves its siblings alone.
+            PartitionRegion(manip_plan::VertexId, Point2f32, f32, f32),
         }
         let writes: Vec<(usize, Vec<WallWrite>)> = {
             let Some(record) = self.current_record.as_ref() else {
@@ -730,6 +738,10 @@ impl AppController {
                 let Some(doc) = self.document.storeys.get(idx) else {
                     continue;
                 };
+                let height = storey
+                    .ceiling_height_m
+                    .map(|h| h as f32)
+                    .unwrap_or(DEFAULT_FACE_HEIGHT_M);
                 let storey_writes: Vec<WallWrite> = ids
                     .iter()
                     .filter_map(|id| storey.walls.regions.iter().find(|r| r.id == *id))
@@ -743,7 +755,25 @@ impl AppController {
                             } else if doc.wall_partition_is_uniform(vid) {
                                 Some(WallWrite::UniformPartition(vid))
                             } else {
-                                None
+                                // Per-region answers exist: address THIS piece by
+                                // a point inside it (its wall-local centroid — a
+                                // partition piece is convex, being a rectangle cut
+                                // by lines), so the set never reaches a sibling
+                                // piece the assessor did not select.
+                                doc.wall_local_face_ring(r).and_then(|(_, ring)| {
+                                    let n = ring.len() as f32;
+                                    (n > 0.0).then(|| {
+                                        let (sx, sy) = ring
+                                            .iter()
+                                            .fold((0.0, 0.0), |(x, y), p| (x + p.x, y + p.y));
+                                        WallWrite::PartitionRegion(
+                                            vid,
+                                            Point2f32::new(sx / n, sy / n),
+                                            len,
+                                            height,
+                                        )
+                                    })
+                                })
                             }
                         }
                         // No perimeter match → riser: key by its base edge.
@@ -779,6 +809,10 @@ impl AppController {
                     }
                     WallWrite::UniformPartition(vid) => {
                         self.document.storeys[idx].set_uniform_partition_exposure(vid, exposure);
+                    }
+                    WallWrite::PartitionRegion(vid, sample, len, height) => {
+                        self.document.storeys[idx]
+                            .set_partition_region_exposure(vid, sample, exposure, len, height);
                     }
                 }
             }
@@ -853,23 +887,15 @@ impl AppController {
                     // wall's exposure is derivation-owned, so its group locks the
                     // exposure control the same way (the durable exposure write
                     // path can't reach porch walls regardless).
-                    // Only a partition carrying PER-REGION exposures locks the
-                    // bulk control — those are the partition tool's answers and a
-                    // bulk set would paint over them. A UNIFORM partition (cut for
-                    // construction reasons, exposure untouched) has nothing to
-                    // protect, so it stays changeable: the set moves the
-                    // partition's `base_exposure` and every piece follows.
-                    let locked = porch
-                        || document
-                            .storeys
-                            .get(idx)
-                            .and_then(|doc| {
-                                doc.recover_wall_region_span(r).map(|(vid, ..)| {
-                                    doc.is_wall_partitioned(vid)
-                                        && !doc.wall_partition_is_uniform(vid)
-                                })
-                            })
-                            .unwrap_or(false);
+                    // A PORCH wall's exposure is derivation-owned, so its group
+                    // locks the bulk control (the durable write path cannot reach
+                    // porch walls regardless). A face-partitioned wall no longer
+                    // locks anything: the bulk set addresses each selected piece
+                    // individually — the whole face via `base_exposure` when the
+                    // partition is uniform, otherwise just the region that piece
+                    // occupies — so it can no longer paint over an answer the
+                    // assessor gave a sibling.
+                    let locked = porch;
                     let (ty, makeup, phase, name, photos) =
                         match record.data.wall_construction(r.construction_id) {
                             Some(c) => (
