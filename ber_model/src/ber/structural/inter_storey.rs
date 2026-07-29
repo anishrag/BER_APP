@@ -132,6 +132,10 @@ pub fn derive_inter_storey(ber: &mut Ber, dimensioned: &[bool]) {
         .map(|s| PlanFootprint::of(&s.floors))
         .collect();
     let ceilings: Vec<CeilingRegions> = ber.storeys.iter().map(|s| s.ceilings.clone()).collect();
+    // The neighbour's FLOORS, for the band BOTTOM: a stepped floor puts the
+    // neighbour's underside at a different z over different plan area, exactly
+    // as a stepped ceiling does for the band top.
+    let floors: Vec<FloorRegions> = ber.storeys.iter().map(|s| s.floors.clone()).collect();
     let slabs: Vec<f64> = ber
         .storeys
         .iter()
@@ -231,7 +235,9 @@ pub fn derive_inter_storey(ber: &mut Ber, dimensioned: &[bool]) {
                 // reuses the wall-base crossing scan of `floor_breakpoints`.
                 bp_floors: FloorRegions::from_vertex_lists(fp.rings.clone(), ItemId::default()),
                 ceilings: &ceilings[j],
+                floors: &floors[j],
                 datum: datums[j],
+                slab: slabs[j],
                 band_lo: datums[j] - slabs[j],
             };
             let walls = std::mem::take(&mut ber.storeys[i].walls.regions);
@@ -593,9 +599,15 @@ struct NeighbourBand<'a> {
     bp_floors: FloorRegions,
     /// The neighbour's resolved ceilings (storey-LOCAL z).
     ceilings: &'a CeilingRegions,
+    /// The neighbour's resolved FLOORS, whose `level_m` steps the underside.
+    floors: &'a FloorRegions,
     /// The neighbour's floor datum (absolute z).
     datum: f64,
-    /// Absolute z of the neighbour volume's underside: `datum − slab`.
+    /// The neighbour's floor-slab thickness.
+    slab: f64,
+    /// Absolute z of the neighbour volume's underside at its DATUM level:
+    /// `datum − slab`. The fallback for [`band_lo_at`](Self::band_lo_at) when
+    /// no floor region backs the wall.
     band_lo: f64,
 }
 
@@ -628,6 +640,41 @@ impl NeighbourBand<'_> {
             }
         }
         best.map(|(_, (c0, cx, cy))| (c0 + self.datum, cx, cy))
+    }
+
+    /// Absolute z of the neighbour volume's UNDERSIDE near the wall-base point
+    /// `m` — the mirror of [`band_plane_at`](Self::band_plane_at) for the
+    /// BOTTOM. A stepped neighbour floor sits at `datum + level_m − slab`, so
+    /// the underside is not one horizontal plane: over a dropped area it can be
+    /// most of a storey lower, and a wall it buries there would otherwise be
+    /// missed entirely (field: 56 Elmwood Road, the riser beside a dropped
+    /// first-floor area reading Exposed).
+    ///
+    /// Probed just inside the footprint on each side of the base line, the
+    /// LOWER side winning — the symmetric counterpart of the top's higher-side
+    /// rule, so a wall on a step line takes the FULL band the neighbour buries
+    /// it under from either side. Falls back to the datum-level underside when
+    /// no floor region backs the wall.
+    fn band_lo_at(&self, m: Point2f64, nrm: (f64, f64)) -> f64 {
+        let mut best: Option<f64> = None;
+        for s in [1.0, -1.0] {
+            let lo = [SAMPLE_NUDGE_M, SAMPLE_NUDGE_M * 0.1].iter().find_map(|d| {
+                let p = Point2f64::new(m.x + s * nrm.0 * d, m.y + s * nrm.1 * d);
+                if !self.fp.contains(p) {
+                    return None;
+                }
+                let gp = GeoPoint::new(p.x, p.y);
+                self.floors
+                    .regions
+                    .iter()
+                    .find(|r| r.polygon.contains(&gp))
+                    .map(|r| self.datum + r.level_m - self.slab)
+            });
+            if let Some(z) = lo {
+                best = Some(best.map_or(z, |b: f64| b.min(z)));
+            }
+        }
+        best.unwrap_or(self.band_lo)
     }
 }
 
@@ -670,8 +717,32 @@ fn process_wall(wall: WallRegion, nb: &NeighbourBand, own_datum: f64, out: &mut 
         out.push(wall);
         return;
     };
-    let (a, b) = (Point2f64::new(a3.x, a3.y), Point2f64::new(b3.x, b3.y));
+    let (a0, b0) = (Point2f64::new(a3.x, a3.y), Point2f64::new(b3.x, b3.y));
     let nrm = (-uy, ux);
+    // Scan the wall's FULL plan extent along its base line, not just its base
+    // EDGE. `merge_coplanar_flush` grows a wall's ring while the HOST keeps its
+    // short base edge, so a merged wall reaches well past it — and
+    // `clip_wall_by_bands`'s "ring outruns the scanned base frame" guard then
+    // leaves the whole thing alone. At 56 Elmwood Road the step down to the
+    // dropped area merged into a 0.37 m outline stub, so 4.4 m of buried face
+    // never got stamped InterStorey.
+    let base_len = len;
+    let (mut lo, mut hi) = (0.0_f64, len);
+    for v in &wall.polygon.exterior {
+        let t = (v.x - a0.x) * ux + (v.y - a0.y) * uy;
+        lo = lo.min(t);
+        hi = hi.max(t);
+    }
+    let (a, b) = (
+        Point2f64::new(a0.x + ux * lo, a0.y + uy * lo),
+        Point2f64::new(a0.x + ux * hi, a0.y + uy * hi),
+    );
+    let len = hi - lo;
+    if len <= MIN_SUBWALL_M {
+        out.push(wall);
+        return;
+    }
+    let _ = b0;
     let at = |t: f64| Point2f64::new(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t);
 
     // Along-base breakpoints: neighbour FOOTPRINT crossings AND the
@@ -685,6 +756,11 @@ fn process_wall(wall: WallRegion, nb: &NeighbourBand, own_datum: f64, out: &mut 
     // region-order-dependent via `top_z_at`'s first-region-wins tie-break.
     let mut ts = floor_breakpoints(&nb.bp_floors, a, b);
     ts.extend(profile_breakpoints(nb.ceilings, a, b));
+    // The neighbour's FLOOR-region boundaries too: the band BOTTOM follows its
+    // underside, so a run must no more straddle one of its floor steps than one
+    // of its ceiling steps — a single midpoint sample would smear one level's
+    // underside across both.
+    ts.extend(floor_breakpoints(nb.floors, a, b));
     ts.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
 
     // Maximal along-base runs whose midpoint lies on/inside the footprint,
@@ -744,14 +820,23 @@ fn process_wall(wall: WallRegion, nb: &NeighbourBand, own_datum: f64, out: &mut 
     // Keep only runs whose z-band overlap with the wall is real (this is
     // what stops a neighbour footprint edge crossing a wall base from
     // splitting a wall the band never touches).
-    let (zmin, _) = z_extent(&wall);
+    let (zmin, zmax) = z_extent(&wall);
+    // `top_z_at_along` only reads the top profile over the wall's BASE EDGE; a
+    // merged wall reaches past it and samples there come back 0, which would
+    // fail the overlap gate below on a wall the band really does bury. Fall
+    // back to the ring's own top there — the gate is a coarse "does the band
+    // touch this wall at all" test, and `clip_wall_by_bands` cuts the exact
+    // geometry regardless.
+    let merged = lo < -MIN_SUBWALL_M || hi > base_len + MIN_SUBWALL_M;
     let mut active: Vec<ActiveRun> = Vec::new();
     for r in &runs {
         let (t0, t1) = (r.t0, r.t1);
         if (t1 - t0) * len < MIN_SUBWALL_M {
             continue; // sliver guard along the base
         }
-        let band_lo = nb.band_lo - own_datum;
+        // Sampled at the run midpoint, like the band top — always strictly
+        // between two neighbour boundaries thanks to the breakpoints above.
+        let band_lo = nb.band_lo_at(at((t0 + t1) / 2.0), nrm) - own_datum;
         let profile: Vec<(f64, f64)> = r.profile.iter().map(|&(t, z)| (t, z - own_datum)).collect();
         // The run's HIGHEST band top gates the overlap — a profile anywhere
         // above the wall base makes the band real; the profile cut below
@@ -762,10 +847,17 @@ fn process_wall(wall: WallRegion, nb: &NeighbourBand, own_datum: f64, out: &mut 
         // The wall's top over the run, sampled at quarter points (never a
         // breakpoint) — enough for the overlap gate; the exact geometry is
         // cut by `split_by_line` / the profile clip, not by these samples.
-        let ztop_run = [0.25, 0.5, 0.75]
-            .iter()
-            .map(|f| wall.top_z_at_along((t0 + (t1 - t0) * f) * len))
-            .fold(f64::NEG_INFINITY, f64::max);
+        // `top_z_at_along` is measured in the wall's OWN base frame, whose
+        // origin is `exterior[0]`; the scan above runs from `lo` metres before
+        // it (the merged reach), so shift the sample back into that frame.
+        let ztop_run = if merged {
+            zmax
+        } else {
+            [0.25, 0.5, 0.75]
+                .iter()
+                .map(|f| wall.top_z_at_along((t0 + (t1 - t0) * f) * len + lo))
+                .fold(f64::NEG_INFINITY, f64::max)
+        };
         let overlap = band_top.min(ztop_run) - band_lo.max(zmin);
         if overlap <= MIN_SUBWALL_M {
             continue; // degenerate band — the neighbour only grazes this wall
@@ -1450,6 +1542,58 @@ mod tests {
             .regions
             .iter()
             .all(|r| r.exposure == FloorExposure::InterStorey));
+    }
+
+    /// THE STEPPED-NEIGHBOUR BAND BOTTOM (field: 56 Elmwood Road — the riser
+    /// beside a dropped first-floor area reading Exposed).
+    ///
+    /// Ground storey: low ceiling 1.958 over x ∈ [0,3], tall 2.548 over
+    /// x ∈ [3,9], with a riser wall on x = 3. First floor covers the WHOLE
+    /// plan, its floor STEPPED down 0.59 over the low half so it rests on both
+    /// ceilings (datum 2.548, slab 0.25 → underside 2.548 over the tall half,
+    /// 1.958 over the low one).
+    ///
+    /// The ground riser spans 1.958..2.548 — entirely BELOW `datum − slab`, so
+    /// a single flat band bottom misses it completely. It is buried by the
+    /// first floor's dropped slab and must read InterStorey.
+    #[test]
+    fn a_stepped_neighbour_floor_buries_the_riser_below_its_datum() {
+        let ground = stepped_storey(
+            square(0.0, 0.0, 9.0, 4.0),
+            2.548,
+            None,
+            &[(square(0.0, 0.0, 3.0, 4.0), -0.59)],
+        );
+        let mut first = flat_storey(square(0.0, 0.0, 9.0, 4.0), 2.0, Some(0.25));
+        // Step the first floor's own slab down over the low half.
+        first.floors = FloorRegions::from_vertex_lists(
+            vec![square(0.0, 0.0, 3.0, 4.0), square(3.0, 0.0, 9.0, 4.0)],
+            ItemId::default(),
+        );
+        first.floors.regions[0].level_m = -0.59;
+        first.floor_datum_z_m = Some(2.548);
+        let mut ber = Ber::default();
+        ber.storeys = vec![ground, first];
+        assert!(
+            (ber.storey_floor_datums()[1] - 2.798).abs() < 1e-9,
+            "datum 2.548 + 0.25: {:?}",
+            ber.storey_floor_datums()
+        );
+        derive_inter_storey(&mut ber, &[true, true]);
+
+        let risers = walls_on_x(&ber.storeys[0], 3.0);
+        assert_eq!(risers.len(), 1, "the riser stays whole: {}", risers.len());
+        let (lo, hi) = z_extent(risers[0]);
+        assert!(
+            (lo - 1.958).abs() < 1e-6 && (hi - 2.548).abs() < 1e-6,
+            "riser spans the ceiling step: {lo}..{hi}"
+        );
+        assert_eq!(
+            risers[0].exposure,
+            WallExposure::InterStorey,
+            "buried by the neighbour's DROPPED slab, which sits below its datum \
+             underside — the band bottom has to follow the neighbour floor"
+        );
     }
 
     // ── §6 test 3: the user's riser fixture ──────────────────────────────
@@ -2347,6 +2491,105 @@ mod tests {
         }
     }
 
+    /// A MERGED wall (`merge_coplanar_flush` grows the host's ring while the
+    /// host keeps its short base EDGE) must be scanned over its FULL plan
+    /// extent, not just that edge — otherwise `clip_wall_by_bands`'s
+    /// "ring outruns the scanned base frame" guard leaves the whole wall alone
+    /// and the buried part is never stamped.
+    ///
+    /// Field case (56 Elmwood Road): the step down to a dropped first-floor
+    /// area merged into a 0.37 m outline stub, so 4.4 m of face buried by the
+    /// storey below kept reading Exposed.
+    #[test]
+    fn a_merged_wall_is_scanned_past_its_base_edge() {
+        let cid = ItemId::default();
+        // A short OUTLINE wall on x = 0 over y ∈ [4.5, 5], full height...
+        let host = WallRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(vec![
+                Point3f64::new(0.0, 4.5, 0.0),
+                Point3f64::new(0.0, 5.0, 0.0),
+                Point3f64::new(0.0, 5.0, 3.0),
+                Point3f64::new(0.0, 4.5, 3.0),
+            ]),
+            exposure: WallExposure::Exposed,
+            opes: Default::default(),
+            construction_id: cid,
+        };
+        // ...and a low RISER coplanar with it running the rest of the way,
+        // y ∈ [0, 4.5] × z ∈ [0, 1] — flush along y = 4.5, so `with_risers`
+        // merges it in and the host keeps its 0.5 m base edge.
+        let riser = Polygon3D::new(vec![
+            Point3f64::new(0.0, 0.0, 0.0),
+            Point3f64::new(0.0, 4.5, 0.0),
+            Point3f64::new(0.0, 4.5, 1.0),
+            Point3f64::new(0.0, 0.0, 1.0),
+        ]);
+        let merged = WallRegions {
+            regions: vec![host],
+        }
+        .with_risers(vec![(riser, WallExposure::Unset)], cid);
+        assert_eq!(merged.regions.len(), 1, "the riser merged into the host");
+        let wall = merged.regions.into_iter().next().unwrap();
+        let base_len = wall
+            .base_edge()
+            .map(|(a, b)| ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt())
+            .expect("base edge");
+        assert!((base_len - 0.5).abs() < 1e-9, "short host base: {base_len}");
+        let reach = wall
+            .polygon
+            .exterior
+            .iter()
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), v| {
+                (l.min(v.y), h.max(v.y))
+            });
+        assert!(
+            reach.0 < 1e-9 && reach.1 > 4.9,
+            "ring reaches past it: {reach:?}"
+        );
+
+        // A neighbour covering the whole span with its ceiling at 1.0 → the
+        // wall's bottom metre is buried along its ENTIRE length.
+        let ring = square(-2.0, 0.0, 2.0, 5.0);
+        let fp = PlanFootprint::of(&FloorRegions::new(ring.clone(), cid));
+        let bp_floors = FloorRegions::new(ring.clone(), cid);
+        let ceilings = CeilingRegions {
+            regions: vec![sloped_ceiling(ring, &|_| 1.0)],
+        };
+        let empty_floors = FloorRegions::default();
+        let nb = NeighbourBand {
+            fp: &fp,
+            bp_floors,
+            ceilings: &ceilings,
+            floors: &empty_floors,
+            datum: 0.0,
+            slab: 0.0,
+            band_lo: -1.0,
+        };
+        let mut out = Vec::new();
+        process_wall(wall, &nb, 0.0, &mut out);
+        assert!(
+            out.len() >= 2,
+            "the merged wall is split, got {}",
+            out.len()
+        );
+        let buried = out
+            .iter()
+            .find(|w| w.exposure == WallExposure::InterStorey)
+            .unwrap_or_else(|| panic!("a buried band is stamped: {out:?}"));
+        let (y0, y1) = buried
+            .polygon
+            .exterior
+            .iter()
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), v| {
+                (l.min(v.y), h.max(v.y))
+            });
+        assert!(
+            y0 < 0.5 && y1 > 4.0,
+            "stamped across the merged reach, not just the base edge: y[{y0}, {y1}]"
+        );
+    }
+
     /// GAP PIN (risers vs a SLOPED neighbour): a RISER-shaped wall (a trapezoid,
     /// not a full-height quad) backed by a sloped neighbour ceiling must go
     /// through `clip_wall_by_band_profile` and come out a sane covered piece +
@@ -2380,11 +2623,16 @@ mod tests {
                 sloped_ceiling(square(2.0, 0.0, 4.0, 4.0), &|x| 2.2 - 0.3 * x),
             ],
         };
+        // No floor regions → `band_lo_at` falls back to the flat `band_lo`,
+        // which is what these band-TOP fixtures are exercising.
+        let empty_floors = FloorRegions::default();
         let nb = NeighbourBand {
             fp: &fp,
             bp_floors,
             ceilings: &ceilings,
+            floors: &empty_floors,
             datum: 0.0,
+            slab: 0.0,
             band_lo: -1.0,
         };
         let mut out = Vec::new();
@@ -2441,11 +2689,16 @@ mod tests {
                 sloped_ceiling(square(6.0, 0.0, 8.0, 4.0), &seg(6.0, 2.0, 0.5)),
             ],
         };
+        // No floor regions → `band_lo_at` falls back to the flat `band_lo`,
+        // which is what these band-TOP fixtures are exercising.
+        let empty_floors = FloorRegions::default();
         let nb = NeighbourBand {
             fp: &fp,
             bp_floors,
             ceilings: &ceilings,
+            floors: &empty_floors,
             datum: 0.0,
+            slab: 0.0,
             band_lo: -1.0,
         };
         let mut out = Vec::new();

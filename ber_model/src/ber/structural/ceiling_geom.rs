@@ -62,7 +62,7 @@ pub fn strip_collinear(ring: &[Point2f64]) -> Vec<Point2f64> {
 /// ([`CeilingRegions::with_z_deltas`]), the fan/ridge triangulations
 /// ([`CeilingRegions::with_apexes`]), the group merge
 /// ([`CeilingRegions::apex_groups`]), the upper-storey anchor/inheritance
-/// queries ([`CeilingRegions::lowest_flat_z_over`] /
+/// queries ([`CeilingRegions::datum_flat_z_over`] /
 /// [`CeilingRegions::inherited_floor_levels`]), and the outline-suggestion
 /// pipeline (`ber::suggest`) — the re-apply identities depend on all of them
 /// drawing the line in the same place.

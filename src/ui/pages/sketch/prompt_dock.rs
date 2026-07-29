@@ -8,7 +8,8 @@
 
 use super::{SketchEvent, SketchView};
 use crate::controller::app_controller::{
-    ExposureSelection, NewStoreyPromptUiData, PartitionView, SelectMode, VertexDropPromptUiData,
+    AssessmentPhase, ExposureSelection, FloorLevelPromptUiData, NewStoreyPromptUiData,
+    PartitionView, SelectMode, VertexDropPromptUiData,
 };
 use crate::number_entry::parse_dimension_expression;
 use crate::ui::pages::events::UiEvent;
@@ -26,6 +27,7 @@ use ber_model::ber::structural::{CeilingExposure, FloorExposure};
 pub(super) fn has_controls(view: &SketchView<'_>) -> bool {
     // Always-has-a-control flows (buttons / inputs / slider).
     if view.stroke_error.is_some()
+        || view.floor_level_prompt.is_some()
         || view
             .new_storey_prompt
             .as_ref()
@@ -161,6 +163,11 @@ pub(super) fn panel_title(view: &SketchView<'_>) -> &'static str {
         if !view.ceiling_ridge_area_options.is_empty() {
             return "Ridge";
         }
+    }
+    // LAST: the floor-level question is advisory and shares the dock, so it
+    // only names the panel when nothing else is claiming it.
+    if view.floor_level_prompt.is_some() {
+        return "Floor levels";
     }
     "Ceiling shape"
 }
@@ -326,7 +333,13 @@ pub(super) fn instruction(view: &SketchView<'_>) -> Option<&'static str> {
         return Some("Review the suggested straightening.");
     }
     if view.partition_mode {
-        return Some("Wall partition — draw a cut line, then tap a part and set its exposure.");
+        // Structure divides a face to give its parts distinct CONSTRUCTIONS;
+        // Mapping divides it to paint distinct exposures.
+        return Some(if view.current_phase == AssessmentPhase::Structure {
+            "Wall partition — draw a cut line, then tap the parts to attribute."
+        } else {
+            "Wall partition — draw a cut line, then tap a part and set its exposure."
+        });
     }
     if view.exposure_mode {
         return Some("Wall exposures — select a wall, then pick its heat-loss exposure.");
@@ -384,6 +397,14 @@ pub(super) fn instruction(view: &SketchView<'_>) -> Option<&'static str> {
                 "Ceiling shape — tap an apex, or draw a ridge / flat-top, then set heights.",
             );
         }
+    }
+    // LAST, for the same reason as `panel_title`: advisory, so it only speaks
+    // when no tool is instructing.
+    if view.floor_level_prompt.is_some() {
+        return Some(
+            "Part of this floor reaches past the storey below. It copies the \
+             area it mostly runs along — pick the other if that is wrong.",
+        );
     }
     None
 }
@@ -468,7 +489,12 @@ pub(super) fn render_controls<F: FnMut(UiEvent)>(
             review_toolbar(ui, view.review_remaining, on_event);
         } else if view.partition_mode {
             if let Some(pv) = view.partition_view {
-                partition_toolbar(ui, pv, on_event);
+                partition_toolbar(
+                    ui,
+                    pv,
+                    view.current_phase == AssessmentPhase::Mapping,
+                    on_event,
+                );
             }
         } else if view.exposure_mode {
             exposure_toolbar(
@@ -480,6 +506,15 @@ pub(super) fn render_controls<F: FnMut(UiEvent)>(
                 view.exposure_end_input,
                 on_event,
             );
+        }
+
+        // The floor-level question is ADVISORY — the levels are already applied
+        // (defaults at seed time, re-stamped on every pick), so it must never
+        // pre-empt a working tool. It sat at the head of the chain when it
+        // still gated the seed, which left the assessor unable to reach the
+        // exposure toolbar until they switched storey and back.
+        if let Some(fl) = &view.floor_level_prompt {
+            floor_level_toolbar(ui, fl, on_event);
         }
 
         if view.has_floor_plan {
@@ -834,6 +869,45 @@ fn curve_radius_toolbar<F: FnMut(UiEvent)>(ui: &mut egui::Ui, bulge: f32, on_eve
 /// - **Browse**: the current suggestion's label, ◀ ▶ cycling with a "2/5"
 ///   count, Accept (adopts it fully finalised — no review, no prompts), and
 ///   "Draw instead". The canvas tints the suggestion's ring meanwhile.
+/// The floor-level questions raised by a new storey's level seed: which
+/// below-ceiling level the floor DATUMS from, and what level each OVERHANGING
+/// piece takes. Rendered ahead of everything else in the dock because the seed
+/// is HELD until it is answered — nothing else can proceed meanwhile.
+///
+/// Levels read as heights of the storey below's ceiling ("2.55 m"), and an
+/// overhang's options as its resulting floor step ("level 0" / "−0.59 m"),
+/// because that is what the assessor sees on the plan.
+fn floor_level_toolbar<F: FnMut(UiEvent)>(
+    ui: &mut egui::Ui,
+    prompt: &FloorLevelPromptUiData,
+    on_event: &mut F,
+) {
+    for oh in &prompt.overhangs {
+        ui.label(format!("Overhang ({:.1} m²) sits at:", oh.area_m2));
+        for &(z, chosen) in &oh.options {
+            if ui
+                .selectable_label(chosen, format!("{z:.2} m"))
+                .hint("Copy the level of the area it runs along")
+                .clicked()
+            {
+                on_event(UiEvent::Sketch(SketchEvent::SetOverhangLevel(oh.index, z)));
+            }
+        }
+        if let Some(z) = oh.custom {
+            let _ = ui.selectable_label(true, format!("{z:.2} m"));
+        }
+        ui.separator();
+    }
+    ui.separator();
+    if ui
+        .button("Done")
+        .hint("The levels are already applied — this just closes the question")
+        .clicked()
+    {
+        on_event(UiEvent::Sketch(SketchEvent::ConfirmFloorLevels));
+    }
+}
+
 fn new_storey_toolbar<F: FnMut(UiEvent)>(
     ui: &mut egui::Ui,
     prompt: &NewStoreyPromptUiData,
@@ -1542,7 +1616,12 @@ fn ceiling_exposure_toolbar<F: FnMut(UiEvent)>(
 /// exposure buttons apply to it; when a cut is mid-dimensioning the prompt's
 /// metre entry + Skip resolve the next free coordinate. Always: "Remove
 /// partition" (back to one face) and "Done" (close the overlay).
-fn partition_toolbar<F: FnMut(UiEvent)>(ui: &mut egui::Ui, pv: &PartitionView, on_event: &mut F) {
+fn partition_toolbar<F: FnMut(UiEvent)>(
+    ui: &mut egui::Ui,
+    pv: &PartitionView,
+    exposure_controls: bool,
+    on_event: &mut F,
+) {
     ui.vertical(|ui| {
         // The cut's dimension is entered in the floating number box (same
         // keypad / laser as plan dimensioning — see `number_box`); the dock
@@ -1550,24 +1629,47 @@ fn partition_toolbar<F: FnMut(UiEvent)>(ui: &mut egui::Ui, pv: &PartitionView, o
         ui.horizontal_wrapped(|ui| {
             // (The "tap a part / set the selected part" instruction is in the
             // bottom bar.)
-            let has_selection = pv.regions.iter().any(|r| r.selected);
-            for (label, exposure) in [
-                ("Exposed", WallExposure::Exposed),
-                ("Semi-exposed", WallExposure::SemiExposed),
-                ("Non-heat-loss", WallExposure::NonHeatLoss),
-                ("Ground", WallExposure::Ground),
-                ("Unset", WallExposure::Unset),
-            ] {
+            //
+            // EXPOSURE is a Mapping concern. Reached from STRUCTURE the same
+            // face tool is a way to divide a wall into separate surfaces, each
+            // taking its own CONSTRUCTION through the normal attribute flow —
+            // so the exposure buttons are omitted there rather than offering
+            // the assessor the wrong phase's question.
+            if exposure_controls {
+                let has_selection = pv.regions.iter().any(|r| r.selected);
+                for (label, exposure) in [
+                    ("Exposed", WallExposure::Exposed),
+                    ("Semi-exposed", WallExposure::SemiExposed),
+                    ("Non-heat-loss", WallExposure::NonHeatLoss),
+                    ("Ground", WallExposure::Ground),
+                    ("Unset", WallExposure::Unset),
+                ] {
+                    if ui
+                        .add_enabled(has_selection, egui::Button::new(label))
+                        .clicked()
+                    {
+                        on_event(UiEvent::Sketch(SketchEvent::SetPartitionRegionExposure(
+                            exposure,
+                        )));
+                    }
+                }
+                ui.separator();
+            } else {
+                // STRUCTURE: the face view PICKS pieces into the ordinary
+                // Structure selection, so the hand-off is the same attribute
+                // editor a plan tap opens — not a partition-only control.
+                let n = pv.structure_count;
                 if ui
-                    .add_enabled(has_selection, egui::Button::new(label))
+                    .add_enabled(n > 0, egui::Button::new(format!("Set attributes ({n})")))
+                    .hint("Attribute the selected part(s) like any other wall")
                     .clicked()
                 {
-                    on_event(UiEvent::Sketch(SketchEvent::SetPartitionRegionExposure(
-                        exposure,
-                    )));
+                    on_event(UiEvent::Sketch(
+                        SketchEvent::EditPartitionSelectionAttributes,
+                    ));
                 }
+                ui.separator();
             }
-            ui.separator();
             if ui
                 .button("Remove partition")
                 .hint("Back to a single face")

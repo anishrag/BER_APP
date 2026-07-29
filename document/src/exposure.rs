@@ -495,8 +495,15 @@ impl StoreyDoc {
                         })
                         .collect();
                     if !regions.is_empty() {
-                        self.wall_face_partitions
-                            .insert(new_vid, WallFacePartition { cuts, regions });
+                        self.wall_face_partitions.insert(
+                            new_vid,
+                            WallFacePartition {
+                                cuts,
+                                regions,
+                                // The flank inherits the source wall's own base.
+                                base_exposure: part.base_exposure,
+                            },
+                        );
                     }
                 }
             }
@@ -694,7 +701,7 @@ impl StoreyDoc {
         let perim = self.outline.floor_plan.perimeter_walls();
         let floor_bases: Vec<(Point2f64, Point2f64)> = storey
             .floors
-            .riser_faces()
+            .riser_faces(storey.floor_thickness_m.unwrap_or(0.0))
             .iter()
             .filter(|f| f.exterior.len() >= 2)
             .map(|f| {

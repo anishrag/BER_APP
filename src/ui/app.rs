@@ -1056,7 +1056,7 @@ impl eframe::App for BerApp {
                                 ceiling_point_pending,
                                 ceiling_ridge_views,
                                 pending_roof_ridge_line,
-                                ceiling_ridge_snap_tag,
+                                ceiling_ridge_snap_tags,
                                 ceiling_ridge_position_pending,
                                 ceiling_ridge_length_pending,
                                 ceiling_ridge_length_anchored,
@@ -1083,6 +1083,7 @@ impl eframe::App for BerApp {
                                 default_ceiling_height,
                                 ceiling_heights_set,
                                 new_storey_prompt,
+                                floor_level_prompt,
                                 floor_thickness,
                                 view_params,
                             ) = {
@@ -1170,7 +1171,7 @@ impl eframe::App for BerApp {
                                     controller_ref.ceiling_point_pending(),
                                     controller_ref.ceiling_ridge_views(),
                                     controller_ref.pending_roof_ridge_line(),
-                                    controller_ref.ceiling_ridge_snap_tag(),
+                                    controller_ref.ceiling_ridge_snap_tags(),
                                     controller_ref.ceiling_ridge_position_pending(),
                                     controller_ref.ceiling_ridge_length_pending(),
                                     controller_ref.ceiling_ridge_length_anchored(),
@@ -1197,6 +1198,7 @@ impl eframe::App for BerApp {
                                     controller_ref.default_ceiling_height(),
                                     controller_ref.ceiling_heights_set(),
                                     controller_ref.new_storey_prompt(),
+                                    controller_ref.floor_level_prompt(),
                                     controller_ref.floor_thickness(),
                                     crate::ui::render::ViewParams {
                                         zoom: v.zoom,
@@ -1453,6 +1455,7 @@ impl eframe::App for BerApp {
                                 structure_progress,
                                 structure_kinds,
                                 structure_select,
+                                structure_can_partition,
                                 checklist,
                             ) = {
                                 let c = self.app_controller.borrow();
@@ -1470,6 +1473,7 @@ impl eframe::App for BerApp {
                                     c.structure_progress(),
                                     c.structure_kinds().clone(),
                                     c.structure_select(),
+                                    c.structure_partition_wall().is_some(),
                                     checklist,
                                 )
                             };
@@ -1802,7 +1806,7 @@ impl eframe::App for BerApp {
                                 ceiling_apex_open_seq: self.sketch_state.ceiling_apex_open_seq,
                                 ceiling_ridge_views: &ceiling_ridge_views,
                                 pending_roof_ridge_line,
-                                ceiling_ridge_snap_tag: ceiling_ridge_snap_tag.as_ref(),
+                                ceiling_ridge_snap_tags: &ceiling_ridge_snap_tags,
                                 ceiling_ridge_position_pending,
                                 ceiling_ridge_length_pending,
                                 ceiling_ridge_length_anchored,
@@ -1842,6 +1846,7 @@ impl eframe::App for BerApp {
                                 default_ceiling_height,
                                 ceiling_heights_set,
                                 new_storey_prompt,
+                                floor_level_prompt,
                                 new_storey_thickness_input: &mut self
                                     .sketch_state
                                     .new_storey_thickness_input,
@@ -1973,6 +1978,7 @@ impl eframe::App for BerApp {
                                 structure_progress,
                                 structure_kinds,
                                 structure_select,
+                                structure_can_partition,
                                 structure_selected: &structure_selected,
                                 structure_edit: structure_edit.as_ref(),
                                 structure_existing_groups,
@@ -2549,8 +2555,8 @@ impl eframe::App for BerApp {
                                                 }
                                             }
                                         }
-                                        SketchEvent::UnsnapCeilingRidge => {
-                                            controller.borrow_mut().unsnap_roof_ridge();
+                                        SketchEvent::UnsnapCeilingRidge(dof) => {
+                                            controller.borrow_mut().unsnap_roof_ridge(dof);
                                             // The stage the error described is gone.
                                             self.sketch_state.roof_error = None;
                                         }
@@ -2682,6 +2688,11 @@ impl eframe::App for BerApp {
                                         SketchEvent::OpenWallPartition => {
                                             controller.borrow_mut().open_wall_partition();
                                         }
+                                        SketchEvent::OpenStructureWallPartition => {
+                                            controller
+                                                .borrow_mut()
+                                                .open_wall_partition_from_structure();
+                                        }
                                         SketchEvent::CloseWallPartition => {
                                             controller.borrow_mut().close_wall_partition();
                                         }
@@ -2717,6 +2728,11 @@ impl eframe::App for BerApp {
                                         }
                                         SketchEvent::ClearWallPartition => {
                                             controller.borrow_mut().clear_active_wall_partition();
+                                        }
+                                        SketchEvent::EditPartitionSelectionAttributes => {
+                                            controller
+                                                .borrow_mut()
+                                                .edit_partition_selection_attributes();
                                         }
                                         SketchEvent::SetOpeningsMode(on) => {
                                             controller.borrow_mut().set_openings_mode(on);
@@ -3171,6 +3187,14 @@ impl eframe::App for BerApp {
                                                     self.sketch_state.new_storey_error = Some(e);
                                                 }
                                             }
+                                        }
+                                        SketchEvent::SetOverhangLevel(i, z) => {
+                                            controller
+                                                .borrow_mut()
+                                                .set_pending_overhang_level(i, z);
+                                        }
+                                        SketchEvent::ConfirmFloorLevels => {
+                                            controller.borrow_mut().confirm_pending_floor_levels();
                                         }
                                         SketchEvent::SetFloorThickness(v) => {
                                             match controller.borrow_mut().set_floor_thickness(v) {

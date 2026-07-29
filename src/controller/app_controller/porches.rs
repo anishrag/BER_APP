@@ -235,7 +235,7 @@ impl AppController {
         // share one band), so the user declines that too before the wall
         // stays off the line and its dimension question reopens (pinned by
         // the two-round decline in the snap test).
-        let mut ref_walls = self.phase_reference_walls();
+        let mut ref_walls = self.subarea_reference_walls();
         ref_walls.extend(line_refs);
         // Porches never overlap each other: carve against the outline MINUS the
         // existing porches (the available region), so a new one tiles against

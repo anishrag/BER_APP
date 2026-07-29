@@ -396,7 +396,12 @@ impl AppController {
         // quantized base edge — mirroring riser exposure, so step-face
         // constructions survive the re-derivation too.
         #[allow(clippy::type_complexity)]
-        let per_storey: Vec<(usize, Vec<manip_plan::SurfaceRef>, Vec<document::RiserKey>)> = {
+        let per_storey: Vec<(
+            usize,
+            Vec<manip_plan::SurfaceRef>,
+            Vec<document::RiserKey>,
+            Vec<document::FaceRegionKey>,
+        )> = {
             let Some(record) = self.current_record.as_ref() else {
                 return;
             };
@@ -409,6 +414,7 @@ impl AppController {
                 let plan = &sd.outline.floor_plan;
                 let mut refs = Vec::new();
                 let mut risers = Vec::new();
+                let mut faces = Vec::new();
                 for r in ids
                     .iter()
                     // `placeable_wall` spans perimeter AND porch inner walls; a
@@ -417,6 +423,14 @@ impl AppController {
                     // durable construction home is `riser_constructions`.
                     .filter_map(|id| storey.placeable_wall(*id))
                 {
+                    // A PIECE of a face-partitioned wall first: its siblings share
+                    // its `SurfaceRef`, so keying it there would write the whole
+                    // wall (the field report — attributing one half of a partition
+                    // set both halves, photos included).
+                    if let Some(fk) = sd.wall_piece_key_of(r, &storey.walls.regions) {
+                        faces.push(fk);
+                        continue;
+                    }
                     let Some((e0, e1)) = r.base_edge() else {
                         continue;
                     };
@@ -431,8 +445,8 @@ impl AppController {
                         ));
                     }
                 }
-                if !refs.is_empty() || !risers.is_empty() {
-                    out.push((idx, refs, risers));
+                if !refs.is_empty() || !risers.is_empty() || !faces.is_empty() {
+                    out.push((idx, refs, risers, faces));
                 }
             }
             out
@@ -441,7 +455,7 @@ impl AppController {
             return;
         }
         self.record_history();
-        for (idx, refs, riser_keys) in per_storey {
+        for (idx, refs, riser_keys, face_keys) in per_storey {
             let sd = &mut self.document.storeys[idx];
             for r in refs {
                 sd.wall_constructions
@@ -449,6 +463,10 @@ impl AppController {
             }
             for k in riser_keys {
                 sd.riser_constructions
+                    .insert(k, (ty, makeup.clone(), phase.clone(), name.clone()));
+            }
+            for k in face_keys {
+                sd.face_constructions
                     .insert(k, (ty, makeup.clone(), phase.clone(), name.clone()));
             }
         }
@@ -1453,6 +1471,20 @@ impl AppController {
     /// Attach a photo (from `source`) to a Structure group's construction(s) —
     /// the build-up floaty's camera button. Stores the file, then pushes the
     /// `Evidence` onto each of the group's (shared) constructions. Marks dirty.
+    ///
+    /// MATERIALIZES FIRST, for the same reason
+    /// [`set_structure_group_insulation`](Self::set_structure_group_insulation)
+    /// does: a type/make-up set in this session lands in the DURABLE store and
+    /// only reaches the region's construction at the next materialize. Until
+    /// then the region still points at its OLD construction — which, for a group
+    /// the assessor is attributing for the first time, is the record-wide
+    /// UNATTRIBUTED catch-all every other untouched wall shares. Pushing the
+    /// photo there smeared it across the whole record and left the group itself
+    /// with no evidence (field report, 56 Elmwood Road: 3 photos ended up on
+    /// the `Uninitialised`/`Tbd` construction ~30 walls point at, so they showed
+    /// up on walls the assessor never photographed). Materializing first makes
+    /// the region's construction current, so the photo lands where it's read
+    /// from.
     pub fn add_group_photo(
         &mut self,
         group: usize,
@@ -1462,6 +1494,7 @@ impl AppController {
         let Some(photo) = self.ingest_photo(source, quality) else {
             return;
         };
+        self.materialize();
         let (kind, ids) = match self
             .structure_edit
             .as_ref()
@@ -1823,6 +1856,7 @@ impl AppController {
         enum Key {
             WallRef(manip_plan::SurfaceRef),
             Riser(document::RiserKey),
+            Face(document::FaceRegionKey),
             Area(document::CentroidKey),
         }
         // Each key with the phase its default entry should carry — the
@@ -1854,6 +1888,12 @@ impl AppController {
                                 .wall_construction(r.construction_id)
                                 .map(|c| c.base.construction_phase.clone())
                                 .unwrap_or_default();
+                            // A partition PIECE detaches on its own key, so a
+                            // reset can't drag its siblings back with it.
+                            if let Some(fk) = sd.wall_piece_key_of(r, &storey.walls.regions) {
+                                keys.push((Key::Face(fk), phase));
+                                continue;
+                            }
                             let mid = Point2f32::new(
                                 ((e0.x + e1.x) * 0.5) as f32,
                                 ((e0.y + e1.y) * 0.5) as f32,
@@ -1953,6 +1993,10 @@ impl AppController {
                         .riser_constructions
                         .get(rk)
                         .is_some_and(|(ty, mk, ..)| ty.is_set() || mk.is_set()),
+                    Key::Face(fk) => sd
+                        .face_constructions
+                        .get(fk)
+                        .is_some_and(|(ty, mk, ..)| ty.is_set() || mk.is_set()),
                     Key::Area(ck) => match kind {
                         SurfaceKind::Floors => sd
                             .floor_constructions
@@ -1983,6 +2027,10 @@ impl AppController {
                     Key::Riser(rk) => {
                         sd.riser_constructions
                             .insert(rk, (Default::default(), Default::default(), phase, None));
+                    }
+                    Key::Face(fk) => {
+                        sd.face_constructions
+                            .insert(fk, (Default::default(), Default::default(), phase, None));
                     }
                     Key::Area(ck) => match kind {
                         SurfaceKind::Floors => {

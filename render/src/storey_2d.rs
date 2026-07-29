@@ -285,14 +285,34 @@ fn draw_selection_overlay(
         .chain(storey.porch_walls.regions.iter())
     {
         if selected.contains(&wall.id) {
-            let v = &wall.polygon.exterior;
-            if v.len() >= 2 {
+            // The wall's FULL plan extent, not its base EDGE — a merged wall's
+            // edge is a stub, so drawing it showed the selection over only part
+            // of the wall while 3D (drawing the real polygon) showed all of it.
+            if let Some((wa, wb)) = wall.base_extent() {
+                let (pa, pb) = (t.apply(wa.x, wa.y), t.apply(wb.x, wb.y));
+                // A wall is only a LINE in plan, drawn over the outline it sits
+                // on — a dashed gold line alone is easy to lose among the other
+                // lines. Give it a dark HALO to separate it from whatever is
+                // under it, and END CAPS so the extent of the selection reads at
+                // a glance (the exposure tool's wall selection does the same).
+                painter.line_segment(
+                    [pa, pb],
+                    egui::Stroke::new(9.0, egui::Color32::from_rgba_premultiplied(0, 0, 0, 160)),
+                );
                 super::draw_dashed_segment(
                     painter,
-                    t.apply(v[0].x, v[0].y),
-                    t.apply(v[1].x, v[1].y),
-                    egui::Stroke::new(4.0, style::SELECTION_LINE),
+                    pa,
+                    pb,
+                    egui::Stroke::new(5.0, style::SELECTION_LINE),
                 );
+                for p in [pa, pb] {
+                    painter.circle_filled(p, 5.0, style::SELECTION_LINE);
+                    painter.circle_stroke(
+                        p,
+                        5.0,
+                        egui::Stroke::new(1.5, egui::Color32::from_rgb(40, 40, 40)),
+                    );
+                }
             }
         }
     }

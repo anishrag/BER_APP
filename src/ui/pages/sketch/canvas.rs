@@ -6,7 +6,9 @@ use egui::epaint::PathShape;
 
 use super::touch::TouchNav;
 use super::{EguiStroke, SketchEvent, SketchView};
-use crate::controller::app_controller::{AssessmentPhase, PhaseDisplayRegion, SelectMode};
+use crate::controller::app_controller::{
+    AssessmentPhase, PhaseDisplayRegion, RidgeDof, SelectMode, SnapTagView,
+};
 use crate::ui::pages::events::UiEvent;
 use crate::ui::render;
 use crate::ui::render::ViewParams;
@@ -2687,49 +2689,65 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             );
         }
 
-        // The pending ridge's wall snap, mirroring the ceiling-step line's:
-        // drawn through the same snap-tag renderer, but its menu is a separate
-        // widget routed to UnsnapCeilingRidge, never ChooseSnap — the generic
-        // replay rewinds history, and the pending ridge lives outside it. The
-        // menu offers exactly "Don't snap".
-        if let Some(tag) = view.ceiling_ridge_snap_tag {
-            render::render_snap_tags(
-                &painter,
-                rect,
-                ber,
-                current_storey_idx,
-                mode,
-                vp,
-                std::slice::from_ref(tag),
-            );
+        // The pending ridge's wall snaps — ONE TAG PER SNAPPED degree of
+        // freedom (cross at the midpoint, start/end on the endpoints). Drawn
+        // through the same snap-tag renderer as the ceiling-step line, but each
+        // menu is its own widget routed to UnsnapCeilingRidge(dof), never
+        // ChooseSnap: the generic replay rewinds history and re-runs the
+        // stroke, and the pending ridge lives outside it. Each menu offers
+        // exactly "Don't snap", and un-snapping one leaves the others alone.
+        if !view.ceiling_ridge_snap_tags.is_empty() {
+            let tags: Vec<SnapTagView> = view
+                .ceiling_ridge_snap_tags
+                .iter()
+                .map(|t| t.tag.clone())
+                .collect();
+            render::render_snap_tags(&painter, rect, ber, current_storey_idx, mode, vp, &tags);
             if let Some(t) =
                 render::active_storey_transform(rect, ber, current_storey_idx, mode, vp)
             {
-                let sp = t.apply(tag.pos.0 as f64, tag.pos.1 as f64);
-                let label = match tag.current_kind {
-                    Some(k) => format!("{} ▾", render::snap_kind_label(k)),
-                    None => "no snap ▾".to_string(),
-                };
-                egui::Area::new(ui.id().with("ceiling_ridge_snap_tag"))
-                    .fixed_pos(sp + egui::vec2(7.0, -7.0))
-                    .order(egui::Order::Foreground)
-                    .show(ui.ctx(), |ui| {
-                        ui.menu_button(label, |ui| {
-                            ui.label(
-                                egui::RichText::new(
-                                    "ridge pinned onto the parallel wall — its position \
-                                 isn't asked; un-snap reopens it",
-                                )
-                                .small()
-                                .weak(),
-                            );
-                            ui.separator();
-                            if tag.skippable && ui.button("Don't snap").clicked() {
-                                on_event(UiEvent::Sketch(SketchEvent::UnsnapCeilingRidge));
-                                ui.close();
-                            }
+                for entry in view.ceiling_ridge_snap_tags {
+                    let tag = &entry.tag;
+                    let sp = t.apply(tag.pos.0 as f64, tag.pos.1 as f64);
+                    let what = match entry.dof {
+                        RidgeDof::Cross => "line",
+                        RidgeDof::Start => "start",
+                        RidgeDof::End => "end",
+                    };
+                    let label = match tag.current_kind {
+                        Some(k) => format!("{what}: {} ▾", render::snap_kind_label(k)),
+                        None => format!("{what}: no snap ▾"),
+                    };
+                    egui::Area::new(ui.id().with(("ceiling_ridge_snap_tag", what)))
+                        .fixed_pos(sp + egui::vec2(7.0, -7.0))
+                        .order(egui::Order::Foreground)
+                        .show(ui.ctx(), |ui| {
+                            ui.menu_button(label, |ui| {
+                                ui.label(
+                                    egui::RichText::new(match entry.dof {
+                                        RidgeDof::Cross => {
+                                            "the ridge LINE is pinned onto a parallel wall or \
+                                             area edge — its position isn't asked; un-snap to \
+                                             place it yourself"
+                                        }
+                                        _ => {
+                                            "this END is pinned onto a wall — un-snap to set \
+                                             the ridge's length yourself"
+                                        }
+                                    })
+                                    .small()
+                                    .weak(),
+                                );
+                                ui.separator();
+                                if tag.skippable && ui.button("Don't snap").clicked() {
+                                    on_event(UiEvent::Sketch(SketchEvent::UnsnapCeilingRidge(
+                                        entry.dof,
+                                    )));
+                                    ui.close();
+                                }
+                            });
                         });
-                    });
+                }
             }
         }
     } // ── end single-storey plan chrome (overlay-mode suppression) ────────────
@@ -6629,7 +6647,11 @@ fn partition_overlay<F: FnMut(UiEvent)>(
     painter.text(
         rect.left_top() + egui::vec2(8.0, 8.0),
         egui::Align2::LEFT_TOP,
-        "Draw a partition · tap a region to set its exposure · Done in the toolbar",
+        if pv.structure {
+            "Draw a partition · tap parts to select them · Set attributes in the toolbar"
+        } else {
+            "Draw a partition · tap a region to set its exposure · Done in the toolbar"
+        },
         egui::FontId::proportional(13.0),
         egui::Color32::from_gray(160),
     );

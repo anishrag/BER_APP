@@ -5,8 +5,12 @@
 //! the classic isometric). The storey's REAL resolved geometry is drawn, not
 //! a uniform extrusion:
 //!
-//! - each floor region's outline at its own `level_m` (floor steps show as
-//!   raised/lowered rings);
+//! - each floor region's outline at its UNDERSIDE (`level_m − slab`) — the
+//!   surface the storey actually rests on, and the one that loses heat where
+//!   a floor is exposed; floor steps show as raised/lowered rings. The
+//!   walking surface above it draws as a thin DOTTED ring, present only so
+//!   the heights (measured from it) can be read off, never mistaken for a
+//!   structural plane;
 //! - each roof region at its own per-vertex z (ceiling steps as offset rings,
 //!   fans/ridges as sloped faces);
 //! - each WALL REGION's real polygon — sloped/jumped tops tracing the roof —
@@ -133,6 +137,9 @@ pub fn render_at_z_offset(
         return;
     };
     let wall_top = z_offset + height;
+    // The slab band: floors draw at their UNDERSIDE, the walking surface a
+    // dotted hint above it. Storey 0 (no thickness) has neither — one line.
+    let slab = storey.floor_thickness_m.unwrap_or(0.0).max(0.0);
     for region in &storey.floors.regions {
         if fade_internal
             && region.exposure == FloorExposure::InterStorey
@@ -144,7 +151,8 @@ pub fn render_at_z_offset(
             painter,
             t,
             region,
-            z_offset + region.level_m,
+            z_offset + region.level_m - slab,
+            slab,
             display_mode,
             view,
             selected,
@@ -264,7 +272,9 @@ pub fn projected_bb_for_storey(
     view: ViewParams,
 ) -> Option<((f64, f64), (f64, f64))> {
     let height = storey.ceiling_height_m?;
-    let wall_bottom = z_offset + min_floor_level(storey);
+    // The slab underside is the storey's real bottom — floors draw there.
+    let slab = storey.floor_thickness_m.unwrap_or(0.0).max(0.0);
+    let wall_bottom = z_offset + min_floor_level(storey) - slab;
     let wall_top = z_offset + height;
     let mut bb: Option<((f64, f64), (f64, f64))> = None;
     let mut add = |px: f64, py: f64| {
@@ -278,7 +288,12 @@ pub fn projected_bb_for_storey(
     };
     for region in &storey.floors.regions {
         for c in region.polygon.exterior().coords() {
-            for z in [wall_bottom, z_offset + region.level_m, wall_top] {
+            for z in [
+                wall_bottom,
+                z_offset + region.level_m - slab,
+                z_offset + region.level_m,
+                wall_top,
+            ] {
                 let (px, py) = view.project_3d(c.x, c.y, z);
                 add(px, py);
             }
@@ -310,21 +325,25 @@ fn draw_floor_region(
     painter: &egui::Painter,
     t: &Transform2d,
     region: &FloorRegion,
-    floor_z: f64,
+    underside_z: f64,
+    slab: f64,
     display_mode: DisplayMode,
     view: ViewParams,
     selected: &HashSet<ItemId>,
     fade_internal: bool,
 ) {
-    let floor_pts: Vec<egui::Pos2> = region
-        .polygon
-        .exterior()
-        .coords()
-        .map(|c| {
-            let (px, py) = view.project_3d(c.x, c.y, floor_z);
-            t.apply(px, py)
-        })
-        .collect();
+    let project = |z: f64| -> Vec<egui::Pos2> {
+        region
+            .polygon
+            .exterior()
+            .coords()
+            .map(|c| {
+                let (px, py) = view.project_3d(c.x, c.y, z);
+                t.apply(px, py)
+            })
+            .collect()
+    };
+    let floor_pts = project(underside_z);
     if floor_pts.len() < 4 {
         return;
     }
@@ -353,6 +372,21 @@ fn draw_floor_region(
         egui::Stroke::new(2.0, floor_color)
     };
     painter.add(egui::Shape::closed_line(floor_pts, stroke));
+    // The WALKING SURFACE, a slab above: a hairline dotted ring. It is where
+    // the storey's heights are measured from, so it has to be visible — but it
+    // is not a structural plane (the storey rests on the underside drawn
+    // above), so it must not read as one.
+    if slab > 1e-6 {
+        let top_pts = project(underside_z + slab);
+        if top_pts.len() >= 4 {
+            painter.extend(egui::Shape::dashed_line(
+                &top_pts,
+                egui::Stroke::new(0.5, style::faded(floor_color)),
+                2.0,
+                3.0,
+            ));
+        }
+    }
 }
 
 /// One WALL region's real polygon (base edge at the bottom, top tracing the

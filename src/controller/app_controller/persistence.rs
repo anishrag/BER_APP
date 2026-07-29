@@ -262,6 +262,7 @@ impl AppController {
         self.review = None;
         self.pending_redraw = None;
         self.pending_new_storey = None;
+        self.pending_floor_levels = None;
         self.inherited_seed_pending.clear();
         self.living_area_mode = false;
         self.porch_mode = false;
@@ -421,6 +422,11 @@ impl AppController {
         if self.purge_shadowed_exposure_entries_all() {
             let _ = self.mark_dirty();
         }
+        // LAST: a storey that still owes its floor-level answer asks now. It has
+        // to be here, at the very end — the active storey is only settled by the
+        // snapshot restore above, and the footprint this reads comes from the
+        // geometry `refresh_all_storeys` just resolved.
+        self.maybe_ask_unanswered_levels();
         Ok(())
     }
 
@@ -747,9 +753,10 @@ impl AppController {
                 Option<String>,
             );
             #[allow(clippy::type_complexity)]
-            let (walls, risers, floors, ceilings): (
+            let (walls, risers, faces, floors, ceilings): (
                 Vec<(manip_plan::SurfaceRef, WallEntry)>,
                 Vec<(document::RiserKey, WallEntry)>,
+                Vec<(document::FaceRegionKey, WallEntry)>,
                 Vec<(
                     document::CentroidKey,
                     (
@@ -777,9 +784,11 @@ impl AppController {
                 };
                 // Map each resolved wall's base midpoint back to its durable key —
                 // a perimeter SurfaceRef, or (for a riser) its quantized base edge.
-                let plan = &self.document.storeys[idx].outline.floor_plan;
+                let sd = &self.document.storeys[idx];
+                let plan = &sd.outline.floor_plan;
                 let mut walls = Vec::new();
                 let mut risers = Vec::new();
+                let mut faces = Vec::new();
                 // Perimeter AND porch inner walls: a porch wall's base midpoint
                 // has no outline SurfaceRef, so it seeds into the riser store —
                 // the same base-edge key its attribution writes and
@@ -802,6 +811,20 @@ impl AppController {
                     if ty == WallConstructionType::default() && mk == ConstructionMakeup::default()
                     {
                         continue;
+                    }
+                    // A PIECE of a SPLIT wall recovers onto its own
+                    // FaceRegionKey, so a restart can't hand every sibling this
+                    // piece's construction on the first re-resolve.
+                    if let Some(fk) = sd.wall_piece_key_of(r, &storey.walls.regions) {
+                        faces.push((fk, (ty.clone(), mk.clone(), ph.clone(), nm.clone())));
+                        // …and ALSO under the shared SurfaceRef, as the
+                        // FALLBACK. A geometric key does not survive a geometry
+                        // change; the parametric one does, and a legacy split
+                        // record UNIFIES its walls on open — losing the piece key
+                        // and, without this, the fabric with it. The piece
+                        // entries stay authoritative (`stamp_wall_constructions`
+                        // reads them first), so the shared entry is only ever
+                        // consulted by a piece that has none of its own.
                     }
                     let Some((e0, e1)) = r.base_edge() else {
                         continue;
@@ -850,7 +873,7 @@ impl AppController {
                         .then(|| (document::centroid_key(r.centroid()), (ty, mk, ph, nm)))
                     })
                     .collect();
-                (walls, risers, floors, ceilings)
+                (walls, risers, faces, floors, ceilings)
             };
             let sd = &mut self.document.storeys[idx];
             for (k, v) in walls {
@@ -858,6 +881,9 @@ impl AppController {
             }
             for (k, v) in risers {
                 sd.riser_constructions.entry(k).or_insert(v);
+            }
+            for (k, v) in faces {
+                sd.face_constructions.entry(k).or_insert(v);
             }
             for (k, v) in floors {
                 sd.floor_constructions.entry(k).or_insert(v);
@@ -1057,6 +1083,9 @@ impl AppController {
         if self.purge_shadowed_exposure_entries_all() {
             let _ = self.mark_dirty();
         }
+        // Same tail as `open_ber`: any storey still owing its floor-level
+        // answer asks now, with the active storey and geometry both settled.
+        self.maybe_ask_unanswered_levels();
         true
     }
 

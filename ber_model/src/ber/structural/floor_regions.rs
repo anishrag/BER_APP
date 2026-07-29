@@ -695,7 +695,10 @@ impl FloorRegions {
 
     /// Interior FLOOR-RISER faces: for every plan edge piece shared by two
     /// regions whose `level_m` differ (> [`RISER_Z_EPS_M`]), the vertical
-    /// quad from the lower to the higher level. `exterior[0]`/`[1]` are the
+    /// quad between the two regions' UNDERSIDES (`level − slab_m`) — the step
+    /// in the floor PLANE, whose height is exactly the level difference. The
+    /// underside is what the storey rests on and what walls run between; the
+    /// walking surface is a measuring datum, not a structural face. `exterior[0]`/`[1]` are the
     /// base edge at the LOWER level (the vertex-order contract `WallRegion`
     /// readers rely on). Outline edges never emit: a piece must be shared by
     /// TWO regions, and the regions tile the footprint with disjoint
@@ -707,7 +710,7 @@ impl FloorRegions {
     /// FLUSH continuation of a wall region does not survive as its own
     /// region: `WallRegions::with_risers` merges it into that wall
     /// (`merge_coplanar_flush`).
-    pub fn riser_faces(&self) -> Vec<Polygon3D> {
+    pub fn riser_faces(&self, slab_m: f64) -> Vec<Polygon3D> {
         let to_pts = |ls: &LineString<f64>| {
             let mut pts: Vec<Point2f64> = ls.coords().map(|c| Point2f64::new(c.x, c.y)).collect();
             if pts.len() > 1 && pts.first() == pts.last() {
@@ -732,7 +735,18 @@ impl FloorRegions {
                 for ring_i in &rings[i] {
                     for ring_j in &rings[j] {
                         for (p, q) in shared_plan_pieces(ring_i, ring_j) {
-                            out.extend(riser_face(p, q, lo, hi, lo, hi));
+                            // BOTH ends at the UNDERSIDE. The underside is the
+                            // floor PLANE — what the storey rests on, what the
+                            // walls run between; the walking surface exists
+                            // only to measure heights from. So the step in that
+                            // plane runs underside-to-underside, and its height
+                            // is exactly the level difference. The slab band
+                            // above the higher underside is that floor's own
+                            // thickness — construction, not wall (field:
+                            // 56 Elmwood Road).
+                            let t = slab_m.max(0.0);
+                            let (base, top) = (lo - t, hi - t);
+                            out.extend(riser_face(p, q, base, top, base, top));
                         }
                     }
                 }

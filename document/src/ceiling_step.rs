@@ -103,6 +103,76 @@ pub fn region_line_coords(regions: &FloorRegions, axis: ParameterAxis) -> Vec<f3
     out
 }
 
+/// Every edge of every resolved FLOOR region, as world-metre reference
+/// segments — the SEGMENT analogue of [`region_line_coords`], for the carve
+/// rather than the line snap.
+///
+/// A ceiling section drawn over a floor step should land ON that step's
+/// boundary: the two are the same wall in the building, and the assessor can
+/// see the floor line on the plan while drawing. The ceiling-step LINE flow
+/// already snaps to these (`region_line_coords` feeds
+/// [`StoreyDoc::snap_ceiling_step_line`]), but the AREA carve levels onto
+/// `ref_walls` — which carried construction-phase lines and ceiling sections
+/// and nothing from the floors, so a section drawn over a dropped floor had
+/// nothing to grab.
+///
+/// Every region edge is emitted, internal step boundaries and outline alike;
+/// the outline ones are harmless (the carve boundary already supplies them,
+/// and levelling onto a wall twice is idempotent). Degenerate rings and
+/// zero-length edges contribute nothing.
+pub fn floor_region_edges(regions: &FloorRegions) -> Vec<[Point2f32; 2]> {
+    let mut out = Vec::new();
+    for region in &regions.regions {
+        let ring: Vec<Point2f32> = region
+            .polygon
+            .exterior()
+            .coords()
+            .map(|c| Point2f32::new(c.x as f32, c.y as f32))
+            .collect();
+        let n = ring.len();
+        if n < 3 {
+            continue;
+        }
+        for i in 0..n {
+            let (a, b) = (ring[i], ring[(i + 1) % n]);
+            if (a.x - b.x).abs() > f32::EPSILON || (a.y - b.y).abs() > f32::EPSILON {
+                out.push([a, b]);
+            }
+        }
+    }
+    out
+}
+
+/// Every edge of every resolved CEILING region, as world-metre reference
+/// segments — the SEGMENT analogue of [`ceiling_line_coords`], and the ceiling
+/// counterpart of [`floor_region_edges`].
+///
+/// Ceiling rings are 3D and may be unclosed; only the plan `(x, y)` matters
+/// here and the wrap edge is included. Degenerate rings and zero-length edges
+/// contribute nothing.
+pub fn ceiling_region_edges(regions: &CeilingRegions) -> Vec<[Point2f32; 2]> {
+    let mut out = Vec::new();
+    for region in &regions.regions {
+        let ring: Vec<Point2f32> = region
+            .polygon
+            .exterior
+            .iter()
+            .map(|v| Point2f32::new(v.x as f32, v.y as f32))
+            .collect();
+        let n = ring.len();
+        if n < 3 {
+            continue;
+        }
+        for i in 0..n {
+            let (a, b) = (ring[i], ring[(i + 1) % n]);
+            if (a.x - b.x).abs() > f32::EPSILON || (a.y - b.y).abs() > f32::EPSILON {
+                out.push([a, b]);
+            }
+        }
+    }
+    out
+}
+
 /// Reference coordinates (on `axis`) of every CEILING-region edge parallel to a
 /// step line on `axis` — the analogue of [`region_line_coords`] for the roof
 /// (ceiling-step) regions, so a drawn step line also snaps to existing ceiling

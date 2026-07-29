@@ -201,6 +201,17 @@ pub enum WallConstructionType {
     /// Aerated (aircrete) concrete block — additive 2026-07; serde is
     /// name-based, so older records (which never stored it) are unaffected.
     AeratedBlock,
+    /// The assessor LOOKED and could not determine the construction — a made
+    /// choice, so `is_set()` and the surface counts as done on the type axis
+    /// (unlike [`Uninitialised`](Self::Uninitialised), which is "not looked at
+    /// yet").
+    ///
+    /// SEPARATE from [`ConstructionMakeup::Unknown`], which declares the
+    /// BUILD-UP unknown for a KNOWN type ("it's a cavity wall, I don't know
+    /// what's in it"). This one is unknown on the TYPE axis ("I don't know what
+    /// this wall is built of"), and the two combine freely. Additive 2026-07;
+    /// serde is name-based, so older records are unaffected.
+    Unknown,
     Floor,
     #[default]
     Uninitialised,
@@ -217,6 +228,7 @@ impl WallConstructionType {
             WallConstructionType::TimberConstruction => "Timber",
             WallConstructionType::ICF => "ICF",
             WallConstructionType::AeratedBlock => "Aerated block",
+            WallConstructionType::Unknown => "Unknown",
             WallConstructionType::Floor => "Floor",
             WallConstructionType::Uninitialised => "Unset",
         }
@@ -235,22 +247,30 @@ impl ConstructionMakeup {
     /// Whether this build-up needs a backing PHOTO to count as done. A
     /// SPECIFIED custom build-up (`Layers`) does — the assessor declared an
     /// actual fabric stack, so a photo is the evidence for it — and so does
-    /// `DefaultPlus` (measured added insulation and/or a dry-lining slab):
-    /// the assessor asserted concrete fabric on top of the default, and
-    /// (exactly like a ceiling's specified
-    /// [`CeilingInsulation::ThicknessMm`]) a measurable fabric claim needs
+    /// `DefaultPlus` WITH measured extra insulation: that's a concrete,
+    /// measurable fabric claim on top of the default and (exactly like a
+    /// ceiling's specified [`CeilingInsulation::ThicknessMm`]) it needs
     /// photographic evidence. `SomeInsulation` does too — the claim is
     /// unmeasurable but it's still an asserted upgrade, and the photo of the
     /// evidence is what backs the partial credit. `Default` (a standard
     /// assumed construction), `Unknown` (declared unknown) and `NonHeatLoss`
     /// are not specified fabric and need no photo.
+    ///
+    /// PLASTERBOARD-ONLY dry-lining — `DefaultPlus { extra_insulation_mm: 0,
+    /// plasterboard: true }` — needs NO photo either (field call, 2026-07-29).
+    /// A bare slab claims no INSULATION: there's no thermal upgrade being
+    /// asserted, just the lining the assessor can see, so demanding evidence
+    /// for it only blocked the box from completing. Add any thickness and the
+    /// photo requirement comes straight back.
     pub fn requires_photo(&self) -> bool {
-        matches!(
-            self,
-            ConstructionMakeup::Layers(_)
-                | ConstructionMakeup::DefaultPlus { .. }
-                | ConstructionMakeup::SomeInsulation
-        )
+        match self {
+            ConstructionMakeup::Layers(_) | ConstructionMakeup::SomeInsulation => true,
+            ConstructionMakeup::DefaultPlus {
+                extra_insulation_mm,
+                ..
+            } => *extra_insulation_mm > 0,
+            _ => false,
+        }
     }
 
     /// The insulation thickness (mm) when this make-up IS a quick
@@ -1251,29 +1271,51 @@ impl Ber {
     /// re-point onto the unclassified base seed (= a group RESET) never
     /// carries — see the seed guard in the body.
     /// Called by the `document` stamp functions after their re-point loops.
+    /// Whether `id` names a construction nothing has been decided about — its
+    /// TYPE and its BUILD-UP are both unset. Such a construction is not a group
+    /// the assessor built; it is the shared bucket every un-answered surface of
+    /// its phase falls into, so nothing group-specific (evidence above all) may
+    /// be attached to it. `false` for an unknown id.
+    pub fn is_unclassified_construction(&self, id: ItemId) -> bool {
+        if let Some(c) = self.wall_constructions.iter().find(|c| c.base.id == id) {
+            return !c.construction_type.is_set() && !c.base.construction_makeup.is_set();
+        }
+        if let Some(c) = self.floor_constructions.iter().find(|c| c.base.id == id) {
+            return !c.construction_type.is_set() && !c.base.construction_makeup.is_set();
+        }
+        if let Some(c) = self.ceiling_constructions.iter().find(|c| c.base.id == id) {
+            return !c.construction_type.is_set() && !c.base.construction_makeup.is_set();
+        }
+        false
+    }
+
     pub fn carry_evidence_from_orphans(&mut self, repoints: &[(ItemId, ItemId)]) {
         if repoints.is_empty() {
             return;
         }
         let referenced = self.referenced_construction_ids();
-        // Never carry ONTO the unclassified base seed: that re-point is a
-        // RESET ("forget this group's attribution"), and the seed is shared by
-        // every unclassified surface — evidence landing there would surface on
-        // unrelated groups.
-        let seeds: Vec<ItemId> = [
-            self.wall_construction_id(Default::default(), Default::default(), Default::default()),
-            self.floor_construction_id(Default::default(), Default::default(), Default::default()),
-            self.ceiling_construction_id(
-                Default::default(),
-                Default::default(),
-                Default::default(),
-            ),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
+        // Never carry ONTO an UNCLASSIFIED construction: that re-point is a
+        // RESET ("forget this group's attribution"), and an unclassified
+        // construction is the shared bucket every un-answered surface of its
+        // phase sits in — evidence landing there surfaces on all of them.
+        //
+        // Tested by NATURE (type unset AND make-up unset), not by identity
+        // against the phase-default seed. `stamp_wall_phases` gives each
+        // unclassified surface a PHASE-stamped bucket, so the buckets that
+        // actually hold the un-answered walls are `Uninitialised/Tbd/Original`,
+        // `…/Extension1`, and so on — never the `…/Unassigned` default the old
+        // seed lookup asked for. Field report, 56 Elmwood Road: resetting a
+        // group carried its photos onto the `Original` bucket that 32 walls
+        // shared, so the pictures appeared on walls that were never
+        // photographed — and vanished again the moment one of those walls was
+        // attributed and forked onto a construction of its own.
+        let unclassified: std::collections::HashSet<ItemId> = repoints
+            .iter()
+            .map(|&(_, new)| new)
+            .filter(|&id| self.is_unclassified_construction(id))
+            .collect();
         for &(old, new) in repoints {
-            if old == new || referenced.contains(&old) || seeds.contains(&new) {
+            if old == new || referenced.contains(&old) || unclassified.contains(&new) {
                 continue;
             }
             let photos = match self.construction_base_mut(old) {
@@ -1891,11 +1933,10 @@ mod tests {
         assert_eq!(old.insulation, None, "pre-field records load unspecified");
     }
 
-    /// `DefaultPlus` — the default construction plus a found upgrade (extra
-    /// insulation and/or a dry-lining slab) — is a real choice (set), and
-    /// like `Layers` it asserts measurable fabric, so its build-up completes
-    /// only with a backing photo. That holds for every shape of the upgrade,
-    /// including plasterboard-only dry-lining.
+    /// `DefaultPlus` — the default construction plus a found upgrade — is a
+    /// real choice (set), and where it claims MEASURED extra insulation it
+    /// asserts fabric like `Layers` does, so its build-up completes only with
+    /// a backing photo.
     #[test]
     fn default_plus_is_set_and_requires_photo() {
         for dp in [
@@ -1905,11 +1946,6 @@ mod tests {
             },
             ConstructionMakeup::DefaultPlus {
                 extra_insulation_mm: 50,
-                plasterboard: true,
-            },
-            // Plasterboard-only dry-lining (0 mm extra insulation).
-            ConstructionMakeup::DefaultPlus {
-                extra_insulation_mm: 0,
                 plasterboard: true,
             },
         ] {
@@ -1927,6 +1963,105 @@ mod tests {
             base.photos.push(Evidence::default());
             assert!(base.build_up_done(), "a backing photo completes {dp:?}");
         }
+    }
+
+    /// FIELD ADDITION (2026-07-29): the TYPE axis gets its own `Unknown` —
+    /// "I looked and can't tell what this wall is built of" — alongside cavity
+    /// / filled cavity / hollow block / timber. It is a MADE CHOICE (`is_set`),
+    /// so unlike `Uninitialised` it completes the type half of the surface.
+    ///
+    /// It is SEPARATE from `ConstructionMakeup::Unknown`, which declares the
+    /// BUILD-UP of a KNOWN type unknown. The two axes are orthogonal and combine
+    /// freely — including "unknown type, unknown build-up", which is complete
+    /// (both are answers) and needs no photo.
+    #[test]
+    fn wall_type_unknown_is_a_made_choice_distinct_from_makeup_unknown() {
+        assert!(
+            WallConstructionType::Unknown.is_set(),
+            "an unknown TYPE is an answer, not the unset placeholder"
+        );
+        assert!(!WallConstructionType::Uninitialised.is_set());
+        assert_eq!(WallConstructionType::Unknown.label(), "Unknown");
+
+        // Unknown TYPE + a known build-up: complete.
+        let known_makeup = WallConstruction {
+            construction_type: WallConstructionType::Unknown,
+            base: ConstructionBase {
+                construction_makeup: ConstructionMakeup::Default,
+                ..Default::default()
+            },
+        };
+        assert!(
+            known_makeup.is_complete(),
+            "unknown type + default build-up is a fully answered wall"
+        );
+
+        // A known TYPE with an unknown build-up: also complete — the other axis.
+        let known_type = WallConstruction {
+            construction_type: WallConstructionType::CavityWall,
+            base: ConstructionBase {
+                construction_makeup: ConstructionMakeup::Unknown,
+                ..Default::default()
+            },
+        };
+        assert!(known_type.is_complete());
+
+        // Both unknown: still complete, still no photo demanded.
+        let both = WallConstruction {
+            construction_type: WallConstructionType::Unknown,
+            base: ConstructionBase {
+                construction_makeup: ConstructionMakeup::Unknown,
+                ..Default::default()
+            },
+        };
+        assert!(!ConstructionMakeup::Unknown.requires_photo());
+        assert!(both.is_complete(), "two answers are still two answers");
+
+        // But an unknown TYPE does not excuse the UNSET build-up.
+        let makeup_tbd = WallConstruction {
+            construction_type: WallConstructionType::Unknown,
+            base: ConstructionBase::default(),
+        };
+        assert!(
+            !makeup_tbd.is_complete(),
+            "the build-up axis is still unanswered"
+        );
+    }
+
+    /// FIELD CALL (2026-07-29): PLASTERBOARD-ONLY dry-lining — "default plus
+    /// plasterboard", 0 mm extra insulation — is a made choice that needs NO
+    /// photo. A bare slab asserts no INSULATION, so there is no measurable
+    /// thermal claim to evidence; requiring one only left the box incomplete.
+    /// Adding any thickness restores the requirement.
+    #[test]
+    fn plasterboard_only_dry_lining_needs_no_photo() {
+        let pb_only = ConstructionMakeup::DefaultPlus {
+            extra_insulation_mm: 0,
+            plasterboard: true,
+        };
+        assert!(pb_only.is_set(), "plasterboard-only is a made choice");
+        assert!(
+            !pb_only.requires_photo(),
+            "a bare slab claims no insulation — nothing to evidence"
+        );
+        let base = ConstructionBase {
+            construction_makeup: pb_only,
+            ..Default::default()
+        };
+        assert!(
+            base.build_up_done(),
+            "…so the build-up completes with no photo attached"
+        );
+
+        // One millimetre of claimed insulation and the evidence is due again.
+        let with_insulation = ConstructionMakeup::DefaultPlus {
+            extra_insulation_mm: 10,
+            plasterboard: true,
+        };
+        assert!(
+            with_insulation.requires_photo(),
+            "insulated dry-lining is a measurable claim — photo required"
+        );
     }
 
     /// `SomeInsulation` — evidence of insulation exists but the thickness is

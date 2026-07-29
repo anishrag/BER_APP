@@ -56,6 +56,76 @@ pub(super) struct PendingNewStorey {
     pub(super) stage: NewStoreyStage,
 }
 
+/// One overhanging piece awaiting its level: which
+/// `CeilingRegions::inherited_floor_pieces` piece it is, how big, the levels it
+/// adjoins (longest shared boundary first) and the one currently chosen.
+#[derive(Debug, Clone)]
+pub(super) struct PendingOverhang {
+    pub(super) index: usize,
+    pub(super) area_m2: f64,
+    pub(super) bordering: Vec<f64>,
+    pub(super) chosen_z: f64,
+}
+
+/// The ONE question the floor-level rule raises: for each piece of the new
+/// storey's floor with nothing under it, which neighbouring area's level it
+/// copies (or a height given outright).
+///
+/// Everything else follows without asking — a piece with a ceiling under it
+/// lands on that ceiling, and the storey's datum is simply the height of its
+/// largest floor area. Raised only when a piece adjoins MORE than one level;
+/// the seed is held until it is answered, so a floor is never stamped on an
+/// assumption. Controller-transient like [`PendingNewStorey`]; fires on BOTH
+/// paths into the seed — an accepted suggestion and a hand-drawn outline.
+#[derive(Debug, Clone)]
+pub(super) struct PendingFloorLevels {
+    pub(super) storey_idx: usize,
+    pub(super) footprint: Vec<Point2f32>,
+    pub(super) overhangs: Vec<PendingOverhang>,
+}
+
+impl PendingFloorLevels {
+    /// The current answers, positional by `inherited_floor_pieces` index — the
+    /// shape [`CeilingRegions::resolve_floor_levels`] consumes.
+    ///
+    /// [`CeilingRegions::resolve_floor_levels`]:
+    /// ber_model::ber::structural::resolve_floor_levels
+    fn answers(&self) -> Vec<Option<f64>> {
+        let n = self
+            .overhangs
+            .iter()
+            .map(|o| o.index + 1)
+            .max()
+            .unwrap_or(0);
+        let mut answers = vec![None; n];
+        for o in &self.overhangs {
+            answers[o.index] = Some(o.chosen_z);
+        }
+        answers
+    }
+}
+
+/// UI-facing snapshot of the floor-level prompt. `None` when nothing is
+/// waiting.
+#[derive(Debug, Clone)]
+pub struct FloorLevelPromptUiData {
+    /// One entry per piece of floor that adjoins more than one level.
+    pub overhangs: Vec<OverhangPromptUiData>,
+}
+
+/// One overhang's question: how big it is, and the neighbouring levels it
+/// could copy — as below-ceiling heights, which is what the assessor measured.
+#[derive(Debug, Clone)]
+pub struct OverhangPromptUiData {
+    pub index: usize,
+    pub area_m2: f64,
+    /// `(ceiling height m, chosen)`, longest shared boundary first.
+    pub options: Vec<(f64, bool)>,
+    /// The chosen height when it is NOT one of the offered neighbours — a
+    /// height the assessor typed in.
+    pub custom: Option<f64>,
+}
+
 /// UI-facing snapshot of the new-storey prompt (slice D renders it as the
 /// top-priority dock toolbar). `None` when no flow is in progress.
 #[derive(Debug, Clone)]
@@ -370,6 +440,62 @@ impl AppController {
     /// (trap 3: the seed fires exactly once, at the finalisation
     /// transition; `open_ber` re-derives the pending set, so the transition
     /// survives a restart; finalised/old records never retro-seed).
+    /// Give a storey whose level questions were never answered its chance to
+    /// ask again — on open, and on every storey switch.
+    ///
+    /// [`maybe_seed_inherited_levels`] alone fires only from the dimensioning /
+    /// carve tails, i.e. at an outline's FINALISATION transition, and reads the
+    /// footprint out of the EDITING BUFFER. Neither serves a storey that is
+    /// already built: it has no transition left to fire, and its buffer can be
+    /// EMPTY — a document snapshot older than the storey restores over the
+    /// rebuild-from-record, leaving `scale_set` false and no outline points
+    /// even though the record holds the real geometry. Such a storey would sit
+    /// flat over a stepped ceiling forever, its floor floating above the lower
+    /// part (field: 56 Elmwood Road).
+    ///
+    /// So this path takes the footprint from the RESOLVED RECORD, and gates on
+    /// the same condition [`rederive_inherited_seed_pending`] uses to pend it:
+    /// never seeded (`floor_datum_z_m` is `None`) AND a piece of its floor
+    /// genuinely has a choice to make. That gate is what keeps it off a storey
+    /// merely mid-draw, whose record floors are still stale.
+    ///
+    /// [`maybe_seed_inherited_levels`]: AppController::maybe_seed_inherited_levels
+    /// [`rederive_inherited_seed_pending`]:
+    /// AppController::rederive_inherited_seed_pending
+    pub(super) fn maybe_ask_unanswered_levels(&mut self) {
+        let Some(idx) = self.current_storey_idx else {
+            return;
+        };
+        if idx == 0 || !self.inherited_seed_pending.contains(&idx) {
+            return;
+        }
+        let Some(record) = self.current_record.as_ref() else {
+            return;
+        };
+        let (Some(storey), Some(below)) = (
+            record.data.storeys.get(idx),
+            record.data.storeys.get(idx - 1),
+        ) else {
+            return;
+        };
+        if storey.floor_datum_z_m.is_some() {
+            return; // already settled
+        }
+        let Some(fp) = storey.floors.footprint_ring() else {
+            return; // nothing resolved yet — the drawn path still owns this
+        };
+        if !below
+            .ceilings
+            .inherited_floor_pieces(&fp)
+            .iter()
+            .any(|p| p.needs_choice())
+        {
+            return; // no question to re-ask
+        }
+        let fp32: Vec<Point2f32> = fp.iter().copied().map(domain::points::to_f32).collect();
+        self.seed_inherited_levels_now(idx, &fp32);
+    }
+
     pub(super) fn maybe_seed_inherited_levels(&mut self) {
         let Some(idx) = self.current_storey_idx else {
             return;
@@ -400,8 +526,17 @@ impl AppController {
     /// tail splits and stamps the covered piece `InterStorey` on every
     /// re-resolve (derived-only — nothing is pushed onto `ceiling_splits`).
     fn seed_inherited_levels_now(&mut self, idx: usize, footprint: &[Point2f32]) {
-        self.inherited_seed_pending.remove(&idx);
         if idx == 0 {
+            self.inherited_seed_pending.remove(&idx);
+            return;
+        }
+        // A prompt already up for this storey owns the seed — re-raising would
+        // discard answers the assessor has already given.
+        if self
+            .pending_floor_levels
+            .as_ref()
+            .is_some_and(|p| p.storey_idx == idx)
+        {
             return;
         }
         let Some(below) = self
@@ -411,7 +546,109 @@ impl AppController {
         else {
             return;
         };
-        let seeded = document::inherited_step_regions(below, footprint);
+        // Rules 1, 2 and 4 need nothing from the assessor, and rule 3 has a
+        // sensible default (copy the neighbour it mostly runs along). So STAMP
+        // THE DEFAULTS NOW and raise the question as a REVISION — holding the
+        // whole seed on an answer left the floor flat over a stepped ceiling,
+        // warning about a mismatch the pending question was there to resolve.
+        let asks: Vec<PendingOverhang> = document::overhang_choices(below, footprint)
+            .into_iter()
+            .map(|(index, area_m2, bordering)| PendingOverhang {
+                index,
+                area_m2,
+                chosen_z: bordering[0],
+                bordering,
+            })
+            .collect();
+        self.stamp_inherited_levels(idx, footprint, &[]);
+        if !asks.is_empty() {
+            self.pending_floor_levels = Some(PendingFloorLevels {
+                storey_idx: idx,
+                footprint: footprint.to_vec(),
+                overhangs: asks,
+            });
+            log::debug!("[new-storey] storey {idx} seeded; offering the overhang choice");
+        }
+    }
+
+    /// Answer one overhang's question — which level that piece takes. `index`
+    /// is the overhang's [`OverhangPromptUiData::index`]. Re-stamps the storey's
+    /// levels immediately so the plan shows the answer as it is picked; the
+    /// prompt stays open, so the choice can be toggled and compared. No-op when
+    /// nothing is pending or the index is unknown.
+    pub fn set_pending_overhang_level(&mut self, index: usize, level_z: f64) {
+        let Some(p) = self.pending_floor_levels.as_mut() else {
+            return;
+        };
+        let Some(o) = p.overhangs.iter_mut().find(|o| o.index == index) else {
+            return;
+        };
+        o.chosen_z = level_z;
+        let (idx, footprint) = (p.storey_idx, p.footprint.clone());
+        let answers = p.answers();
+        self.stamp_inherited_levels(idx, &footprint, &answers);
+    }
+
+    /// Dismiss the overhang question. The levels are already stamped — the
+    /// defaults at seed time, then re-stamped on every pick — so this only
+    /// closes the prompt. No-op when nothing is pending.
+    pub fn confirm_pending_floor_levels(&mut self) {
+        let Some(p) = self.pending_floor_levels.take() else {
+            return;
+        };
+        let answers = p.answers();
+        self.stamp_inherited_levels(p.storey_idx, &p.footprint, &answers);
+    }
+
+    /// The floor-level prompt for the dock, or `None` when nothing is waiting.
+    pub fn floor_level_prompt(&self) -> Option<FloorLevelPromptUiData> {
+        let p = self.pending_floor_levels.as_ref()?;
+        let near = |a: f64, b: f64| (a - b).abs() < 1e-6;
+        Some(FloorLevelPromptUiData {
+            overhangs: p
+                .overhangs
+                .iter()
+                .map(|o| OverhangPromptUiData {
+                    index: o.index,
+                    area_m2: o.area_m2,
+                    options: o
+                        .bordering
+                        .iter()
+                        .map(|z| (*z, near(*z, o.chosen_z)))
+                        .collect(),
+                    custom: (!o.bordering.iter().any(|z| near(*z, o.chosen_z)))
+                        .then_some(o.chosen_z),
+                })
+                .collect(),
+        })
+    }
+
+    /// The seed proper, once the choices are settled (or there were none).
+    fn stamp_inherited_levels(
+        &mut self,
+        idx: usize,
+        footprint: &[Point2f32],
+        answers: &[Option<f64>],
+    ) {
+        self.inherited_seed_pending.remove(&idx);
+        // REPLACE, never append: answering the overhang question re-stamps a
+        // storey that was already seeded with the defaults.
+        self.step_regions.remove(&idx);
+        let Some(below) = self
+            .current_record
+            .as_ref()
+            .and_then(|r| r.data.storeys.get(idx - 1))
+        else {
+            return;
+        };
+        let (datum, seeded) = document::inherited_step_regions_with(below, footprint, answers);
+        if let Some(storey) = self
+            .current_record
+            .as_mut()
+            .and_then(|r| r.data.storeys.get_mut(idx))
+        {
+            storey.floor_datum_z_m = datum;
+        }
         // Same transition seeds the inherited construction-PHASE zones from the
         // storey below: a two-storey extension carries its construction date up
         // without re-drawing. The resolve partition clips them to this outline
@@ -421,7 +658,7 @@ impl AppController {
         let phases = self
             .current_record
             .as_ref()
-            .map(|r| document::inherited_phase_regions(&r.data, idx - 1))
+            .map(|r| document::inherited_phase_regions_over(&r.data, idx - 1, footprint))
             .unwrap_or_default();
         log::debug!(
             "[new-storey] seeding {} inherited floor level(s) and {} phase zone(s) onto storey {idx}",
@@ -519,6 +756,37 @@ impl AppController {
             .filter(|(_, s)| !(s.outline.dimensioning.scale_set && s.outline.finalised()))
             .map(|(i, _)| i)
             .collect();
+        // A FINALISED storey can still owe its answer: the seed holds on an
+        // overhang that adjoins more than one level, and a dismissed prompt (or
+        // a reload while it was up) would otherwise strand the storey flat over
+        // a stepped ceiling — its floor floating above the lower part forever,
+        // since the finalised rule above never re-pends it. Never seeded at all
+        // is exactly `floor_datum_z_m == None`; once seeded it is `Some` and
+        // this stops firing.
+        let unanswered: Vec<usize> = self
+            .current_record
+            .as_ref()
+            .map(|r| {
+                r.data
+                    .storeys
+                    .iter()
+                    .enumerate()
+                    .skip(1)
+                    .filter(|(i, s)| {
+                        s.floor_datum_z_m.is_none()
+                            && s.floors.footprint_ring().is_some_and(|fp| {
+                                r.data.storeys[i - 1]
+                                    .ceilings
+                                    .inherited_floor_pieces(&fp)
+                                    .iter()
+                                    .any(|p| p.needs_choice())
+                            })
+                    })
+                    .map(|(i, _)| i)
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.inherited_seed_pending.extend(unanswered);
         if !self.inherited_seed_pending.is_empty() {
             log::debug!(
                 "[new-storey] inherited-level seed pending (re-derived) for storeys {:?}",

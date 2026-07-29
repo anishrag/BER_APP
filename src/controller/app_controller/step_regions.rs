@@ -140,11 +140,16 @@ impl AppController {
         // available region (outline minus the steps already drawn); we only
         // dispatch the outcome. The chosen piece comes back for wall pinning.
         let wall_snap_tol = self.snap_tol_carve();
+        // Level onto every visible region boundary — phase lines, ceiling
+        // sections and the other floor regions. This carve passed NO references
+        // at all, so a floor step drawn along a ceiling section or a phase line
+        // never landed on it.
+        let ref_walls = self.subarea_reference_walls();
         match self.document.carve_or_cut_in_available(
             &pts,
             &step_rings,
             &self.tuning.subarea,
-            &[],
+            &ref_walls,
             wall_snap_tol,
         ) {
             Ok((boundary, SubareaOutcome::Cut(a, b))) => {

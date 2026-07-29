@@ -910,7 +910,7 @@ mod tests {
         let floors = FloorRegions::new(square(0.0, 0.0, 4.0, 4.0), cid)
             .with_levels(&[(square(0.0, 0.0, 2.0, 4.0), -0.3)]);
         assert_eq!(floors.regions.len(), 2);
-        let faces = floors.riser_faces();
+        let faces = floors.riser_faces(0.0);
         assert_eq!(faces.len(), 1, "one shared boundary piece steps");
         let ext = &faces[0].exterior;
         assert_eq!(ext.len(), 4, "a full quad");
@@ -926,6 +926,40 @@ mod tests {
 
     /// Two floor regions at the SAME level (a phase partition) emit nothing:
     /// the riser predicate is z-discontinuity, not adjacency.
+    /// A step riser spans the two floor UNDERSIDES — the step in the floor
+    /// PLANE. The underside is what the storey rests on and what walls run
+    /// between; the walking surface is only a datum to measure heights from, so
+    /// a riser drawn to it would put a wall edge across the upper floor's top
+    /// line (field: 56 Elmwood Road).
+    #[test]
+    fn a_step_riser_spans_the_two_floor_undersides() {
+        let cid = ItemId::default();
+        let floors = FloorRegions::new(square(0.0, 0.0, 4.0, 4.0), cid)
+            .with_levels(&[(square(0.0, 0.0, 2.0, 4.0), -0.3)]);
+        assert_eq!(floors.regions.len(), 2);
+        let z_span = |slab: f64| {
+            let faces = floors.riser_faces(slab);
+            assert_eq!(faces.len(), 1, "one shared boundary piece steps");
+            faces[0]
+                .exterior
+                .iter()
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), v| {
+                    (l.min(v.z), h.max(v.z))
+                })
+        };
+        // No slab (storey 0) — surface to surface, exactly as before.
+        assert_eq!(z_span(0.0), (-0.3, 0.0));
+        // With a slab, BOTH ends drop by it — the step keeps its 0.3 height and
+        // sits in the floor plane.
+        let (lo, hi) = z_span(0.25);
+        assert!((lo + 0.55).abs() < 1e-9, "base at −0.3 − 0.25: {lo}");
+        assert!((hi + 0.25).abs() < 1e-9, "top at 0 − 0.25: {hi}");
+        assert!(
+            (hi - lo - 0.3).abs() < 1e-9,
+            "height is the level difference"
+        );
+    }
+
     #[test]
     fn floor_riser_faces_skip_same_level_boundaries() {
         let cid = ItemId::default();
@@ -935,7 +969,7 @@ mod tests {
             cid,
         );
         assert_eq!(floors.regions.len(), 2);
-        assert!(floors.riser_faces().is_empty());
+        assert!(floors.riser_faces(0.0).is_empty());
     }
 
     /// A ceiling step → one face from the lower to the higher flat piece,
@@ -1126,6 +1160,64 @@ mod tests {
     /// SUB-SEGMENT — the partial-overlap case), merges INTO the wall: one
     /// region, host id/exposure/opes kept, polygon the L-shaped union with
     /// the base edge still at indices 0/1.
+    /// A MERGED wall is a plan SEGMENT as long as its ring, not as long as its
+    /// base EDGE (field: 56 Elmwood Road — a 0.88 m base stub on an 8.95 m
+    /// back wall, so it could only be clicked near one end and the selection
+    /// drew over just that stub while 3D showed all of it).
+    ///
+    /// `base_edge` deliberately stays the ORIGINAL footprint for identity
+    /// stability, so the extent is a separate query.
+    #[test]
+    fn a_merged_wall_extends_past_its_base_edge_for_picking() {
+        let cid = ItemId::default();
+        let p3 = Point3f64::new;
+        // A short outline wall on y = 0 over x ∈ [0, 1], full height, merged
+        // with a coplanar riser continuing it to x = 9 ABOVE the floor band
+        // (a ceiling step, the case `base_edge` deliberately excludes).
+        let host = WallRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(vec![
+                p3(0.0, 0.0, 0.0),
+                p3(1.0, 0.0, 0.0),
+                p3(1.0, 0.0, 2.4),
+                p3(0.0, 0.0, 2.4),
+            ]),
+            exposure: WallExposure::Exposed,
+            opes: Opes::default(),
+            construction_id: cid,
+        };
+        let riser = Polygon3D::new(vec![
+            p3(1.0, 0.0, 1.0),
+            p3(9.0, 0.0, 1.0),
+            p3(9.0, 0.0, 2.0),
+            p3(1.0, 0.0, 2.0),
+        ]);
+        let merged = WallRegions {
+            regions: vec![host],
+        }
+        .with_risers(vec![(riser, WallExposure::Unset)], cid);
+        assert_eq!(merged.regions.len(), 1, "the riser merged in");
+        let wall = &merged.regions[0];
+
+        let (ba, bb) = wall.base_edge().expect("base edge");
+        let base_len = (ba.x - bb.x).hypot(ba.y - bb.y);
+        assert!(
+            (base_len - 1.0).abs() < 1e-9,
+            "the base edge stays the original 1 m footprint: {base_len}"
+        );
+        let (ea, eb) = wall.base_extent().expect("extent");
+        let span = (ea.x - eb.x).hypot(ea.y - eb.y);
+        assert!(
+            (span - 9.0).abs() < 1e-9,
+            "but the extent covers the whole 9 m wall: {span}"
+        );
+        let mid = wall.base_extent_midpoint().expect("midpoint");
+        assert!(
+            (mid.x - 4.5).abs() < 1e-9,
+            "and its midpoint is the wall's, not the stub's: {mid:?}"
+        );
+    }
+
     #[test]
     fn flush_coplanar_riser_merges_into_its_continuation_wall() {
         let cid = ItemId::default();
@@ -1155,6 +1247,64 @@ mod tests {
             ],
             "the union ring, stitched along the shared side edge"
         );
+    }
+
+    /// AN INTERIOR RISER NEVER MERGES INTO A WALL. Same geometry as
+    /// [`flush_coplanar_riser_merges_into_its_continuation_wall`] — a riser
+    /// continuing the wall's plane past its end — but routed through
+    /// `with_interior_risers`, so it stays its OWN region.
+    ///
+    /// `FloorRegions::riser_faces` only emits INTERIOR step boundaries, so a
+    /// floor riser has the storey on both sides and can never carry an envelope
+    /// exposure. Merged in, it would take the wall's exposure and identity, and
+    /// the assessor could no longer tag them apart (field: 56 Elmwood Road —
+    /// ~1 m² of internal slab edge inside an otherwise-exposed wall region).
+    #[test]
+    fn an_interior_riser_stays_separate_from_the_wall_it_continues() {
+        let cid = ItemId::default();
+        let walls = flat_wall(cid);
+        let wall_id = walls.regions[0].id;
+        let out = walls.with_interior_risers(
+            vec![(coplanar_face(4.0, 6.0, 1.0, 2.4), WallExposure::Unset)],
+            cid,
+        );
+        assert_eq!(
+            out.regions.len(),
+            2,
+            "the interior riser stays its own region"
+        );
+        let host = out
+            .regions
+            .iter()
+            .find(|r| r.id == wall_id)
+            .expect("the wall survives untouched");
+        assert_eq!(host.exposure, WallExposure::Exposed);
+        assert_eq!(
+            xz(&host.polygon),
+            vec![(0.0, 0.0), (4.0, 0.0), (4.0, 2.4), (0.0, 2.4)],
+            "and its ring did not grow"
+        );
+        let riser = out
+            .regions
+            .iter()
+            .find(|r| r.id != wall_id)
+            .expect("the riser is there");
+        assert_eq!(
+            riser.exposure,
+            WallExposure::Unset,
+            "left for the assessor to classify on its own terms"
+        );
+
+        // Riser-to-riser still merges — one physical step face split by
+        // geometry is still one region.
+        let two = flat_wall(cid).with_interior_risers(
+            vec![
+                (coplanar_face(4.0, 5.0, 1.0, 2.4), WallExposure::Unset),
+                (coplanar_face(5.0, 6.0, 1.0, 2.4), WallExposure::Unset),
+            ],
+            cid,
+        );
+        assert_eq!(two.regions.len(), 2, "the two riser halves merged: {two:?}");
     }
 
     /// A coplanar riser that touches the wall at a SINGLE POINT (no
@@ -6216,17 +6366,219 @@ mod tests {
     /// L-shape ceiling stepped via `with_z_deltas`: bottom arm (x∈[0,10],
     /// y∈[0,4], 40 m²) raised to 2.7, upper arm (x∈[0,4], y∈[4,10], 24 m²)
     /// left at 2.4 — flats at two z's.
-    fn stepped_l_roofs() -> CeilingRegions {
-        let l_ring = vec![
+    /// The L the stepped fixture roofs: a 10 × 4 bottom arm and a 4 × 6 top
+    /// arm, missing the (4..10, 4..10) corner.
+    fn l_ring() -> Vec<Point2f64> {
+        vec![
             Point2f64::new(0.0, 0.0),
             Point2f64::new(10.0, 0.0),
             Point2f64::new(10.0, 4.0),
             Point2f64::new(4.0, 4.0),
             Point2f64::new(4.0, 10.0),
             Point2f64::new(0.0, 10.0),
-        ];
-        CeilingRegions::default_for_footprint(vec![l_ring], 2.4, ItemId::default())
+        ]
+    }
+
+    fn stepped_l_roofs() -> CeilingRegions {
+        CeilingRegions::default_for_footprint(vec![l_ring()], 2.4, ItemId::default())
             .with_z_deltas(&[(square(0.0, 0.0, 10.0, 4.0), 0.3)])
+    }
+
+    /// A storey above that reaches past the one below — the L's missing corner
+    /// — is an OVERHANG: no ceiling under it, so it has no level of its own and
+    /// takes one from the wall it runs along.
+
+    /// 56 ELMWOOD ROAD end-to-end: a ground floor whose main body (2.548) is
+    /// the larger area and whose side section (1.958) is smaller, with a
+    /// bridged front-door recess overhanging between them. The datum lands on
+    /// the MAIN body, the side section steps DOWN, and the overhang — bordering
+    /// both — is offered as a question whose default is the main level.
+    #[test]
+    fn elmwood_recessed_door_datums_on_the_main_body() {
+        use geo::Area;
+        let cid = ItemId::default();
+        let p = Point2f64::new;
+        // Main body, notched where the front door is set in.
+        let main = vec![
+            p(0.0, 0.0),
+            p(9.0, 0.0),
+            p(9.0, 8.0),
+            p(6.0, 8.0),
+            p(6.0, 7.4),
+            p(3.0, 7.4),
+            p(3.0, 0.0),
+        ];
+        // The lower single-storey section alongside it.
+        let side = vec![p(0.0, 0.0), p(3.0, 0.0), p(3.0, 8.4), p(0.0, 8.4)];
+        let ceilings = CeilingRegions::default_for_footprint(vec![main, side], 2.548, cid)
+            .with_z_deltas(&[(
+                vec![p(0.0, 0.0), p(3.0, 0.0), p(3.0, 8.4), p(0.0, 8.4)],
+                -0.59,
+            )]);
+        // The storey above bridges the recess: the union PLUS that 3 × 0.6 piece.
+        let upper = vec![
+            p(0.0, 0.0),
+            p(9.0, 0.0),
+            p(9.0, 8.0),
+            p(3.0, 8.0),
+            p(3.0, 8.4),
+            p(0.0, 8.4),
+        ];
+        let pieces = ceilings.inherited_floor_pieces(&upper);
+        // Rule 1: the pieces WITH a ceiling take its height.
+        let mut floored: Vec<(f64, f64)> = pieces
+            .iter()
+            .filter_map(|p| p.ceiling_z.map(|z| (z, p.area_m2)))
+            .collect();
+        floored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        assert!(
+            (floored[0].0 - 2.548).abs() < 1e-6,
+            "the main body is largest"
+        );
+        assert!(floored.iter().any(|(z, _)| (z - 1.958).abs() < 1e-6));
+
+        // Rule 2/3: the bridged recess has no ceiling and adjoins BOTH.
+        let ohs: Vec<_> = pieces.iter().filter(|p| p.ceiling_z.is_none()).collect();
+        assert_eq!(ohs.len(), 1, "the bridged recess: {ohs:?}");
+        assert!((ohs[0].area_m2 - 1.8).abs() < 0.05, "{}", ohs[0].area_m2);
+        assert!(ohs[0].needs_choice(), "borders BOTH — so it is asked");
+        assert!(
+            (ohs[0].bordering[0] - 2.548).abs() < 1e-6,
+            "defaulting to the main body it mostly runs along: {:?}",
+            ohs[0].bordering
+        );
+
+        // Rule 4: the datum is the height of the largest floor AREA.
+        let (datum, _) = resolve_floor_levels(&pieces, &[]);
+        assert!(datum.is_some_and(|z| (z - 2.548).abs() < 1e-6), "{datum:?}");
+
+        // Default answers: side section steps down, overhang is level 0.
+        let steps = ceilings.inherited_floor_levels(&upper);
+        assert_eq!(steps.len(), 1, "only the side section steps: {steps:?}");
+        assert!(
+            (steps[0].1 + 0.59).abs() < 1e-6,
+            "down 0.59: {}",
+            steps[0].1
+        );
+        let a = ring_to_poly(&steps[0].0).unsigned_area();
+        assert!((a - 25.2).abs() < 0.1, "the side section, got {a}");
+
+        // Answering the overhang the OTHER way makes it a −0.59 piece too.
+        let oh_idx = pieces.iter().position(|p| p.ceiling_z.is_none()).unwrap();
+        let mut answers = vec![None; pieces.len()];
+        answers[oh_idx] = Some(1.958);
+        let (_, low) = resolve_floor_levels(&pieces, &answers);
+        assert_eq!(low.len(), 2, "{low:?}");
+        assert!(low.iter().all(|(_, l)| (l + 0.59).abs() < 1e-6));
+    }
+
+    /// PHASE ZONES EXTEND OVER AN OVERHANG (56 Elmwood Road): the storey above
+    /// bridges a recessed front door, so part of its floor sits in a NOTCH of
+    /// the storey below and no inherited zone can reach it. Left unassigned,
+    /// that slice is carved out of the upper storey's floors AND ceilings with
+    /// its own construction — dividing one continuous build. It must instead be
+    /// absorbed into the zone it mostly runs along.
+    #[test]
+    fn phase_zones_extend_over_an_overhang() {
+        use geo::Area;
+        let p = Point2f64::new;
+        let mut ber = Ber::default();
+        let original = ber.ensure_floor_construction(
+            Default::default(),
+            Default::default(),
+            ConstructionPhase::Original,
+        );
+        // Below: a 10 x 8 block with a 4 x 2 notch out of its top edge.
+        let below_ring = vec![
+            p(0.0, 0.0),
+            p(10.0, 0.0),
+            p(10.0, 8.0),
+            p(7.0, 8.0),
+            p(7.0, 6.0),
+            p(3.0, 6.0),
+            p(3.0, 8.0),
+            p(0.0, 8.0),
+        ];
+        ber.storeys = vec![Storey {
+            floors: FloorRegions::new(below_ring, original),
+            ..Storey::default()
+        }];
+        let zones = ber.storey_phase_zones(0);
+        assert_eq!(zones.len(), 1);
+        assert!(
+            (ring_to_poly(&zones[0].1).unsigned_area() - 72.0).abs() < 0.01,
+            "the notched block: {:?}",
+            ring_to_poly(&zones[0].1).unsigned_area()
+        );
+
+        // Above: the full 10 x 8 rectangle — it BRIDGES the notch.
+        let upper = square(0.0, 0.0, 10.0, 8.0);
+        let extended = ber.storey_phase_zones_over(0, &upper);
+        assert_eq!(extended.len(), 1, "still one zone: {extended:?}");
+        assert_eq!(extended[0].0, ConstructionPhase::Original);
+        let area = ring_to_poly(&extended[0].1).unsigned_area();
+        assert!(
+            (area - 80.0).abs() < 0.05,
+            "the notch is absorbed, so the zone covers the whole footprint: {area}"
+        );
+
+        // A footprint the zones DON'T reach at all keeps its own area
+        // unassigned — absorption needs a neighbour to copy.
+        let detached = square(50.0, 50.0, 60.0, 58.0);
+        let none = ber.storey_phase_zones_over(0, &detached);
+        assert!(
+            none.iter().all(|(_, r)| {
+                let a = ring_to_poly(r).unsigned_area();
+                (a - 72.0).abs() < 0.01
+            }),
+            "nothing absorbed across open ground: {none:?}"
+        );
+    }
+
+    #[test]
+    fn overhangs_over_finds_uncovered_area_and_its_neighbouring_levels() {
+        use geo::Area;
+        let ceilings = stepped_l_roofs();
+        // A square footprint over the L overhangs the missing 6 × 6 corner.
+        let pieces = ceilings.inherited_floor_pieces(&square(0.0, 0.0, 10.0, 10.0));
+        let ohs: Vec<_> = pieces.iter().filter(|p| p.ceiling_z.is_none()).collect();
+        assert_eq!(ohs.len(), 1, "{ohs:?}");
+        assert!((ohs[0].area_m2 - 36.0).abs() < 1e-6, "{}", ohs[0].area_m2);
+        // It runs along the raised arm (x 4..10 at y = 4, 6 m) and the top arm
+        // (y 4..10 at x = 4, 6 m) — both, longest first, and the tie breaks low.
+        assert_eq!(ohs[0].bordering.len(), 2, "{:?}", ohs[0].bordering);
+        assert!(
+            ohs[0].bordering.contains(&2.4)
+                || ohs[0].bordering.iter().any(|z| (z - 2.4).abs() < 1e-9)
+        );
+        assert!(ohs[0].bordering.iter().any(|z| (z - 2.7).abs() < 1e-9));
+        // The L itself overhangs nothing.
+        assert!(ceilings
+            .inherited_floor_pieces(&l_ring())
+            .iter()
+            .all(|p| p.ceiling_z.is_some()));
+        // An overhang assigned a level becomes a step at that level − datum;
+        // assigned the datum it contributes none.
+        let oh_i = pieces.iter().position(|p| p.ceiling_z.is_none()).unwrap();
+        let step_over = |answer: f64, want_area: f64| {
+            let mut answers = vec![None; pieces.len()];
+            answers[oh_i] = Some(answer);
+            let (datum, levels) = resolve_floor_levels(&pieces, &answers);
+            // Whichever level the corner joins wins the area, so it becomes the
+            // datum — and the corner is level 0, never a step.
+            assert!(
+                datum.is_some_and(|z| (z - answer).abs() < 1e-9),
+                "answering {answer} makes it the datum: {datum:?}"
+            );
+            assert_eq!(levels.len(), 1, "exactly the other arm steps: {levels:?}");
+            let a = ring_to_poly(&levels[0].0).unsigned_area();
+            assert!((a - want_area).abs() < 1e-6, "the other arm, got {a}");
+            levels[0].1
+        };
+        // Copy the base arm: 24 + 36 beats 40, so the RAISED arm steps UP.
+        assert!((step_over(2.4, 40.0) - 0.3).abs() < 1e-9);
+        // Copy the raised arm: 40 + 36 beats 24, so the BASE arm steps DOWN.
+        assert!((step_over(2.6999999999999997, 24.0) + 0.3).abs() < 1e-9);
     }
 
     /// `Some(z)` within float noise of `want` (2.4 + 0.3 lands at
@@ -6238,72 +6590,77 @@ mod tests {
         );
     }
 
+    /// The datum is the LARGEST-AREA flat level, not the lowest: over both
+    /// arms the raised one covers 40 m² against the base level's 24, so the
+    /// storey above reads the RAISED arm as level 0 and the rest steps down.
     #[test]
-    fn lowest_flat_z_over_takes_min_of_overlapping_flats() {
+    fn the_datum_is_the_height_of_the_largest_floor_area() {
         let ceilings = stepped_l_roofs();
-        // Footprint covering both arms → the LOWER level anchors.
-        assert_approx(
-            ceilings.lowest_flat_z_over(&square(0.0, 0.0, 10.0, 10.0)),
-            2.4,
-        );
-        // Footprint strictly inside the raised bottom arm only.
-        assert_approx(
-            ceilings.lowest_flat_z_over(&square(1.0, 1.0, 9.0, 3.0)),
-            2.7,
-        );
-        // Off to the side → no coverage.
-        assert_eq!(
-            ceilings.lowest_flat_z_over(&square(20.0, 20.0, 30.0, 30.0)),
-            None
-        );
-        // A boundary graze (sub-sliver overlap) is not coverage.
-        assert_eq!(
-            ceilings.lowest_flat_z_over(&square(10.0, 0.0, 20.0, 4.0)),
-            None
-        );
-        // Degenerate footprint.
-        assert_eq!(ceilings.lowest_flat_z_over(&[]), None);
+        let datum =
+            |fp: &[Point2f64]| resolve_floor_levels(&ceilings.inherited_floor_pieces(fp), &[]).0;
+        // Over the L: the raised arm floors 40 m² against the base arm's 24.
+        assert_approx(datum(&l_ring()), 2.7);
+        // Strictly inside the raised arm → that is the only level.
+        assert_approx(datum(&square(1.0, 1.0, 9.0, 3.0)), 2.7);
+        // Off every region, a boundary graze, and a degenerate footprint: no
+        // piece has a height, so there is no datum.
+        assert_eq!(datum(&square(20.0, 20.0, 30.0, 30.0)), None);
+        // Rule 2: a footprint hanging entirely off the building still has a
+        // height — it copies the wall it runs along (the raised arm at x = 10).
+        assert_approx(datum(&square(10.0, 0.0, 20.0, 4.0)), 2.7);
+        assert_eq!(datum(&[]), None);
     }
 
     #[test]
-    fn inherited_floor_levels_pieces_at_z_minus_anchor() {
+    fn inherited_floor_levels_pieces_at_z_minus_datum() {
         use geo::Area;
         let ceilings = stepped_l_roofs();
-        // Footprint over both arms: anchor 2.4, ONE inherited level — the
-        // bottom arm at 2.7 − 2.4 = 0.3 (the slab thickness cancels).
-        let levels = ceilings.inherited_floor_levels(&square(0.0, 0.0, 10.0, 10.0));
+        // Footprint over both arms — the L ITSELF, so nothing overhangs. The
+        // datum is the RAISED arm (2.7, the larger area), so the ONE inherited
+        // level is the base arm stepping DOWN — 2.4 − 2.7 = −0.3 (the slab
+        // thickness cancels).
+        let levels = ceilings.inherited_floor_levels(&l_ring());
         assert_eq!(levels.len(), 1, "{levels:?}");
         let (ring, level) = &levels[0];
-        assert!((level - 0.3).abs() < 1e-9);
-        let area = ring_to_poly(ring).unsigned_area();
         assert!(
-            (area - 40.0).abs() < 1e-6,
-            "the whole bottom arm, got {area}"
+            (level + 0.3).abs() < 1e-9,
+            "steps DOWN off the datum: {level}"
         );
+        let area = ring_to_poly(ring).unsigned_area();
+        assert!((area - 24.0).abs() < 1e-6, "the whole top arm, got {area}");
         // f32-quantized at the boundary (the add_ceiling_apex precedent).
         for p in ring {
             assert_eq!(p.x, p.x as f32 as f64);
             assert_eq!(p.y, p.y as f32 as f64);
         }
-        // A footprint clipped to part of both arms inherits only the covered
-        // piece of the raised arm: (2..10, 0..4) = 32 m².
-        let clipped = ceilings.inherited_floor_levels(&square(2.0, 0.0, 10.0, 10.0));
+        // The L clipped to x ≥ 2 inherits only the covered piece of the
+        // stepped-down arm: (2..4, 4..10) = 12 m². (The raised arm still wins
+        // the datum there — 32 m² against 12.)
+        let clipped_fp = vec![
+            Point2f64::new(2.0, 0.0),
+            Point2f64::new(10.0, 0.0),
+            Point2f64::new(10.0, 4.0),
+            Point2f64::new(4.0, 4.0),
+            Point2f64::new(4.0, 10.0),
+            Point2f64::new(2.0, 10.0),
+        ];
+        let clipped = ceilings.inherited_floor_levels(&clipped_fp);
         assert_eq!(clipped.len(), 1, "{clipped:?}");
         let clipped_area = ring_to_poly(&clipped[0].0).unsigned_area();
         assert!(
-            (clipped_area - 32.0).abs() < 1e-6,
-            "8 × 4 piece, got {clipped_area}"
+            (clipped_area - 12.0).abs() < 1e-6,
+            "2 × 6 piece, got {clipped_area}"
         );
     }
 
     #[test]
-    fn inherited_floor_levels_anchor_level_and_no_anchor_yield_empty() {
+    fn inherited_floor_levels_datum_level_and_no_datum_yield_empty() {
         let ceilings = stepped_l_roofs();
-        // Footprint on the raised arm only: it IS the anchor — no step.
+        // Footprint on the raised arm only: it IS the datum — no step.
         assert!(ceilings
             .inherited_floor_levels(&square(1.0, 1.0, 9.0, 3.0))
             .is_empty());
-        // No coverage at all → no anchor → empty.
+        // No coverage at all → no datum → empty.
         assert!(ceilings
             .inherited_floor_levels(&square(20.0, 20.0, 30.0, 30.0))
             .is_empty());
@@ -6333,9 +6690,13 @@ mod tests {
         assert!(ceilings
             .inherited_floor_levels(&square(0.0, 0.0, 10.0, 10.0))
             .is_empty());
-        // And it never anchors: only the flat half does.
+        // And it is never the datum: only the flat half can be.
         assert_eq!(
-            ceilings.lowest_flat_z_over(&square(0.0, 0.0, 10.0, 10.0)),
+            resolve_floor_levels(
+                &ceilings.inherited_floor_pieces(&square(0.0, 0.0, 10.0, 10.0)),
+                &[]
+            )
+            .0,
             Some(2.4)
         );
     }
@@ -6376,7 +6737,7 @@ mod tests {
     }
 
     #[test]
-    fn storey_floor_datums_anchors_thickness_on_lowest_covered_flat() {
+    fn storey_floor_datums_anchors_thickness_on_the_largest_covered_flat() {
         let cid = ItemId::default();
         let below = Storey {
             floors: FloorRegions::new(square(0.0, 0.0, 10.0, 10.0), cid),
@@ -6384,7 +6745,7 @@ mod tests {
             ceiling_height_m: Some(2.4),
             ..Storey::default()
         };
-        // Upper footprint strictly inside the RAISED arm → anchor 2.7.
+        // Upper footprint strictly inside the RAISED arm → datum 2.7.
         let upper_on_raised = Storey {
             floors: FloorRegions::new(square(1.0, 1.0, 9.0, 3.0), cid),
             floor_thickness_m: Some(0.3),
@@ -6400,9 +6761,18 @@ mod tests {
             );
         };
         datums_approx(&ber, [0.0, 3.0], "2.7 + 0.3");
-        // Upper footprint spanning BOTH arms → the LOW flat anchors.
+        // Upper footprint spanning BOTH arms — rules 2 + 4 together: the square
+        // OVERHANGS the L's missing 6 × 6 corner, that 36 m² copies its
+        // neighbour (the base arm — equal borders, tie to the lower), and
+        // 24 + 36 now beats the raised arm's 40. The datum follows the FLOOR
+        // areas, not the ceiling areas.
         ber.storeys[1].floors = FloorRegions::new(square(0.0, 0.0, 10.0, 10.0), cid);
         datums_approx(&ber, [0.0, 2.7], "2.4 + 0.3");
+        // An explicit `floor_datum_z_m` OVERRIDES the rule — the assessor was
+        // asked and picked the lower level.
+        ber.storeys[1].floor_datum_z_m = Some(2.4);
+        datums_approx(&ber, [0.0, 2.7], "2.4 + 0.3, as answered");
+        ber.storeys[1].floor_datum_z_m = None;
         // No flat coverage (footprint off to the side) → fall back to the
         // below ceiling height.
         ber.storeys[1].floors = FloorRegions::new(square(20.0, 20.0, 26.0, 26.0), cid);

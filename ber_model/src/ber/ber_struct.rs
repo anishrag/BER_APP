@@ -808,19 +808,31 @@ impl Ber {
     ///   - `None` (legacy records, storey 0-era storeys): the storey
     ///     BELOW's `ceiling_height_m` — byte-identical to the original
     ///     full-house ceiling-height stacking;
-    ///   - `Some(t)`: `anchor_z + t`, where `anchor_z` is the LOWEST flat
-    ///     ceiling height of the storey below over THIS storey's footprint
-    ///     ([`CeilingRegions::lowest_flat_z_over`] — overlap above sliver
+    ///   - `Some(t)`: `datum_z + t`, where `datum_z` is the below-ceiling
+    ///     level this storey's floor rests on: its own
+    ///     [`Storey::floor_datum_z_m`] when the seed asked and got an
+    ///     answer, else the LARGEST-AREA flat ceiling of the storey below
+    ///     over THIS storey's footprint
+    ///     ([`CeilingRegions::datum_flat_z_over`] — overlap above sliver
     ///     area), falling back to the storey below's `ceiling_height_m`
     ///     when this storey has no footprint yet or no flat ceiling covers
     ///     it.
+    ///
+    /// The datum MUST agree with whatever
+    /// [`CeilingRegions::inherited_floor_pieces`] measured the floor
+    /// regions' `level_m` against — the two are halves of one convention
+    /// (`walking surface = datum + level_m`), so a storey whose levels were
+    /// seeded against a chosen datum stores that choice in
+    /// [`Storey::floor_datum_z_m`] and this reads it back.
     ///
     /// Unset ceiling heights count 0 in both branches (`unwrap_or_default`,
     /// exactly like the stacking this replaces) — callers gate on heights
     /// being set (the 3D gate) before trusting the stack.
     ///
-    /// [`CeilingRegions::lowest_flat_z_over`]:
-    /// super::structural::CeilingRegions::lowest_flat_z_over
+    /// [`resolve_floor_levels`]: super::structural::resolve_floor_levels
+    /// [`CeilingRegions::inherited_floor_pieces`]:
+    /// super::structural::CeilingRegions::inherited_floor_pieces
+    /// [`Storey::floor_datum_z_m`]: super::structural::Storey::floor_datum_z_m
     pub fn storey_floor_datums(&self) -> Vec<f64> {
         let mut out = Vec::with_capacity(self.storeys.len());
         let mut z = 0.0_f64;
@@ -831,12 +843,16 @@ impl Ber {
                 z += match storey.floor_thickness_m {
                     None => below_height,
                     Some(t) => {
-                        let anchor = storey
-                            .floors
-                            .footprint_ring()
-                            .and_then(|fp| below.ceilings.lowest_flat_z_over(&fp))
-                            .unwrap_or(below_height);
-                        anchor + t
+                        let datum = storey.floor_datum_z_m.or_else(|| {
+                            storey.floors.footprint_ring().and_then(|fp| {
+                                super::structural::resolve_floor_levels(
+                                    &below.ceilings.inherited_floor_pieces(&fp),
+                                    &[],
+                                )
+                                .0
+                            })
+                        });
+                        datum.unwrap_or(below_height) + t
                     }
                 };
             }
@@ -873,6 +889,72 @@ impl Ber {
             })
             .into_iter()
             .filter(|(phase, _)| *phase != ConstructionPhase::Unassigned)
+            .collect()
+    }
+
+    /// Storey `below_idx`'s phase zones EXTENDED to cover `footprint` — the
+    /// zones a storey ABOVE should inherit.
+    ///
+    /// A storey may reach past the one below (an OVERHANG — classically a
+    /// bridged front-door recess), and the zones, being the below storey's own
+    /// floor area, cannot reach there. That leftover would be phase-UNASSIGNED,
+    /// which carves it out of the upper storey's floors AND ceilings as a
+    /// region of its own with its own construction — a spurious division on a
+    /// surface that is one continuous build (field: 56 Elmwood Road, a 1.57 m²
+    /// slice of ceiling split off over the bridged recess).
+    ///
+    /// So each leftover piece is absorbed into the zone it shares the most
+    /// plan BOUNDARY with — the same "copy the neighbour you mostly run along"
+    /// rule the floor levels use for the very same piece. A piece adjoining no
+    /// zone is left out (genuinely unassigned). Rings come back open, one per
+    /// connected component per phase, as [`storey_phase_zones`] returns them.
+    ///
+    /// [`storey_phase_zones`]: Self::storey_phase_zones
+    pub fn storey_phase_zones_over(
+        &self,
+        below_idx: usize,
+        footprint: &[Point2f64],
+    ) -> Vec<(ConstructionPhase, Vec<Point2f64>)> {
+        use super::structural::{dominant_bordering, open_ring_of, ring_to_poly, split_to_simple};
+        use geo::bool_ops::BooleanOps;
+        use geo::Area;
+        let zones = self.storey_phase_zones(below_idx);
+        if zones.is_empty() || footprint.len() < 3 {
+            return zones;
+        }
+        // Accumulate per PHASE — several components of one phase are one zone
+        // for the purpose of absorbing a neighbour.
+        let mut acc: Vec<(ConstructionPhase, geo::MultiPolygon<f64>)> = Vec::new();
+        for (phase, ring) in &zones {
+            let poly = geo::MultiPolygon::new(vec![ring_to_poly(ring)]);
+            match acc.iter_mut().find(|(p, _)| p == phase) {
+                Some((_, mp)) => *mp = mp.union(&poly),
+                None => acc.push((phase.clone(), poly)),
+            }
+        }
+        let covered = acc
+            .iter()
+            .fold(geo::MultiPolygon::new(Vec::new()), |a, (_, mp)| a.union(mp));
+        let fp = geo::MultiPolygon::new(vec![ring_to_poly(footprint)]);
+        for piece in fp.difference(&covered).0.iter().flat_map(split_to_simple) {
+            if piece.unsigned_area() < super::structural::SLIVER_AREA_M2 {
+                continue;
+            }
+            let borders: Vec<&geo::MultiPolygon<f64>> = acc.iter().map(|(_, mp)| mp).collect();
+            let Some(k) = dominant_bordering(&piece, &borders) else {
+                continue; // adjoins no zone — genuinely unassigned
+            };
+            let mp = &mut acc[k].1;
+            *mp = mp.union(&geo::MultiPolygon::new(vec![piece]));
+        }
+        acc.into_iter()
+            .flat_map(|(phase, mp)| {
+                mp.0.iter()
+                    .flat_map(split_to_simple)
+                    .filter(|p| p.unsigned_area() >= super::structural::SLIVER_AREA_M2)
+                    .map(|p| (phase.clone(), open_ring_of(&p)))
+                    .collect::<Vec<_>>()
+            })
             .collect()
     }
 

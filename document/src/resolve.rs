@@ -434,9 +434,10 @@ pub fn resolve_storey(
     // storey's floor thickness (storey-LOCAL coords — the datum is the
     // floor's top). Storey 0 and legacy records have no thickness (`None`)
     // → base_z = 0, byte-identical output. `fallback_top_z` stays the
-    // ABSOLUTE ceiling height; the riser pass below is untouched (an
-    // interior step riser spans between two slabs of the SAME storey, not
-    // down to the storey below).
+    // ABSOLUTE ceiling height. The riser pass below drops its base by the same
+    // slab: a step riser runs from the LOWER floor's underside to the higher
+    // floor's surface, so the lower slab's edge — which faces the storey below
+    // just as the perimeter slab band does — is part of a wall.
     // (Map None AND an explicit 0.0 to exactly +0.0 — negating a 0.0
     // default would stamp `-0.0` into every base vertex and break the
     // byte-identity of the legacy resolve under serialization.)
@@ -543,14 +544,28 @@ pub fn resolve_storey(
     // (`merge_coplanar_flush` — host keeps id/base/exposure/opes), so one
     // physical wall resolves as ONE region and `riser_walls` only ever
     // lists the risers that remain separate.
-    let risers: Vec<(Polygon3D, WallExposure)> = storey
-        .floors
+    // CEILING risers MAY merge into a wall: a step line continuing a perimeter
+    // plane is one physical wall, which is what the merge was written for.
+    // FLOOR risers may NOT — `FloorRegions::riser_faces` only emits INTERIOR
+    // step boundaries, so both their sides are inside the storey and they can
+    // never carry an envelope exposure. Merging one into a perimeter wall gave
+    // it that wall's exposure and left the assessor unable to tag them apart
+    // (field: 56 Elmwood Road, ~1 m² of internal slab edge inside an
+    // otherwise-exposed wall region).
+    let ceiling_risers: Vec<(Polygon3D, WallExposure)> = roofs_for_walls
         .riser_faces()
         .into_iter()
-        .chain(roofs_for_walls.riser_faces())
         .map(|f| (f, WallExposure::Unset))
         .collect();
-    storey.walls = walls.with_risers(risers, wall_cid);
+    let floor_risers: Vec<(Polygon3D, WallExposure)> = storey
+        .floors
+        .riser_faces(storey.floor_thickness_m.unwrap_or(0.0))
+        .into_iter()
+        .map(|f| (f, WallExposure::Unset))
+        .collect();
+    storey.walls = walls
+        .with_risers(ceiling_risers, wall_cid)
+        .with_interior_risers(floor_risers, wall_cid);
     // The pre-projection porch walls — like `previous_walls`, kept only to
     // seed opening anchors whose placement still references a pre-projection
     // porch-wall id.
@@ -818,6 +833,12 @@ fn split_partitioned_wall(
                     Point2f32::new(along as f32, v.z as f32)
                 })
                 .collect();
+            // A region with no stored sample INHERITS the parent wall's
+            // exposure — cutting a face divides one wall into pieces, it does
+            // not un-answer it. (`Unset` here made every fresh cut drop the
+            // wall's exposure, so partitioning to give one wall two
+            // CONSTRUCTIONS silently wiped the exposure it already had.) It
+            // mirrors the other splits, which copy exposure to both pieces.
             let exposure = part
                 .regions
                 .iter()
@@ -825,7 +846,12 @@ fn split_partitioned_wall(
                     manip_plan::point_in_polygon(&projected, Point2f32::new(sample.x, sample.y))
                 })
                 .map(|(_, e)| *e)
-                .unwrap_or(WallExposure::Unset);
+                // No sample: the partition's own base exposure (the wall's
+                // answer when it was first cut), else the parent region's.
+                .unwrap_or(match part.base_exposure {
+                    WallExposure::Unset => region.exposure,
+                    e => e,
+                });
             rebase_ring_start(ber_model::ber::structural::WallRegion {
                 id: ItemId::default(),
                 polygon: poly,
@@ -4894,13 +4920,20 @@ mod tests {
             .find(|r| is_riser(r))
             .expect("the floor riser still derives");
         let rext = &riser.polygon.exterior;
+        // The riser spans the two floor UNDERSIDES — −0.3 − 0.225 up to
+        // 0 − 0.225 — so its height is the level difference (0.3) and it sits
+        // in the floor PLANE. It used to run surface-to-surface; the walking
+        // surface is only a datum to measure heights from, so a riser drawn to
+        // it put a wall edge across the upper floor's top line and left the
+        // lower slab's edge in no wall at all (field: 56 Elmwood Road).
         assert!(
-            (rext[0].z + 0.3).abs() < 1e-9 && (rext[1].z + 0.3).abs() < 1e-9,
-            "riser base UNCHANGED at the lower floor level: {rext:?}"
+            (rext[0].z + 0.525).abs() < 1e-9 && (rext[1].z + 0.525).abs() < 1e-9,
+            "riser base at the lower floor's UNDERSIDE: {rext:?}"
         );
+        let rtop = rext.iter().fold(f64::NEG_INFINITY, |m, v| m.max(v.z));
         assert!(
-            rext.iter().all(|v| v.z < 1e-9),
-            "riser tops at the upper floor level, not the slab band: {rext:?}"
+            (rtop + 0.225).abs() < 1e-9,
+            "riser tops at the HIGHER floor's underside, not its surface: {rtop}"
         );
     }
 
@@ -6769,6 +6802,64 @@ mod tests {
     /// wall span, the in-scope Exposed piece seeds `Select All`
     /// (`surface_ids`) exactly once, and a plan tap on the wall line hits it
     /// (`surface_at`).
+    /// A cut DIVIDES a wall, it does not un-answer it: a region with no stored
+    /// exposure sample inherits the PARENT wall's exposure, the way every other
+    /// split copies attributes to both pieces.
+    ///
+    /// This matters most when partitioning is reached from STRUCTURE — dividing
+    /// a wall so its halves can take different CONSTRUCTIONS used to silently
+    /// drop the exposure the wall already carried.
+    #[test]
+    fn face_partition_pieces_inherit_the_parent_wall_exposure() {
+        let mut doc = square_doc(&[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(4.0, 0.0),
+            Point2f32::new(4.0, 4.0),
+            Point2f32::new(0.0, 4.0),
+        ]);
+        let (vid, a, b) = doc.outline.floor_plan.perimeter_walls()[0];
+        let len = manip_plan::segment_len(a, b);
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &[]);
+        ber.set_default_ceiling_height(Some(0), 2.4);
+
+        // The wall is answered before any cut — a whole-wall section.
+        doc.set_wall_section(vid, 0.0, len, len, WallExposure::Exposed);
+        let before = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+        assert_eq!(
+            before
+                .walls
+                .regions
+                .iter()
+                .filter(|r| r.exposure == WallExposure::Exposed)
+                .count(),
+            1,
+            "the wall starts out Exposed"
+        );
+
+        // One vertical cut, NO exposure sample stored for either side.
+        doc.commit_partition_cut(
+            vid,
+            crate::PartitionCut {
+                a: Point2f32::new(len * 0.5, 0.0),
+                b: Point2f32::new(len * 0.5, 2.4),
+            },
+        );
+        let after = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+        assert_eq!(after.walls.regions.len(), 5, "3 + 2 = 5 wall regions");
+        assert_eq!(
+            after
+                .walls
+                .regions
+                .iter()
+                .filter(|r| r.exposure == WallExposure::Exposed)
+                .count(),
+            2,
+            "BOTH halves inherited Exposed — the cut divided the wall, it did \
+             not un-answer it"
+        );
+    }
+
     #[test]
     fn face_partition_pieces_are_first_class_walls() {
         use ber_model::ber::structural::SurfaceKind;

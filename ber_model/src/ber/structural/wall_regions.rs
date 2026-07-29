@@ -133,6 +133,47 @@ impl WallRegion {
         Some((a, b))
     }
 
+    /// The wall's full plan EXTENT along its base line — the base edge stretched
+    /// to cover every vertex of the ring, as `(near, far)` plan points.
+    ///
+    /// [`base_edge`](Self::base_edge) is deliberately the ORIGINAL footprint: a
+    /// merged guest's forward arm is excluded so the edge stays stable across
+    /// re-derivation, which is what identity matching needs. But that makes it
+    /// a SHORT STUB of the real wall — at 56 Elmwood Road, 0.88 m of an 8.95 m
+    /// back wall — so anything treating a wall as a plan SEGMENT must use this
+    /// instead: hit-testing a tap, drawing the selection, marquee containment.
+    /// Using the edge there let the assessor click only the stub and drew the
+    /// selection over just that part, while 3D (which draws the real polygon)
+    /// showed the whole wall.
+    ///
+    /// `None` for a wall with no base frame (plan-degenerate).
+    pub fn base_extent(&self) -> Option<(Point2f64, Point2f64)> {
+        let (a, b) = self.base_edge()?;
+        let (dx, dy) = (b.x - a.x, b.y - a.y);
+        let len = dx.hypot(dy);
+        if len <= f64::EPSILON {
+            return None;
+        }
+        let (ux, uy) = (dx / len, dy / len);
+        let (mut lo, mut hi) = (0.0_f64, len);
+        for v in &self.polygon.exterior {
+            let t = (v.x - a.x) * ux + (v.y - a.y) * uy;
+            lo = lo.min(t);
+            hi = hi.max(t);
+        }
+        Some((
+            Point2f64::new(a.x + ux * lo, a.y + uy * lo),
+            Point2f64::new(a.x + ux * hi, a.y + uy * hi),
+        ))
+    }
+
+    /// The midpoint of [`base_extent`](Self::base_extent) — the plan point that
+    /// represents the wall for containment tests. `None` when it has no extent.
+    pub fn base_extent_midpoint(&self) -> Option<Point2f64> {
+        let (a, b) = self.base_extent()?;
+        Some(Point2f64::new((a.x + b.x) * 0.5, (a.y + b.y) * 0.5))
+    }
+
     /// World→wall-local frame for the base edge: `(origin = exterior[0] in plan,
     /// u_hat = unit vector along the base toward the FAR base endpoint, length,
     /// base_z)`. `None` for a degenerate wall (base edge under 1e-9 m). The
@@ -497,6 +538,38 @@ impl WallRegions {
         faces: Vec<(Polygon3D, WallExposure)>,
         default_construction_id: ItemId,
     ) -> Self {
+        self.push_risers(faces, default_construction_id, false)
+    }
+
+    /// [`with_risers`](Self::with_risers) for INTERIOR risers — faces with the
+    /// storey on BOTH sides, which merge with each other but never into a wall.
+    ///
+    /// [`FloorRegions::riser_faces`] only ever emits interior step boundaries
+    /// ("a piece must be shared by TWO regions"), so a floor riser is never
+    /// part of the heat-loss envelope. Letting one merge into a perimeter wall
+    /// hands it that wall's exposure and identity, and the assessor can no
+    /// longer tag them apart: at 56 Elmwood Road the step down to a dropped
+    /// area merged into an outline wall, so marking that wall Exposed would
+    /// have counted ~1 m² of internal slab edge as heat-loss area.
+    ///
+    /// Riser-to-riser merging still applies — two pieces of one physical step
+    /// face are one region.
+    ///
+    /// [`FloorRegions::riser_faces`]: super::FloorRegions::riser_faces
+    pub fn with_interior_risers(
+        self,
+        faces: Vec<(Polygon3D, WallExposure)>,
+        default_construction_id: ItemId,
+    ) -> Self {
+        self.push_risers(faces, default_construction_id, true)
+    }
+
+    fn push_risers(
+        mut self,
+        faces: Vec<(Polygon3D, WallExposure)>,
+        default_construction_id: ItemId,
+        interior_only: bool,
+    ) -> Self {
         let first_riser = self.regions.len();
         for (polygon, exposure) in faces.into_iter().filter(|(p, _)| p.exterior.len() >= 3) {
             self.regions.push(WallRegion {
@@ -507,7 +580,7 @@ impl WallRegions {
                 construction_id: default_construction_id,
             });
         }
-        self.merge_coplanar_flush(first_riser)
+        self.merge_coplanar_flush(first_riser, interior_only)
     }
 
     /// THE COPLANAR-FLUSH MERGE (live report, 2026-06: a ceiling-step carve
@@ -536,7 +609,7 @@ impl WallRegions {
     /// point (no positive-length shared segment) stays a separate region,
     /// and perimeter walls never merge into each other — exposure sections
     /// split over one outline edge stay separate regions.
-    fn merge_coplanar_flush(mut self, first_riser: usize) -> Self {
+    fn merge_coplanar_flush(mut self, first_riser: usize, interior_only: bool) -> Self {
         let mut is_riser: Vec<bool> = (0..self.regions.len()).map(|k| k >= first_riser).collect();
         loop {
             let mut merge: Option<(usize, usize, Polygon3D)> = None;
@@ -547,6 +620,12 @@ impl WallRegions {
                 let mut best: Option<(usize, Polygon3D)> = None;
                 for hi in 0..self.regions.len() {
                     if hi == ri {
+                        continue;
+                    }
+                    // An INTERIOR riser never merges into a WALL — it would
+                    // inherit an envelope exposure it can't have. Riser-to-riser
+                    // still merges (one physical step face, split by geometry).
+                    if interior_only && !is_riser[hi] {
                         continue;
                     }
                     let Some(stitched) =

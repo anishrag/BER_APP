@@ -31,14 +31,14 @@ use egui::Pos2;
 
 use crate::controller::app_controller::FinalDetails;
 use crate::controller::app_controller::{
-    ActiveObjectRoomView, AssessmentPhase, ChecklistItem, ComplexWindowPlacement,
-    DimensionPromptUiData, DoorSidelightsPlacement, EditDragPromptUiData, ElevationView,
-    ExistingGroup, ExistingWindowType, ExposureSelection, FinalMode, FloorStepZoneView,
-    NewStoreyPromptUiData, ObjectPinView, ObjectReviewView, OpeningFieldsPrompt, OpeningToolKind,
-    PartitionView, PhaseDisplayRegion, PhotoView, PositionPromptUiData, ReviewView, RiserView,
-    SelectMode, SnapTagView, StructureEdit, StructureReviewView, SurfaceKind,
-    VertexDropPromptUiData, WallExposureView, WallFinishField, WallInclusionPromptView,
-    WindowTypeChoice,
+    ActiveObjectRoomView, AssessmentPhase, CeilingRidgeSnapTag, ChecklistItem,
+    ComplexWindowPlacement, DimensionPromptUiData, DoorSidelightsPlacement, EditDragPromptUiData,
+    ElevationView, ExistingGroup, ExistingWindowType, ExposureSelection, FinalMode,
+    FloorLevelPromptUiData, FloorStepZoneView, NewStoreyPromptUiData, ObjectPinView,
+    ObjectReviewView, OpeningFieldsPrompt, OpeningToolKind, PartitionView, PhaseDisplayRegion,
+    PhotoView, PositionPromptUiData, ReviewView, RidgeDof, RiserView, SelectMode, SnapTagView,
+    StructureEdit, StructureReviewView, SurfaceKind, VertexDropPromptUiData, WallExposureView,
+    WallFinishField, WallInclusionPromptView, WindowTypeChoice,
 };
 use crate::ui::pages::events::UiEvent;
 use crate::ui::render::ViewParams;
@@ -455,12 +455,12 @@ pub enum SketchEvent {
     },
     /// Leave copy-height pick mode without copying (re-shows the keypad).
     CancelCopyHeight,
-    /// "Don't snap" on the pending roof ridge's snap tag: revert the cross
-    /// coordinate to its drawn value and reopen the position question. Routed
-    /// to the controller's dedicated `unsnap_roof_ridge` — NOT
-    /// `ChooseSnap`/`UnsnapLast`, whose rewind-and-replay machinery must not
-    /// touch a ridge outside history.
-    UnsnapCeilingRidge,
+    /// "Don't snap" on ONE of the pending roof ridge's snap tags: revert that
+    /// degree of freedom to its drawn value and re-ask whatever the remaining
+    /// snaps leave open, the others untouched. Routed to the controller's
+    /// dedicated `unsnap_roof_ridge` — NOT `ChooseSnap`/`UnsnapLast`, whose
+    /// rewind-and-replay machinery must not touch a ridge outside history.
+    UnsnapCeilingRidge(RidgeDof),
     /// Discard the in-flight roof ridge at any stage.
     CancelPendingCeilingRidge,
     /// Toggle wall-exposure mode: when on, tapping an outline wall selects it
@@ -498,6 +498,11 @@ pub enum SketchEvent {
     /// Open the selected exposure wall's unrolled face for partitioning (routes
     /// the canvas to the partition overlay).
     OpenWallPartition,
+    /// Structure phase: open the SELECTED wall's face for partitioning — the
+    /// same tool, reached from Structure so a wall can be divided into several
+    /// CONSTRUCTION surfaces (each partition region resolves to its own wall
+    /// region). Enabled only with exactly one wall selected.
+    OpenStructureWallPartition,
     /// Close the partition overlay (back to the wall-exposure plan).
     CloseWallPartition,
     /// Append a point to the in-flight partition stroke (drag), wall-local
@@ -529,6 +534,10 @@ pub enum SketchEvent {
     PartitionDimSkip,
     /// Remove the active wall's partition entirely (back to a single face).
     ClearWallPartition,
+    /// STRUCTURE phase: close the face view and open the attribute editor on the
+    /// pieces picked in it — the face view is a planar SELECTOR there, so this
+    /// hands off to the ordinary Structure editing flow.
+    EditPartitionSelectionAttributes,
     // ── Windows/doors ──────────────────────────────────────────────────────
     /// Toggle windows/doors mode.
     SetOpeningsMode(bool),
@@ -891,6 +900,11 @@ pub enum SketchEvent {
     /// Browse stage: accept the current suggestion as the storey's
     /// fully-finalised outline (no review, no dimension prompts).
     AcceptSuggestion,
+    /// Floor-level prompt: the overhanging piece with this
+    /// `overhangs_over` index sits at this below-ceiling level.
+    SetOverhangLevel(usize, f64),
+    /// Floor-level prompt: apply the answers and seed the storey's levels.
+    ConfirmFloorLevels,
     /// Switch the workspace onto another assessment phase (clicked in the phase
     /// signpost). The controller gates which phases are reachable.
     SetAssessmentPhase(AssessmentPhase),
@@ -1386,7 +1400,7 @@ pub struct SketchView<'a> {
     /// has its own buffer (prefilled with the drawn length on stage open).
     pub ceiling_ridge_views: &'a [((f64, f64), (f64, f64), String)],
     pub pending_roof_ridge_line: Option<((f64, f64), (f64, f64))>,
-    pub ceiling_ridge_snap_tag: Option<&'a SnapTagView>,
+    pub ceiling_ridge_snap_tags: &'a [CeilingRidgeSnapTag],
     pub ceiling_ridge_position_pending: bool,
     pub ceiling_ridge_length_pending: bool,
     /// The open length question's extent starts at a SNAPPED wall coordinate
@@ -1471,6 +1485,8 @@ pub struct SketchView<'a> {
     /// browsing, the canvas tints the current suggestion's ring over the
     /// previous-storey watermark. `None` when no flow is in progress.
     pub new_storey_prompt: Option<NewStoreyPromptUiData>,
+    /// The floor-level questions a level seed is waiting on, if any.
+    pub floor_level_prompt: Option<FloorLevelPromptUiData>,
     /// Backing string for the flow's thickness input (prefilled "0.25" when
     /// the Thickness stage opens — the one-shot guard lives on `SketchState`).
     pub new_storey_thickness_input: &'a mut String,
@@ -1748,6 +1764,8 @@ pub struct SketchView<'a> {
     pub structure_kinds: std::collections::BTreeSet<SurfaceKind>,
     /// The active global Select subtool, so the panel shows it. `None` = none.
     pub structure_select: Option<SelectMode>,
+    /// Exactly one WALL selected — gates the Structure "Partition" button.
+    pub structure_can_partition: bool,
     /// Region ids selected in the Structure phase — the canvas shades these.
     pub structure_selected: &'a HashSet<ItemId>,
     /// The in-flight "Edit attributes" session (selection grouped by

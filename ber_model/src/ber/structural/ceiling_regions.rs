@@ -106,6 +106,22 @@ pub struct Dormer {
 /// flattens on re-resolve (a fixpoint break).
 pub const APEX_BOUNDARY_EPS_M: f64 = 1e-4;
 
+/// How far outside its own outline [`CeilingRegions::overhangs_over`] probes to
+/// find an overhang's neighbours. Comfortably past boolean-op drift along a
+/// shared edge, and far shorter than any real wall — so the probe lands in the
+/// neighbouring region, never back inside the piece or across it.
+const BORDER_PROBE_M: f64 = 1e-3;
+
+/// Spacing of those probes along the outline. Fine enough to attribute a short
+/// door reveal, coarse enough that a long wall costs a few hundred point tests.
+const BORDER_SAMPLE_STEP_M: f64 = 0.05;
+
+/// A neighbour must share at least this much boundary with an overhang before
+/// it counts as one of its levels. Below this it is a corner graze, not a wall
+/// the storey above could sit on — and it must not turn a one-level overhang
+/// into a spurious question.
+const MIN_BORDER_RUN_M: f64 = 0.15;
+
 /// A connected GROUP of ceiling apexes and the ceiling regions they shape — the
 /// session-derived view (never persisted; no serde) that is THE grouping
 /// authority: ridge validation ("does this region already have a high
@@ -149,6 +165,198 @@ pub struct CeilingApexGroup {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CeilingRegions {
     pub regions: Vec<CeilingRegion>, // height per vertex
+}
+
+/// A polygon's exterior as an OPEN ring (no closing duplicate), f32-quantized
+/// — the ring form the model hands out (the `Ber::add_ceiling_apex` precedent:
+/// the document layer round-trips rings through `Point2f32`).
+pub fn open_ring_of(p: &Polygon<f64>) -> Vec<Point2f64> {
+    let mut ring: Vec<Point2f64> = p
+        .exterior()
+        .coords()
+        .map(|c| Point2f64::new(c.x as f32 as f64, c.y as f32 as f64))
+        .collect();
+    if ring.len() > 1 && ring.first() == ring.last() {
+        ring.pop();
+    }
+    ring.dedup();
+    if ring.len() > 1 && ring.first() == ring.last() {
+        ring.pop();
+    }
+    ring
+}
+
+/// Which of `neighbours` shares the longest plan BOUNDARY with `piece` — the
+/// "copy the area you mostly run along" rule, shared by the floor-level
+/// overhang question ([`CeilingRegions::inherited_floor_pieces`]) and the
+/// inherited phase zones ([`Ber::storey_phase_zones_over`]).
+///
+/// Walks the piece's outline and probes just outside it, attributing each
+/// sample's share of the segment length to whichever neighbour contains the
+/// probe. Probing rather than comparing edges because these rings are
+/// boolean-op output whose shared edges rarely match vertex-for-vertex. `None`
+/// when nothing shares at least [`MIN_BORDER_RUN_M`] of wall — a corner graze
+/// is not adjacency.
+///
+/// [`Ber::storey_phase_zones_over`]: crate::ber::ber_struct::Ber::storey_phase_zones_over
+pub fn dominant_bordering(
+    piece: &Polygon<f64>,
+    neighbours: &[&MultiPolygon<f64>],
+) -> Option<usize> {
+    let mut shared = vec![0.0_f64; neighbours.len()];
+    for w in piece.exterior().0.windows(2) {
+        let (ax, ay, bx, by) = (w[0].x, w[0].y, w[1].x, w[1].y);
+        let len = (bx - ax).hypot(by - ay);
+        if len <= BORDER_PROBE_M {
+            continue;
+        }
+        let (nx, ny) = (-(by - ay) / len, (bx - ax) / len);
+        let n = ((len / BORDER_SAMPLE_STEP_M).ceil() as usize).clamp(1, 256);
+        let weight = len / n as f64;
+        for k in 0..n {
+            let t = (k as f64 + 0.5) / n as f64;
+            let (px, py) = (ax + (bx - ax) * t, ay + (by - ay) * t);
+            let outward = [
+                (px + nx * BORDER_PROBE_M, py + ny * BORDER_PROBE_M),
+                (px - nx * BORDER_PROBE_M, py - ny * BORDER_PROBE_M),
+            ]
+            .into_iter()
+            .find(|&(qx, qy)| !piece.contains(&GeoPoint::new(qx, qy)));
+            let Some((qx, qy)) = outward else { continue };
+            let probe = GeoPoint::new(qx, qy);
+            if let Some(i) = neighbours.iter().position(|mp| mp.contains(&probe)) {
+                shared[i] += weight;
+            }
+        }
+    }
+    shared
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| **s >= MIN_BORDER_RUN_M)
+        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(i, _)| i)
+}
+
+/// One piece of a new storey's floor, and where its height comes from.
+///
+/// THE unit of the floor-level rule:
+///  1. a piece with a ceiling under it lands on that ceiling (+ the slab);
+///  2. a piece with none — an OVERHANG, where the storey below is set back,
+///     classically a front door recessed into the ground floor and bridged
+///     above — copies a NEIGHBOUR's level;
+///  3. where it adjoins more than one, the assessor is asked which to copy
+///     (or gives a height outright).
+///
+/// Produced by [`CeilingRegions::inherited_floor_pieces`]; turned into floor
+/// levels by [`resolve_floor_levels`].
+#[derive(Debug, Clone)]
+pub struct InheritedFloorPiece {
+    /// Open plan ring of the piece.
+    pub ring: Vec<Point2f64>,
+    /// Plan area (m²).
+    pub area_m2: f64,
+    /// The flat ceiling height under it (storey-below-local z), or `None` when
+    /// nothing is under it — an overhang.
+    pub ceiling_z: Option<f64>,
+    /// An overhang's neighbouring levels, longest shared boundary first. Empty
+    /// unless `ceiling_z` is `None`; more than one entry is the question.
+    pub bordering: Vec<f64>,
+}
+
+impl InheritedFloorPiece {
+    /// Build a piece from a boolean-op polygon, quantizing its ring. `None`
+    /// when the ring degenerates below a triangle.
+    fn new(poly: &Polygon<f64>, ceiling_z: Option<f64>, bordering: Vec<f64>) -> Option<Self> {
+        use geo::Area;
+        let area_m2 = poly.unsigned_area();
+        if area_m2 < SLIVER_AREA_M2 {
+            return None;
+        }
+        let mut ring: Vec<Point2f64> = poly
+            .exterior()
+            .coords()
+            .map(|c| Point2f64::new(c.x as f32 as f64, c.y as f32 as f64))
+            .collect();
+        if ring.len() > 1 && ring.first() == ring.last() {
+            ring.pop();
+        }
+        ring.dedup(); // quantization can collapse near-identical vertices
+        if ring.len() > 1 && ring.first() == ring.last() {
+            ring.pop();
+        }
+        (ring.len() >= 3).then_some(Self {
+            ring,
+            area_m2,
+            ceiling_z,
+            bordering,
+        })
+    }
+
+    /// Does this piece need asking about? An overhang adjoining more than one
+    /// level — rule 3, and the ONLY question the floor-level rule raises.
+    pub fn needs_choice(&self) -> bool {
+        self.ceiling_z.is_none() && self.bordering.len() > 1
+    }
+}
+
+/// Turn [`InheritedFloorPiece`]s into the storey's floor levels: the DATUM
+/// (rule 4 — the height of the largest floor area on the storey, so the main
+/// body reads as level 0) and one `(ring, level_m)` per piece that sits off it.
+///
+/// `answers` assigns a height to a piece by INDEX into `pieces`; a `None` (or
+/// an absent entry) leaves the piece on its own ceiling, or for an overhang on
+/// its longest-bordering neighbour. Pieces at the datum contribute no entry —
+/// they are level 0 by definition.
+///
+/// Areas are summed PER LEVEL before picking the datum: several pieces at the
+/// same height are one floor. Ties break to the lower level, so the result is
+/// stable. Returns `(None, empty)` when nothing has a height at all.
+pub fn resolve_floor_levels(
+    pieces: &[InheritedFloorPiece],
+    answers: &[Option<f64>],
+) -> (Option<f64>, Vec<(Vec<Point2f64>, f64)>) {
+    // Rules 1–3: every piece's height.
+    let heights: Vec<Option<f64>> = pieces
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            answers
+                .get(i)
+                .copied()
+                .flatten()
+                .or(p.ceiling_z)
+                .or_else(|| p.bordering.first().copied())
+        })
+        .collect();
+    // Rule 4: the datum is the height of the largest floor AREA.
+    let mut by_level: Vec<(f64, f64)> = Vec::new();
+    for (p, z) in pieces.iter().zip(&heights) {
+        let Some(z) = *z else { continue };
+        match by_level
+            .iter_mut()
+            .find(|(lz, _)| (*lz - z).abs() <= RISER_Z_EPS_M)
+        {
+            Some((_, acc)) => *acc += p.area_m2,
+            None => by_level.push((z, p.area_m2)),
+        }
+    }
+    by_level.sort_by(|(az, aa), (bz, ba)| {
+        ba.partial_cmp(aa)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(az.partial_cmp(bz).unwrap_or(std::cmp::Ordering::Equal))
+    });
+    let Some(&(datum, _)) = by_level.first() else {
+        return (None, Vec::new());
+    };
+    let levels = pieces
+        .iter()
+        .zip(&heights)
+        .filter_map(|(p, z)| {
+            let level = (*z)? - datum;
+            (level.abs() > RISER_Z_EPS_M).then(|| (p.ring.clone(), level))
+        })
+        .collect();
+    (Some(datum), levels)
 }
 
 impl CeilingRegions {
@@ -1538,33 +1746,124 @@ impl CeilingRegions {
         false
     }
 
-    /// The LOWEST flat ceiling height over `footprint`: the minimum
-    /// [`flat_z`] among regions whose plan polygon overlaps `footprint` by
-    /// more than [`SLIVER_AREA_M2`] (a boundary graze is not coverage).
-    /// Heights are metres above this storey's floor datum. This is the
-    /// ANCHOR the storey above's floor slab sits on
-    /// (`Ber::storey_floor_datums`) and the zero its inherited floor steps
-    /// are measured from ([`inherited_floor_levels`]). `None` when no flat
-    /// region overlaps — sloped-only coverage, empty ceilings, or a degenerate
-    /// footprint (< 3 vertices).
+    /// Every piece of `footprint` that a storey above would floor, with the
+    /// height it takes it from: `region ∩ footprint` for each FLAT ceiling
+    /// below, plus the OVERHANGING pieces the storey below doesn't reach under
+    /// at all. THE query behind the whole floor-level rule.
     ///
-    /// [`flat_z`]: CeilingRegion::flat_z
-    /// [`inherited_floor_levels`]: CeilingRegions::inherited_floor_levels
-    pub(crate) fn lowest_flat_z_over(&self, footprint: &[Point2f64]) -> Option<f64> {
+    /// Sloped regions are warn-logged and floor nothing (sloped-under-floor is
+    /// later ceilings work), but they still COUNT AS COVER — the area under a
+    /// sloped bay is not an overhang. Sub-[`SLIVER_AREA_M2`] pieces are dropped.
+    /// Rings are OPEN and f32-QUANTIZED (the `Ber::add_ceiling_apex` precedent:
+    /// the document layer round-trips step rings through `Point2f32`, and the
+    /// seed → reload fixpoint needs the stored ring to survive that round-trip).
+    pub fn inherited_floor_pieces(&self, footprint: &[Point2f64]) -> Vec<InheritedFloorPiece> {
         use geo::bool_ops::BooleanOps;
         use geo::Area;
         if footprint.len() < 3 {
-            return None;
+            return Vec::new();
         }
         let fp = ring_to_poly(footprint);
-        self.regions
+        let fp_mp = MultiPolygon::new(vec![fp.clone()]);
+        let mut out = Vec::new();
+        let mut covered = MultiPolygon::<f64>::new(Vec::new());
+        for r in &self.regions {
+            let plan: Polygon<f64> = r.polygon.clone().into();
+            covered = covered.union(&MultiPolygon::new(vec![plan.clone()]));
+            let piece = plan.intersection(&fp);
+            if piece.unsigned_area() <= SLIVER_AREA_M2 {
+                continue; // not under the new storey
+            }
+            let Some(z) = r.flat_z() else {
+                log::warn!(
+                    "sloped ceiling region under the new storey's footprint — \
+                     it floors nothing"
+                );
+                continue;
+            };
+            for poly in piece.0.iter().flat_map(split_to_simple) {
+                if let Some(p) = InheritedFloorPiece::new(&poly, Some(z), Vec::new()) {
+                    out.push(p);
+                }
+            }
+        }
+        // Rule 2: what has no ceiling under it at all takes a NEIGHBOUR's level.
+        for poly in fp_mp
+            .difference(&covered)
+            .0
             .iter()
-            .filter_map(|r| {
-                let z = r.flat_z()?;
-                let plan: Polygon<f64> = r.polygon.clone().into();
-                (plan.intersection(&fp).unsigned_area() > SLIVER_AREA_M2).then_some(z)
-            })
-            .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .flat_map(split_to_simple)
+        {
+            let bordering = self.levels_bordering(&poly);
+            if let Some(p) = InheritedFloorPiece::new(&poly, None, bordering) {
+                out.push(p);
+            }
+        }
+        out
+    }
+
+    /// The distinct flat levels whose region shares a BOUNDARY with `piece`,
+    /// longest shared boundary first. Measured by how much of each region's
+    /// plan outline runs along the piece's outline: a neighbour that merely
+    /// touches at a corner scores ~0 and drops out, while the wall a recess is
+    /// cut into scores its full width.
+    ///
+    /// Implemented by WALKING the piece's outline and probing just outside it,
+    /// rather than by comparing edges: these rings come from boolean output and
+    /// their shared edges rarely match vertex-for-vertex, so an edge comparison
+    /// would miss neighbours a probe finds reliably. Each sample carries its
+    /// share of the segment's length, so the score is a real boundary length.
+    fn levels_bordering(&self, piece: &Polygon<f64>) -> Vec<f64> {
+        let coords: Vec<_> = piece.exterior().0.to_vec();
+        let mut hits: Vec<(f64, f64)> = Vec::new(); // (z, shared boundary metres)
+        for w in coords.windows(2) {
+            let (ax, ay, bx, by) = (w[0].x, w[0].y, w[1].x, w[1].y);
+            let len = (bx - ax).hypot(by - ay);
+            if len <= BORDER_PROBE_M {
+                continue; // degenerate edge — nothing to attribute
+            }
+            // Unit normal; which side is OUTSIDE the piece is settled per
+            // sample, so the ring's winding never has to be assumed.
+            let (nx, ny) = (-(by - ay) / len, (bx - ax) / len);
+            let n = ((len / BORDER_SAMPLE_STEP_M).ceil() as usize).clamp(1, 256);
+            let weight = len / n as f64;
+            for k in 0..n {
+                let t = (k as f64 + 0.5) / n as f64;
+                let (px, py) = (ax + (bx - ax) * t, ay + (by - ay) * t);
+                let outward = [
+                    (px + nx * BORDER_PROBE_M, py + ny * BORDER_PROBE_M),
+                    (px - nx * BORDER_PROBE_M, py - ny * BORDER_PROBE_M),
+                ]
+                .into_iter()
+                .find(|&(qx, qy)| !piece.contains(&GeoPoint::new(qx, qy)));
+                let Some((qx, qy)) = outward else { continue };
+                let probe = GeoPoint::new(qx, qy);
+                for r in &self.regions {
+                    let Some(z) = r.flat_z() else { continue };
+                    let plan: Polygon<f64> = r.polygon.clone().into();
+                    if !plan.contains(&probe) {
+                        continue;
+                    }
+                    match hits
+                        .iter_mut()
+                        .find(|(hz, _)| (*hz - z).abs() <= RISER_Z_EPS_M)
+                    {
+                        Some((_, acc)) => *acc += weight,
+                        None => hits.push((z, weight)),
+                    }
+                    break; // regions don't overlap — first hit is the neighbour
+                }
+            }
+        }
+        // A neighbour that only grazes a corner picks up a sample or two of
+        // noise; require a real run of wall before it counts as a choice.
+        hits.retain(|(_, shared)| *shared >= MIN_BORDER_RUN_M);
+        hits.sort_by(|(az, aa), (bz, ba)| {
+            ba.partial_cmp(aa)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(az.partial_cmp(bz).unwrap_or(std::cmp::Ordering::Equal))
+        });
+        hits.into_iter().map(|(z, _)| z).collect()
     }
 
     /// Absolute-z of the ceiling SURFACE over plan point `p` (plane-eval on the
@@ -1575,8 +1874,8 @@ impl CeilingRegions {
     /// a shared boundary — callers sample points just INSIDE the footprint,
     /// never on a step line. `None` when no region covers `p` (or the covering
     /// region is plan-degenerate). The point-query cousin of
-    /// [`lowest_flat_z_over`](Self::lowest_flat_z_over), which is flat-only and
-    /// area-based.
+    /// [`inherited_floor_pieces`](Self::inherited_floor_pieces), which is
+    /// flat-only and area-based.
     pub fn top_z_at(&self, p: Point2f64) -> Option<f64> {
         use geo::Intersects;
         let gp = GeoPoint::new(p.x, p.y);
@@ -1647,69 +1946,15 @@ impl CeilingRegions {
     }
 
     /// The floor levels a storey ABOVE inherits from this (below-storey)
-    /// ceiling: for every FLAT region overlapping `footprint` (by more than
-    /// [`SLIVER_AREA_M2`]) whose height sits more than [`RISER_Z_EPS_M`]
-    /// above the anchor ([`lowest_flat_z_over`]), the plan pieces of
-    /// region ∩ footprint at level `z − anchor` — the anchor (and with it
-    /// the floor-slab thickness) cancels, so levels are
-    /// thickness-independent. Boolean results carrying interior rings are
-    /// decomposed via `split_to_simple` (`Polygon3D`-style exterior-only
-    /// consumers would fill the hole) and sub-[`SLIVER_AREA_M2`] pieces are
-    /// dropped. Piece rings are OPEN (no closing duplicate) and
-    /// f32-QUANTIZED (the `Ber::add_ceiling_apex` precedent: the document
-    /// layer round-trips step rings through `Point2f32`, and the
-    /// seed → reload fixpoint needs the stored ring to survive that
-    /// round-trip). Sloped regions overlapping the footprint are
-    /// warn-logged and contribute nothing (sloped-under-floor is later
-    /// ceilings work). Empty when there is no anchor.
+    /// ceiling, with no choices supplied — [`inherited_floor_pieces`] resolved
+    /// by [`resolve_floor_levels`]'s defaults (every piece on its own ceiling,
+    /// an overhang on its longest-bordering neighbour). One `(open plan ring,
+    /// level_m)` per piece that sits OFF the datum; levels below it are
+    /// negative. Empty when nothing under the footprint has a height.
     ///
-    /// [`lowest_flat_z_over`]: CeilingRegions::lowest_flat_z_over
+    /// [`inherited_floor_pieces`]: CeilingRegions::inherited_floor_pieces
     pub fn inherited_floor_levels(&self, footprint: &[Point2f64]) -> Vec<(Vec<Point2f64>, f64)> {
-        use geo::bool_ops::BooleanOps;
-        use geo::Area;
-        let Some(anchor) = self.lowest_flat_z_over(footprint) else {
-            return Vec::new();
-        };
-        let fp = ring_to_poly(footprint);
-        let mut out = Vec::new();
-        for r in &self.regions {
-            let plan: Polygon<f64> = r.polygon.clone().into();
-            let covered = plan.intersection(&fp);
-            if covered.unsigned_area() <= SLIVER_AREA_M2 {
-                continue; // not under the new storey
-            }
-            let Some(z) = r.flat_z() else {
-                log::warn!(
-                    "sloped ceiling region under the new storey's footprint — \
-                     it contributes no inherited floor level"
-                );
-                continue;
-            };
-            if z - anchor <= RISER_Z_EPS_M {
-                continue; // the anchor level itself — not a step
-            }
-            for poly in covered.0.iter().flat_map(split_to_simple) {
-                if poly.unsigned_area() < SLIVER_AREA_M2 {
-                    continue;
-                }
-                let mut ring: Vec<Point2f64> = poly
-                    .exterior()
-                    .coords()
-                    .map(|c| Point2f64::new(c.x as f32 as f64, c.y as f32 as f64))
-                    .collect();
-                if ring.len() > 1 && ring.first() == ring.last() {
-                    ring.pop();
-                }
-                ring.dedup(); // quantization can collapse near-identical vertices
-                if ring.len() > 1 && ring.first() == ring.last() {
-                    ring.pop();
-                }
-                if ring.len() >= 3 {
-                    out.push((ring, z - anchor));
-                }
-            }
-        }
-        out
+        resolve_floor_levels(&self.inherited_floor_pieces(footprint), &[]).1
     }
 
     /// The region whose plan projection STRICTLY contains `p` (boundary

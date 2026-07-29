@@ -478,6 +478,11 @@ pub fn add_wall_door(
 /// redistribution — rooflights don't line up like wall windows). Overshading
 /// DEFAULTS to `VeryLittle` — a rooflight looks at the sky, so surrounding
 /// buildings/trees rarely shade it (the assessor can still override).
+///
+/// The tapped point is the requested CENTRE; the footprint is then slid onto
+/// the surface by [`fit_roof_window_plan`], so a rooflight tapped near an eave
+/// or ridge lands flush against it instead of spilling onto the neighbouring
+/// region.
 pub fn add_roof_window(
     storey: &mut Storey,
     ceiling_region_id: ItemId,
@@ -489,16 +494,30 @@ pub fn add_roof_window(
     if width_m <= 0.0 || height_m <= 0.0 {
         return Err(OpeningError::ZeroSize);
     }
-    let Some(r) = storey
+    let Some(host) = storey
         .ceilings
         .regions
-        .iter_mut()
+        .iter()
         .find(|r| r.id == ceiling_region_id)
     else {
         return Err(OpeningError::NoHostRegion);
     };
+    let fitted = fit_roof_window_plan(
+        host,
+        (plan.0 as f64, plan.1 as f64),
+        width_m as f64,
+        height_m as f64,
+    );
+    let plan = (fitted.0 as f32, fitted.1 as f32);
     let id = ItemId::default();
-    r.opes.windows.push(id);
+    if let Some(r) = storey
+        .ceilings
+        .regions
+        .iter_mut()
+        .find(|r| r.id == ceiling_region_id)
+    {
+        r.opes.windows.push(id);
+    }
     storey.windows.push(Window {
         id,
         vertices: vec![],
@@ -732,24 +751,42 @@ pub fn add_multi_storey_window(
 /// under that point (so it derives onto the right face). Keeps the old region if
 /// the point is off every roof. No-op if `window_id` isn't a roof window. `opes`
 /// membership is rebuilt at the resolve tail, so it isn't touched here.
+///
+/// The footprint is fitted onto the host region ([`fit_roof_window_plan`]), so a
+/// drag can slide the rooflight up against an eave or ridge but never over it —
+/// dragged past the edge it parks flush instead of straddling two faces.
 pub fn move_roof_window(storey: &mut Storey, window_id: ItemId, new_plan: (f32, f32)) {
-    let new_region = storey
+    let Some(w) = storey.windows.iter().find(|w| w.id == window_id) else {
+        return;
+    };
+    let Some(OpeningPlacement::Roof {
+        ceiling_region_id, ..
+    }) = w.placement
+    else {
+        return;
+    };
+    let (width_m, height_m) = (w.width_m as f64, w.height_m as f64);
+    let wanted = (new_plan.0 as f64, new_plan.1 as f64);
+    // The region under the cursor when there is one, else the window keeps its
+    // current host — so a drag that leaves every roof still fits against the
+    // face it came from rather than following the cursor into nothing.
+    let host_id = storey
         .ceilings
-        .region_strictly_containing(domain::points::Point2f64::new(
-            new_plan.0 as f64,
-            new_plan.1 as f64,
-        ))
-        .map(|r| r.id);
+        .region_strictly_containing(domain::points::Point2f64::new(wanted.0, wanted.1))
+        .map(|r| r.id)
+        .unwrap_or(ceiling_region_id);
+    let Some(host) = storey.ceilings.regions.iter().find(|r| r.id == host_id) else {
+        return;
+    };
+    let fitted = fit_roof_window_plan(host, wanted, width_m, height_m);
     if let Some(w) = storey.windows.iter_mut().find(|w| w.id == window_id) {
         if let Some(OpeningPlacement::Roof {
             ceiling_region_id,
             plan,
         }) = &mut w.placement
         {
-            *plan = new_plan;
-            if let Some(rid) = new_region {
-                *ceiling_region_id = rid;
-            }
+            *plan = (fitted.0 as f32, fitted.1 as f32);
+            *ceiling_region_id = host_id;
         }
     }
 }
@@ -1002,6 +1039,66 @@ fn plan_boundary_closest(
         }
     }
     best
+}
+
+/// Slide a rooflight's requested plan `centre` so its FOOTPRINT
+/// ([`roof_window_plan_corners`]) sits wholly inside `region`, and return the
+/// fitted centre. A rooflight must always land on its surface — it can't run
+/// over a ridge or eave into the neighbouring region, where it would be pitched
+/// differently (or not at all).
+///
+/// FLUSH IS THE TARGET, not a violation: there is no safety margin, so a
+/// rooflight may sit hard against the eave/ridge. That's deliberate — a margin
+/// would make short slopes unusable, and the assessor is placing something they
+/// have already measured on the roof.
+///
+/// Iterative corner projection: take the corner overshooting FURTHEST, slide the
+/// whole footprint in by exactly that corner's offset to the boundary, repeat.
+/// Each pass lands the worst corner ON the ring, so a footprint inside a convex
+/// region settles in a pass or two. A concave region (or a rooflight genuinely
+/// bigger than its surface) can't always be satisfied, so the passes are capped
+/// and the LEAST-BAD centre is returned — [`roof_window_overhangs`] still flags
+/// what truly cannot fit, rather than the size being silently rejected.
+fn fit_roof_window_plan(
+    region: &super::structural::CeilingRegion,
+    centre: (f64, f64),
+    width_m: f64,
+    height_m: f64,
+) -> (f64, f64) {
+    // The worst-overshooting corner at `c` as (distance, corner, closest point
+    // on the ring), or `None` once every corner is inside. Corners are tested
+    // through the same `PROFILE_EPS_M` band the fit gate uses, which is what
+    // lets a flush corner — conceptually ON the boundary, a hair either side of
+    // it after boolean-op drift — read as fitting.
+    let worst = |c: (f64, f64)| {
+        let mut worst: Option<(f64, (f64, f64), (f64, f64))> = None;
+        for corner in roof_window_plan_corners(region, c, width_m, height_m) {
+            let p = domain::points::Point2f64::new(corner.0, corner.1);
+            if region.plan_contains_within(p, super::structural::PROFILE_EPS_M) {
+                continue;
+            }
+            let (d, closest) = plan_boundary_closest(region, corner.0, corner.1);
+            if worst.is_none_or(|(wd, _, _)| d > wd) {
+                worst = Some((d, corner, closest));
+            }
+        }
+        worst
+    };
+    let (mut c, mut best) = (centre, (f64::INFINITY, centre));
+    for _ in 0..16 {
+        let Some((d, corner, closest)) = worst(c) else {
+            return c; // every corner on the surface
+        };
+        if d < best.0 {
+            best = (d, c);
+        }
+        c = (c.0 + closest.0 - corner.0, c.1 + closest.1 - corner.1);
+    }
+    // Never satisfied — the least-bad centre, counting the final slide.
+    match worst(c) {
+        Some((d, _, _)) if d < best.0 => c,
+        _ => best.1,
+    }
 }
 
 /// Compose a door+sidelights assembly on a wall at `along_m` (centre): one
@@ -1298,9 +1395,52 @@ pub fn compose_full_wall_door_sidelights(
     )
 }
 
+/// The rigid body a move translates: the along-centre and vertical band
+/// `[vmin, vmax]` of the whole ASSEMBLY (door + sidelights + transom), or of the
+/// lone opening when it isn't an assembly member. What [`move_opening`] clamps.
+struct MovedBody {
+    centre: f32,
+    vmin: f32,
+    vmax: f32,
+}
+
+/// The [`MovedBody`] for `opening` on `wall_id` — the bounding box of its
+/// assembly (or of the opening alone). `None` when the gather can't see it (the
+/// opening has no wall placement), leaving the caller to fall back.
+fn moved_body(
+    storey: &Storey,
+    wall_id: ItemId,
+    opening: OpeningRef,
+    assembly: Option<ItemId>,
+) -> Option<MovedBody> {
+    let (mut left, mut right) = (f32::INFINITY, f32::NEG_INFINITY);
+    let (mut vmin, mut vmax) = (f32::INFINITY, f32::NEG_INFINITY);
+    let mut any = false;
+    for o in wall_openings(storey, wall_id)
+        .iter()
+        .filter(|o| match assembly {
+            Some(aid) => o.assembly_id == Some(aid),
+            None => o.opening == opening,
+        })
+    {
+        any = true;
+        left = left.min(o.along_m - o.width_m / 2.0);
+        right = right.max(o.along_m + o.width_m / 2.0);
+        vmin = vmin.min(o.sill_m);
+        vmax = vmax.max(o.sill_m + o.height_m);
+    }
+    any.then(|| MovedBody {
+        centre: (left + right) / 2.0,
+        vmin,
+        vmax,
+    })
+}
+
 /// Move an opening to a new along-centre and sill. An assembly member moves the
-/// WHOLE assembly rigidly. Horizontal change auto-redistributes (no overlap);
-/// vertical (sill) is set directly. No-op if the opening isn't on a wall.
+/// WHOLE assembly rigidly — including the vertical clamp, which runs against the
+/// assembly's combined band so the members never collapse into each other.
+/// Horizontal change auto-redistributes (no overlap); vertical (sill) is set
+/// directly. No-op if the opening isn't on a wall.
 pub fn move_opening(
     storey: &mut Storey,
     opening: OpeningRef,
@@ -1310,26 +1450,52 @@ pub fn move_opening(
     let Some((wall_id, old_along, old_sill, assembly)) = wall_placement_of(storey, opening) else {
         return Ok(());
     };
-    // Clamp the dragged opening's TOP under the wall roofline and its BOTTOM
-    // onto the wall underside (the sloped base of an inter-storey remainder) at
-    // its new along. Lives HERE so every drag path — the review elevation AND
-    // the 2D placement view — shares one clamp via this single mutation, instead
-    // of each re-implementing it. A MULTI-STOREY window is exempt from the
-    // roofline cap (it spans up); its bottom still clears the underside. If the
-    // opening can't fit between the underside and the roofline, refuse (leave the
-    // storey untouched) rather than resize.
+    // Clamp the moved body's TOP under the wall roofline and its BOTTOM onto the
+    // wall underside (the sloped base of an inter-storey remainder) at its new
+    // along. Lives HERE so every drag path — the review elevation AND the 2D
+    // placement view — shares one clamp via this single mutation, instead of each
+    // re-implementing it. A MULTI-STOREY window is exempt from the roofline cap
+    // (it spans up); its bottom still clears the underside. If it can't fit
+    // between the underside and the roofline, refuse (leave the storey untouched)
+    // rather than resize.
+    //
+    // The body is the whole ASSEMBLY, not the grabbed member: a door+sidelights+
+    // transom moves rigidly, so the clamp runs against the assembly's combined
+    // vertical band and centre. Clamping each member separately would break the
+    // rigid body — dragging down, the door bottoms out on the floor while the
+    // transom keeps descending into it — and it's IRREVERSIBLE, because the
+    // members' relative offsets are gone once the clamp has eaten them.
     let multi_storey = matches!(opening, OpeningRef::Window(id)
         if storey.windows.iter().any(|w| w.id == id && w.multi_storey));
-    let h = opening_height(storey, opening);
-    let new_sill_m = clamp_wall_sill(storey, wall_id, new_along_m, h, new_sill_m, multi_storey)?;
-    let (d_along, d_sill) = (new_along_m - old_along, new_sill_m - old_sill);
+    // No gathered extent (the opening carries no wall placement) → fall back to
+    // its own band at its own along: exactly the pre-assembly clamp.
+    let body = moved_body(storey, wall_id, opening, assembly).unwrap_or(MovedBody {
+        centre: old_along,
+        vmin: old_sill,
+        vmax: old_sill + opening_height(storey, opening),
+    });
+    let d_along = new_along_m - old_along;
+    // What the drag asks of the body's bottom, then clamped as one.
+    let want_bottom = body.vmin + (new_sill_m - old_sill);
+    let bottom = clamp_wall_sill(
+        storey,
+        wall_id,
+        body.centre + d_along,
+        body.vmax - body.vmin,
+        want_bottom,
+        multi_storey,
+    )?;
+    // `.max(0.0)` on the BODY's bottom (not per member, which is what broke
+    // rigidity): the floor guard survives a wall that no longer resolves, where
+    // `clamp_wall_sill` passes the sill through untouched.
+    let d_sill = bottom.max(0.0) - body.vmin;
     let shift = |p: &mut Option<OpeningPlacement>| {
         if let Some(OpeningPlacement::Wall {
             along_m, sill_m, ..
         }) = p
         {
             *along_m += d_along;
-            *sill_m = (*sill_m + d_sill).max(0.0);
+            *sill_m += d_sill;
         }
     };
     match assembly {
@@ -1576,12 +1742,13 @@ pub fn set_door_attributes(
 /// Resize a ROOF window in place (ceiling-plane width/height). Unlike a wall
 /// opening there's no host wall / redistribution / sill: the new size is set
 /// directly and the 3D `vertices` re-derive from it at the next resolve (see
-/// the [`OpeningPlacement::Roof`] arm of the derivation). A resize that makes
-/// the footprint OVERHANG its ceiling region is deliberately ACCEPTED — the
-/// "Windows" mapping gate ([`roof_window_overhangs`]) flags it rather than the
-/// size being silently rejected, exactly like placement. `ZeroSize` on a
-/// non-positive dimension; no-op `Ok` if `window_id` isn't a roof window
-/// (mirrors [`resize_opening`]).
+/// the [`OpeningPlacement::Roof`] arm of the derivation). The size is never
+/// rejected: the grown footprint is RE-FITTED onto the host region
+/// ([`fit_roof_window_plan`]) so it slides clear of the eave/ridge instead of
+/// spilling over, and a rooflight that genuinely cannot fit its surface at all
+/// is left for the "Windows" mapping gate ([`roof_window_overhangs`]) to flag.
+/// `ZeroSize` on a non-positive dimension; no-op `Ok` if `window_id` isn't a
+/// roof window (mirrors [`resize_opening`]).
 pub fn resize_roof_window(
     storey: &mut Storey,
     window_id: ItemId,
@@ -1591,11 +1758,30 @@ pub fn resize_roof_window(
     if new_width_m <= 0.0 || new_height_m <= 0.0 {
         return Err(OpeningError::ZeroSize);
     }
+    let Some(w) = storey.windows.iter().find(|w| w.id == window_id) else {
+        return Ok(());
+    };
+    let Some(OpeningPlacement::Roof {
+        ceiling_region_id,
+        plan,
+    }) = w.placement
+    else {
+        return Ok(()); // not a roof window
+    };
+    let wanted = (plan.0 as f64, plan.1 as f64);
+    let fitted = storey
+        .ceilings
+        .regions
+        .iter()
+        .find(|r| r.id == ceiling_region_id)
+        .map(|host| fit_roof_window_plan(host, wanted, new_width_m as f64, new_height_m as f64))
+        .unwrap_or(wanted);
     if let Some(w) = storey.windows.iter_mut().find(|w| w.id == window_id) {
-        if matches!(w.placement, Some(OpeningPlacement::Roof { .. })) {
-            w.width_m = new_width_m;
-            w.height_m = new_height_m;
+        if let Some(OpeningPlacement::Roof { plan, .. }) = &mut w.placement {
+            *plan = (fitted.0 as f32, fitted.1 as f32);
         }
+        w.width_m = new_width_m;
+        w.height_m = new_height_m;
     }
     Ok(())
 }
@@ -4846,5 +5032,320 @@ mod tests {
         let loaded: WallAnchor = serde_json::from_value(json).expect("old anchor loads");
         assert_eq!(loaded.porch, None, "defaults to an outline anchor");
         assert_eq!(loaded.along_fraction, 0.25);
+    }
+
+    /// A door+sidelights+transom assembly dragged DOWN moves as a RIGID body: the
+    /// door bottoming out on the floor stops the WHOLE assembly, so the transom
+    /// never descends into the door. (Before the assembly-level clamp, each
+    /// member was floored at 0 independently — the door stuck at the floor while
+    /// the transom kept going, and the collapse was irreversible because the
+    /// members' offsets were gone.)
+    #[test]
+    fn dragging_an_assembly_down_keeps_the_transom_above_the_door() {
+        let wid = ItemId::default();
+        let mut storey = flat_wall_storey(wid); // 4 m x 2.4 m
+        let spec = DoorSidelightsSpec {
+            door_width_m: 0.9,
+            door_height_m: 1.8,
+            left_sidelight_m: Some(0.3),
+            right_sidelight_m: Some(0.3),
+            left_sill_m: None,
+            right_sill_m: None,
+            transom_m: Some(0.3),
+            transom_semicircular: false,
+            window_type_id: ItemId::default(),
+            door_type_name: "Front".into(),
+        };
+        compose_door_sidelights(&mut storey, wid, 2.0, spec).expect("composes");
+        let sill = |s: &Storey, r: OpeningRef| match r {
+            OpeningRef::Window(id) => {
+                match s.windows.iter().find(|w| w.id == id).unwrap().placement {
+                    Some(OpeningPlacement::Wall { sill_m, .. }) => sill_m,
+                    _ => unreachable!(),
+                }
+            }
+            OpeningRef::Door(id) => match s.doors.iter().find(|d| d.id == id).unwrap().placement {
+                Some(OpeningPlacement::Wall { sill_m, .. }) => sill_m,
+                _ => unreachable!(),
+            },
+        };
+        // The transom is the widest window (it spans the whole assembly).
+        let transom = OpeningRef::Window(
+            storey
+                .windows
+                .iter()
+                .max_by(|a, b| a.width_m.partial_cmp(&b.width_m).unwrap())
+                .unwrap()
+                .id,
+        );
+        let door = OpeningRef::Door(storey.doors[0].id);
+        let along = 2.0;
+        assert_eq!(sill(&storey, door), 0.0);
+        assert!(
+            (sill(&storey, transom) - 1.8).abs() < 1e-4,
+            "transom on the door top"
+        );
+
+        // Grab the transom and haul it to the floor. The door is ALREADY on the
+        // floor, so the rigid body can't descend at all — nothing moves.
+        move_opening(&mut storey, transom, along, 0.0).expect("move ok");
+        assert_eq!(sill(&storey, door), 0.0, "door stays on the floor");
+        assert!(
+            (sill(&storey, transom) - 1.8).abs() < 1e-4,
+            "transom stays on the door top, not inside it: {}",
+            sill(&storey, transom)
+        );
+
+        // Up 0.3 then back down is lossless — the offsets survive the round trip.
+        move_opening(&mut storey, transom, along, 2.1).expect("up ok");
+        assert!(
+            (sill(&storey, door) - 0.3).abs() < 1e-4,
+            "assembly rose as one"
+        );
+        move_opening(&mut storey, transom, along, 1.8).expect("down ok");
+        assert_eq!(sill(&storey, door), 0.0, "back on the floor");
+        assert!(
+            (sill(&storey, transom) - 1.8).abs() < 1e-4,
+            "and back on the door top"
+        );
+    }
+
+    /// The assembly's TOP is capped by the roofline too — dragging it up stops
+    /// when the transom reaches the wall top, rather than the grabbed member
+    /// sliding up while the rest poke through.
+    #[test]
+    fn dragging_an_assembly_up_caps_the_whole_body_under_the_roofline() {
+        let wid = ItemId::default();
+        let mut storey = flat_wall_storey(wid); // 4 m x 2.4 m
+        let spec = DoorSidelightsSpec {
+            door_width_m: 0.9,
+            door_height_m: 1.8,
+            left_sidelight_m: Some(0.3),
+            right_sidelight_m: Some(0.3),
+            left_sill_m: None,
+            right_sill_m: None,
+            transom_m: Some(0.3),
+            transom_semicircular: false,
+            window_type_id: ItemId::default(),
+            door_type_name: "Front".into(),
+        };
+        compose_door_sidelights(&mut storey, wid, 2.0, spec).expect("composes");
+        let door = OpeningRef::Door(storey.doors[0].id);
+        // Body is 2.1 m tall on a 2.4 m wall → the door sill can rise to 0.3 max.
+        move_opening(&mut storey, door, 2.0, 5.0).expect("move ok");
+        let door_sill = match storey.doors[0].placement {
+            Some(OpeningPlacement::Wall { sill_m, .. }) => sill_m,
+            _ => unreachable!(),
+        };
+        assert!(
+            (door_sill - 0.3).abs() < 1e-4,
+            "capped at 0.3, got {door_sill}"
+        );
+        let top = storey
+            .windows
+            .iter()
+            .map(|w| match w.placement {
+                Some(OpeningPlacement::Wall { sill_m, .. }) => sill_m + w.height_m,
+                _ => 0.0,
+            })
+            .fold(0.0f32, f32::max);
+        assert!(top <= 2.4 + 1e-4, "nothing through the roofline, top {top}");
+    }
+
+    /// A flat ceiling over the plan rectangle `x0..x1 × y0..y1`.
+    fn flat_ceiling(id: ItemId, x0: f64, x1: f64, y0: f64, y1: f64, z: f64) -> CeilingRegion {
+        CeilingRegion {
+            id,
+            polygon: Polygon3D::new(vec![
+                p3(x0, y0, z),
+                p3(x1, y0, z),
+                p3(x1, y1, z),
+                p3(x0, y1, z),
+            ]),
+            opes: Opes::default(),
+            construction_id: ItemId::default(),
+            exposure: CeilingExposure::default(),
+        }
+    }
+
+    /// The placed rooflight's plan footprint bounds, as (x0, x1, y0, y1).
+    fn footprint(storey: &Storey, id: ItemId) -> (f64, f64, f64, f64) {
+        let w = storey.windows.iter().find(|w| w.id == id).unwrap();
+        let Some(OpeningPlacement::Roof {
+            ceiling_region_id,
+            plan,
+        }) = w.placement
+        else {
+            panic!("not a roof window");
+        };
+        let region = storey
+            .ceilings
+            .regions
+            .iter()
+            .find(|r| r.id == ceiling_region_id)
+            .unwrap();
+        let c = roof_window_plan_corners(
+            region,
+            (plan.0 as f64, plan.1 as f64),
+            w.width_m as f64,
+            w.height_m as f64,
+        );
+        (
+            c.iter().map(|p| p.0).fold(f64::INFINITY, f64::min),
+            c.iter().map(|p| p.0).fold(f64::NEG_INFINITY, f64::max),
+            c.iter().map(|p| p.1).fold(f64::INFINITY, f64::min),
+            c.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max),
+        )
+    }
+
+    /// Tapped hard against the eave, the rooflight slides UP the slope until it
+    /// sits on the surface — and lands FLUSH (no safety margin), so a short
+    /// slope stays usable.
+    #[test]
+    fn roof_window_tapped_over_the_eave_slides_flush_onto_the_surface() {
+        let rid = ItemId::default();
+        let grad = 3.0_f64.sqrt(); // cos(pitch) = 0.5 over plan y 0..2
+        let mut storey = Storey {
+            ceilings: CeilingRegions {
+                regions: vec![sloped_ceiling(rid, 2.4, grad)],
+            },
+            ..Storey::default()
+        };
+        // Height 2.0 foreshortens to a 1.0 m up-slope plan extent (+-0.5). Tapped
+        // at y = 0.1 the footprint would run to y = -0.4, off the eave.
+        let id = add_roof_window(&mut storey, rid, (2.0, 0.1), 1.0, 2.0, ItemId::default())
+            .expect("places");
+        let (x0, x1, y0, y1) = footprint(&storey, id);
+        assert!(y0 > -1e-6, "bottom edge is on the surface, got {y0}");
+        assert!(y0 < 1e-3, "and FLUSH to the eave — no margin, got {y0}");
+        assert!(
+            (y1 - 1.0).abs() < 1e-3,
+            "slid up by exactly the overshoot: {y1}"
+        );
+        assert!(x0 > -1e-6 && x1 < 4.0 + 1e-6, "across-slope untouched");
+        assert!(
+            oversized_roof_windows(&storey).is_empty(),
+            "and the mapping gate is happy"
+        );
+    }
+
+    /// The rooflight can't run over the ridge into the FLAT region next door —
+    /// it stops flush against the shared boundary, still hosted by the slope.
+    #[test]
+    fn roof_window_cannot_cross_the_ridge_into_the_flat_region() {
+        let (slope, flat) = (ItemId::default(), ItemId::default());
+        let grad = 3.0_f64.sqrt();
+        let mut storey = Storey {
+            ceilings: CeilingRegions {
+                // Slope over y 0..2, flat deck over y 2..4 sharing the y = 2 ridge.
+                regions: vec![
+                    sloped_ceiling(slope, 2.4, grad),
+                    flat_ceiling(flat, 0.0, 4.0, 2.0, 4.0, 2.4 + grad * 2.0),
+                ],
+            },
+            ..Storey::default()
+        };
+        // Tapped at y = 1.9, a hair below the ridge: the footprint would reach
+        // y = 2.4, a full 0.4 m onto the flat deck.
+        let id = add_roof_window(&mut storey, slope, (2.0, 1.9), 1.0, 2.0, ItemId::default())
+            .expect("places");
+        let (_, _, y0, y1) = footprint(&storey, id);
+        assert!(y1 < 2.0 + 1e-3, "top edge stops at the ridge, got {y1}");
+        assert!((y1 - 2.0).abs() < 1e-3, "flush against it, got {y1}");
+        assert!(y0 > -1e-6, "and still on the slope, got {y0}");
+        let w = storey.windows.iter().find(|w| w.id == id).unwrap();
+        assert!(
+            matches!(w.placement, Some(OpeningPlacement::Roof { ceiling_region_id, .. })
+                if ceiling_region_id == slope),
+            "still hosted by the slope, not the flat deck"
+        );
+        assert!(oversized_roof_windows(&storey).is_empty());
+    }
+
+    /// Dragged clean off the roof, the rooflight parks flush on the face it came
+    /// from instead of following the cursor into nothing.
+    #[test]
+    fn dragging_a_roof_window_off_the_edge_parks_it_flush() {
+        let rid = ItemId::default();
+        let grad = 3.0_f64.sqrt();
+        let mut storey = Storey {
+            ceilings: CeilingRegions {
+                regions: vec![sloped_ceiling(rid, 2.4, grad)],
+            },
+            ..Storey::default()
+        };
+        let id = add_roof_window(&mut storey, rid, (2.0, 1.0), 1.0, 2.0, ItemId::default())
+            .expect("places");
+        move_roof_window(&mut storey, id, (2.0, -5.0));
+        let (_, _, y0, y1) = footprint(&storey, id);
+        assert!(
+            y0 > -1e-6 && (y0 < 1e-3),
+            "parked flush at the eave, got {y0}"
+        );
+        assert!(y1 < 2.0 + 1e-6, "and wholly on the slope, got {y1}");
+        assert!(oversized_roof_windows(&storey).is_empty());
+    }
+
+    /// Growing a rooflight already near the eave slides it clear rather than
+    /// letting the new size spill off the surface.
+    #[test]
+    fn resizing_a_roof_window_slides_it_clear_of_the_edge() {
+        let rid = ItemId::default();
+        let grad = 3.0_f64.sqrt();
+        let mut storey = Storey {
+            ceilings: CeilingRegions {
+                regions: vec![sloped_ceiling(rid, 2.4, grad)],
+            },
+            ..Storey::default()
+        };
+        // 0.5 m up-slope plan extent, centred at y = 0.25 → flush at the eave.
+        let id = add_roof_window(&mut storey, rid, (2.0, 0.25), 1.0, 1.0, ItemId::default())
+            .expect("places");
+        assert!((footprint(&storey, id).2).abs() < 1e-3, "starts flush");
+        // Grow it to a 1.5 m up-slope extent: it must slide UP, not off.
+        resize_roof_window(&mut storey, id, 1.0, 3.0).expect("resizes");
+        let (_, _, y0, y1) = footprint(&storey, id);
+        assert!(y0 > -1e-6, "still on the surface, got {y0}");
+        assert!(
+            (y1 - 1.5).abs() < 1e-3,
+            "grew up-slope from the eave, got {y1}"
+        );
+        assert!(oversized_roof_windows(&storey).is_empty());
+    }
+
+    /// NO safety margin: a rooflight that already fits is placed exactly where
+    /// it was asked for, and one sized to the whole surface still fits.
+    #[test]
+    fn a_roof_window_that_already_fits_is_not_nudged() {
+        let rid = ItemId::default();
+        let grad = 3.0_f64.sqrt();
+        let mut storey = Storey {
+            ceilings: CeilingRegions {
+                regions: vec![sloped_ceiling(rid, 2.4, grad)],
+            },
+            ..Storey::default()
+        };
+        let id = add_roof_window(&mut storey, rid, (2.0, 1.0), 1.0, 2.0, ItemId::default())
+            .expect("places");
+        let w = storey.windows.iter().find(|w| w.id == id).unwrap();
+        assert!(
+            matches!(w.placement, Some(OpeningPlacement::Roof { plan, .. })
+                if (plan.0 - 2.0).abs() < 1e-6 && (plan.1 - 1.0).abs() < 1e-6),
+            "left exactly where it was tapped: {:?}",
+            w.placement
+        );
+        // Sized to the ENTIRE region (4.0 across, 4.0 -> 2.0 m of plan up-slope):
+        // with no margin this is a legal, unflagged fit.
+        let full = add_roof_window(&mut storey, rid, (2.0, 1.0), 4.0, 4.0, ItemId::default())
+            .expect("places");
+        let (x0, x1, y0, y1) = footprint(&storey, full);
+        assert!(
+            x0.abs() < 1e-3 && (x1 - 4.0).abs() < 1e-3,
+            "spans the full width"
+        );
+        assert!(
+            y0.abs() < 1e-3 && (y1 - 2.0).abs() < 1e-3,
+            "and the full slope"
+        );
     }
 }

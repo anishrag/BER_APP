@@ -38,8 +38,8 @@ pub use ceiling_point::{
     CeilingFanTapAction, RidgeAutoChoice, RidgeSlopeSide,
 };
 pub use ceiling_step::{
-    canonicalize_ceiling_steps, ceiling_line_coords, region_line_coords, CeilingStepRegion,
-    LinePositionOption, LinePositionPrompt, LineSide,
+    canonicalize_ceiling_steps, ceiling_line_coords, ceiling_region_edges, floor_region_edges,
+    region_line_coords, CeilingStepRegion, LinePositionOption, LinePositionPrompt, LineSide,
 };
 pub use debug::debug_dump_storey;
 /// Derive full per-wall exposure coverage — the shell's `commit_to_ber` uses it.
@@ -51,9 +51,10 @@ pub use exposure::{
 };
 pub use phase::{
     centroid_key, construction_phase_complete, construction_phase_reasons, inherited_phase_regions,
-    phase_regions_from_floors, phase_snap_segments, ring_centroid_key, stamp_ceiling_constructions,
-    stamp_ceiling_phases, stamp_floor_constructions, stamp_wall_constructions, stamp_wall_phases,
-    CentroidKey, PhaseRegion,
+    inherited_phase_regions_over, phase_regions_from_floors, phase_snap_segments,
+    ring_centroid_key, stamp_ceiling_constructions, stamp_ceiling_phases,
+    stamp_floor_constructions, stamp_wall_constructions, stamp_wall_phases, CentroidKey,
+    PhaseRegion,
 };
 pub use position::{PositionOption, PositionPrompt, PositionPromptKind};
 pub use resolve::{
@@ -63,8 +64,8 @@ pub use resolve::{
     stamp_horizontal_exposure, stamp_riser_exposure,
 };
 pub use step::{
-    inherited_step_regions, junction_mismatch_reasons_by_storey, step_regions_from_floors,
-    StepRegion,
+    inherited_step_regions, inherited_step_regions_with, junction_mismatch_reasons_by_storey,
+    overhang_choices, step_regions_from_floors, StepRegion,
 };
 pub use windows::{windows_complete, windows_issues, WindowsIssue};
 
@@ -76,7 +77,9 @@ use ber_model::ber::structural::{
 // Wall-face partition types now live in `ber_model` (so the durable recipe can
 // be a Layer-1 `Storey` field); re-exported here to keep `document::PartitionCut`
 // / `crate::PartitionCut` call sites unchanged.
-pub use ber_model::ber::structural::{wall_face_key, PartitionCut, WallFaceKey, WallFacePartition};
+pub use ber_model::ber::structural::{
+    face_region_key, wall_face_key, FaceRegionKey, PartitionCut, WallFaceKey, WallFacePartition,
+};
 use domain::points::{to_f64, Point2f32, Point2f64};
 use manip_plan::{
     Error, FloorPlan, ParameterAxis, ParameterId, SubareaOutcome, SubareaTuning, SurfaceRef,
@@ -407,6 +410,26 @@ pub struct StoreyDoc {
     )]
     pub riser_constructions: HashMap<
         RiserKey,
+        (
+            WallConstructionType,
+            ConstructionMakeup,
+            ConstructionPhase,
+            Option<String>,
+        ),
+    >,
+
+    /// Assigned wall CONSTRUCTION of one PIECE of a face-partitioned wall, keyed
+    /// by [`FaceRegionKey`] (the wall's face key + the piece's wall-local
+    /// centroid). Every piece of a wall shares one `SurfaceRef`, so
+    /// [`wall_constructions`](Self::wall_constructions) cannot tell them apart —
+    /// setting one piece's construction set them all (and its evidence rode
+    /// along). This is the per-piece analogue of
+    /// [`riser_constructions`](Self::riser_constructions): a geometric key for a
+    /// surface with no parametric ref of its own. Single-homed on Layer 1
+    /// (seeded from the resolved pieces on load), kept out of the snapshot.
+    #[serde(skip)]
+    pub face_constructions: HashMap<
+        FaceRegionKey,
         (
             WallConstructionType,
             ConstructionMakeup,

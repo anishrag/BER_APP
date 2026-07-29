@@ -6,9 +6,15 @@
 //! point — see [`HEURISTICS`].
 //!
 //! PIPELINE INVARIANT: a suggestion never covers a SLOPED ceiling region —
-//! it's unlikely the new storey will be built over a sloped ceiling, so
-//! every candidate ring, from every heuristic, is clipped to the
-//! flat-ceiling union before validation/scoring.
+//! it's unlikely the new storey will be built over a sloped ceiling, so the
+//! sloped-ceiling union is SUBTRACTED from every candidate ring, from every
+//! heuristic, before validation/scoring.
+//!
+//! Note what that does NOT forbid: plan area with no ceiling below it at all.
+//! A storey may legitimately OVERHANG — the common case being a front door set
+//! into the ground floor, bridged by the storey above
+//! ([`h12_filled_recesses`]). Subtracting the slopes allows that where
+//! intersecting the flats would have clipped the overhang straight back off.
 
 use geo::bool_ops::BooleanOps;
 use geo::{Area, BoundingRect, Intersects, MultiPolygon, Polygon};
@@ -55,6 +61,10 @@ const VERTEX_PENALTY: f64 = 0.02;
 /// below this fraction of the larger one's area; the lower-scored is dropped.
 const DEDUP_SYM_DIFF_FRAC: f64 = 0.02;
 
+/// How far short of full containment [`is_duplicate`] still reads as NESTED,
+/// as a fraction of the smaller suggestion's area — the f32-quantization slack.
+const NESTED_EPS_FRAC: f64 = 1e-3;
+
 /// One suggested outline for the storey above, ready to adopt as a
 /// fully-finalised outline (the `from_storey` pattern — no carve, no
 /// collinearity review).
@@ -89,10 +99,10 @@ pub(crate) struct SuggestionContext {
     /// via `split_to_simple`, sub-sliver pieces dropped) — the area the new
     /// storey can bear on.
     pub flat_union: Vec<Vec<Point2f64>>,
-    /// The same union as one `MultiPolygon` (pre-decomposition) — the
-    /// BUILDABLE area every candidate is clipped to before validation (the
-    /// sloped-ceiling invariant; see the module doc).
-    pub flat_acc: MultiPolygon<f64>,
+    /// Plan union of the below storey's SLOPED ceiling regions — the area
+    /// SUBTRACTED from every candidate before validation (the sloped-ceiling
+    /// invariant; see the module doc). Empty when [`all_flat`](Self::all_flat).
+    pub sloped_acc: MultiPolygon<f64>,
     /// The below storey's footprint ring (`FloorRegions::footprint_ring`).
     pub footprint: Vec<Point2f64>,
     /// Plan area of `footprint` (m²).
@@ -121,8 +131,8 @@ pub(crate) type OutlineHeuristic = (&'static str, fn(&SuggestionContext) -> Vec<
 /// TO ADD A HEURISTIC: write one `fn(&SuggestionContext) ->
 /// Vec<Vec<Point2f64>>` returning raw candidate rings (open, world metres)
 /// and append one `(label, fn)` entry here — nothing else. The pipeline
-/// ([`suggest_storey_outlines`]) clips every ring to the flat-ceiling union
-/// (the sloped-ceiling invariant), validates it (≥ 3 vertices, area ≥
+/// ([`suggest_storey_outlines`]) subtracts the sloped-ceiling union from
+/// every ring (the sloped-ceiling invariant), validates it (≥ 3 vertices, area ≥
 /// [`MIN_SUGGESTION_AREA_M2`], collinear-strip, f32-quantize), scores,
 /// sorts, dedups and caps; a heuristic never needs to do any of that, and
 /// returning an empty/degenerate ring is always safe.
@@ -139,6 +149,11 @@ pub(crate) const HEURISTICS: &[OutlineHeuristic] = &[
     ("minus-protrusions", h10_minus_protrusions),
     ("phase-minus-protrusions", h11_phase_minus_protrusions),
 ];
+
+/// [`OutlineSuggestion::source`] for the bridged-recess stage — see
+/// [`fill_recesses`]. Not a [`HEURISTICS`] entry: it runs OVER every
+/// heuristic's output rather than beside them.
+pub(crate) const FILLED_RECESSES: &str = "filled-recesses";
 
 /// Whether [`suggest_storey_outlines`] has anything to work from — the CHEAP
 /// mirror of its empty-guards (no unions, no scoring): `below` has its
@@ -198,22 +213,24 @@ pub fn suggest_storey_outlines(
         return Vec::new();
     }
     let mut flats: Vec<(Vec<Point2f64>, f64)> = Vec::new();
+    let mut sloped_acc = MultiPolygon::<f64>(Vec::new());
     let mut all_flat = true;
     for r in &below.ceilings.regions {
         if r.polygon.exterior.len() < 3 {
             continue; // degenerate — neither flat nor sloped
         }
+        let ring: Vec<Point2f64> = r
+            .polygon
+            .exterior
+            .iter()
+            .map(|v| Point2f64::new(v.x, v.y))
+            .collect();
         match r.flat_z() {
-            Some(z) => {
-                let ring: Vec<Point2f64> = r
-                    .polygon
-                    .exterior
-                    .iter()
-                    .map(|v| Point2f64::new(v.x, v.y))
-                    .collect();
-                flats.push((ring, z));
+            Some(z) => flats.push((ring, z)),
+            None => {
+                all_flat = false;
+                sloped_acc = sloped_acc.union(&MultiPolygon(vec![ring_to_poly(&ring)]));
             }
-            None => all_flat = false,
         }
     }
     if flats.is_empty() {
@@ -234,7 +251,7 @@ pub fn suggest_storey_outlines(
     let ctx = SuggestionContext {
         flats,
         flat_union,
-        flat_acc: acc,
+        sloped_acc,
         footprint,
         footprint_area,
         all_flat,
@@ -246,13 +263,29 @@ pub fn suggest_storey_outlines(
         original: (original_area > SLIVER_AREA_M2).then_some((original_acc, original_area)),
     };
 
-    let mut suggestions: Vec<OutlineSuggestion> = HEURISTICS
+    let raw: Vec<(&'static str, Vec<Point2f64>)> = HEURISTICS
         .iter()
-        .flat_map(|(label, heuristic)| {
-            heuristic(&ctx)
+        .flat_map(|(label, heuristic)| heuristic(&ctx).into_iter().map(move |ring| (*label, ring)))
+        .collect();
+    // BRIDGED-RECESS variants. Every base outline, whichever heuristic proposed
+    // it, also gets offered with its set-in front door filled — the storey above
+    // bridges the recess as a mini overhang, so apart from that notch its walls
+    // follow the one below. This runs as a STAGE rather than a heuristic because
+    // it composes with all of them: the base an assessor wants bridged is
+    // usually the one some other heuristic already found (at 56 Elmwood Road
+    // it's `grown-from-largest`'s), not the raw footprint.
+    let bridged: Vec<(&'static str, Vec<Point2f64>)> = raw
+        .iter()
+        .flat_map(|(_, ring)| {
+            fill_recesses(ring)
                 .into_iter()
-                .filter_map(|ring| validate_and_score(&ctx, ring, label))
+                .map(|filled| (FILLED_RECESSES, filled))
         })
+        .collect();
+    let mut suggestions: Vec<OutlineSuggestion> = raw
+        .into_iter()
+        .chain(bridged)
+        .filter_map(|(label, ring)| validate_and_score(&ctx, ring, label))
         .collect();
     suggestions.sort_by(|a, b| {
         b.score
@@ -590,6 +623,200 @@ fn trim_protrusions(ring: &[Point2f64]) -> Vec<Vec<Point2f64>> {
     out
 }
 
+/// [`fill_recesses`] never fills more than this fraction of the base ring's
+/// area at one edge line — past it the pocket is a courtyard or the missing
+/// leg of an L, not a set-in front door. Deliberately tighter than
+/// [`PROTRUSION_MAX_FRAC`]: filling ADDS area the storey below has no ceiling
+/// under, so it should stay clearly in "doorway recess" territory.
+const RECESS_MAX_FRAC: f64 = 0.10;
+
+/// How many points [`is_enclosed_notch`] walks along each pocket boundary
+/// segment. The segments are few and the ring short, so this is cheap; it only
+/// has to be fine enough that a sliver running PAST the end of a wall is caught.
+const NOTCH_SAMPLES: usize = 16;
+
+/// How close a point must be to count as lying ON the ring boundary or the
+/// edge line when [`is_enclosed_notch`] classifies a pocket — well above
+/// boolean-op noise, well below any real wall offset.
+const NOTCH_EPS_M: f64 = 1e-3;
+
+/// Is `pocket` a NOTCH cut into the wall on `line` — enclosed by the ring on
+/// every side except its opening?
+///
+/// This is what separates a set-in front door from the open ground each side
+/// of a porch. Both show up as "inside the wall's line but outside the ring";
+/// only the notch is BUILDING on three sides. Concretely: walk the pocket's
+/// boundary and require every edge to lie either along the ring (the recess's
+/// reveals and back wall) or along the edge's own infinite line (its opening).
+/// A pocket flanking a protrusion fails — part of its boundary is the bbox we
+/// clipped against, which is neither.
+fn is_enclosed_notch(
+    pocket: &Polygon<f64>,
+    ring: &[Point2f64],
+    a: Point2f64,
+    u: (f64, f64),
+) -> bool {
+    let on_line = |x: f64, y: f64| ((x - a.x) * u.1 - (y - a.y) * u.0).abs() <= NOTCH_EPS_M;
+    let on_ring = |x: f64, y: f64| {
+        (0..ring.len()).any(|i| {
+            let (p, q) = (ring[i], ring[(i + 1) % ring.len()]);
+            domain::points::point_to_segment_distance(x, y, p.x, p.y, q.x, q.y) <= NOTCH_EPS_M
+        })
+    };
+    // SAMPLE each boundary segment rather than testing one point on it. The
+    // boolean op likes to trace a pocket with a zero-width sliver running along
+    // a wall and past its end — a segment whose midpoint sits squarely on the
+    // ring while its far half is open air. Endpoints alone are no better (they
+    // land on ring corners by coincidence), so walk the segment.
+    let coords: Vec<_> = pocket.exterior().0.iter().collect();
+    coords.windows(2).all(|w| {
+        (0..=NOTCH_SAMPLES).all(|k| {
+            let t = k as f64 / NOTCH_SAMPLES as f64;
+            let (x, y) = (
+                w[0].x + (w[1].x - w[0].x) * t,
+                w[0].y + (w[1].y - w[0].y) * t,
+            );
+            on_line(x, y) || on_ring(x, y)
+        })
+    })
+}
+
+/// The bridged-recess core — per-edge recess filling over any OPEN ring, the
+/// exact mirror of [`trim_protrusions`]. Run by [`suggest_storey_outlines`]
+/// over EVERY heuristic's raw candidates, so any base outline can be offered
+/// with its set-in front door bridged. For each edge, take the INNER half-plane of
+/// the edge's infinite line (the side holding the majority of the ring's
+/// area); whatever lies inside that half-plane but OUTSIDE the ring is a
+/// recess the storey above could bridge, kept only while the fill stays within
+/// [`RECESS_MAX_FRAC`] of the ring's area. Returns the filled candidates, raw
+/// (the pipeline validates).
+fn fill_recesses(ring: &[Point2f64]) -> Vec<Vec<Point2f64>> {
+    let n = ring.len();
+    if n < 3 {
+        return Vec::new();
+    }
+    let body = MultiPolygon(vec![ring_to_poly(ring)]);
+    let ring_area = body.unsigned_area();
+    if ring_area <= SLIVER_AREA_M2 {
+        return Vec::new();
+    }
+    let Some(bbox) = body.bounding_rect() else {
+        return Vec::new();
+    };
+    // Same half-plane stand-in as `trim_protrusions`: a rectangle overhanging
+    // the edge by L on every side, L = 2× the bbox diagonal.
+    let l = 2.0 * bbox.width().hypot(bbox.height());
+    // The ring's own bounding box as a polygon — the fill is confined to it so
+    // a half-plane can't add area off the end of the building.
+    let bounds = MultiPolygon(vec![ring_to_poly(&[
+        Point2f64::new(bbox.min().x, bbox.min().y),
+        Point2f64::new(bbox.max().x, bbox.min().y),
+        Point2f64::new(bbox.max().x, bbox.max().y),
+        Point2f64::new(bbox.min().x, bbox.max().y),
+    ])]);
+    let mut out = Vec::new();
+    for i in 0..n {
+        let (a, b) = (ring[i], ring[(i + 1) % n]);
+        let (dx, dy) = (b.x - a.x, b.y - a.y);
+        let len = dx.hypot(dy);
+        if len <= f64::EPSILON {
+            continue; // degenerate edge — no line to clip against
+        }
+        let (ux, uy) = (dx / len, dy / len);
+        let half = |nx: f64, ny: f64| -> MultiPolygon<f64> {
+            let p0 = Point2f64::new(a.x - ux * l, a.y - uy * l);
+            let p1 = Point2f64::new(b.x + ux * l, b.y + uy * l);
+            let p2 = Point2f64::new(p1.x + nx * l, p1.y + ny * l);
+            let p3 = Point2f64::new(p0.x + nx * l, p0.y + ny * l);
+            bounds.intersection(&MultiPolygon(vec![ring_to_poly(&[p0, p1, p2, p3])]))
+        };
+        // The INNER side is whichever half-plane holds more of the ring — the
+        // same choice `trim_protrusions` makes, so the two read the geometry
+        // identically and simply move opposite ways across the line.
+        let (left, right) = (half(-uy, ux), half(uy, -ux));
+        let inner = if body.intersection(&left).unsigned_area()
+            >= body.intersection(&right).unsigned_area()
+        {
+            left
+        } else {
+            right
+        };
+        // The pocket: inside the line, inside the building's bbox, outside the
+        // ring. A supporting line (any convex edge) leaves nothing. Keep only
+        // the pieces that are true enclosed NOTCHES — the open ground flanking
+        // a porch also lands in here, and filling that is not an overhang.
+        let notches: Vec<Polygon<f64>> = inner
+            .difference(&body)
+            .0
+            .into_iter()
+            .filter(|p| is_enclosed_notch(p, ring, a, (ux, uy)))
+            .collect();
+        if notches.is_empty() {
+            continue;
+        }
+        let pocket = MultiPolygon(notches);
+        let fill = pocket.unsigned_area();
+        if fill <= SLIVER_AREA_M2 || fill > RECESS_MAX_FRAC * ring_area {
+            continue;
+        }
+        let filled = body.union(&pocket);
+        // Filling can only grow the body, but a pocket touching the ring at a
+        // single point can still leave more than one simple piece — keep the
+        // largest, exactly as the trim side does.
+        let Some(largest) = simple_pieces(&filled).into_iter().max_by(|p, q| {
+            p.unsigned_area()
+                .partial_cmp(&q.unsigned_area())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        }) else {
+            continue;
+        };
+        // The union likes to trace the join as a ZERO-WIDTH SLIT — out along an
+        // edge and straight back. At f64 its two sides differ by ~1e-8 and the
+        // ring reads correctly, but the pipeline quantizes to f32, where they
+        // land on the SAME point and the leftover sequence describes a quite
+        // different polygon (a 72.7 m² fill came out as 46.4). Clean it here,
+        // at the resolution the pipeline will use.
+        let cleaned = strip_ring_spurs(&open_ring(&largest));
+        if cleaned.len() >= 3 {
+            out.push(cleaned);
+        }
+    }
+    out
+}
+
+/// Drop the degenerate spurs from an open ring, at f32 resolution: repeated
+/// points, and any vertex whose two neighbours coincide (the tip of a
+/// zero-width slit). Iterates because removing one spur can expose another.
+fn strip_ring_spurs(ring: &[Point2f64]) -> Vec<Point2f64> {
+    let q = |p: &Point2f64| Point2f64::new(p.x as f32 as f64, p.y as f32 as f64);
+    let same = |a: &Point2f64, b: &Point2f64| a.x == b.x && a.y == b.y;
+    let mut pts: Vec<Point2f64> = ring.iter().map(q).collect();
+    loop {
+        let n = pts.len();
+        if n < 3 {
+            return pts;
+        }
+        let before = n;
+        pts.dedup_by(|a, b| same(a, b));
+        while pts.len() > 1 && same(&pts[0], &pts[pts.len() - 1]) {
+            pts.pop();
+        }
+        let n = pts.len();
+        if n < 3 {
+            return pts;
+        }
+        // A spur tip: prev == next, so the vertex doubles back on itself.
+        if let Some(i) = (0..n).find(|&i| same(&pts[(i + n - 1) % n], &pts[(i + 1) % n])) {
+            pts.remove(i);
+            let n = pts.len();
+            pts.remove(i % n.max(1));
+        }
+        if pts.len() == before {
+            return pts;
+        }
+    }
+}
+
 // ── Pipeline internals ──────────────────────────────────────────────────────
 
 /// Validate one raw candidate ring and score it — `None` when it fails
@@ -597,11 +824,17 @@ fn trim_protrusions(ring: &[Point2f64]) -> Vec<Vec<Point2f64>> {
 /// [`MIN_SUGGESTION_AREA_M2`]).
 ///
 /// This is also the SLOPED-CEILING invariant's seam: every raw candidate,
-/// from every heuristic, is first clipped to the flat-ceiling union (largest
-/// simple piece kept; a candidate entirely over slopes vanishes), so no
-/// suggestion can extend over a sloped ceiling region. Clipping along a
+/// from every heuristic, first has the sloped-ceiling union SUBTRACTED
+/// (largest simple piece kept; a candidate entirely over slopes vanishes), so
+/// no suggestion can extend over a sloped ceiling region. Clipping along a
 /// shared edge can mint collinear/sliver noise — the collinear-strip,
 /// quantize and area-floor steps right below absorb it.
+///
+/// SUBTRACTING the slopes rather than INTERSECTING the flats is what lets a
+/// candidate reach over plan area that has no ceiling below it at all — the
+/// [`fill_recesses`] overhang. Both forms enforce the invariant
+/// identically wherever the below storey's ceilings tile its footprint (there
+/// `footprint − sloped ≡ flat`), which is every other heuristic's case.
 fn validate_and_score(
     ctx: &SuggestionContext,
     ring: Vec<Point2f64>,
@@ -612,7 +845,7 @@ fn validate_and_score(
     let ring = if ctx.all_flat {
         ring
     } else {
-        let clipped = MultiPolygon(vec![ring_to_poly(&ring)]).intersection(&ctx.flat_acc);
+        let clipped = MultiPolygon(vec![ring_to_poly(&ring)]).difference(&ctx.sloped_acc);
         let largest = simple_pieces(&clipped).into_iter().max_by(|p, q| {
             p.unsigned_area()
                 .partial_cmp(&q.unsigned_area())
@@ -688,10 +921,35 @@ fn levels_under(ctx: &SuggestionContext, ring_poly: &Polygon<f64>) -> usize {
 
 /// The dedup predicate: symmetric-difference area below
 /// [`DEDUP_SYM_DIFF_FRAC`] of the larger suggestion's area.
+///
+/// EXCEPT when one suggestion wholly CONTAINS the other and the difference is
+/// a real area (at least [`MIN_SUGGESTION_AREA_M2`]). Nesting isn't
+/// near-duplication — "this outline" and "this outline plus the bridged front
+/// door" are two genuinely different offers and the assessor picks between
+/// them. Collapsing them keeps only whichever scores higher, and the compact
+/// one usually does (fewer vertices, tighter bbox), so the outline that
+/// actually FOLLOWS the walls below would silently lose to one that squares a
+/// corner off it. The sym-diff rule still collapses candidates that merely
+/// wobble around each other without either containing the other.
 fn is_duplicate(a: &OutlineSuggestion, b: &OutlineSuggestion) -> bool {
     let (pa, pb) = (ring_to_poly(&a.ring), ring_to_poly(&b.ring));
-    let sym_diff = pa.union(&pb).unsigned_area() - pa.intersection(&pb).unsigned_area();
-    sym_diff < DEDUP_SYM_DIFF_FRAC * a.area_m2.max(b.area_m2)
+    let inter = pa.intersection(&pb).unsigned_area();
+    let (smaller, larger) = if a.area_m2 <= b.area_m2 {
+        (a.area_m2, b.area_m2)
+    } else {
+        (b.area_m2, a.area_m2)
+    };
+    // Nested: the intersection IS the smaller one. The tolerance is RELATIVE —
+    // these rings are f32-quantized at validation, so a containment that is
+    // exact in intent misses by ~1e-5 m² over a house-sized edge, far above any
+    // absolute sliver floor. A tenth of a percent is comfortably above that
+    // noise and comfortably below [`MIN_SUGGESTION_AREA_M2`], so a genuine
+    // partial overlap can never pass as nesting.
+    if smaller - inter <= NESTED_EPS_FRAC * smaller && larger - smaller >= MIN_SUGGESTION_AREA_M2 {
+        return false;
+    }
+    let sym_diff = pa.union(&pb).unsigned_area() - inter;
+    sym_diff < DEDUP_SYM_DIFF_FRAC * larger
 }
 
 /// Decompose a multipolygon into SIMPLE polygons (`split_to_simple` per
@@ -1026,6 +1284,67 @@ mod tests {
         assert!(plain.iter().all(|s| !s.source.starts_with("phase")));
     }
 
+    /// NESTING IS NOT DUPLICATION (56 Elmwood Road): the Original zone with
+    /// its front-door recess bridged, and the same thing with the little corner
+    /// over the single-storey section ALSO squared off, differ by 0.886 m² —
+    /// 1.2%, under [`DEDUP_SYM_DIFF_FRAC`]. The squared-off one scores higher
+    /// (4 vertices against 6, tighter bbox), so collapsing them dropped the
+    /// outline that actually FOLLOWS the walls below. Both must be offered.
+    #[test]
+    fn a_contained_outline_is_not_deduped_away_by_its_squared_off_sibling() {
+        let p = Point2f64::new;
+        // The Original zone: the main block with the doorway notch.
+        let zone = vec![
+            p(0.943, 4.514),
+            p(9.889, 4.514),
+            p(9.889, 12.544),
+            p(6.107, 12.544),
+            p(6.107, 11.98),
+            p(3.325, 11.98),
+            p(3.325, 12.916),
+            p(0.943, 12.916),
+        ];
+        let cid = ItemId::default();
+        let below = Storey {
+            floors: FloorRegions::new(zone.clone(), cid),
+            ceilings: CeilingRegions::default_for_footprint(vec![zone.clone()], 2.548, cid),
+            ceiling_height_m: Some(2.548),
+            ..Storey::default()
+        };
+        let out = suggest_storey_outlines(&below, &[(ConstructionPhase::Original, zone)], 12);
+        let follows = out
+            .iter()
+            .find(|s| (s.area_m2 - 72.72).abs() < 0.05)
+            .unwrap_or_else(|| panic!("the recess bridged, walls below followed: {out:?}"));
+        // It keeps the storey below's north-west return at y = 12.916 rather
+        // than squaring the whole top edge off at 12.544.
+        assert!(
+            follows.ring.iter().any(|v| (v.y - 12.916).abs() < 1e-3),
+            "follows the wall below: {follows:?}"
+        );
+        // Its squared-off sibling is offered too — they are different offers.
+        assert!(
+            out.iter().any(|s| (s.area_m2 - 71.84).abs() < 0.05),
+            "the squared-off sibling survives as well: {out:?}"
+        );
+    }
+
+    /// Nesting only escapes dedup when the difference is a REAL area — a
+    /// hair's-breadth containment is still a duplicate.
+    #[test]
+    fn a_sliver_of_containment_is_still_a_duplicate() {
+        let a = square(0.0, 0.0, 8.0, 5.0);
+        let b = square(0.0, 0.0, 8.0, 5.01); // +0.08 m², under the area floor
+        let mk = |ring: Vec<Point2f64>| OutlineSuggestion {
+            area_m2: ring_to_poly(&ring).unsigned_area(),
+            ring,
+            levels: 1,
+            source: "test",
+            score: 0.0,
+        };
+        assert!(is_duplicate(&mk(a), &mk(b)));
+    }
+
     /// A [`SuggestionContext`] over a bare footprint with one flat ceiling —
     /// enough for the footprint-only heuristics (H10).
     fn ctx_for(footprint: Vec<Point2f64>) -> SuggestionContext {
@@ -1033,9 +1352,9 @@ mod tests {
         SuggestionContext {
             flats: vec![(footprint.clone(), 2.4)],
             flat_union: vec![footprint.clone()],
-            flat_acc: MultiPolygon(vec![ring_to_poly(&footprint)]),
             footprint,
             footprint_area,
+            sloped_acc: MultiPolygon(Vec::new()),
             all_flat: true,
             phase_zones: Vec::new(),
             original: None,
@@ -1220,5 +1539,135 @@ mod tests {
             out.iter().all(|s| (s.area_m2 - 28.0).abs() > 1.0),
             "{out:?}"
         );
+    }
+
+    /// 56 ELMWOOD ROAD's ground floor, as the flat area the first floor bears
+    /// on: a broadly rectangular block whose NORTH wall is interrupted by a
+    /// 2.782 × 0.564 m set-in front door (the recess `10a5c95a` notches out and
+    /// the repaired doorset sits at the back of). The left return runs on to
+    /// y = 12.916 over the single-storey section, so the notch's two flanks are
+    /// NOT collinear — the fill is bounded by the line of the right flank.
+    fn recessed_door_ring() -> Vec<Point2f64> {
+        vec![
+            Point2f64::new(0.943, 4.514),
+            Point2f64::new(9.889, 4.514),
+            Point2f64::new(9.889, 12.544),
+            Point2f64::new(6.107, 12.544),
+            Point2f64::new(6.107, 11.980),
+            Point2f64::new(3.325, 11.980),
+            Point2f64::new(3.325, 12.916),
+            Point2f64::new(0.943, 12.916),
+        ]
+    }
+
+    /// The recess area the first floor bridges (m²) — 2.782 × 0.564.
+    const RECESS_M2: f64 = 1.569;
+
+    /// THE LIVE-REPRO for H12: the storey above bridges the set-in front door
+    /// as a mini overhang, so its outline is the ground floor's with that one
+    /// notch filled — every other wall unchanged.
+    #[test]
+    fn fill_recesses_bridges_a_set_in_front_door() {
+        let ring = recessed_door_ring();
+        let base = ring_to_poly(&ring).unsigned_area();
+        let out = fill_recesses(&ring);
+        let filled = out
+            .iter()
+            .find(|r| (ring_to_poly(r).unsigned_area() - (base + RECESS_M2)).abs() < 0.02)
+            .unwrap_or_else(|| panic!("expected the notch filled (+{RECESS_M2} m²): {out:?}"));
+        // The recess's back wall (y = 11.98 across the doorway) is gone: the
+        // north wall now runs straight at y = 12.544.
+        assert!(
+            !filled.iter().any(|p| p.y < 12.5 && p.x > 3.4 && p.x < 6.0),
+            "the doorway notch is bridged: {filled:?}"
+        );
+        // And nothing else moved — every other vertex is one of the original's.
+        for p in filled {
+            assert!(
+                ring.iter()
+                    .any(|q| (q.x - p.x).abs() < 1e-6 && (q.y - p.y).abs() < 1e-6)
+                    || (p.y - 12.544).abs() < 1e-6,
+                "only the notch changed, but {p:?} is new"
+            );
+        }
+    }
+
+    /// END-TO-END, with a SLOPED region present so the pipeline's clip actually
+    /// runs: the overhang candidate survives. This is the case the old
+    /// intersect-the-flats clip could not express — the bridged recess has NO
+    /// ceiling under it, so intersecting would have shaved the fill straight
+    /// back off and left a duplicate of the plain flat union.
+    #[test]
+    fn a_set_in_front_door_is_offered_as_an_overhang_even_past_a_slope() {
+        use crate::ber::structural::{CeilingExposure, CeilingRegion, Opes, Polygon3D};
+        use domain::points::Point3f64;
+        let cid = ItemId::default();
+        let ring = recessed_door_ring();
+        let flat_area = ring_to_poly(&ring).unsigned_area();
+        // The whole notched block is flat, plus a SLOPED lean-to south of it —
+        // enough to switch `all_flat` off so the clip is exercised.
+        let mut ceilings = CeilingRegions::default_for_footprint(vec![ring.clone()], 2.548, cid);
+        ceilings.regions.push(CeilingRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(vec![
+                Point3f64::new(0.943, 2.514, 2.548),
+                Point3f64::new(9.889, 2.514, 2.548),
+                Point3f64::new(9.889, 4.514, 3.4), // rises along y — sloped
+                Point3f64::new(0.943, 4.514, 3.4),
+            ]),
+            opes: Opes::default(),
+            construction_id: cid,
+            exposure: CeilingExposure::default(),
+        });
+        let mut footprint = ring.clone();
+        footprint.insert(0, Point2f64::new(0.943, 2.514));
+        footprint.insert(1, Point2f64::new(9.889, 2.514));
+        let below = Storey {
+            floors: FloorRegions::new(footprint, cid),
+            ceilings,
+            ceiling_height_m: Some(2.548),
+            ..Storey::default()
+        };
+        let out = suggest_storey_outlines(&below, &[], 10);
+        let overhang = out
+            .iter()
+            .find(|s| {
+                s.source == "filled-recesses" && (s.area_m2 - (flat_area + RECESS_M2)).abs() < 0.05
+            })
+            .unwrap_or_else(|| panic!("expected the bridged-recess candidate: {out:?}"));
+        assert!(
+            !overhang
+                .ring
+                .iter()
+                .any(|p| p.y < 12.5 && p.x > 3.4 && p.x < 6.0),
+            "the doorway notch is bridged: {overhang:?}"
+        );
+        // It reaches over plan area with NO ceiling below — that is the whole
+        // point — but still never over the SLOPE.
+        assert!(
+            overhang.ring.iter().all(|p| p.y >= 4.5),
+            "nothing reaches onto the sloped lean-to: {overhang:?}"
+        );
+    }
+
+    /// The open ground each SIDE of a porch is "inside the wall line, outside
+    /// the ring" exactly like a recess is — but it is not a notch, and squaring
+    /// the building off to its bounding box is not an overhang. H12 must stay
+    /// silent on the H10 fixture rather than crowd out the minus-porch answer.
+    #[test]
+    fn filling_never_squares_off_the_ground_beside_a_porch() {
+        assert!(
+            fill_recesses(&porch_ring()).is_empty(),
+            "a protrusion is H10's business, not H12's: {:?}",
+            fill_recesses(&porch_ring())
+        );
+    }
+
+    /// Nor does it invent area on a plain rectangle, or fill the missing leg of
+    /// an L — that is a wing, not a doorway.
+    #[test]
+    fn filling_is_silent_on_a_rectangle_and_on_an_l() {
+        assert!(fill_recesses(&square(0.0, 0.0, 8.0, 5.0)).is_empty());
+        assert!(fill_recesses(&l_ring()).is_empty());
     }
 }

@@ -196,6 +196,19 @@ pub struct PartitionSnapTag {
     pub corner: bool,
 }
 
+/// The centroid of a wall-local region ring (`None` when empty) — the sample
+/// used to map a face region back to its resolved wall piece.
+fn ring_centroid(ring: &[Point2f32]) -> Option<Point2f32> {
+    if ring.is_empty() {
+        return None;
+    }
+    let n = ring.len() as f32;
+    let (sx, sy) = ring
+        .iter()
+        .fold((0.0, 0.0), |(sx, sy), p| (sx + p.x, sy + p.y));
+    Some(Point2f32::new(sx / n, sy / n))
+}
+
 /// The snap tags for a cut: one per endpoint with ≥1 snapped coordinate.
 fn cut_snap_tags(p: &PendingCut) -> Vec<PartitionSnapTag> {
     let mut tags = Vec::new();
@@ -284,6 +297,12 @@ pub struct PartitionView {
     /// endpoint with ≥1 snapped axis, at the endpoint's wall-local position.
     /// `corner` when both axes snapped (label "corner") vs one ("edge").
     pub snap_tags: Vec<PartitionSnapTag>,
+    /// Opened from the STRUCTURE phase: the face view is a planar SELECTOR
+    /// feeding the ordinary Structure attribute flow, not the exposure painter.
+    pub structure: bool,
+    /// How many of this wall's pieces are in the STRUCTURE selection — drives
+    /// the "Set attributes (n)" button. Always 0 outside the Structure phase.
+    pub structure_count: usize,
 }
 
 impl AppController {
@@ -307,6 +326,72 @@ impl AppController {
     /// No-op when no wall is selected.
     pub fn open_wall_partition(&mut self) {
         let Some(vid) = self.selected_exposure_wall else {
+            return;
+        };
+        self.materialize();
+        self.partition_wall = Some(vid);
+        self.partition_stroke.clear();
+        self.partition_pending = None;
+        self.partition_instant_commit = None;
+        self.partition_selected_region = None;
+    }
+
+    /// The STRUCTURE-selected wall's perimeter `VertexId`, when exactly one
+    /// wall is selected and it lies on the editable outline. `None` otherwise
+    /// — the Structure "Partition" button's enable test.
+    ///
+    /// The Structure selection holds RESOLVED `WallRegion` ids, while the
+    /// partition model is keyed by the outline's parametric `VertexId`, so the
+    /// region is matched back by base-edge MIDPOINT — the same way
+    /// `apply_face_partitions` finds the wall a region belongs to at resolve.
+    pub fn structure_partition_wall(&self) -> Option<VertexId> {
+        let record = self.current_record.as_ref()?;
+        let storey = record.data.storeys.get(self.current_storey_idx?)?;
+        // Exactly one selected surface, and it must be a wall.
+        let mut walls = storey
+            .walls
+            .regions
+            .iter()
+            .chain(storey.porch_walls.regions.iter())
+            .filter(|w| self.structure_selected.contains(&w.id));
+        let wall = walls.next()?;
+        if walls.next().is_some() || self.structure_selected.len() != 1 {
+            return None; // several surfaces (or a non-wall) — ambiguous
+        }
+        let (origin, (ux, uy), len, _) = wall.base_frame()?;
+        let mid = Point2f64::new(origin.x + ux * len * 0.5, origin.y + uy * len * 0.5);
+        const TOL_M: f64 = 1e-2;
+        self.document
+            .outline
+            .floor_plan
+            .perimeter_walls()
+            .into_iter()
+            .find(|(_, a, b)| {
+                domain::points::point_to_segment_distance(
+                    mid.x, mid.y, a.x as f64, a.y as f64, b.x as f64, b.y as f64,
+                ) < TOL_M
+            })
+            .map(|(vid, _, _)| vid)
+    }
+
+    /// Open the STRUCTURE-selected wall's face for partitioning — the Structure
+    /// phase's entry to the same tool the exposure toolbar offers.
+    ///
+    /// A partitioned face resolves into SEPARATE wall regions
+    /// (`apply_face_partitions`), each independently selectable and
+    /// attributable, so dividing a face here is how one wall carries several
+    /// CONSTRUCTION build-ups — not just several exposures. No-op unless
+    /// exactly one wall is selected ([`structure_partition_wall`]).
+    ///
+    /// NOTE: committing a cut clears that wall's 1-D exposure SECTIONS — a wall
+    /// is either sectioned along its length or partitioned across its face,
+    /// never both. Partitioning from Structure therefore drops along-wall
+    /// exposure ranges already painted in Mapping; the face regions carry
+    /// exposure instead.
+    ///
+    /// [`structure_partition_wall`]: Self::structure_partition_wall
+    pub fn open_wall_partition_from_structure(&mut self) {
+        let Some(vid) = self.structure_partition_wall() else {
             return;
         };
         self.materialize();
@@ -584,6 +669,15 @@ impl AppController {
     /// Tap a face region at wall-local `(along, height)`: select it (store its
     /// sample point) IF the tap lands inside some region; otherwise clear the
     /// selection. No-op when not in partition mode.
+    ///
+    /// In the STRUCTURE phase the tap ALSO toggles that region's resolved wall
+    /// piece in the Structure selection ([`toggle_structure_piece_at`]), so the
+    /// face view acts as a planar way to PICK a sub-wall and the normal
+    /// attribute editor then offers it the same options as a whole wall. Without
+    /// it a horizontally-cut wall was unreachable: its pieces stack on one plan
+    /// line, so no plan tap can tell them apart.
+    ///
+    /// [`toggle_structure_piece_at`]: Self::toggle_structure_piece_at
     pub fn select_partition_region(&mut self, along: f32, height: f32) {
         let Some((vid, _, _, len, h)) = self.partition_active_geom() else {
             return;
@@ -595,6 +689,81 @@ impl AppController {
             .into_iter()
             .any(|(poly, _)| point_in_polygon(&poly, p));
         self.partition_selected_region = hit.then_some(p);
+        if hit && self.current_phase == AssessmentPhase::Structure {
+            // The pieces are RESOLVED regions, so the record must reflect the
+            // cuts committed since the face opened before a tap can name one.
+            // (`materialize` is a no-op when nothing changed.)
+            self.materialize();
+            self.toggle_structure_piece_at(p);
+        }
+    }
+
+    /// The resolved `WallRegion` id of the active partitioned wall's PIECE
+    /// containing wall-local `sample` — the face view's tap → Structure-selection
+    /// map. `None` when nothing is open, or the sample misses every piece.
+    pub fn partition_piece_at(&self, sample: Point2f32) -> Option<ItemId> {
+        let vid = self.partition_wall?;
+        let idx = self.current_storey_idx?;
+        let storey = self.current_record.as_ref()?.data.storeys.get(idx)?;
+        let sd = self.document.storeys.get(idx)?;
+        storey
+            .walls
+            .regions
+            .iter()
+            .find(|r| {
+                sd.wall_local_face_ring(r)
+                    .is_some_and(|(v, ring)| v == vid && point_in_polygon(&ring, sample))
+            })
+            .map(|r| r.id.clone())
+    }
+
+    /// Toggle the piece under wall-local `sample` in the Structure selection —
+    /// the same add/remove a plan tap performs, so the face view feeds the
+    /// ordinary Structure attribute flow rather than a partition-only one.
+    fn toggle_structure_piece_at(&mut self, sample: Point2f32) {
+        let Some(id) = self.partition_piece_at(sample) else {
+            return;
+        };
+        if !self.structure_selected.insert(id.clone()) {
+            self.structure_selected.remove(&id);
+        }
+    }
+
+    /// How many of the active wall's pieces are in the Structure selection —
+    /// the face toolbar's "Set attributes (n)" count / enable test.
+    pub fn partition_structure_selected_count(&self) -> usize {
+        let Some(vid) = self.partition_wall else {
+            return 0;
+        };
+        let Some(idx) = self.current_storey_idx else {
+            return 0;
+        };
+        let (Some(storey), Some(sd)) = (
+            self.current_record
+                .as_ref()
+                .and_then(|r| r.data.storeys.get(idx)),
+            self.document.storeys.get(idx),
+        ) else {
+            return 0;
+        };
+        storey
+            .walls
+            .regions
+            .iter()
+            .filter(|r| {
+                self.structure_selected.contains(&r.id)
+                    && sd.wall_local_face_ring(r).is_some_and(|(v, _)| v == vid)
+            })
+            .count()
+    }
+
+    /// Close the face view and open the Structure attribute editor on the
+    /// current selection — the "Set attributes" button. The pieces picked in the
+    /// face view are already in `structure_selected`, so this is exactly the
+    /// editor a plan tap would have opened.
+    pub fn edit_partition_selection_attributes(&mut self) {
+        self.close_wall_partition();
+        self.begin_structure_edit();
     }
 
     /// Attribute `exposure` to the currently selected face region. Needs a
@@ -664,15 +833,25 @@ impl AppController {
             .iter()
             .map(|pt| (pt.x, pt.y))
             .collect();
+        // In STRUCTURE the face view is a picker for the ordinary Structure
+        // selection, so a region reads its highlight from THAT (a piece stays lit
+        // across taps on its siblings) rather than from the single-sample
+        // `partition_selected_region` the Mapping exposure flow uses.
+        let structure = self.current_phase == AssessmentPhase::Structure;
         let regions = self
             .document
             .partition_face_regions(vid, len, height)
             .into_iter()
             .map(|(poly, exposure)| {
-                let selected = self
-                    .partition_selected_region
-                    .map(|s| point_in_polygon(&poly, s))
-                    .unwrap_or(false);
+                let selected = if structure {
+                    ring_centroid(&poly)
+                        .and_then(|c| self.partition_piece_at(c))
+                        .is_some_and(|id| self.structure_selected.contains(&id))
+                } else {
+                    self.partition_selected_region
+                        .map(|s| point_in_polygon(&poly, s))
+                        .unwrap_or(false)
+                };
                 PartitionRegionView {
                     poly: poly.iter().map(|p| (p.x, p.y)).collect(),
                     exposure,
@@ -695,6 +874,12 @@ impl AppController {
             pending,
             stroke,
             regions,
+            structure,
+            structure_count: if structure {
+                self.partition_structure_selected_count()
+            } else {
+                0
+            },
             inset: self.partition_inset(a, b),
             dim_prompt: self.partition_dim_prompt(),
             snap_tags,
@@ -794,6 +979,62 @@ mod tests {
         vid
     }
 
+    /// STRUCTURE ENTRY: the same face tool reached from the Structure phase, so
+    /// one wall can carry several CONSTRUCTION build-ups — a partitioned face
+    /// resolves into separate wall regions, each attributable on its own.
+    /// Gated on exactly one wall being selected.
+    #[test]
+    fn structure_selection_opens_the_partition_on_that_wall() {
+        let mut c = dimensioned_square_controller();
+        c.materialize();
+        let (wall_id, vid) = {
+            let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+            let wall = &storey.walls.regions[0];
+            let (origin, (ux, uy), len, _) = wall.base_frame().expect("base frame");
+            let mid = Point2f64::new(origin.x + ux * len * 0.5, origin.y + uy * len * 0.5);
+            let vid = c
+                .document
+                .outline
+                .floor_plan
+                .perimeter_walls()
+                .into_iter()
+                .find(|(_, a, b)| {
+                    domain::points::point_to_segment_distance(
+                        mid.x, mid.y, a.x as f64, a.y as f64, b.x as f64, b.y as f64,
+                    ) < 1e-2
+                })
+                .map(|(v, _, _)| v)
+                .expect("the region sits on a perimeter wall");
+            (wall.id, vid)
+        };
+
+        // Nothing selected → no wall to divide, and the button stays off.
+        assert!(c.structure_partition_wall().is_none());
+        c.open_wall_partition_from_structure();
+        assert!(!c.partition_mode(), "no-op without a selection");
+
+        // One wall selected → its outline vertex is found and the face opens.
+        c.structure_selected.insert(wall_id);
+        assert_eq!(c.structure_partition_wall(), Some(vid));
+        c.open_wall_partition_from_structure();
+        assert!(c.partition_mode(), "the face opened");
+        assert_eq!(c.partition_wall(), Some(vid), "on the selected wall");
+
+        // Several surfaces selected → ambiguous, so it refuses.
+        c.close_wall_partition();
+        let other = c.current_record.as_ref().unwrap().data.storeys[0]
+            .walls
+            .regions[1]
+            .id;
+        c.structure_selected.insert(other);
+        assert!(
+            c.structure_partition_wall().is_none(),
+            "two walls is ambiguous — nothing to divide"
+        );
+        c.open_wall_partition_from_structure();
+        assert!(!c.partition_mode(), "and it stays closed");
+    }
+
     #[test]
     fn stroke_snapping_both_ends_auto_commits_a_cut() {
         let mut c = dimensioned_square_controller();
@@ -862,6 +1103,66 @@ mod tests {
         let part = c.document.wall_face_partitions.get(&vid).unwrap();
         let cut = &part.cuts[0];
         assert!((cut.a.y - 1.2).abs() < 1e-3 && (cut.b.y - 1.2).abs() < 1e-3);
+    }
+
+    /// FIELD FOLLOW-UP (56 Elmwood Road): partitioning from STRUCTURE gave no
+    /// way to attribute a piece — the face view only offered "Remove partition"
+    /// / "Done", and the pieces of a HORIZONTAL cut stack on one plan line so no
+    /// plan tap can separate them either. The face view is now a planar SELECTOR
+    /// there: a region tap toggles that piece into the ordinary Structure
+    /// selection, so "Set attributes" opens the SAME editor a whole-wall tap
+    /// would. Pins the tap→selection map (each piece independently, no
+    /// bleed-through) and the hand-off.
+    #[test]
+    fn structure_face_tap_selects_the_piece_and_opens_the_normal_editor() {
+        let mut c = dimensioned_square_controller();
+        c.set_current_phase(AssessmentPhase::Structure);
+        let vid = open_partition_on_wall0(&mut c);
+        // A HORIZONTAL cut at 1.2 m — the case with no plan-tap alternative.
+        c.partition_stroke_point(0.0, 1.2);
+        c.partition_stroke_point(10.0, 1.2);
+        c.partition_stroke_end();
+        c.partition_dim_entry(1.2);
+        assert!(c.document.is_wall_partitioned(vid));
+
+        // Tap the LOWER part.
+        c.select_partition_region(5.0, 0.5);
+        let lower = c
+            .partition_piece_at(Point2f32::new(5.0, 0.5))
+            .expect("the lower piece resolves");
+        let upper = c
+            .partition_piece_at(Point2f32::new(5.0, 2.0))
+            .expect("the upper piece resolves");
+        assert_ne!(lower, upper, "the two pieces are distinct regions");
+        assert!(
+            c.structure_selected.contains(&lower) && !c.structure_selected.contains(&upper),
+            "the tap selects ONLY the tapped piece"
+        );
+        assert_eq!(c.partition_structure_selected_count(), 1);
+        let view = c.partition_view().unwrap();
+        assert!(view.structure, "the face view knows it came from Structure");
+        assert_eq!(
+            view.regions.iter().filter(|r| r.selected).count(),
+            1,
+            "exactly one region highlights"
+        );
+
+        // Tapping it again deselects (the plan tap's toggle contract).
+        c.select_partition_region(5.0, 0.5);
+        assert!(!c.structure_selected.contains(&lower));
+        assert_eq!(c.partition_structure_selected_count(), 0);
+
+        // Re-select, then hand off: the face closes and the ORDINARY Structure
+        // editor opens on that piece alone.
+        c.select_partition_region(5.0, 0.5);
+        c.edit_partition_selection_attributes();
+        assert!(!c.partition_mode(), "the face view closes on hand-off");
+        let edit = c
+            .structure_edit
+            .as_ref()
+            .expect("the normal Structure editor opens");
+        assert_eq!(edit.groups.len(), 1, "one group — the tapped piece");
+        assert_eq!(edit.groups[0].ids, vec![lower], "…and it is THAT piece");
     }
 
     #[test]

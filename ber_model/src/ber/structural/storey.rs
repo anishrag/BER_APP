@@ -144,6 +144,24 @@ pub struct Storey {
     /// `#[serde(default)]` so older records load.
     #[serde(default)]
     pub floor_thickness_m: Option<f64>,
+    /// Which below-storey CEILING height (storey-below-local z) this storey's
+    /// floor datums from — the level that reads as "level 0", with every other
+    /// level below becoming a floor step off it (POSITIVE where the below
+    /// ceiling stands proud of it, NEGATIVE where it drops away).
+    ///
+    /// Durable because it is the assessor's ANSWER: with more than one flat
+    /// level under the new footprint the seed asks which one the storey sits
+    /// on, and recomputing the rule each time would silently overwrite that
+    /// choice. `None` — never asked, or only one level to choose from — falls
+    /// back to the LARGEST-AREA flat level under the footprint
+    /// ([`CeilingRegions::datum_flat_z_over`]), so the main body of the house
+    /// reads as level 0 rather than whichever corner happens to sit lowest.
+    /// `#[serde(default)]` so older records load.
+    ///
+    /// [`CeilingRegions::datum_flat_z_over`]:
+    /// super::CeilingRegions::datum_flat_z_over
+    #[serde(default)]
+    pub floor_datum_z_m: Option<f64>,
     /// Durable CANONICAL ceiling-step list (`(world-metre plan ring, z delta)`)
     /// — the explicit record of the storey's ceiling steps, so the editing list
     /// is RESTORED on reload instead of re-inferred from the roof geometry. The
@@ -435,11 +453,11 @@ impl Storey {
                 .filter(|r| r.exposure.in_structure_scope())
                 .chain(self.structure_porch_walls())
                 .filter_map(|r| {
-                    let e = &r.polygon.exterior;
-                    if e.len() < 2 {
-                        return None;
-                    }
-                    let d = point_to_segment_distance(x, y, e[0].x, e[0].y, e[1].x, e[1].y);
+                    // The wall's FULL plan extent, not its base edge: a merged
+                    // wall's edge is a stub of the real thing, and hit-testing
+                    // that let only the stub be clicked.
+                    let (a, b) = r.base_extent()?;
+                    let d = point_to_segment_distance(x, y, a.x, a.y, b.x, b.y);
                     (d <= tol).then_some((d, r.id))
                 })
                 .min_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
@@ -487,7 +505,10 @@ impl Storey {
                 .iter()
                 .filter(|r| r.exposure.in_structure_scope())
                 .chain(self.structure_porch_walls())
-                .filter(|r| match r.base_midpoint() {
+                // Represented by the midpoint of its FULL extent — a merged
+                // wall's base-edge midpoint sits in the stub, which a marquee
+                // over the real wall can easily miss.
+                .filter(|r| match r.base_extent_midpoint() {
                     Some(m) => {
                         point_on_ring_boundary(region_ring, m.x, m.y, WALL_ON_BOUNDARY_TOL_M)
                             || inside(m.x, m.y)

@@ -112,6 +112,7 @@ mod view;
 
 use ceiling_points::{ContinuationTool, PendingCeilingContinuation, PendingCeilingPoint};
 use ceiling_rects::{PendingCeilingRect, RectPins};
+pub use ceiling_ridges::{CeilingRidgeSnapTag, RidgeDof};
 use ceiling_ridges::{PendingCeilingRidge, RidgeQuestion};
 use ceiling_steps::PendingCeilingStep;
 use copy_height::CopyHeightTarget;
@@ -124,8 +125,8 @@ pub use editing::{
 pub use final_phase::{FinalDetails, FinalMode, NorthImageView, WallFinishField};
 pub use history::HistorySnapshot;
 pub use mapping_review::ReviewView;
-pub use new_storey::NewStoreyPromptUiData;
-use new_storey::{NewStoreyStage, PendingNewStorey};
+pub use new_storey::{FloorLevelPromptUiData, NewStoreyPromptUiData, OverhangPromptUiData};
+use new_storey::{NewStoreyStage, PendingFloorLevels, PendingNewStorey};
 pub use objects::{
     ActiveObjectRoomView, ObjectPinView, ObjectReviewView, ObjectRowView, ObjectTotalView,
     PorchPromptView, PorchQuestion,
@@ -497,6 +498,11 @@ pub struct AppController {
     /// `add_storey`, cleared on storey switch / load / open / exit. See
     /// `new_storey.rs`.
     pending_new_storey: Option<PendingNewStorey>,
+    /// The floor-level questions a seed raised and is waiting on (datum +
+    /// per-overhang level). The seed is HELD until answered, so levels are
+    /// never stamped on an assumption. Controller-transient like
+    /// `pending_new_storey`.
+    pending_floor_levels: Option<PendingFloorLevels>,
     /// Upper storeys (idx > 0) whose INHERITED floor levels haven't been
     /// seeded yet — the drawn-path seed fires when the storey's outline
     /// FINALISES. Inserted by `add_storey`; re-derived on open/restore as
@@ -875,6 +881,7 @@ impl AppController {
             partition_instant_commit: None,
             partition_selected_region: None,
             pending_new_storey: None,
+            pending_floor_levels: None,
             inherited_seed_pending: HashSet::new(),
             splice_debug: Vec::new(),
             revision: 0,

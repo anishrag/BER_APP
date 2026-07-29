@@ -61,6 +61,9 @@ const WALL_TYPES: &[WallConstructionType] = &[
     WallConstructionType::TimberConstruction,
     WallConstructionType::ICF,
     WallConstructionType::AeratedBlock,
+    // Last: the "I looked and couldn't tell" answer, distinct from the build-up
+    // dropdown's `Unknown` (which declares the MAKE-UP of a known type unknown).
+    WallConstructionType::Unknown,
 ];
 
 /// Floor construction TYPE options (the group editor).
@@ -121,13 +124,16 @@ fn existing_group_label(eg: &ExistingGroup) -> String {
 /// Render the Structure tool area: the global MODE row + the global SELECT row +
 /// the "Edit attributes" group editor (when a session is open). `kind` is the
 /// active mode; `select` the active Select subtool; `edit` the in-flight session;
-/// `enabled` gates interaction. Each mode button carries its kind's
+/// `can_partition` is true when exactly one WALL is selected — it gates the
+/// "Partition" button. `enabled` gates interaction. Each mode button carries its
+/// kind's
 /// "attributed/total" progress counter ("Walls · 3/12" — in-scope surfaces
 /// only, per [`StructureProgress`]).
 pub fn structure_panel<F: FnMut(UiEvent)>(
     ui: &mut egui::Ui,
     kinds: &std::collections::BTreeSet<SurfaceKind>,
     select: Option<SelectMode>,
+    can_partition: bool,
     edit: Option<&StructureEdit>,
     progress: StructureProgress,
     phases: &[(ConstructionPhase, String)],
@@ -167,6 +173,20 @@ pub fn structure_panel<F: FnMut(UiEvent)>(
                 let next = if active { None } else { Some(*mode) };
                 on_event(UiEvent::Sketch(SketchEvent::SetStructureSelectMode(next)));
             }
+        }
+        // Divide ONE wall's face into several surfaces, each attributable on
+        // its own — the Structure reason to partition (several construction
+        // build-ups on one wall), not just several exposures.
+        if ui
+            .add_enabled(
+                enabled && can_partition,
+                egui::Button::new("⊟ Partition").small(),
+            )
+            .on_hover_text("Divide the selected wall's face into separate surfaces")
+            .on_disabled_hover_text("Select exactly one wall to divide its face")
+            .clicked()
+        {
+            on_event(UiEvent::Sketch(SketchEvent::OpenStructureWallPartition));
         }
         if ui
             .add_enabled(enabled, egui::Button::new("Deselect all").small())
@@ -1224,12 +1244,14 @@ mod tests {
     use super::*;
 
     /// The group editor's wall TYPE dropdown offers every real wall type —
-    /// including the 2026-07 aerated-block addition — and only user-pickable
-    /// entries (no `Uninitialised`/`Floor` placeholders), each with a real
-    /// label.
+    /// including the 2026-07 aerated-block addition and the `Unknown` type
+    /// ("can't tell what it's built of", distinct from the build-up dropdown's
+    /// `Unknown`) — and only user-pickable entries (no `Uninitialised`/`Floor`
+    /// placeholders), each with a real label.
     #[test]
     fn wall_types_offer_aerated_block_and_only_pickable_types() {
         assert!(WALL_TYPES.contains(&WallConstructionType::AeratedBlock));
+        assert!(WALL_TYPES.contains(&WallConstructionType::Unknown));
         for ty in WALL_TYPES {
             assert!(ty.is_set(), "{ty:?} must be a real choice");
             assert_ne!(*ty, WallConstructionType::Floor);

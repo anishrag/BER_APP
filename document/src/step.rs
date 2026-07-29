@@ -62,15 +62,51 @@ pub fn step_regions_from_floors(ber: &Ber, idx: usize) -> Vec<StepRegion> {
 /// [`CeilingRegions::inherited_floor_levels`]:
 /// ber_model::ber::structural::CeilingRegions::inherited_floor_levels
 pub fn inherited_step_regions(below: &Storey, footprint: &[Point2f32]) -> Vec<StepRegion> {
+    inherited_step_regions_with(below, footprint, &[]).1
+}
+
+/// [`inherited_step_regions`] with the overhang answers supplied: a height per
+/// [`CeilingRegions::inherited_floor_pieces`] piece, by index. `None`/absent
+/// leaves a piece on its own ceiling, or an overhang on its longest-bordering
+/// neighbour. Also returns the DATUM the levels were measured against, which
+/// the caller must stamp on the storey (`Storey::floor_datum_z_m`) so
+/// `Ber::storey_floor_datums` reads back the same one.
+///
+/// [`CeilingRegions::inherited_floor_pieces`]:
+/// ber_model::ber::structural::CeilingRegions::inherited_floor_pieces
+pub fn inherited_step_regions_with(
+    below: &Storey,
+    footprint: &[Point2f32],
+    answers: &[Option<f64>],
+) -> (Option<f64>, Vec<StepRegion>) {
+    let fp: Vec<_> = footprint.iter().copied().map(to_f64).collect();
+    let pieces = below.ceilings.inherited_floor_pieces(&fp);
+    let (datum, levels) = ber_model::ber::structural::resolve_floor_levels(&pieces, answers);
+    (
+        datum,
+        levels
+            .into_iter()
+            .map(|(ring, level_m)| StepRegion {
+                polygon: ring.into_iter().map(to_f32).collect(),
+                level_m,
+            })
+            .collect(),
+    )
+}
+
+/// The floor pieces a storey above `footprint` would take from `below`, for
+/// the seed's ONE question: which neighbour an overhang copies. Returns
+/// `(piece index, area m², the levels it adjoins)` for every piece that needs
+/// asking — empty when the levels follow from the ceilings alone.
+pub fn overhang_choices(below: &Storey, footprint: &[Point2f32]) -> Vec<(usize, f64, Vec<f64>)> {
     let fp: Vec<_> = footprint.iter().copied().map(to_f64).collect();
     below
         .ceilings
-        .inherited_floor_levels(&fp)
+        .inherited_floor_pieces(&fp)
         .into_iter()
-        .map(|(ring, level_m)| StepRegion {
-            polygon: ring.into_iter().map(to_f32).collect(),
-            level_m,
-        })
+        .enumerate()
+        .filter(|(_, p)| p.needs_choice())
+        .map(|(i, p)| (i, p.area_m2, p.bordering))
         .collect()
 }
 
@@ -209,8 +245,10 @@ mod tests {
             ..Storey::default()
         };
         let mut upper_floors = FloorRegions::from_vertex_lists(vec![zone, remainder], cid);
-        upper_floors.regions[0].level_m = 0.0;
-        upper_floors.regions[1].level_m = 0.59;
+        // The main body (over the 2.548 ceiling, the larger area) is the datum
+        // at 0; the low zone steps DOWN to −0.59.
+        upper_floors.regions[0].level_m = -0.59;
+        upper_floors.regions[1].level_m = 0.0;
         let upper = Storey {
             floors: upper_floors,
             ceiling_height_m: Some(2.4),
@@ -224,8 +262,9 @@ mod tests {
         let per = junction_mismatch_reasons_by_storey(&ber, &[true, true]);
         assert!(per.iter().all(|l| l.is_empty()), "aligned: {per:?}");
 
-        // The Elmwood hand-step: anchor zone floor to −0.247.
-        ber.storeys[1].floors.regions[0].level_m = -0.247;
+        // The Elmwood hand-step: the low zone's floor driven 0.247 m past its
+        // correct −0.59, so its underside sits below the ceiling it rests on.
+        ber.storeys[1].floors.regions[0].level_m = -0.837;
         let per = junction_mismatch_reasons_by_storey(&ber, &[true, true]);
         assert!(per[0].is_empty(), "the below storey reports nothing");
         assert_eq!(
@@ -235,7 +274,7 @@ mod tests {
 
         // A named neighbour is named; a void gap reads as floating.
         ber.storeys[0].name = "Ground Floor".into();
-        ber.storeys[1].floors.regions[0].level_m = 0.3;
+        ber.storeys[1].floors.regions[0].level_m = -0.29; // 0.3 above its correct −0.59
         let per = junction_mismatch_reasons_by_storey(&ber, &[true, true]);
         assert_eq!(
             per[1],

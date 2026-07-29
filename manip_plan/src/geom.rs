@@ -775,6 +775,18 @@ pub fn ring_within_ring(inner: &[Point2f64], outer: &[Point2f64], tol: f64) -> b
     if !inner.iter().all(|p| on_or_inside(*p)) {
         return false;
     }
+    // A ring that FILLS A NOTCH of `outer` passes both the vertex test above
+    // and the crossing test below — every corner sits ON the outer boundary and
+    // every edge runs ALONG it — while its interior lies wholly OUTSIDE. Nothing
+    // that only samples the boundary can see that, so probe the INTERIOR:
+    // a representative point strictly inside `inner` must be strictly inside
+    // `outer` too (field: 56 Elmwood Road — the first floor's bridged
+    // front-door recess read as contained by the ground floor's footprint and
+    // was stamped InterStorey, when it hangs over open air).
+    match ring_interior_point(inner) {
+        Some(p) if !point_in_ring_f64(outer, p.x, p.y) => return false,
+        _ => {}
+    }
     // No inner edge may properly cross an outer edge (a poke-out the
     // vertex-sampling above can't see).
     let m = inner.len();
@@ -1544,6 +1556,38 @@ mod tests {
     /// `ring_within_ring`: a fully-enclosed inner ring is contained; a coincident
     /// (equal) ring counts as contained (shared boundary within tolerance); an
     /// inner ring that POKES OUT past the outer is not; degenerate rings never are.
+    /// A ring that exactly FILLS A NOTCH in the outer ring is NOT contained:
+    /// every corner sits on the outer boundary and every edge runs along it, so
+    /// the vertex and crossing tests both pass — but its interior is wholly
+    /// outside. Only the interior probe catches it.
+    ///
+    /// Field case (56 Elmwood Road): the first floor bridges a recessed front
+    /// door, so that piece of floor sits in a notch of the ground floor's
+    /// footprint. Read as contained, it was stamped an internal inter-storey
+    /// floor when it actually hangs over open air.
+    #[test]
+    fn a_ring_filling_a_notch_is_not_contained() {
+        // Outer: a 10 x 8 block with a 4 x 2 notch cut out of its top edge.
+        let outer = ring64(&[
+            (0.0, 0.0),
+            (10.0, 0.0),
+            (10.0, 8.0),
+            (7.0, 8.0),
+            (7.0, 6.0),
+            (3.0, 6.0),
+            (3.0, 8.0),
+            (0.0, 8.0),
+        ]);
+        let notch = ring64(&[(3.0, 6.0), (7.0, 6.0), (7.0, 8.0), (3.0, 8.0)]);
+        assert!(
+            !ring_within_ring(&notch, &outer, 0.05),
+            "the notch filler is outside, however its boundary traces the outer"
+        );
+        // A ring genuinely inside is still contained, boundary-sharing and all.
+        let inside = ring64(&[(0.0, 0.0), (3.0, 0.0), (3.0, 6.0), (0.0, 6.0)]);
+        assert!(ring_within_ring(&inside, &outer, 0.05));
+    }
+
     #[test]
     fn ring_within_ring_is_conservative_full_containment() {
         let outer = ring64(&[(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0)]);

@@ -8,7 +8,7 @@
 //! from persisted floors — lives here.
 use ber_model::ber::ber_struct::Ber;
 use ber_model::ber::common::{ConstructionPhase, ItemId};
-use domain::points::{to_f32, Point2f32, Point2f64};
+use domain::points::{to_f32, to_f64, Point2f32, Point2f64};
 
 /// Durable geometric key for an AREA region (floor / ceiling): its plan centroid
 /// quantized to the mm grid. Area regions have no parametric `SurfaceRef`, so the
@@ -272,7 +272,9 @@ pub fn stamp_ceiling_phases(ber: &mut Ber, idx: usize) {
 /// home is the parametric `SurfaceRef` key, not the resolved wall id.
 pub fn stamp_wall_constructions(ber: &mut Ber, idx: usize, doc: &crate::StoreyDoc) {
     if ber.storeys.len() <= idx
-        || (doc.wall_constructions.is_empty() && doc.riser_constructions.is_empty())
+        || (doc.wall_constructions.is_empty()
+            && doc.riser_constructions.is_empty()
+            && doc.face_constructions.is_empty())
     {
         return;
     }
@@ -299,15 +301,31 @@ pub fn stamp_wall_constructions(ber: &mut Ber, idx: usize, doc: &crate::StoreyDo
             continue;
         };
         let mid = Point2f32::new(((e0.x + e1.x) * 0.5) as f32, ((e0.y + e1.y) * 0.5) as f32);
-        // A perimeter wall is keyed by its parametric SurfaceRef; a RISER (interior
+        // A PIECE of a face-partitioned wall is keyed by its own FaceRegionKey —
+        // checked FIRST because it would otherwise fall into the SurfaceRef arm
+        // shared with its siblings and read back their construction. An ordinary
+        // perimeter wall is keyed by its parametric SurfaceRef; a RISER (interior
         // step face, no perimeter ref) by its quantized base edge — mirroring
         // riser exposure. The stored entry carries its own (editable) phase.
-        let assigned = if let Some(sref) = plan.surface_ref_at(mid, TOL_M) {
-            doc.wall_constructions.get(&sref)
-        } else {
-            let key = crate::riser_key(Point2f64::new(e0.x, e0.y), Point2f64::new(e1.x, e1.y));
-            doc.riser_constructions.get(&key)
-        };
+        let face_key = doc.wall_piece_key_of(
+            &ber.storeys[idx].walls.regions[i],
+            &ber.storeys[idx].walls.regions,
+        );
+        let assigned = face_key
+            .and_then(|fk| doc.face_constructions.get(&fk))
+            // No per-piece entry: INHERIT the whole wall's — cutting a face
+            // divides a wall into pieces, it doesn't un-answer it (the same rule
+            // `split_partitioned_wall` applies to exposure via `base_exposure`).
+            // A piece keeps inheriting until it's individually attributed.
+            .or_else(|| {
+                if let Some(sref) = plan.surface_ref_at(mid, TOL_M) {
+                    doc.wall_constructions.get(&sref)
+                } else {
+                    let key =
+                        crate::riser_key(Point2f64::new(e0.x, e0.y), Point2f64::new(e1.x, e1.y));
+                    doc.riser_constructions.get(&key)
+                }
+            });
         if let Some((ty, makeup, phase, name)) = assigned {
             let cid = ber.ensure_wall_construction_named(
                 *ty,
@@ -466,6 +484,28 @@ pub fn stamp_ceiling_constructions(ber: &mut Ber, idx: usize, doc: &crate::Store
 /// zone + its phase tag. Empty when nothing below is tagged.
 pub fn inherited_phase_regions(ber: &Ber, below_idx: usize) -> Vec<PhaseRegion> {
     phase_regions_from_floors(ber, below_idx)
+}
+
+/// [`inherited_phase_regions`] for a storey whose `footprint` is known —
+/// the zones EXTENDED to cover it ([`Ber::storey_phase_zones_over`]).
+///
+/// A storey that OVERHANGS the one below reaches past every inherited zone, and
+/// that leftover would be phase-unassigned: carved out of the new storey's
+/// floors AND ceilings as its own region with its own construction, dividing a
+/// surface that is one continuous build. Extending absorbs it into the zone it
+/// mostly runs along, so no spurious division appears.
+///
+/// [`Ber::storey_phase_zones_over`]: ber_model::ber::ber_struct::Ber::storey_phase_zones_over
+pub fn inherited_phase_regions_over(
+    ber: &Ber,
+    below_idx: usize,
+    footprint: &[Point2f32],
+) -> Vec<PhaseRegion> {
+    let fp: Vec<_> = footprint.iter().copied().map(to_f64).collect();
+    ber.storey_phase_zones_over(below_idx, &fp)
+        .into_iter()
+        .map(|(phase, polygon)| PhaseRegion { polygon, phase })
+        .collect()
 }
 
 /// Rebuild the session phase regions for storey `idx` from its persisted floor

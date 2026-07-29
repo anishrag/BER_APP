@@ -277,7 +277,18 @@ impl AppController {
         // and the refusal was silent. See `ceiling_section_edges` for why the
         // reference set is what keeps the snapping and the dimension prompts
         // behaving exactly as they did when the region was fenced.
-        let mut ref_walls = self.phase_reference_walls();
+        //
+        // PLUS the resolved FLOOR-region edges. A ceiling section drawn over a
+        // floor step should land ON that step's line — they're the same wall in
+        // the building, and the assessor is looking at the floor boundary on the
+        // plan while drawing it. The ceiling-step LINE flow already snaps to
+        // these (`region_snap_references` feeds them to
+        // `snap_ceiling_step_line`); the AREA carve never got them, so a section
+        // drawn over a dropped floor had nothing to grab (field report:
+        // "I drew it above the dropped floor area but it didn't snap").
+        let mut ref_walls = self.subarea_reference_walls();
+        // Plus the SESSION sections — a section just drawn but not yet resolved
+        // isn't in `storey.ceilings` yet, so the shared set would miss it.
         ref_walls.extend(self.document.ceiling_section_edges(&steps));
         let action_points: Vec<(f32, f32)> = pts.iter().map(|p| (p.x, p.y)).collect();
         let wall_snap_tol = self.snap_tol_carve();

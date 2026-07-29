@@ -93,6 +93,42 @@ impl AppController {
     /// level onto and be pinned to, so a wall drawn beside a phase "year" line
     /// lands on it. Empty when the storey has no phase regions. Shared by every
     /// sub-area carve that opts into phase-line snapping.
+    /// EVERY region boundary on the current storey a drawn sub-area may snap
+    /// onto: the construction-PHASE lines
+    /// ([`phase_reference_walls`](Self::phase_reference_walls)) plus the
+    /// resolved FLOOR- and CEILING-region edges.
+    ///
+    /// The rule this encodes: **a stroke should snap to any line the assessor
+    /// can see on the plan.** Floor steps, ceiling sections and phase
+    /// boundaries are all drawn on the canvas, and an area drawn along one is
+    /// meant to share that line — they're the same wall in the building.
+    ///
+    /// Each carve used to assemble its own set ad hoc and they had drifted
+    /// badly apart: living areas and phases got phase lines only, porches got
+    /// phase + divider lines, and the FLOOR-step carve passed `&[]` — it could
+    /// not snap to anything at all. So whether a drawn edge landed on a visible
+    /// line depended on which tool you happened to be holding, with nothing to
+    /// explain the difference (field reports: a ceiling section over a dropped
+    /// floor, then a living area over both).
+    ///
+    /// The carve boundary itself is NOT included — that comes from
+    /// `carve_or_cut_in_available`'s available region, which already supplies
+    /// the outline and any same-kind neighbours. Overlap between the two is
+    /// harmless: levelling a wall onto the same line twice is idempotent.
+    pub(super) fn subarea_reference_walls(&self) -> Vec<[Point2f32; 2]> {
+        let mut refs = self.phase_reference_walls();
+        let idx = self.current_storey_idx.unwrap_or(0);
+        if let Some(storey) = self
+            .current_record
+            .as_ref()
+            .and_then(|r| r.data.storeys.get(idx))
+        {
+            refs.extend(document::floor_region_edges(&storey.floors));
+            refs.extend(document::ceiling_region_edges(&storey.ceilings));
+        }
+        refs
+    }
+
     pub(super) fn phase_reference_walls(&self) -> Vec<[Point2f32; 2]> {
         let idx = self.current_storey_idx.unwrap_or(0);
         let Some(regions) = self.phase_regions.get(&idx) else {

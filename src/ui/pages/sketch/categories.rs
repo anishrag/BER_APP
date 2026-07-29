@@ -322,6 +322,8 @@ pub struct ToolFlags {
     pub structure_kinds: std::collections::BTreeSet<SurfaceKind>,
     /// The active global Select subtool — drives which reads as selected.
     pub structure_select: Option<SelectMode>,
+    /// Exactly one WALL selected — gates the Structure "Partition" button.
+    pub structure_can_partition: bool,
     /// The in-flight "Edit attributes" session (selection grouped by
     /// construction), so the panel renders the group editor. `None` = none.
     pub structure_edit: Option<StructureEdit>,
@@ -383,6 +385,7 @@ impl ToolFlags {
             phase: view.current_phase,
             structure_kinds: view.structure_kinds.clone(),
             structure_select: view.structure_select,
+            structure_can_partition: view.structure_can_partition,
             structure_edit: view.structure_edit.cloned(),
             surface_counts: view.surface_counts,
             structure_progress: view.structure_progress,
@@ -453,6 +456,7 @@ pub fn ribbon<F: FnMut(UiEvent)>(
             ui,
             &flags.structure_kinds,
             flags.structure_select,
+            flags.structure_can_partition,
             flags.structure_edit.as_ref(),
             flags.structure_progress,
             &flags.phase_choices,
@@ -501,6 +505,7 @@ pub fn side_panel<F: FnMut(UiEvent)>(
             ui,
             &flags.structure_kinds,
             flags.structure_select,
+            flags.structure_can_partition,
             flags.structure_edit.as_ref(),
             flags.structure_progress,
             &flags.phase_choices,

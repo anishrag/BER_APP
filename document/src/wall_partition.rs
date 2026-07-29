@@ -28,16 +28,41 @@ impl StoreyDoc {
     /// Append `cut` to outline wall `vid`'s face partition (creating the entry),
     /// and CLEAR that wall's 1-D `wall_sections` — face partitioning supersedes
     /// along-wall sectioning. A zero-length cut (`a ≈ b`) is ignored.
+    ///
+    /// The FIRST cut carries the wall's current exposure onto the partition as
+    /// its [`base_exposure`], so every region starts out with the answer the
+    /// wall already had. Without that, clearing the sections lost it: dividing
+    /// a wall to give its halves different CONSTRUCTIONS silently un-answered
+    /// its exposure. Where the wall was painted in several ranges, the one
+    /// covering the greatest LENGTH carries over.
+    ///
+    /// [`base_exposure`]: ber_model::ber::structural::WallFacePartition::base_exposure
     pub fn commit_partition_cut(&mut self, vid: VertexId, cut: PartitionCut) {
         if near(cut.a, cut.b) {
             return; // degenerate cut paints nothing
         }
+        let dominant = self.wall_sections.get(&vid).and_then(|sections| {
+            let mut by_exposure: Vec<(WallExposure, f32)> = Vec::new();
+            for s in sections {
+                let run = (s.end_m - s.start_m).abs();
+                match by_exposure.iter_mut().find(|(e, _)| *e == s.exposure) {
+                    Some((_, acc)) => *acc += run,
+                    None => by_exposure.push((s.exposure, run)),
+                }
+            }
+            by_exposure
+                .into_iter()
+                .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(e, _)| e)
+        });
         self.wall_sections.remove(&vid);
-        self.wall_face_partitions
-            .entry(vid)
-            .or_default()
-            .cuts
-            .push(cut);
+        let part = self.wall_face_partitions.entry(vid).or_default();
+        if part.cuts.is_empty() {
+            if let Some(e) = dominant {
+                part.base_exposure = e;
+            }
+        }
+        part.cuts.push(cut);
     }
 
     /// Attribute `exposure` to the face region of wall `vid` that CONTAINS
@@ -88,6 +113,121 @@ impl StoreyDoc {
     /// Whether outline wall `vid` is face-partitioned.
     pub fn is_wall_partitioned(&self, vid: VertexId) -> bool {
         self.wall_face_partitions.contains_key(&vid)
+    }
+
+    /// The durable [`FaceRegionKey`] of a RESOLVED wall region that is only a
+    /// PIECE of its plan wall — `None` for a riser, and for a region that spans
+    /// its whole plan wall (those keep the parametric `SurfaceRef` /
+    /// `riser_key`, which survives geometry edits).
+    ///
+    /// One plan wall can resolve into SEVERAL regions, and `surface_ref_at` maps
+    /// every one of them to the same `SurfaceRef::wall(vid)`. Attributing one
+    /// then writes the whole wall and its siblings read it back. Two ways a wall
+    /// gets split:
+    ///
+    /// * a FACE PARTITION (the assessor's own cut), and
+    /// * an ALONG-LENGTH split from the derivation — most often a construction
+    ///   PHASE boundary crossing the middle of a wall.
+    ///
+    /// Field report, 56 Elmwood Road: the left wall runs y 0.46→8.10 with the
+    /// extension boundary at 4.51, so it resolved into two pieces. Attributing
+    /// the extension piece ("2004, unknown, default") silently re-pointed the
+    /// original piece, wiping the "1960s plasterboarded" answer set earlier —
+    /// its construction was orphaned and dropped from the record.
+    ///
+    /// The key is the piece's own wall-local CENTROID on the mm grid, the
+    /// per-piece analogue of a riser's base-edge key.
+    /// `siblings` is the full resolved wall list the region came from — the
+    /// collision test needs it, because a piece key is only warranted when the
+    /// plan wall actually carries MORE THAN ONE attributable region.
+    ///
+    /// That narrowness is deliberate. A geometric key does NOT survive a
+    /// geometry edit the way a `SurfaceRef` does (that is the whole reason
+    /// `SurfaceRef` keying exists — a legacy split record unifies its walls on
+    /// open and must keep its fabric). So a wall that resolves to a single
+    /// region keeps the parametric key, and only a genuinely SPLIT wall — where
+    /// the shared key would otherwise silently overwrite — pays the stability
+    /// cost.
+    ///
+    /// `InterStorey` siblings do not count: the derivation owns them, and
+    /// `stamp_wall_constructions` skips them, so they can never be the region
+    /// that gets clobbered.
+    pub fn wall_piece_key_of(
+        &self,
+        region: &ber_model::ber::structural::WallRegion,
+        siblings: &[ber_model::ber::structural::WallRegion],
+    ) -> Option<crate::FaceRegionKey> {
+        let (vid, ring) = self.wall_local_face_ring(region)?;
+        if !self.is_wall_partitioned(vid) {
+            let attributable = siblings
+                .iter()
+                .filter(|r| r.exposure != WallExposure::InterStorey)
+                .filter(|r| self.wall_local_face_ring(r).is_some_and(|(v, _)| v == vid))
+                .count();
+            if attributable < 2 {
+                return None; // one region on this plan wall — no collision
+            }
+        }
+        let (a, b) = self.outline.floor_plan.wall_endpoints(vid)?;
+        let n = ring.len() as f32;
+        let (sa, sh) = ring
+            .iter()
+            .fold((0.0, 0.0), |(sa, sh), p| (sa + p.x, sh + p.y));
+        Some(crate::face_region_key(
+            crate::wall_face_key(a, b),
+            Point2f32::new(sa / n, sh / n),
+        ))
+    }
+
+    /// A RESOLVED wall region's ring in WALL-LOCAL `(along_m, height_m)` coords,
+    /// with the partitioned perimeter wall it belongs to — `None` for a riser, a
+    /// plain wall, or a piece of an un-partitioned wall.
+    ///
+    /// The projection [`split_partitioned_wall`](crate::resolve) attributes
+    /// exposure with, factored out: match the region's base midpoint to a
+    /// perimeter wall, then project its ring onto that wall's `a`→`b` axis. It
+    /// uses the SAME endpoints `stamp_wall_face_partitions` keys the recipe by,
+    /// so the local frame agrees with the partition's own cuts and samples — a
+    /// flipped `a`/`b` would mirror every piece's `along`.
+    ///
+    /// Shared by [`face_region_key_of`](Self::face_region_key_of) (which takes
+    /// the ring's centroid as the piece's durable key) and the Structure face
+    /// view's region tap (which point-in-polygons a tapped sample against it to
+    /// find the piece the assessor means).
+    pub fn wall_local_face_ring(
+        &self,
+        region: &ber_model::ber::structural::WallRegion,
+    ) -> Option<(VertexId, Vec<Point2f32>)> {
+        const TOL_M: f64 = 1e-2;
+        let (origin, (ux, uy), wlen, _) = region.base_frame()?;
+        let mid =
+            domain::points::Point2f64::new(origin.x + ux * wlen * 0.5, origin.y + uy * wlen * 0.5);
+        let plan = &self.outline.floor_plan;
+        let (vid, _, _) = plan.perimeter_walls().into_iter().find(|(_, a, b)| {
+            domain::points::point_to_segment_distance(
+                mid.x, mid.y, a.x as f64, a.y as f64, b.x as f64, b.y as f64,
+            ) < TOL_M
+        })?;
+        let (a, b) = plan.wall_endpoints(vid)?;
+        let (dx, dy) = ((b.x - a.x) as f64, (b.y - a.y) as f64);
+        let plen = (dx * dx + dy * dy).sqrt();
+        if plen < 1e-9 {
+            return None;
+        }
+        let (dirx, diry) = (dx / plen, dy / plen);
+        let ring = &region.polygon.exterior;
+        if ring.is_empty() {
+            return None;
+        }
+        Some((
+            vid,
+            ring.iter()
+                .map(|v| {
+                    let along = (v.x - a.x as f64) * dirx + (v.y - a.y as f64) * diry;
+                    Point2f32::new(along as f32, v.z as f32)
+                })
+                .collect(),
+        ))
     }
 
     /// The face regions of wall `vid` with their attributed exposures — the

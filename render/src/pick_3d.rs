@@ -215,6 +215,10 @@ fn collect_hits(
     };
     for (slot, &(idx, storey)) in storeys.iter().enumerate() {
         let datum = datums[slot];
+        // Pick where the floor is DRAWN — its underside (`storey_3d` moved
+        // there: that is the plane the storey rests on). Testing the walking
+        // surface instead would put every floor a slab out of place.
+        let slab = storey.floor_thickness_m.unwrap_or(0.0).max(0.0);
         for region in &storey.floors.regions {
             if stack && region.exposure == FloorExposure::InterStorey {
                 continue;
@@ -223,7 +227,7 @@ fn collect_hits(
                 .polygon
                 .exterior()
                 .coords()
-                .map(|c| (c.x, c.y, datum + region.level_m))
+                .map(|c| (c.x, c.y, datum + region.level_m - slab))
                 .collect();
             drop_closing_duplicate(&mut ring);
             consider(

@@ -263,12 +263,14 @@ impl AppController {
         self.begin_snap_capture();
         // Save the live buffer so the outline we carve against is current.
         self.sync_active();
-        // Reference walls the carve levels the drawn living area onto besides the
-        // outline: the construction-PHASE lines. A wall drawn beside a phase line
-        // lands flush on it (post-carve per-line leveling in `snap_walls`), and —
-        // because a snapped wall is a known wall — is then pinned pre-known so
+        // Reference walls the carve levels the drawn living area onto besides
+        // the outline: every visible region boundary on the storey — phase
+        // lines, floor steps and ceiling sections
+        // ([`subarea_reference_walls`]). A wall drawn beside one lands flush on
+        // it (post-carve per-line leveling in `snap_walls`), and — because a
+        // snapped wall is a known wall — is then pinned pre-known so
         // dimensioning doesn't prompt for it (`pinned_subarea_slot_refs`).
-        let ref_walls = self.phase_reference_walls();
+        let ref_walls = self.subarea_reference_walls();
         // Living areas never overlap: carve against the outline MINUS the existing
         // living areas (the available region), so a new one tiles against them and
         // snaps to their shared walls. The available region may be disconnected;

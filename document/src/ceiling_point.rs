@@ -93,13 +93,6 @@ const RIDGE_TOO_IRREGULAR_MSG: &str =
 const RIDGE_ENDS_SAME_REGION_MSG: &str =
     "Both ends of the ridge must sit in the same ceiling area.";
 
-/// User-facing rejection for a ridge end ON the line SHARED by two ceiling
-/// areas: an outline-boundary end is a gable (one claimant), but an internal
-/// shared boundary has no single owning area — both neighbours would need
-/// coordinated face generation. Kept stable.
-const RIDGE_END_ON_SHARED_BOUNDARY_MSG: &str =
-    "A high point can't sit on the line between two ceiling areas — move it to one side.";
-
 /// User-facing rejection for a ridge end claimed by NO ceiling area (outside
 /// every region and beyond the boundary band). Kept stable.
 const RIDGE_END_OUTSIDE_CEILING_MSG: &str =
@@ -397,10 +390,12 @@ fn check_end_claims(storey: &Storey, q: Point2f64, ridx: usize) -> Result<(), St
 ///   inside one ceiling region — the midpoint, never the ends, picks the
 ///   region (the determinism dodge: the ends may legally sit ON the
 ///   boundary — a wall-to-wall GABLE ridge).
-/// - Each (quantized) endpoint must be claimed by EXACTLY that region
-///   ([`check_end_claims`]): strictly inside it or on its OUTER boundary;
-///   an end on an internal shared boundary is rejected
-///   ([`RIDGE_END_ON_SHARED_BOUNDARY_MSG`]).
+/// - Each (quantized) endpoint must be claimed BY that region
+///   ([`check_end_claims`]): strictly inside it, on its OUTER boundary (a
+///   gable), or on an INTERNAL boundary that includes it (a mono-pitch ridge
+///   along the junction — the sloped side is fixed by the apex hint at
+///   resolve). Only an end claimed solely by OTHER regions, or by none,
+///   rejects.
 /// - That region must be in NO apex group — the line needs an empty area
 ///   (a second point over an existing apex goes through the tap flow,
 ///   [`validate_roof_apex`]).
@@ -1178,20 +1173,35 @@ fn rect_corners(lo: Point2f64, hi: Point2f64) -> [Point2f64; 4] {
     ]
 }
 
-/// Require flat-top corner `q` (already quantized) to be claimed by EXACTLY
-/// the region `ridx` — the rect flavour of [`check_end_claims`], with the
-/// rect's stable messages: strictly inside or on the OUTER boundary passes
-/// (a boundary-touching side is the mono-gable case); an internal shared
-/// boundary, a different region, or no claimant rejects.
+/// Require flat-top corner `q` (already quantized) to be claimed BY the region
+/// `ridx` — the rect flavour of [`check_end_claims`], with the rect's stable
+/// messages. Strictly inside passes; ON a boundary of `ridx` passes whether
+/// that boundary is the OUTER footprint edge (the mono-gable side) or an
+/// INTERNAL one shared with a neighbouring ceiling area. A corner claimed only
+/// by OTHER regions (the rect spills out of its own area), or by none, rejects.
+///
+/// The shared-boundary case is deliberately allowed, unlike the ridge's
+/// [`check_end_claims`]. For a RIDGE, an end on an internal boundary is
+/// genuinely ambiguous — which of the two areas slopes? A flat top has no such
+/// ambiguity: its CENTRE already picks the region ([`validate_roof_rect_placement`]),
+/// and a corner on the boundary just means the plateau stops there. That is the
+/// three-slopes-and-a-step shape — a plateau flush against a "Divide ceiling"
+/// line, sloping on its three free sides and stepping down at the divider —
+/// which the loft builds correctly; requiring exactly one claimant refused to
+/// let the assessor ask for it. The same plateau against the OUTLINE was always
+/// allowed (one claimant there), so the tool behaved differently depending on
+/// whether the bounding line was a wall or a section edge.
+///
+/// A rect that genuinely STRADDLES a boundary is still rejected: its far
+/// corners are claimed only by the neighbour, so they miss `ridx` and fall to
+/// [`RECT_CORNERS_SAME_REGION_MSG`].
 fn check_rect_corner_claims(storey: &Storey, q: Point2f64, ridx: usize) -> Result<(), String> {
     let claims = storey.ceilings.claim_regions(q);
-    if claims == [ridx] {
+    if claims.contains(&ridx) {
         return Ok(());
     }
     if claims.is_empty() {
         Err(RECT_CORNER_OUTSIDE_CEILING_MSG.to_string())
-    } else if claims.contains(&ridx) {
-        Err(RIDGE_END_ON_SHARED_BOUNDARY_MSG.to_string())
     } else {
         Err(RECT_CORNERS_SAME_REGION_MSG.to_string())
     }
@@ -3461,10 +3471,91 @@ mod tests {
             )
             .regions,
         );
+        // Reaching the shared line is ALLOWED — the plateau's centre already
+        // picks the region, so a corner on the boundary just means it stops
+        // there. That is the three-slopes-and-a-step shape (a flat top flush
+        // against a divider). The same plateau against the OUTLINE was always
+        // allowed, and the RIDGE has permitted internal boundaries since the
+        // mono-pitch case; only the rect was stricter.
         let (lo, hi) = rect(2.0, 1.0, 4.0, 3.0);
-        assert_eq!(
-            validate_roof_rect_placement(&two, lo, hi).unwrap_err(),
-            RIDGE_END_ON_SHARED_BOUNDARY_MSG
+        assert!(
+            validate_roof_rect_placement(&two, lo, hi).is_ok(),
+            "a flat top may sit flush against a neighbouring ceiling area"
+        );
+        // STRADDLING it is still refused. Which guard fires depends on how it
+        // straddles — a rect running past its area's extent is caught by the
+        // LENGTH check first, a centre on the line by the centre-claims check —
+        // so pin the refusal, not the wording.
+        for (x0, y0, x1, y1) in [(2.5, 1.0, 4.5, 3.0), (3.0, 1.0, 5.0, 3.0)] {
+            let (lo, hi) = rect(x0, y0, x1, y1);
+            assert!(
+                validate_roof_rect_placement(&two, lo, hi).is_err(),
+                "a flat top spilling into the neighbouring area is refused"
+            );
+        }
+    }
+
+    /// THREE SLOPES AND A STEP, end to end: a "Divide ceiling" boundary splits
+    /// the ceiling, and a flat top drawn in one section FLUSH against that
+    /// boundary is accepted and lofts correctly — three sides slope down to the
+    /// walls, the fourth steps down to the neighbouring area.
+    ///
+    /// This is the shape the assessor asked for and could not draw. The same
+    /// plateau against the OUTLINE always worked (one claimant on a footprint
+    /// edge), so the tool behaved differently depending on whether the bounding
+    /// line was a wall or a section edge — with nothing to explain the
+    /// difference. The loft always built it correctly; only the placement
+    /// guard refused to accept the input.
+    #[test]
+    fn flat_top_flush_against_a_divider_is_accepted_and_lofts_a_step() {
+        // Two flat areas side by side, sharing the line x = 4.
+        let mut storey = storey_with_flat_roof(2.4);
+        storey.ceilings.regions.extend(
+            CeilingRegions::default_for_footprint(
+                vec![vec![
+                    Point2f64::new(4.0, 0.0),
+                    Point2f64::new(8.0, 0.0),
+                    Point2f64::new(8.0, 4.0),
+                    Point2f64::new(4.0, 4.0),
+                ]],
+                2.4,
+                Default::default(),
+            )
+            .regions,
+        );
+        // A plateau in the LEFT area, its right edge on the shared line.
+        let (lo, hi) = (Point2f64::new(1.0, 1.0), Point2f64::new(4.0, 3.0));
+        validate_roof_rect_placement(&storey, lo, hi)
+            .expect("a plateau may sit flush against the divider");
+
+        // And the loft builds the step: raise it and check the surface.
+        let apexes: Vec<CeilingApex> = [(1.0, 1.0), (4.0, 1.0), (4.0, 3.0), (1.0, 3.0)]
+            .into_iter()
+            .map(|(x, y)| CeilingApex {
+                point: Point2f64::new(x, y),
+                z_m: 3.0,
+            })
+            .collect();
+        let out = std::mem::take(&mut storey.ceilings).with_apexes(&apexes);
+        let plateau = out
+            .regions
+            .iter()
+            .filter(|r| r.flat_z().is_some_and(|z| (z - 3.0).abs() < 1e-9))
+            .count();
+        assert_eq!(plateau, 1, "one flat plateau at 3.0");
+        // The neighbour is untouched at the base height — that height gap IS
+        // the step at the divider.
+        assert!(
+            out.regions
+                .iter()
+                .any(|r| r.polygon.exterior.iter().all(|v| v.x >= 4.0 - 1e-9)
+                    && r.flat_z().is_some_and(|z| (z - 2.4).abs() < 1e-9)),
+            "the neighbouring area stays at 2.4 — the step"
+        );
+        // And sloped faces exist on the plateau's free sides.
+        assert!(
+            out.regions.iter().any(|r| r.flat_z().is_none()),
+            "the three free sides slope"
         );
     }
 

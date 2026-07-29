@@ -182,6 +182,11 @@ impl AppController {
                 if !self.ceiling_step_regions.contains_key(&i) {
                     self.load_ceiling_step_regions_for(i);
                 }
+                // Arriving on a storey that still owes its floor-level answers,
+                // ask again — the seed holds rather than assuming, so a prompt
+                // dismissed earlier must be re-offered or the storey stays flat
+                // over a stepped ceiling.
+                self.maybe_ask_unanswered_levels();
             }
             None => {
                 // "All storeys" overview — no editable shape. The active storey's
@@ -289,6 +294,7 @@ impl AppController {
         // it was opened on — never carried across a switch. (The inherited-
         // level SEED set stays: it's consumed at each storey's finalisation.)
         self.pending_new_storey = None;
+        self.pending_floor_levels = None;
         // Pending phase/step cuts hold the OUTGOING storey's geometry — a pick
         // after the switch would graft it onto the new storey.
         self.pending_phase_cut = None;
@@ -446,6 +452,7 @@ impl AppController {
         // So does an in-flight new-storey flow (`add_storey` re-opens it AFTER
         // this call when it's the one loading).
         self.pending_new_storey = None;
+        self.pending_floor_levels = None;
         // An in-flight ceiling-step line too (its coordinate is that storey's),
         // and an in-flight roof point / ridge for the same reason.
         self.pending_ceiling_step = None;

@@ -237,8 +237,9 @@ mod tests {
     /// its main ceiling at 2.548 and the left-rear zone (x 0.66–3.04,
     /// y 0.9–4.0 → 7.378 m²) stepped down to 1.958; upper storey over the
     /// same footprint, slab 0.2, floors seeded the way
-    /// `inherited_floor_levels` does: the anchor zone (over the low ceiling)
-    /// at level 0, the remainder at +0.59.
+    /// `inherited_floor_levels` does: the remainder (over the MAIN ceiling,
+    /// the largest area) is the datum at level 0, and the zone over the low
+    /// ceiling drops to −0.59.
     fn elmwood() -> Ber {
         let cid = ItemId::default();
         let footprint = square(0.0, 0.0, 8.0, 4.0);
@@ -264,8 +265,8 @@ mod tests {
             ..Storey::default()
         };
         let mut upper_floors = FloorRegions::from_vertex_lists(vec![zone, remainder], cid);
-        upper_floors.regions[0].level_m = 0.0; // the anchor zone (lowest ceiling)
-        upper_floors.regions[1].level_m = 0.59; // over the main ceiling
+        upper_floors.regions[0].level_m = -0.59; // over the LOW ceiling — below the datum
+        upper_floors.regions[1].level_m = 0.0; // over the main ceiling — the datum
         let upper = Storey {
             floors: upper_floors,
             ceilings: CeilingRegions::default_for_footprint(
@@ -282,8 +283,10 @@ mod tests {
         ber
     }
 
-    /// Correctly seeded levels (anchor zone 0, main +0.59) align both
-    /// junction zones exactly — no mismatch.
+    /// Correctly seeded levels (main 0, low zone −0.59) align both junction
+    /// zones exactly — no mismatch. THE negative-step check: a floor stepping
+    /// DOWN off its datum lands on its ceiling as exactly as one stepping up
+    /// did under the old lowest-anchor convention.
     #[test]
     fn elmwood_seeded_levels_align_no_mismatch() {
         let ber = elmwood();
@@ -291,13 +294,14 @@ mod tests {
         assert!(ms.is_empty(), "seeded junction is aligned: {ms:?}");
     }
 
-    /// The field damage: the anchor zone's floor hand-stepped to −0.247 puts
-    /// its underside 0.247 m BELOW the low ceiling it rests on → exactly one
-    /// mismatch zone, negative (overlap) gap, on the stepped-zone side.
+    /// The field damage: the low zone's floor hand-stepped 0.247 m past its
+    /// correct −0.59 puts its underside 0.247 m BELOW the low ceiling it rests
+    /// on → exactly one mismatch zone, negative (overlap) gap, on the
+    /// stepped-zone side.
     #[test]
     fn elmwood_hand_stepped_floor_flags_the_overlap_zone() {
         let mut ber = elmwood();
-        ber.storeys[1].floors.regions[0].level_m = -0.247;
+        ber.storeys[1].floors.regions[0].level_m = -0.837;
         let ms = junction_floor_ceiling_mismatches(&ber, &[true, true]);
         assert_eq!(ms.len(), 1, "one mismatching zone: {ms:?}");
         let m = &ms[0];
@@ -327,7 +331,7 @@ mod tests {
     #[test]
     fn floor_above_ceiling_flags_a_void_gap() {
         let mut ber = elmwood();
-        ber.storeys[1].floors.regions[0].level_m = 0.3;
+        ber.storeys[1].floors.regions[0].level_m = -0.29; // 0.3 above its correct −0.59
         let ms = junction_floor_ceiling_mismatches(&ber, &[true, true]);
         assert_eq!(ms.len(), 1);
         assert!(
@@ -342,7 +346,7 @@ mod tests {
     #[test]
     fn alignment_within_tolerance_is_clean() {
         let mut ber = elmwood();
-        ber.storeys[1].floors.regions[0].level_m = 0.5e-4;
+        ber.storeys[1].floors.regions[0].level_m = -0.59 + 0.5e-4;
         assert!(junction_floor_ceiling_mismatches(&ber, &[true, true]).is_empty());
     }
 
@@ -351,35 +355,37 @@ mod tests {
     #[test]
     fn undimensioned_pair_is_skipped() {
         let mut ber = elmwood();
-        ber.storeys[1].floors.regions[0].level_m = -0.247;
+        ber.storeys[1].floors.regions[0].level_m = -0.837;
         assert!(junction_floor_ceiling_mismatches(&ber, &[true, false]).is_empty());
         assert!(junction_floor_ceiling_mismatches(&ber, &[false, true]).is_empty());
         assert!(junction_floor_ceiling_mismatches(&ber, &[true]).is_empty());
     }
 
-    /// Display zones: every stepped region shows; the flagged one carries
-    /// the gap; the level-0 anchor zone without a mismatch is skipped.
+    /// Display zones: every stepped region shows; the flagged one carries the
+    /// gap; the level-0 datum region without a mismatch is skipped.
     #[test]
     fn step_zones_carry_levels_and_the_flagged_gap() {
-        // Seeded (aligned): only the +0.59 zone displays, no gap.
+        // Seeded (aligned): only the −0.59 zone displays, no gap — an UNflagged
+        // stepped region still shows.
         let ber = elmwood();
         let ms = junction_floor_ceiling_mismatches(&ber, &[true, true]);
         let zones = storey_floor_step_zones(&ber, 1, &ms);
         assert_eq!(zones.len(), 1, "only the stepped region displays");
-        assert!((zones[0].level_m - 0.59).abs() < 1e-9);
+        assert!((zones[0].level_m + 0.59).abs() < 1e-9);
         assert!(zones[0].gap_m.is_none());
         // Below storey: no steps, nothing to display.
         assert!(storey_floor_step_zones(&ber, 0, &ms).is_empty());
 
-        // Hand-stepped: the −0.247 zone displays too, flagged with its gap.
+        // Hand-stepped the DATUM region up 0.3: it now displays too, flagged,
+        // alongside the correctly-stepped −0.59 zone.
         let mut ber = elmwood();
-        ber.storeys[1].floors.regions[0].level_m = -0.247;
+        ber.storeys[1].floors.regions[1].level_m = 0.3;
         let ms = junction_floor_ceiling_mismatches(&ber, &[true, true]);
         let zones = storey_floor_step_zones(&ber, 1, &ms);
         assert_eq!(zones.len(), 2, "both stepped regions display");
         let flagged: Vec<_> = zones.iter().filter(|z| z.gap_m.is_some()).collect();
         assert_eq!(flagged.len(), 1, "exactly the mismatching zone is flagged");
-        assert!((flagged[0].level_m + 0.247).abs() < 1e-9);
-        assert!((flagged[0].gap_m.unwrap() + 0.247).abs() < 1e-9);
+        assert!((flagged[0].level_m - 0.3).abs() < 1e-9);
+        assert!((flagged[0].gap_m.unwrap() - 0.3).abs() < 1e-9);
     }
 }
