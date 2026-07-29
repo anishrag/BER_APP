@@ -3469,6 +3469,158 @@ fn uniform_partition_keeps_its_exposure_and_stays_changeable() {
     );
 }
 
+/// A SUBSET that has already forked is, from the second edit onward, a whole
+/// group of its own — so a further rename must NOT fork again and throw its
+/// evidence away.
+///
+/// This is only right if the decision reads a CURRENT record: the fork's durable
+/// write reaches the regions at the next materialize, and until then the record
+/// still shows the members inside the group they left. Hence the materialize at
+/// the top of each group-editing entry point, before region ids are captured.
+#[test]
+fn a_forked_subset_is_a_whole_group_for_the_next_edit() {
+    use ber_model::ber::structural::{ConstructionMakeup, ConstructionType, WallConstructionType};
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    let tmp = std::env::temp_dir().join(format!("ber_photos_{}", ItemId::default().0));
+    c.set_photos_dir(tmp.clone());
+    let src = std::env::temp_dir().join(format!("ber_src_{}.jpg", ItemId::default().0));
+    std::fs::write(&src, b"jpeg-bytes").unwrap();
+    set_only_kind(&mut c, SurfaceKind::Walls);
+    let mids = square_wall_mids(&c);
+
+    // THREE walls in one named group.
+    c.clear_structure_surface_selection();
+    for m in &mids[0..3] {
+        let id = wall_at_mid(&c, *m);
+        c.structure_selected.insert(id);
+    }
+    c.begin_structure_edit();
+    c.set_structure_group_attrs(
+        0,
+        ConstructionType::Wall(WallConstructionType::CavityWall),
+        ConstructionMakeup::Default,
+        ConstructionPhase::Original,
+    );
+    c.set_structure_group_name(0, "all three".to_string());
+    c.end_structure_edit();
+    c.materialize();
+
+    // Select TWO of them and fork with a rename.
+    c.clear_structure_surface_selection();
+    for m in &mids[0..2] {
+        let id = wall_at_mid(&c, *m);
+        c.structure_selected.insert(id);
+    }
+    c.begin_structure_edit();
+    c.set_structure_group_name(0, "the pair".to_string());
+    c.add_group_photo(0, &src, PhotoQuality::Full);
+
+    let photos_at = |c: &AppController, m: (f64, f64)| -> usize {
+        let id = wall_at_mid(c, m);
+        let rec = c.current_record.as_ref().unwrap();
+        rec.data.storeys[0]
+            .walls
+            .regions
+            .iter()
+            .find(|r| r.id == id)
+            .and_then(|r| rec.data.wall_construction(r.construction_id))
+            .map(|con| con.base.photos.len())
+            .unwrap_or(0)
+    };
+    assert_eq!(photos_at(&c, mids[0]), 1, "the fork has its photo");
+
+    // Rename the SAME pair again, still in this session. They are now a whole
+    // group, so this must be an in-place rename that KEEPS the photo.
+    c.set_structure_group_name(0, "the pair, renamed".to_string());
+    c.materialize();
+    assert_eq!(
+        photos_at(&c, mids[0]),
+        1,
+        "renaming an already-forked pair does NOT fork again and lose its photo"
+    );
+    assert_eq!(photos_at(&c, mids[1]), 1, "…for both members");
+    assert_eq!(
+        photos_at(&c, mids[2]),
+        0,
+        "and the wall left behind never had it"
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+    let _ = std::fs::remove_file(&src);
+}
+
+/// STRUCTURAL: the full-group-vs-subset decision is SNAPSHOTTED when the
+/// session opens, so nothing an edit does mid-session can flip it — including a
+/// materialize, which the render loop can run at any moment.
+///
+/// This is the seam behind a family of field bugs: the controller writes
+/// attributes to the DURABLE maps, and a region's `construction_id` only catches
+/// up at the next materialize, so any decision made by reading the record
+/// mid-edit reads the state before this session. Re-deriving the subset answer
+/// there threw away group names; the same seam put a photo on the wrong
+/// construction and dropped an insulation spec. Each was patched with a
+/// materialize at the call site; this removes the dependence instead.
+#[test]
+fn subset_decision_is_stable_across_a_mid_session_materialize() {
+    use ber_model::ber::structural::{ConstructionMakeup, ConstructionType, WallConstructionType};
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    set_only_kind(&mut c, SurfaceKind::Walls);
+    let mids = square_wall_mids(&c);
+
+    c.clear_structure_surface_selection();
+    for m in &mids[0..2] {
+        let id = wall_at_mid(&c, *m);
+        c.structure_selected.insert(id);
+    }
+    c.begin_structure_edit();
+    c.set_structure_group_attrs(
+        0,
+        ConstructionType::Wall(WallConstructionType::CavityWall),
+        ConstructionMakeup::Default,
+        ConstructionPhase::Original,
+    );
+    c.set_structure_group_name(0, "front pair".to_string());
+
+    // Materialize MID-SESSION — as a render frame does — then keep editing.
+    // Every one of these used to be a chance for the answer to flip.
+    for makeup in [
+        ConstructionMakeup::SomeInsulation,
+        ConstructionMakeup::Unknown,
+        ConstructionMakeup::Default,
+    ] {
+        c.materialize();
+        c.set_structure_group_attrs(
+            0,
+            ConstructionType::Wall(WallConstructionType::CavityWall),
+            makeup,
+            ConstructionPhase::Original,
+        );
+        assert_eq!(
+            c.structure_edit().unwrap().groups[0]
+                .explicit_name
+                .as_deref(),
+            Some("front pair"),
+            "the group's name survives every attribute change, materialize or not"
+        );
+    }
+
+    c.end_structure_edit();
+    c.materialize();
+    let rec = c.current_record.as_ref().unwrap();
+    for m in &mids[0..2] {
+        let id = wall_at_mid(&c, *m);
+        let con = rec.data.storeys[0]
+            .walls
+            .regions
+            .iter()
+            .find(|r| r.id == id)
+            .and_then(|r| rec.data.wall_construction(r.construction_id))
+            .expect("a construction");
+        assert_eq!(con.base.name.as_deref(), Some("front pair"));
+    }
+}
+
 /// FIELD REGRESSION (2026-07-29, 56 Elmwood Road): "I selected Unknown, typed a
 /// name, then selected default + some insulation — and the name reverted to
 /// Group 1."

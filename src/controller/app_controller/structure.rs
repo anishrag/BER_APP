@@ -837,6 +837,10 @@ impl AppController {
         if self.structure_selected.is_empty() {
             return;
         }
+        // The full-group-vs-subset snapshot below is only correct against a
+        // CURRENT record — the durable writes of a previous session reach a
+        // region's construction at the next materialize, not before.
+        self.materialize();
         let Some(record) = self.current_record.as_ref() else {
             return;
         };
@@ -1773,6 +1777,10 @@ impl AppController {
     /// group's constructions (`Ber::set_construction_name`). No undo snapshot
     /// (cosmetic); marks dirty so the rename persists.
     pub fn set_structure_group_name(&mut self, group: usize, name: String) {
+        // Bring the record current BEFORE capturing region ids: every decision
+        // below reads it, and a materialize afterwards would re-mint the ids we
+        // are about to hold. (No-op when nothing changed.)
+        self.materialize();
         let (kind, ids, group_attrs) = {
             let Some(e) = self.structure_edit.as_mut() else {
                 return;
@@ -2203,6 +2211,24 @@ impl AppController {
         makeup: ConstructionMakeup,
         phase: ConstructionPhase,
     ) {
+        // Photograph-FIRST evidence lives on a PROVISIONAL construction that only
+        // the resolved regions point at — no durable entry — so the materialize
+        // below drops the link. Take it off FIRST, and re-attach it after the
+        // write to whatever construction the new attributes resolve to.
+        let carried = {
+            let Some((k, ids)) = self
+                .structure_edit
+                .as_ref()
+                .and_then(|e| e.groups.get(group))
+                .map(|g| (g.ty.kind(), g.ids.clone()))
+            else {
+                return;
+            };
+            self.take_provisional_evidence(k, &ids)
+        };
+        // Bring the record current BEFORE capturing region ids — see
+        // `set_structure_group_name`. (No-op when nothing changed.)
+        self.materialize();
         let (ids, kind_before) = {
             let Some(e) = self.structure_edit.as_ref() else {
                 return;
@@ -2213,14 +2239,6 @@ impl AppController {
             (g.ids.clone(), g.ty.kind())
         };
         let full = self.group_covers_all_members(kind_before, &ids);
-        // Evidence recorded BEFORE the fabric was specified lives on a
-        // PROVISIONAL group (see `rehome_unspecified_group_for_evidence`). The
-        // resolve re-mints every region and re-establishes its construction from
-        // the durable maps, so that link does not survive the materialize below
-        // — the photos have to be carried across by hand, onto whichever
-        // construction the new attributes land on (an existing identical group,
-        // if there is one).
-        let carried = self.take_provisional_evidence(kind_before, &ids);
         let name = {
             let Some(e) = self.structure_edit.as_mut() else {
                 return;
@@ -2319,6 +2337,23 @@ impl AppController {
     /// construction(s) they currently reference — the full-group-vs-subset
     /// decision behind name carry and rename forking. A SUBSET edit must
     /// never mutate/carry what the stay-behind members share.
+    /// Whether `ids` cover EVERY resolved member of the construction(s) they
+    /// reference — the full-group-vs-subset decision behind name carry and
+    /// rename forking. A SUBSET edit must never mutate what the stay-behind
+    /// members share.
+    ///
+    /// CALLER CONTRACT: the record must be CURRENT. The controller writes
+    /// attributes to the DURABLE maps, and a region's `construction_id` only
+    /// catches up at the next materialize, so answering this against a stale
+    /// record answers about the state BEFORE this session — for a fresh
+    /// selection, the shared unclassified bucket, of which three walls are never
+    /// all thirty-three members. That read every attribute change as a subset
+    /// fork and threw the group's name away (field report, 56 Elmwood Road).
+    ///
+    /// The materialize cannot live in here: it RE-MINTS region ids, so it would
+    /// invalidate the very `ids` the caller is holding. It belongs at the TOP of
+    /// the operation, BEFORE the ids are captured — which is the rule every
+    /// group-editing entry point follows.
     fn group_covers_all_members(&self, kind: SurfaceKind, ids: &[ItemId]) -> bool {
         let Some(record) = self.current_record.as_ref() else {
             return false;
