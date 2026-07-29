@@ -3469,6 +3469,96 @@ fn uniform_partition_keeps_its_exposure_and_stays_changeable() {
     );
 }
 
+/// FIELD REGRESSION (2026-07-29, 56 Elmwood Road): "I selected Unknown, typed a
+/// name, then selected default + some insulation — and the name reverted to
+/// Group 1."
+///
+/// `set_structure_group_attrs` wipes the name when the edit is a SUBSET
+/// divergence: some members of an existing group splitting off, which is a new
+/// unnamed group. But `group_covers_all_members` asks whether the selection
+/// covers every member of the construction the regions CURRENTLY point at — and
+/// until a materialize, an unattributed selection still points at the shared
+/// unclassified bucket that every un-answered wall of that phase sits in. Three
+/// walls never cover thirty-three, so every edit on a fresh selection looked
+/// like a divergence and threw the name away.
+///
+/// An unclassified construction is not a group, so there is nothing to diverge
+/// FROM: such a selection is forming its own group and counts as full.
+#[test]
+fn field_setting_makeup_after_naming_keeps_the_name() {
+    use ber_model::ber::structural::{ConstructionMakeup, ConstructionType, WallConstructionType};
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    set_only_kind(&mut c, SurfaceKind::Walls);
+    let mids = square_wall_mids(&c);
+
+    // Three of the four walls — the rest stay on the unclassified bucket.
+    c.clear_structure_surface_selection();
+    for m in &mids[0..3] {
+        let id = wall_at_mid(&c, *m);
+        c.structure_selected.insert(id);
+    }
+    c.begin_structure_edit();
+
+    // 1. type, 2. name, 3. make-up — the assessor's order.
+    c.set_structure_group_attrs(
+        0,
+        ConstructionType::Wall(WallConstructionType::Unknown),
+        ConstructionMakeup::Tbd,
+        Default::default(),
+    );
+    c.set_structure_group_name(0, "orig walls".to_string());
+    assert_eq!(
+        c.structure_edit().unwrap().groups[0]
+            .explicit_name
+            .as_deref(),
+        Some("orig walls"),
+        "the typed name sticks"
+    );
+
+    c.set_structure_group_attrs(
+        0,
+        ConstructionType::Wall(WallConstructionType::Unknown),
+        ConstructionMakeup::SomeInsulation,
+        Default::default(),
+    );
+    assert_eq!(
+        c.structure_edit().unwrap().groups[0]
+            .explicit_name
+            .as_deref(),
+        Some("orig walls"),
+        "setting the MAKE-UP must not throw the name away (it reverted to \
+         \"Group 1\" because the still-unattributed selection was mistaken for a \
+         subset of the unclassified bucket)"
+    );
+    assert_eq!(
+        c.structure_edit().unwrap().groups[0].name,
+        "orig walls",
+        "…and the displayed name follows"
+    );
+
+    // It survives to the record.
+    c.end_structure_edit();
+    c.materialize();
+    let rec = c.current_record.as_ref().unwrap();
+    for m in &mids[0..3] {
+        let id = wall_at_mid(&c, *m);
+        let con = rec.data.storeys[0]
+            .walls
+            .regions
+            .iter()
+            .find(|r| r.id == id)
+            .and_then(|r| rec.data.wall_construction(r.construction_id))
+            .expect("a construction");
+        assert_eq!(con.base.name.as_deref(), Some("orig walls"));
+        assert_eq!(con.construction_type, WallConstructionType::Unknown);
+        assert_eq!(
+            con.base.construction_makeup,
+            ConstructionMakeup::SomeInsulation
+        );
+    }
+}
+
 // ─── CHARACTERISATION: what the Structure editor groups on ─────────────────
 //
 // These pin the CURRENT, INTENDED behaviour of the group boxes so the planned

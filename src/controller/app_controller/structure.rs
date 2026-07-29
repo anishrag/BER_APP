@@ -2325,6 +2325,21 @@ impl AppController {
         };
         let id_set: HashSet<ItemId> = ids.iter().copied().collect();
         self.construction_ids_for(kind, ids).iter().all(|cid| {
+            // An UNCLASSIFIED construction is not a group — it is the bucket
+            // every un-answered surface of its phase shares — so there is
+            // nothing to be a subset OF. A selection sitting on it is forming
+            // its own group, which is a full-group edit.
+            //
+            // Without this, a fresh selection was always "diverging": the durable
+            // attribute write only reaches a region's construction at the next
+            // materialize, so mid-edit the walls still pointed at the bucket, and
+            // three walls never cover thirty-three. Every attribute change was
+            // treated as a subset fork and threw the group's NAME away (field
+            // report, 56 Elmwood Road: type, then name, then make-up — and the
+            // name reverted to "Group 1").
+            if record.data.is_unclassified_construction(*cid) {
+                return true;
+            }
             record
                 .data
                 .construction_member_ids(kind, *cid)
