@@ -3059,6 +3059,213 @@ fn specify_layers_saves_to_library_and_builds_up() {
     assert_eq!(c.structure_edit().unwrap().specifying, None);
 }
 
+// ─── CHARACTERISATION: what the Structure editor groups on ─────────────────
+//
+// These pin the CURRENT, INTENDED behaviour of the group boxes so the planned
+// construction-identity rework (stable group ids; "unattributed" meaning NO
+// group) cannot silently change what the assessor sees. They are not bug
+// regressions — they are the contract the rework must preserve.
+//
+// The editor's box key is `(type, make-up, phase, exposure, explicit_name,
+// inferred_roof_type)` (`begin_structure_edit`). Note it is NOT the
+// construction's identity, which is only `(type, make-up, phase, name)` —
+// exposure and the inferred roof class are view-level splitters. Any rework
+// that keys boxes by group id must reproduce exactly these splits.
+
+/// Wall midpoints of the 10×10 fixture, in `perimeter_walls()` order.
+fn square_wall_mids(c: &AppController) -> Vec<(f64, f64)> {
+    c.document
+        .outline
+        .floor_plan
+        .perimeter_walls()
+        .into_iter()
+        .map(|(_, a, b)| (((a.x + b.x) * 0.5) as f64, ((a.y + b.y) * 0.5) as f64))
+        .collect()
+}
+
+/// The resolved wall region whose base midpoint is `mid`.
+fn wall_at_mid(c: &AppController, mid: (f64, f64)) -> ItemId {
+    c.current_record.as_ref().unwrap().data.storeys[0]
+        .walls
+        .regions
+        .iter()
+        .find(|r| {
+            r.base_edge().is_some_and(|(e0, e1)| {
+                ((e0.x + e1.x) * 0.5 - mid.0).abs() < 1e-3
+                    && ((e0.y + e1.y) * 0.5 - mid.1).abs() < 1e-3
+            })
+        })
+        .unwrap_or_else(|| panic!("no wall at {mid:?}"))
+        .id
+}
+
+/// Attribute the wall at `mid` on its own, optionally naming the group.
+fn attribute_wall_at(
+    c: &mut AppController,
+    mid: (f64, f64),
+    ty: ber_model::ber::structural::WallConstructionType,
+    makeup: ber_model::ber::structural::ConstructionMakeup,
+    phase: ConstructionPhase,
+    name: Option<&str>,
+) {
+    let id = wall_at_mid(c, mid);
+    c.clear_structure_surface_selection();
+    c.structure_selected.insert(id);
+    c.begin_structure_edit();
+    c.set_structure_group_attrs(
+        0,
+        ber_model::ber::structural::ConstructionType::Wall(ty),
+        makeup,
+        phase,
+    );
+    if let Some(n) = name {
+        c.set_structure_group_name(0, n.to_string());
+    }
+    c.end_structure_edit();
+    c.materialize();
+}
+
+/// CONTRACT: attributes identical IN EVERY AXIS — including the NAME — are ONE
+/// group. Two walls attributed SEPARATELY, never selected together, still land
+/// in a single box sharing one construction.
+///
+/// Today this falls out of content-addressed identity
+/// (`ensure_wall_construction_named` find-or-creates on the fabric tuple).
+/// Under stable group ids it must become an explicit auto-join at attribution
+/// time — same outcome, deliberately rather than accidentally.
+#[test]
+fn characterise_identical_attributes_including_name_are_one_group() {
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    set_only_kind(&mut c, SurfaceKind::Walls);
+    let mids = square_wall_mids(&c);
+
+    for m in [mids[0], mids[1]] {
+        attribute_wall_at(
+            &mut c,
+            m,
+            ber_model::ber::structural::WallConstructionType::CavityWall,
+            ber_model::ber::structural::ConstructionMakeup::Default,
+            ConstructionPhase::Original,
+            Some("front and side"),
+        );
+    }
+
+    let cid = |c: &AppController, m: (f64, f64)| {
+        let id = wall_at_mid(c, m);
+        c.current_record.as_ref().unwrap().data.storeys[0]
+            .walls
+            .regions
+            .iter()
+            .find(|r| r.id == id)
+            .unwrap()
+            .construction_id
+    };
+    assert_eq!(
+        cid(&c, mids[0]),
+        cid(&c, mids[1]),
+        "identical attributes (incl. name) share ONE construction, even though \
+         the walls were attributed in separate sessions of the editor"
+    );
+
+    // …and they present as ONE box.
+    c.clear_structure_surface_selection();
+    for m in [mids[0], mids[1]] {
+        let id = wall_at_mid(&c, m);
+        c.structure_selected.insert(id);
+    }
+    c.begin_structure_edit();
+    let e = c.structure_edit().unwrap();
+    assert_eq!(e.groups.len(), 1, "one box for the two identical walls");
+    assert_eq!(e.groups[0].ids.len(), 2);
+    assert_eq!(e.groups[0].explicit_name.as_deref(), Some("front and side"));
+}
+
+/// CONTRACT: every axis of the box key SPLITS. Same fabric but a different
+/// NAME, or a different PHASE, or a different EXPOSURE, is a different box —
+/// so "Select All" shows the assessor their existing grouping, not one lump.
+#[test]
+fn characterise_group_boxes_split_on_name_phase_and_exposure() {
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    let mids = square_wall_mids(&c);
+
+    // Wall 2 gets a DIFFERENT exposure; the rest stay Exposed.
+    c.set_exposure_mode(true);
+    for (i, m) in mids.iter().enumerate() {
+        c.exposure_pointer_down(m.0, m.1, 0.5);
+        c.set_wall_exposure(if i == 2 {
+            WallExposure::SemiExposed
+        } else {
+            WallExposure::Exposed
+        });
+    }
+    c.set_exposure_mode(false);
+    c.materialize();
+    set_only_kind(&mut c, SurfaceKind::Walls);
+
+    // Same fabric throughout; walls 0/1 differ only by NAME and PHASE, wall 3
+    // only by NAME. Wall 2 is left unattributed with its own exposure.
+    attribute_wall_at(
+        &mut c,
+        mids[0],
+        ber_model::ber::structural::WallConstructionType::CavityWall,
+        ber_model::ber::structural::ConstructionMakeup::Default,
+        ConstructionPhase::Original,
+        Some("A"),
+    );
+    attribute_wall_at(
+        &mut c,
+        mids[1],
+        ber_model::ber::structural::WallConstructionType::CavityWall,
+        ber_model::ber::structural::ConstructionMakeup::Default,
+        ConstructionPhase::Extension1,
+        Some("A ext"),
+    );
+    attribute_wall_at(
+        &mut c,
+        mids[3],
+        ber_model::ber::structural::WallConstructionType::CavityWall,
+        ber_model::ber::structural::ConstructionMakeup::Default,
+        ConstructionPhase::Original,
+        Some("B"),
+    );
+
+    c.set_structure_select_mode(Some(SelectMode::All));
+    c.begin_structure_edit();
+    let e = c.structure_edit().unwrap();
+    let mut seen: Vec<(String, String)> = e
+        .groups
+        .iter()
+        .map(|g| {
+            (
+                g.explicit_name.clone().unwrap_or_else(|| "-".into()),
+                format!("{:?}/{:?}", g.phase, g.exposure),
+            )
+        })
+        .collect();
+    seen.sort();
+    assert_eq!(
+        seen.len(),
+        4,
+        "four boxes: A(Original), A ext(Extension1), B(Original) and the \
+         unattributed SemiExposed wall — got {seen:?}"
+    );
+    let names: Vec<&str> = seen.iter().map(|(n, _)| n.as_str()).collect();
+    assert!(
+        names.contains(&"A") && names.contains(&"A ext") && names.contains(&"B"),
+        "the NAME axis splits same-fabric groups: {seen:?}"
+    );
+    assert!(
+        seen.iter().any(|(_, k)| k.contains("Extension1")),
+        "the PHASE axis splits: {seen:?}"
+    );
+    assert!(
+        seen.iter().any(|(_, k)| k.contains("SemiExposed")),
+        "the EXPOSURE axis splits: {seen:?}"
+    );
+}
+
 /// FIELD REGRESSION (2026-07-29, 56 Elmwood Road, "I renamed it and all the
 /// pictures disappeared"): RESETTING an attributed group carried its photos onto
 /// the shared UNCLASSIFIED construction, where they surfaced on every un-answered
