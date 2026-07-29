@@ -494,6 +494,17 @@ impl AppController {
         self.seed_riser_exposure_from_record();
         self.seed_horizontal_exposure_from_record();
         self.seed_construction_stores_from_record();
+        // REPAIR (2026-07-29): records written before the "unclassified carries
+        // no evidence" guards have photos sitting on the bucket every
+        // un-answered surface of a phase shares — pictures on walls that were
+        // never photographed. Drop the attachment (the files stay on disk) so
+        // the record opens clean. A no-op once nothing is mis-attached.
+        if let Some(record) = self.current_record.as_mut() {
+            let n = record.data.strip_evidence_from_unclassified();
+            if n > 0 {
+                log::info!("stripped stray evidence from {n} unclassified construction(s)");
+            }
+        }
         // Recompose phase-tagged ceilings from their durable inputs (drops a stale
         // pre-fix phase-induced split); the caller's re-resolve re-applies the
         // clean carve and re-stamps the exposures seeded just above.

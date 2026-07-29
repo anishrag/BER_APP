@@ -1289,6 +1289,47 @@ impl Ber {
         false
     }
 
+    /// Strip evidence (and a ceiling's insulation spec) from every UNCLASSIFIED
+    /// construction, returning how many constructions were cleaned. The repair
+    /// arm of the "unclassified carries no evidence" invariant: records written
+    /// before the guards existed have photos sitting on the bucket that every
+    /// un-answered surface of a phase shares, where they show up on walls the
+    /// assessor never photographed.
+    ///
+    /// The photo FILES are untouched on disk — only the attachment is dropped,
+    /// so evidence can be re-attached to the group it belongs to.
+    pub fn strip_evidence_from_unclassified(&mut self) -> usize {
+        let ids: Vec<ItemId> = self
+            .wall_constructions
+            .iter()
+            .map(|c| c.base.id)
+            .chain(self.floor_constructions.iter().map(|c| c.base.id))
+            .chain(self.ceiling_constructions.iter().map(|c| c.base.id))
+            .filter(|&id| self.is_unclassified_construction(id))
+            .collect();
+        let mut n = 0;
+        for id in ids {
+            let cleared = self
+                .construction_base_mut(id)
+                .map(|b| {
+                    let had = !b.photos.is_empty();
+                    b.photos.clear();
+                    had
+                })
+                .unwrap_or(false);
+            let insul = self
+                .ceiling_constructions
+                .iter_mut()
+                .find(|c| c.base.id == id)
+                .map(|c| c.insulation.take().is_some())
+                .unwrap_or(false);
+            if cleared || insul {
+                n += 1;
+            }
+        }
+        n
+    }
+
     pub fn carry_evidence_from_orphans(&mut self, repoints: &[(ItemId, ItemId)]) {
         if repoints.is_empty() {
             return;

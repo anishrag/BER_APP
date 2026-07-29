@@ -3059,6 +3059,52 @@ fn specify_layers_saves_to_library_and_builds_up() {
     assert_eq!(c.structure_edit().unwrap().specifying, None);
 }
 
+/// The load-time REPAIR arm of "unclassified carries no evidence": a record
+/// written before the guards existed has photos attached to the bucket every
+/// un-answered surface of a phase shares, so they appear on walls that were
+/// never photographed. Opening the record strips the ATTACHMENT (the files stay
+/// on disk); an attributed group's evidence is left alone.
+#[test]
+fn stray_evidence_on_the_unclassified_bucket_is_stripped() {
+    use ber_model::ber::structural::{ConstructionMakeup, WallConstructionType};
+    let mut ber = ber_model::ber::ber_struct::Ber::default();
+    // The shared bucket: nothing decided, but PHASE-stamped (the shape a real
+    // record has — never the `Unassigned` default).
+    let bucket = ber.ensure_wall_construction(
+        WallConstructionType::Uninitialised,
+        ConstructionMakeup::Tbd,
+        ConstructionPhase::Original,
+    );
+    // A real group the assessor built.
+    let real = ber.ensure_wall_construction(
+        WallConstructionType::ConcreteHollowBlocks,
+        ConstructionMakeup::SomeInsulation,
+        ConstructionPhase::Original,
+    );
+    for cid in [bucket, real] {
+        ber.add_construction_photo(SurfaceKind::Walls, cid, Default::default());
+    }
+    assert!(ber.is_unclassified_construction(bucket));
+    assert!(!ber.is_unclassified_construction(real));
+
+    assert_eq!(ber.strip_evidence_from_unclassified(), 1, "one cleaned");
+    assert!(
+        ber.wall_construction(bucket)
+            .unwrap()
+            .base
+            .photos
+            .is_empty(),
+        "the bucket's stray evidence is detached"
+    );
+    assert_eq!(
+        ber.wall_construction(real).unwrap().base.photos.len(),
+        1,
+        "an attributed group keeps its own evidence"
+    );
+    // Idempotent.
+    assert_eq!(ber.strip_evidence_from_unclassified(), 0);
+}
+
 // ─── CHARACTERISATION: what the Structure editor groups on ─────────────────
 //
 // These pin the CURRENT, INTENDED behaviour of the group boxes so the planned
