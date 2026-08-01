@@ -43,6 +43,37 @@ pub struct HeatingSystem {
     /// [`Ber::sync_heating_system_from_objects`](crate::ber::ber_struct::Ber::sync_heating_system_from_objects).
     #[serde(default)]
     pub secondary_heating: Vec<HeatingSystemType>,
+    /// The heat-source APPLIANCE's documentation (BERresolve Certificates
+    /// stage): a heat pump's datasheet (COP/SPF), a boiler's efficiency
+    /// document — whatever backs the DEAP heating inputs when they are
+    /// assembled. `#[serde(default)]` so older records load.
+    #[serde(default)]
+    pub certificates: Vec<crate::ber::common::Evidence>,
+    /// "Skip for now" from the resolver's Certificates stage — see
+    /// [`crate::ber::fenestration::WindowType::cert_skipped`].
+    #[serde(default)]
+    pub cert_skipped: bool,
+}
+
+/// Office-resolved SOLAR PV details (BERresolve Certificates stage). The
+/// survey pins the array — placement, panel counts, photos — but the array's
+/// RATING lives in the installation's documentation, so the office reads the
+/// total kWp off the panel datasheet / installer cert and attaches the
+/// documents here. Consumed by the report's renewables section (the record
+/// pre-answers its own `solar-pv-kwp` query). All-default so records from
+/// before the struct load empty.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SolarPvResolution {
+    /// Total installed capacity (kWp), from the documentation.
+    #[serde(default)]
+    pub kwp: Option<f32>,
+    /// The panel datasheet / installer cert documents.
+    #[serde(default)]
+    pub certificates: Vec<crate::ber::common::Evidence>,
+    /// "Skip for now" from the resolver's Certificates stage — see
+    /// [`crate::ber::fenestration::WindowType::cert_skipped`].
+    #[serde(default)]
+    pub cert_skipped: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -104,6 +135,10 @@ pub struct VentilationSystem {
     /// The unit's certificate / datasheet documents.
     #[serde(default)]
     pub certificates: Vec<crate::ber::common::Evidence>,
+    /// "Skip for now" from the resolver's Certificates stage — the central
+    /// unit's cert deliberately deferred (see `WindowType::cert_skipped`).
+    #[serde(default)]
+    pub cert_skipped: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

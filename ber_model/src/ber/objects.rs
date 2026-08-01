@@ -229,6 +229,47 @@ pub enum SolarPanelKind {
     Battery,
 }
 
+/// An 8-way compass sector the ASSESSOR enters (e.g. the roof side a PV
+/// array faces — read off the aligned satellite view, not derived).
+/// String-serialized ("SE").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Compass8 {
+    N,
+    NE,
+    E,
+    SE,
+    S,
+    SW,
+    W,
+    NW,
+}
+
+impl Compass8 {
+    pub const ALL: [Compass8; 8] = [
+        Compass8::N,
+        Compass8::NE,
+        Compass8::E,
+        Compass8::SE,
+        Compass8::S,
+        Compass8::SW,
+        Compass8::W,
+        Compass8::NW,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Compass8::N => "N",
+            Compass8::NE => "NE",
+            Compass8::E => "E",
+            Compass8::SE => "SE",
+            Compass8::S => "S",
+            Compass8::SW => "SW",
+            Compass8::W => "W",
+            Compass8::NW => "NW",
+        }
+    }
+}
+
 /// A concrete recorded object kind: a category plus its subtype (where one
 /// applies). The single source of an object's identity + label.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -441,6 +482,17 @@ pub struct BuildingObject {
     /// `HeatingSystem.separate_hot_water`.
     #[serde(default)]
     pub separate_hw_control: bool,
+    /// Watt-peak rating of ONE panel (e.g. 465), read off the panel label /
+    /// datasheet — recorded for a `SolarPanel(Photovoltaic)` object; `None`
+    /// for every other kind. ADDITIVE serde field (2026-07): older records
+    /// never contain it and load as `None`.
+    #[serde(default)]
+    pub panel_wp: Option<f32>,
+    /// The compass side the HOST ROOF PLANE faces, ENTERED by the assessor
+    /// (not derived) — recorded for a `SolarPanel(Photovoltaic)` object.
+    /// ADDITIVE serde field (2026-07).
+    #[serde(default)]
+    pub roof_faces: Option<Compass8>,
 }
 
 impl BuildingObject {
@@ -453,6 +505,8 @@ impl BuildingObject {
             kwh: None,
             photos: Vec::new(),
             separate_hw_control: false,
+            panel_wp: None,
+            roof_faces: None,
         }
     }
 }

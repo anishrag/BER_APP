@@ -9,6 +9,25 @@
 //!
 //! Depends on `egui` (not `eframe`) so consumers don't pull a window stack.
 
+/// Bracket a DETAIL annotation run (dimension strings, per-corner heights…)
+/// with the shared sentinel shapes from [`domain::figure`]: invisible on every
+/// live renderer, recognised by the report's SVG serializer, which wraps the
+/// run in a `<g class="fig-detail">` the page can trim to label-only.
+pub fn detail_marker(painter: &egui::Painter, on: bool) {
+    let c = if on {
+        domain::figure::DETAIL_ON_RGBA
+    } else {
+        domain::figure::DETAIL_OFF_RGBA
+    };
+    painter.add(egui::Shape::line_segment(
+        [egui::Pos2::ZERO, egui::Pos2::ZERO],
+        egui::Stroke::new(
+            0.01,
+            egui::Color32::from_rgba_premultiplied(c[0], c[1], c[2], c[3]),
+        ),
+    ));
+}
+
 pub mod elevation;
 pub mod full_house_3d;
 pub mod pick_3d;

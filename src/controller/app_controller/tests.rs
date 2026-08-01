@@ -25980,6 +25980,13 @@ fn plan_area3(ext: &[domain::points::Point3f64]) -> f64 {
 fn dump_797a7ff5_no_degenerate_sliver_after_resolve() {
     let dump = "/tmp/claude-1000/-home-anishrag-WORK-BER-APP-Branch2/\
 c3838f4c-8dc1-4e86-92de-029cef93c73d/scratchpad/bugs-new6/07-14T1534_797a7ff5/state.json";
+    // The dump lives in a session /tmp scratchpad — when it's gone (fresh
+    // boot, another machine) skip rather than fail; the guard still runs
+    // wherever the capture exists.
+    if !std::path::Path::new(dump).exists() {
+        eprintln!("dump_797a7ff5: {dump} not present — skipped");
+        return;
+    }
     let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
     assert!(c.load_checkpoint_from(dump), "checkpoint loads");
 

@@ -184,6 +184,7 @@ fn create_minimal_ber(id: ItemId) -> Ber {
             year_evidence: Default::default(),
             booking_sourced: Default::default(),
         },
+        solar_pv: Default::default(),
         heating_system: HeatingSystem {
             id: ItemId::default(),
             system_type: HeatingSystemType::GasBoiler,
@@ -198,6 +199,8 @@ fn create_minimal_ber(id: ItemId) -> Ber {
             separate_hot_water: true,
             distribution: Default::default(),
             secondary_heating: Vec::new(),
+            certificates: Default::default(),
+            cert_skipped: false,
         },
         ventilation_system: VentilationSystem {
             id: ItemId::default(),

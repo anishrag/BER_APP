@@ -89,6 +89,13 @@ pub struct WindowType {
     /// CERTIFIED g-value (solar transmittance, 0..1) from the same cert.
     #[serde(default)]
     pub assessed_g_value: Option<f32>,
+    /// "Skip for now" ticked in the resolver's Certificates stage — the
+    /// office deliberately deferred this type's certificate (the row stops
+    /// nagging "unresolved"; the report still queries the missing values, so
+    /// nothing is silently dropped). Additive `serde(default)` — records
+    /// from before the field load unskipped.
+    #[serde(default)]
+    pub cert_skipped: bool,
 }
 
 impl WindowType {

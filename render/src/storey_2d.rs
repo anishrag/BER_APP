@@ -632,6 +632,9 @@ fn draw_dimensions(
         let mid = t.apply(mid_x, mid_y);
         // Polygon is in meters after the first user dimension; before that,
         // no walls are in `edges_to_label` so the unit label is always meters here.
+        // Detail tier: the report trims dimension strings to declutter the
+        // figure (hover / checkbox restores; print always shows them).
+        crate::detail_marker(painter, true);
         painter.text(
             mid,
             egui::Align2::CENTER_CENTER,
@@ -639,6 +642,7 @@ fn draw_dimensions(
             egui::FontId::monospace(11.0),
             style::DIMENSION_TEXT,
         );
+        crate::detail_marker(painter, false);
     }
 }
 
@@ -657,6 +661,8 @@ fn draw_corner_height_labels(
             continue;
         }
         let pos = t.apply(v.x, v.y) + egui::Vec2::new(0.0, -12.0);
+        // Detail tier — see the dimension labels above.
+        crate::detail_marker(painter, true);
         painter.text(
             pos,
             egui::Align2::CENTER_BOTTOM,
@@ -664,6 +670,7 @@ fn draw_corner_height_labels(
             egui::FontId::proportional(9.0),
             style::ROOF_LINE,
         );
+        crate::detail_marker(painter, false);
     }
 }
 

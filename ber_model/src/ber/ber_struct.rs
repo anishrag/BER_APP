@@ -97,6 +97,10 @@ pub struct Ber {
     pub construction_phases: ConstructionPhases,
     pub heating_system: HeatingSystem,
     pub ventilation_system: VentilationSystem,
+    /// Office-resolved solar PV (rating + documents) — see
+    /// [`SolarPvResolution`](crate::ber::systems::SolarPvResolution).
+    #[serde(default)]
+    pub solar_pv: crate::ber::systems::SolarPvResolution,
     pub sheltered_sides: f32,
     pub number_of_storeys: i32,
     pub storeys: Vec<Storey>,
@@ -698,6 +702,7 @@ impl Ber {
             notes: None,
             assessed_u_value: None,
             assessed_g_value: None,
+            cert_skipped: false,
         });
         id
     }
