@@ -238,6 +238,15 @@ public class MainActivity extends GameActivity {
         }
         connectivityManager = null;
         networkCallback = null;
+        // The Rust event loop (eframe/winit) parks instead of returning from
+        // android_main when the activity dies, so android-activity's
+        // ndk-context is never released. Recreating the activity in this same
+        // process would re-run the native glue and abort (ndk-context
+        // double-init panic). End the process here so every activity launch is
+        // a cold start; all app state is persisted per-mutation, nothing is
+        // lost.
+        Log.i(TAG, "lifecycle: activity destroyed — exiting process for a clean recreate");
+        System.exit(0);
     }
 
     @Override

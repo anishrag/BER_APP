@@ -45,10 +45,15 @@
              android_main. MainActivity is a thin GameActivity subclass adding
              immersive mode and the camera/Bluetooth/audio JNI bridges. The
              theme must be an AppCompat descendant (GameActivity extends
-             AppCompatActivity) — see res/values/themes.xml. -->
+             AppCompatActivity) — see res/values/themes.xml.
+             launchMode=singleTask: a second activity instance in a live
+             process would re-run the native glue and abort (ndk-context can
+             only initialize once per process; the Rust loop never returns to
+             release it — see MainActivity.onDestroy). -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:launchMode="singleTask"
             android:theme="@style/BerAppTheme"
             android:screenOrientation="sensor"
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|screenLayout|uiMode">
