@@ -493,6 +493,12 @@ pub struct BuildingObject {
     /// ADDITIVE serde field (2026-07).
     #[serde(default)]
     pub roof_faces: Option<Compass8>,
+    /// The array's OVERSHADING, assessed separately from windows and at the
+    /// collector's tilt (DEAP Table H3: Heavy / Significant / Modest / None
+    /// or very little — the shared 4-level scale) — recorded for a
+    /// `SolarPanel(Photovoltaic)` object. ADDITIVE serde field (2026-08).
+    #[serde(default)]
+    pub overshading: Option<crate::ber::fenestration::Overshading>,
 }
 
 impl BuildingObject {
@@ -507,6 +513,7 @@ impl BuildingObject {
             separate_hw_control: false,
             panel_wp: None,
             roof_faces: None,
+            overshading: None,
         }
     }
 }
