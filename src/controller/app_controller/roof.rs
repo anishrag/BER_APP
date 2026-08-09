@@ -72,6 +72,10 @@ pub struct PendingRoofSection {
     pub needs_pitch: bool,
     pub candidates: Vec<GeneratedRoof>,
     pub selected: usize,
+    /// Manual LATERAL offset of the selected candidate's ridge (metres on the
+    /// cross axis) — dragged or set by "centre between 2 points". Reset when
+    /// the candidates regenerate or the selection browses.
+    pub ridge_shift_m: f64,
 }
 
 /// UI-facing snapshot of the pending Stage-B section (owned data only).
@@ -88,6 +92,10 @@ pub struct PendingRoofSectionView {
     pub needs_pitch: bool,
     /// "ridge east–west" / "ridge north–south" for the Flip button.
     pub axis_label: &'static str,
+    /// The "centre between 2 points" pick is live (canvas taps route to it).
+    pub centre_picking: bool,
+    /// The first picked (snapped) point, drawn as a marker.
+    pub centre_first: Option<(f64, f64)>,
 }
 
 /// One storey's footprint for the roof-context overlay: its outline ring (world
@@ -555,6 +563,167 @@ impl AppController {
         Ok(())
     }
 
+    /// The candidate's ridge with a lateral `shift` applied (cross-axis).
+    fn shifted_ridge_line(c: &GeneratedRoof, shift: f64) -> (Point2f64, Point2f64) {
+        let (mut a, mut b) = c.ridge;
+        match c.axis {
+            RidgeAxis::X => {
+                a.y += shift;
+                b.y += shift;
+            }
+            RidgeAxis::Y => {
+                a.x += shift;
+                b.x += shift;
+            }
+        }
+        (a, b)
+    }
+
+    /// The selected candidate's cross-axis coordinate of a world point, plus
+    /// the candidate's own (unshifted) ridge lateral — the drag math.
+    fn ridge_lateral_of(c: &GeneratedRoof, w: (f64, f64)) -> (f64, f64) {
+        match c.axis {
+            RidgeAxis::X => (w.1, c.ridge.0.y),
+            RidgeAxis::Y => (w.0, c.ridge.0.x),
+        }
+    }
+
+    /// Primary press while a Stage-B section is pending: grab the dashed
+    /// ridge when the press lands within `tol` (world metres) of it.
+    pub fn roof_ridge_pointer_down(&mut self, wx: f64, wy: f64, tol: f64) {
+        let Some(p) = self.pending_roof_section.as_ref() else {
+            return;
+        };
+        if p.needs_pitch {
+            return;
+        }
+        let Some(c) = p.candidates.get(p.selected) else {
+            return;
+        };
+        let (a, b) = Self::shifted_ridge_line(c, p.ridge_shift_m);
+        let d = domain::points::point_to_segment_distance(wx, wy, a.x, a.y, b.x, b.y);
+        if d <= tol {
+            self.roof_ridge_drag = true;
+        }
+    }
+
+    /// Drag the grabbed ridge laterally, snapping to the section's own wall
+    /// lines (every selected-ring coordinate on the cross axis) and clamped
+    /// inside the section's extent.
+    pub fn roof_ridge_pointer_drag(&mut self, wx: f64, wy: f64) {
+        if !self.roof_ridge_drag {
+            return;
+        }
+        let snap_tol = self.snap_tol_carve() as f64;
+        let rings = self.roof_selected_rings_or_committed();
+        let Some(p) = self.pending_roof_section.as_mut() else {
+            return;
+        };
+        let Some(c) = p.candidates.get(p.selected) else {
+            return;
+        };
+        let (pointer_lat, ridge_lat) = Self::ridge_lateral_of(c, (wx, wy));
+        // Snap candidates + extent from the section's rings on the cross axis.
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        let mut cands: Vec<f64> = vec![ridge_lat];
+        for ring in &rings {
+            for pt in ring {
+                let lat = match c.axis {
+                    RidgeAxis::X => pt.y,
+                    RidgeAxis::Y => pt.x,
+                };
+                lo = lo.min(lat);
+                hi = hi.max(lat);
+                cands.push(lat);
+            }
+        }
+        let mut target = if lo <= hi {
+            pointer_lat.clamp(lo, hi)
+        } else {
+            pointer_lat
+        };
+        for cand in cands {
+            if (cand - target).abs() <= snap_tol {
+                target = cand;
+                break;
+            }
+        }
+        p.ridge_shift_m = target - ridge_lat;
+    }
+
+    pub fn roof_ridge_pointer_up(&mut self) {
+        self.roof_ridge_drag = false;
+    }
+
+    /// Open the "centre between 2 points" pick: the next two (snapped) canvas
+    /// taps centre the ridge midway between them on the cross axis.
+    pub fn begin_roof_centre_pick(&mut self) {
+        if self
+            .pending_roof_section
+            .as_ref()
+            .is_some_and(|p| !p.needs_pitch)
+        {
+            self.roof_centre_pick = Some(None);
+        }
+    }
+
+    pub fn cancel_roof_centre_pick(&mut self) {
+        self.roof_centre_pick = None;
+    }
+
+    /// One tap of the centre pick, snapped to the nearest corner / wall of
+    /// the section's rings (and the storey outline). The second tap sets the
+    /// ridge's lateral position to the midpoint and closes the pick.
+    pub fn roof_centre_pick_tap(&mut self, wx: f64, wy: f64) {
+        let Some(state) = self.roof_centre_pick else {
+            return;
+        };
+        let tol = self.snap_tol_ceiling_line();
+        let rings32: Vec<Vec<domain::points::Point2f32>> = self
+            .roof_selected_rings_or_committed()
+            .iter()
+            .map(|r| {
+                r.iter()
+                    .map(|p| domain::points::Point2f32::new(p.x as f32, p.y as f32))
+                    .collect()
+            })
+            .collect();
+        let outline = self.document.outline.floor_plan.get_points();
+        let mut slices: Vec<&[domain::points::Point2f32]> =
+            rings32.iter().map(|r| r.as_slice()).collect();
+        slices.push(outline.as_slice());
+        let snapped = manip_plan::snap_point_across_rings(
+            &slices,
+            domain::points::Point2f32::new(wx as f32, wy as f32),
+            tol,
+            tol,
+        );
+        let snapped = (snapped.x as f64, snapped.y as f64);
+        match state {
+            None => self.roof_centre_pick = Some(Some(snapped)),
+            Some(first) => {
+                let Some(p) = self.pending_roof_section.as_mut() else {
+                    self.roof_centre_pick = None;
+                    return;
+                };
+                if let Some(c) = p.candidates.get(p.selected) {
+                    let (a_lat, ridge_lat) = Self::ridge_lateral_of(c, first);
+                    let (b_lat, _) = Self::ridge_lateral_of(c, snapped);
+                    p.ridge_shift_m = (a_lat + b_lat) * 0.5 - ridge_lat;
+                }
+                self.roof_centre_pick = None;
+            }
+        }
+    }
+
+    /// The rings the pending section spans: the live selection, else (the
+    /// selection cleared on some paths) the pending section's own footprint
+    /// is not stored — fall back to the selected rings only.
+    fn roof_selected_rings_or_committed(&self) -> Vec<Vec<Point2f64>> {
+        self.roof_selected_rings()
+    }
+
     /// Classify's "None — pick a roof style next": advance to the Section
     /// stage WITHOUT committing anything. The escape for the ordinary pitched
     /// house whose flat ceilings merely sit UNDER the roof — selecting them
@@ -685,6 +854,7 @@ impl AppController {
             needs_pitch: inherited.is_none(),
             candidates: Vec::new(),
             selected: 0,
+            ridge_shift_m: 0.0,
         });
         if inherited.is_some() {
             if let Err(e) = self.regenerate_roof_section() {
@@ -727,6 +897,9 @@ impl AppController {
     /// Run the ridge the other way and regenerate the candidates. No-op while
     /// the pitch prompt is up (no candidates to regenerate yet).
     pub fn flip_roof_section_axis(&mut self) {
+        if let Some(p) = self.pending_roof_section.as_mut() {
+            p.ridge_shift_m = 0.0;
+        }
         let Some(p) = self.pending_roof_section.as_mut() else {
             return;
         };
@@ -741,6 +914,9 @@ impl AppController {
 
     /// Cycle to the next generated candidate.
     pub fn next_roof_section_candidate(&mut self) {
+        if let Some(p) = self.pending_roof_section.as_mut() {
+            p.ridge_shift_m = 0.0;
+        }
         let Some(p) = self.pending_roof_section.as_mut() else {
             return;
         };
@@ -755,9 +931,21 @@ impl AppController {
         let Some(p) = self.pending_roof_section.as_ref() else {
             return Ok(());
         };
-        let Some(candidate) = p.candidates.get(p.selected).cloned() else {
+        let Some(mut candidate) = p.candidates.get(p.selected).cloned() else {
             return Ok(());
         };
+        // Bake the manual lateral ridge move into the committed geometry.
+        let shift = p.ridge_shift_m;
+        if shift.abs() > 1e-9 {
+            let (a, b) = Self::shifted_ridge_line(&candidate, shift);
+            candidate.ridge = (a, b);
+            for apex in &mut candidate.apexes {
+                match candidate.axis {
+                    RidgeAxis::X => apex.point.y += shift,
+                    RidgeAxis::Y => apex.point.x += shift,
+                }
+            }
+        }
         let (storey_idx, eave_z, pitch_deg) = (p.storey_idx, p.eave_z, p.pitch_deg);
         let shape = if candidate.ends == [RoofEnd::Gable, RoofEnd::Gable] {
             RoofShape::Gable
@@ -785,6 +973,8 @@ impl AppController {
     /// Drop the pending section (keeps the selection, so another style can be
     /// picked over the same grouping).
     pub fn cancel_roof_section(&mut self) {
+        self.roof_ridge_drag = false;
+        self.roof_centre_pick = None;
         self.pending_roof_section = None;
     }
 
@@ -836,7 +1026,7 @@ impl AppController {
             .flatten();
         let ridge_lines = candidate
             .map(|c| {
-                let (a, b) = c.ridge;
+                let (a, b) = Self::shifted_ridge_line(c, p.ridge_shift_m);
                 vec![((a.x, a.y), (b.x, b.y))]
             })
             .unwrap_or_default();
@@ -869,6 +1059,8 @@ impl AppController {
         };
         Some(PendingRoofSectionView {
             ridge_lines,
+            centre_picking: self.roof_centre_pick.is_some(),
+            centre_first: self.roof_centre_pick.flatten(),
             candidate_label,
             candidate_idx: p.selected,
             candidate_count: if p.needs_pitch { 0 } else { p.candidates.len() },

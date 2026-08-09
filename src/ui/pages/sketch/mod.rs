@@ -1185,6 +1185,25 @@ pub enum SketchEvent {
     /// Classify's "None — pick a roof style next": advance to the style
     /// stage without committing any follow/flat areas.
     SkipRoofFollow,
+    /// Stage-B ridge move: grab / drag / release the dashed ridge line.
+    RoofRidgePointerDown {
+        world_x: f64,
+        world_y: f64,
+        tol: f64,
+    },
+    RoofRidgePointerDrag {
+        world_x: f64,
+        world_y: f64,
+    },
+    RoofRidgePointerUp,
+    /// Open the ridge "centre between 2 points" pick.
+    BeginRoofCentrePick,
+    /// One (snapped) tap of the centre pick.
+    RoofCentrePickTap {
+        world_x: f64,
+        world_y: f64,
+    },
+    CancelRoofCentrePick,
     /// Roof step (Section): pick the style for the grouped section (Flat
     /// commits; the sloped styles open the generated-candidate preview).
     PickRoofSectionStyle(crate::controller::app_controller::RoofSectionStyle),

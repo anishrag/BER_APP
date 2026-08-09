@@ -3666,6 +3666,34 @@ impl eframe::App for BerApp {
                                         SketchEvent::SkipRoofFollow => {
                                             controller.borrow_mut().skip_roof_follow();
                                         }
+                                        SketchEvent::RoofRidgePointerDown {
+                                            world_x,
+                                            world_y,
+                                            tol,
+                                        } => {
+                                            controller
+                                                .borrow_mut()
+                                                .roof_ridge_pointer_down(world_x, world_y, tol);
+                                        }
+                                        SketchEvent::RoofRidgePointerDrag { world_x, world_y } => {
+                                            controller
+                                                .borrow_mut()
+                                                .roof_ridge_pointer_drag(world_x, world_y);
+                                        }
+                                        SketchEvent::RoofRidgePointerUp => {
+                                            controller.borrow_mut().roof_ridge_pointer_up();
+                                        }
+                                        SketchEvent::BeginRoofCentrePick => {
+                                            controller.borrow_mut().begin_roof_centre_pick();
+                                        }
+                                        SketchEvent::RoofCentrePickTap { world_x, world_y } => {
+                                            controller
+                                                .borrow_mut()
+                                                .roof_centre_pick_tap(world_x, world_y);
+                                        }
+                                        SketchEvent::CancelRoofCentrePick => {
+                                            controller.borrow_mut().cancel_roof_centre_pick();
+                                        }
                                         SketchEvent::PickRoofSectionStyle(style) => {
                                             let r = controller
                                                 .borrow_mut()

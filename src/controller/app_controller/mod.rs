@@ -585,6 +585,11 @@ pub struct AppController {
     /// The pin dropdown's per-object EDIT in flight: `(room, object)`.
     /// Transient.
     object_edit: Option<(ItemId, ItemId)>,
+    /// The Stage-B roof RIDGE is being dragged laterally. Transient.
+    roof_ridge_drag: bool,
+    /// The roof "centre between 2 points" pick: `None` off, `Some(None)`
+    /// awaiting the first tap, `Some(Some(p))` awaiting the second. Transient.
+    roof_centre_pick: Option<Option<(f64, f64)>>,
     /// Structure-phase "Divide wall" in flight (the 1-D bound handles over
     /// the selected wall region). Transient.
     structure_divide: Option<structure_divide::StructureDivide>,
@@ -919,6 +924,8 @@ impl AppController {
             pending_opening_move: None,
             structure_divide: None,
             object_edit: None,
+            roof_ridge_drag: false,
+            roof_centre_pick: None,
             history: Vec::new(),
             redo: Vec::new(),
             view: ViewTransform::default(),

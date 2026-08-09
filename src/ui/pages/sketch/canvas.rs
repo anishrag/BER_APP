@@ -3861,6 +3861,50 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     }));
                 }
             }
+            // Stage-B ridge interaction: while the centre pick is open a TAP
+            // is one of its two (snapped) points; otherwise a primary drag
+            // grabs / moves the dashed ridge laterally.
+            if let Some(section) = view.roof_section.as_ref() {
+                if section.centre_picking {
+                    if response.clicked_by(egui::PointerButton::Primary) {
+                        if let Some(pos) = response.interact_pointer_pos() {
+                            let (wx, wy) = t.inverse(pos.x, pos.y);
+                            on_event(UiEvent::Sketch(SketchEvent::RoofCentrePickTap {
+                                world_x: wx,
+                                world_y: wy,
+                            }));
+                        }
+                    }
+                    if let Some((fx, fy)) = section.centre_first {
+                        let m = t.apply(fx, fy);
+                        painter.circle_filled(m, 6.0, egui::Color32::from_rgb(60, 180, 90));
+                    }
+                } else {
+                    let tol_world = (14.0 / t.scale()) as f64;
+                    if response.drag_started_by(egui::PointerButton::Primary) {
+                        if let Some(pos) = response.interact_pointer_pos() {
+                            let (wx, wy) = t.inverse(pos.x, pos.y);
+                            on_event(UiEvent::Sketch(SketchEvent::RoofRidgePointerDown {
+                                world_x: wx,
+                                world_y: wy,
+                                tol: tol_world,
+                            }));
+                        }
+                    }
+                    if response.dragged_by(egui::PointerButton::Primary) {
+                        if let Some(pos) = response.interact_pointer_pos() {
+                            let (wx, wy) = t.inverse(pos.x, pos.y);
+                            on_event(UiEvent::Sketch(SketchEvent::RoofRidgePointerDrag {
+                                world_x: wx,
+                                world_y: wy,
+                            }));
+                        }
+                    }
+                    if response.drag_stopped_by(egui::PointerButton::Primary) {
+                        on_event(UiEvent::Sketch(SketchEvent::RoofRidgePointerUp));
+                    }
+                }
+            }
             // The selected candidate's generated ridge, dashed over the area
             // (empty while the pitch prompt is up).
             if let Some(section) = view.roof_section.as_ref() {

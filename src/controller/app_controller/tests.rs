@@ -32712,3 +32712,74 @@ fn roof_skip_follow_reaches_the_gable_flow_without_flat_committing() {
         roof.areas[0].shape
     );
 }
+
+/// Stage-B ridge placement: DRAG moves the generated ridge laterally with a
+/// snap to the section's wall lines; "centre between 2 points" (snapped
+/// taps) centres it midway; the commit bakes the shift into the stored
+/// ridge + apexes; browsing candidates resets the shift.
+#[test]
+fn roof_ridge_moves_by_drag_and_centres_between_points() {
+    let mut c = dimensioned_square_controller(); // 10×10, ridge axis X → lateral y
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.set_roof_mode(true);
+    c.confirm_all_storeys_added_roof();
+    c.skip_roof_follow();
+    c.roof_region_tap(5.0, 5.0, 0.5);
+    c.pick_roof_section_style(RoofSectionStyle::GableBoth)
+        .unwrap();
+    c.assign_roof_section_pitch(40.0).unwrap();
+    let before = c.pending_roof_section_view().unwrap().ridge_lines[0];
+    assert!(
+        ((before.0).1 - 5.0).abs() < 1e-6,
+        "generated ridge starts on the midline"
+    );
+    // Grab the ridge at its midpoint and drag 2 m north (no snap target at 7).
+    c.roof_ridge_pointer_down(5.0, 5.0, 0.3);
+    c.roof_ridge_pointer_drag(5.0, 7.0);
+    c.roof_ridge_pointer_up();
+    let dragged = c.pending_roof_section_view().unwrap().ridge_lines[0];
+    assert!(
+        ((dragged.0).1 - 7.0).abs() < 1e-3,
+        "ridge followed the drag (y = {})",
+        (dragged.0).1
+    );
+    // Drag NEAR the north wall — it snaps onto y = 10's wall line? The wall
+    // is the section extent, clamp+snap land it exactly on 10 only if within
+    // tol; drag to 9.9 → snaps to 10.0.
+    c.roof_ridge_pointer_down(5.0, 7.0, 0.3);
+    c.roof_ridge_pointer_drag(5.0, 9.9);
+    c.roof_ridge_pointer_up();
+    let snapped = c.pending_roof_section_view().unwrap().ridge_lines[0];
+    assert!(
+        ((snapped.0).1 - 10.0).abs() < 1e-3,
+        "ridge snapped to the wall line (y = {})",
+        (snapped.0).1
+    );
+    // Centre between two snapped points: the south-west corner and the north
+    // wall's midpoint → centre y = 5.
+    c.begin_roof_centre_pick();
+    c.roof_centre_pick_tap(0.05, 0.05); // snaps to (0,0)
+    c.roof_centre_pick_tap(5.0, 9.95); // snaps onto the y=10 wall
+    let centred = c.pending_roof_section_view().unwrap().ridge_lines[0];
+    assert!(
+        ((centred.0).1 - 5.0).abs() < 1e-3,
+        "ridge centred between the picks (y = {})",
+        (centred.0).1
+    );
+    // Move it off-centre again, then COMMIT: the stored apexes carry the move.
+    c.roof_ridge_pointer_down(5.0, 5.0, 0.3);
+    c.roof_ridge_pointer_drag(5.0, 6.5);
+    c.roof_ridge_pointer_up();
+    c.confirm_roof_section().unwrap();
+    let roof = &c.current_record.as_ref().unwrap().data.roof;
+    assert_eq!(roof.areas.len(), 1);
+    let apex_ys: Vec<f64> = roof.areas[0]
+        .ridge
+        .iter()
+        .flat_map(|r| [r.0.y, r.1.y])
+        .collect();
+    assert!(
+        apex_ys.iter().all(|y| (y - 6.5).abs() < 1e-3),
+        "committed ridge at the moved position: {apex_ys:?}"
+    );
+}

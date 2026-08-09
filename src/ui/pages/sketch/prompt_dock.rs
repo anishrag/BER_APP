@@ -1505,6 +1505,35 @@ fn roof_toolbar<F: FnMut(UiEvent)>(ui: &mut egui::Ui, view: &mut SketchView<'_>,
                 {
                     on_event(UiEvent::Sketch(SketchEvent::FlipRoofSectionAxis));
                 }
+                if section.centre_picking {
+                    ui.label(
+                        egui::RichText::new(if section.centre_first.is_some() {
+                            "Tap the SECOND point — the ridge centres between them"
+                        } else {
+                            "Tap the FIRST point (snaps to corners/walls)"
+                        })
+                        .color(egui::Color32::from_rgb(60, 180, 90)),
+                    );
+                    if ui.button("Cancel centre").clicked() {
+                        on_event(UiEvent::Sketch(SketchEvent::CancelRoofCentrePick));
+                    }
+                } else {
+                    ui.label(
+                        egui::RichText::new("(drag the dashed ridge to move it — it snaps)")
+                            .size(11.0)
+                            .weak(),
+                    );
+                    if ui
+                        .button("Centre between 2 points")
+                        .hint(
+                            "Tap two (snapping) points; the ridge centres midway \
+                             between them across its direction",
+                        )
+                        .clicked()
+                    {
+                        on_event(UiEvent::Sketch(SketchEvent::BeginRoofCentrePick));
+                    }
+                }
                 if section.candidate_count > 1
                     && ui
                         .button(format!(
