@@ -189,6 +189,21 @@ pub fn structure_panel<F: FnMut(UiEvent)>(
             on_event(UiEvent::Sketch(SketchEvent::OpenStructureWallPartition));
         }
         if ui
+            .add_enabled(
+                enabled && can_partition,
+                egui::Button::new("✂ Divide").small(),
+            )
+            .on_hover_text(
+                "Split the selected wall along its length: drag the two \
+                 handles (they snap) or type distances, then Split — each \
+                 part gets its own construction",
+            )
+            .on_disabled_hover_text("Select exactly one wall to divide it")
+            .clicked()
+        {
+            on_event(UiEvent::Sketch(SketchEvent::BeginStructureDivide));
+        }
+        if ui
             .add_enabled(enabled, egui::Button::new("Deselect all").small())
             .clicked()
         {
@@ -1039,16 +1054,14 @@ pub(crate) fn photos_view_ui<F: FnMut(UiEvent)>(
             ui.horizontal_wrapped(|ui| {
                 for p in &g.photos {
                     // Prefer the lightweight preview; fall back to the original
-                    // for photos saved before thumbnails existed.
+                    // for photos saved before thumbnails existed. Tapping opens
+                    // the full-res original in the global lightbox.
                     let src = p.thumbnail_path.as_deref().unwrap_or(&p.file_path);
-                    // `fit_to_exact_size` ignores the available layout space (a
-                    // thin text-line height inside `horizontal_wrapped`) and
-                    // renders the preview into a real box, keeping aspect ratio.
-                    ui.add(
-                        egui::Image::new(format!("file://{src}"))
-                            .fit_to_exact_size(egui::vec2(200.0, 200.0))
-                            .maintain_aspect_ratio(true)
-                            .corner_radius(4.0),
+                    crate::ui::widgets::clickable_photo(
+                        ui,
+                        &format!("file://{src}"),
+                        &format!("file://{}", p.file_path),
+                        egui::vec2(200.0, 200.0),
                     );
                 }
             });

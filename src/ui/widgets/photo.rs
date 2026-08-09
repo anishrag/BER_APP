@@ -256,3 +256,162 @@ pub mod android_cam {
         SLOT.lock().unwrap().in_flight = false;
     }
 }
+
+// ── Global photo lightbox ───────────────────────────────────────────────────
+
+/// Memory key holding the OPEN lightbox photo's full-res URI (`None` closed).
+const VIEWER_URI_ID: &str = "ber_photo_viewer_uri";
+
+/// Open the full-screen photo viewer on `uri` (an egui image URI, e.g.
+/// `file:///…`). Called by [`clickable_photo`]; usable directly by any site
+/// with its own image widget.
+pub fn open_photo_viewer(ctx: &egui::Context, uri: String) {
+    ctx.data_mut(|d| {
+        d.insert_temp(egui::Id::new(VIEWER_URI_ID), uri);
+        // Every photo opens at FIT — zoom/pan never carry across photos.
+        d.remove::<(f32, f32, f32)>(egui::Id::new(VIEWER_ZOOM_ID));
+    });
+}
+
+/// A photo THUMBNAIL that opens the full-screen viewer when tapped — the
+/// app-wide convention for every evidence/pending photo. `thumb_uri` renders
+/// small; the viewer opens `full_uri` (pass the same value when there's no
+/// separate full-res file). Returns the thumbnail's response.
+pub fn clickable_photo(
+    ui: &mut egui::Ui,
+    thumb_uri: &str,
+    full_uri: &str,
+    size: egui::Vec2,
+) -> egui::Response {
+    let resp = ui
+        .add(
+            egui::Image::new(thumb_uri.to_string())
+                .fit_to_exact_size(size)
+                .maintain_aspect_ratio(true)
+                .corner_radius(3.0)
+                .sense(egui::Sense::click()),
+        )
+        .on_hover_text("Tap to view large");
+    if resp.clicked() {
+        open_photo_viewer(ui.ctx(), full_uri.to_string());
+    }
+    resp
+}
+
+/// Memory key holding the viewer's `(zoom, pan_x, pan_y)`. Reset on open.
+const VIEWER_ZOOM_ID: &str = "ber_photo_viewer_zoom";
+
+/// The full-screen viewer itself — call ONCE per frame at the app level,
+/// after the pages, so it overlays everything. A dark backdrop with the
+/// photo fitted large; the ✕ button (or tapping anywhere outside the photo)
+/// closes it. ZOOM: pinch (or scroll / ctrl+scroll) zooms about the pointer,
+/// dragging pans while zoomed, and a double-tap toggles fit ↔ 2.5×.
+pub fn render_photo_viewer(ctx: &egui::Context) {
+    let id = egui::Id::new(VIEWER_URI_ID);
+    let Some(uri) = ctx.data(|d| d.get_temp::<String>(id)) else {
+        return;
+    };
+    let zoom_id = egui::Id::new(VIEWER_ZOOM_ID);
+    let (mut zoom, mut pan_x, mut pan_y) = ctx
+        .data(|d| d.get_temp::<(f32, f32, f32)>(zoom_id))
+        .unwrap_or((1.0, 0.0, 0.0));
+    let screen = ctx.content_rect();
+    let mut close = false;
+    egui::Area::new(egui::Id::new("ber_photo_viewer_overlay"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(screen.min)
+        .show(ctx, |ui| {
+            // Backdrop: swallow the whole screen; a click outside closes.
+            let backdrop = ui.allocate_rect(screen, egui::Sense::click());
+            ui.painter()
+                .rect_filled(screen, 0.0, egui::Color32::from_black_alpha(235));
+
+            // Pinch / ctrl+scroll (`zoom_delta`) or plain scroll — the viewer
+            // is modal, so the wheel has no other meaning here. Zoom about
+            // the POINTER: the point under the finger stays put.
+            let (zoom_delta, scroll_y, pointer) = ui.input(|i| {
+                (
+                    i.zoom_delta(),
+                    i.raw_scroll_delta.y,
+                    i.pointer.interact_pos(),
+                )
+            });
+            let mut factor = zoom_delta;
+            if scroll_y.abs() > 0.0 {
+                factor *= (scroll_y * 0.002).exp();
+            }
+            if (factor - 1.0).abs() > 1e-4 {
+                let new_zoom = (zoom * factor).clamp(1.0, 8.0);
+                let applied = new_zoom / zoom;
+                if let Some(p) = pointer {
+                    // Keep the pointed-at image point stationary.
+                    let c = screen.center() + egui::vec2(pan_x, pan_y);
+                    let d = p - c;
+                    pan_x += d.x * (1.0 - applied);
+                    pan_y += d.y * (1.0 - applied);
+                }
+                zoom = new_zoom;
+            }
+
+            let img_rect = egui::Rect::from_center_size(
+                screen.center() + egui::vec2(pan_x, pan_y),
+                screen.size() * 0.92 * zoom,
+            );
+            let img_resp = ui.put(
+                img_rect,
+                egui::Image::new(uri.clone())
+                    .max_size(img_rect.size())
+                    .maintain_aspect_ratio(true)
+                    .sense(egui::Sense::click_and_drag()),
+            );
+            // Drag pans (any zoom — at fit it just springs within the clamp).
+            if img_resp.dragged() {
+                let d = img_resp.drag_delta();
+                pan_x += d.x;
+                pan_y += d.y;
+            }
+            // Double-tap: toggle fit ↔ 2.5× about the tap point.
+            if img_resp.double_clicked() {
+                if zoom > 1.01 {
+                    (zoom, pan_x, pan_y) = (1.0, 0.0, 0.0);
+                } else if let Some(p) = img_resp.interact_pointer_pos() {
+                    let d = p - screen.center();
+                    zoom = 2.5;
+                    pan_x = -d.x * (zoom - 1.0);
+                    pan_y = -d.y * (zoom - 1.0);
+                }
+            }
+            // Keep the image from flying away: the pan can offset at most
+            // half the zoomed extent (at fit that pins it centred).
+            let max_x = (screen.width() * 0.92 * (zoom - 1.0)) * 0.5;
+            let max_y = (screen.height() * 0.92 * (zoom - 1.0)) * 0.5;
+            pan_x = pan_x.clamp(-max_x.max(0.0), max_x.max(0.0));
+            pan_y = pan_y.clamp(-max_y.max(0.0), max_y.max(0.0));
+
+            if backdrop.clicked() && !img_resp.hovered() {
+                close = true;
+            }
+            // Big ✕ target top-right ("X" text — glyph-safe on the tablet font).
+            let x_rect = egui::Rect::from_center_size(
+                screen.right_top() + egui::vec2(-36.0, 36.0),
+                egui::vec2(48.0, 48.0),
+            );
+            if ui
+                .put(
+                    x_rect,
+                    egui::Button::new(egui::RichText::new("X").size(26.0).strong()),
+                )
+                .clicked()
+            {
+                close = true;
+            }
+        });
+    if close {
+        ctx.data_mut(|d| {
+            d.remove::<String>(id);
+            d.remove::<(f32, f32, f32)>(zoom_id);
+        });
+    } else {
+        ctx.data_mut(|d| d.insert_temp(zoom_id, (zoom, pan_x, pan_y)));
+    }
+}

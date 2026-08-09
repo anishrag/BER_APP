@@ -738,6 +738,12 @@ impl AppController {
         self.document.apply_dimension(value)?;
         self.warn_if_non_orthogonal("dimension");
         self.mark_dirty()?;
+        // An outline dimension moves walls the opening anchors are fractions
+        // of (e.g. a trim's remnants firm up as its cut walls are typed) —
+        // re-derive the anchors from the openings' placements, which stay
+        // valid until the deferred resolve lands. No-op while the initial
+        // outline is being measured (no openings exist yet).
+        self.reseed_anchors_after_outline_splice();
         self.push_history_snapshot(undo_snap);
         // This dimension may have FINALISED a drawn upper-storey outline —
         // the seed point for its inherited floor levels (no-op otherwise).

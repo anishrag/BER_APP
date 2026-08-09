@@ -321,6 +321,120 @@ impl ParametricPlan {
         }
     }
 
+    /// Translate every coordinate on ONE axis by `delta` — the single-axis
+    /// form of [`translate_all`](Self::translate_all).
+    pub fn translate_axis(&mut self, axis: ParameterAxis, delta: f32) {
+        match axis {
+            ParameterAxis::X => self.translate_all(delta, 0.0),
+            ParameterAxis::Y => self.translate_all(0.0, delta),
+        }
+    }
+
+    /// Move every coordinate PLANE on `axis` lying within `tol` of `plane` by
+    /// `delta`: each parameter on that axis whose value matches, and each
+    /// matching Constant coordinate. All vertices sharing a moved plane
+    /// translate together (a building face moves as one); everything else is
+    /// untouched, so lengths perpendicular to the face grow/shrink by `delta`.
+    /// Returns the number of distinct planes moved (0 = nothing matched).
+    pub fn move_coordinate_planes(
+        &mut self,
+        axis: ParameterAxis,
+        plane: f32,
+        tol: f32,
+        delta: f32,
+    ) -> usize {
+        // Params on `axis`, discovered from the vertex expressions (a param
+        // only ever appears on one axis — same convention as translate_all).
+        let mut axis_params: HashSet<ParameterId> = HashSet::new();
+        for ring in &self.rings {
+            for v in ring {
+                let expr = match axis {
+                    ParameterAxis::X => &v.x_expr,
+                    ParameterAxis::Y => &v.y_expr,
+                };
+                if let CoordinateExpression::Parameter(p) = expr {
+                    axis_params.insert(*p);
+                }
+            }
+        }
+        let mut moved = 0usize;
+        for p in axis_params {
+            if let Some(v) = self.parameters.get_mut(&p) {
+                if (*v - plane).abs() <= tol {
+                    *v += delta;
+                    moved += 1;
+                }
+            }
+        }
+        // Matching constants: rewrite in place. Count distinct values (quantized
+        // to the match tolerance) so a face collapsed to constants counts once.
+        let mut const_planes: HashSet<i64> = HashSet::new();
+        for ring in &mut self.rings {
+            for v in ring {
+                let expr = match axis {
+                    ParameterAxis::X => &mut v.x_expr,
+                    ParameterAxis::Y => &mut v.y_expr,
+                };
+                if let CoordinateExpression::Constant(c) = expr {
+                    if (*c - plane).abs() <= tol {
+                        const_planes.insert((*c * 1.0e4).round() as i64);
+                        *expr = CoordinateExpression::Constant(*c + delta);
+                    }
+                }
+            }
+        }
+        moved + const_planes.len()
+    }
+
+    /// The min/max coordinate on `axis` over every vertex in the plan (all
+    /// rings, evaluated). `None` for an empty plan.
+    pub fn axis_span(&self, axis: ParameterAxis) -> Option<(f32, f32)> {
+        let mut span: Option<(f32, f32)> = None;
+        for ring in &self.rings {
+            for v in ring {
+                let p = v.evaluate(&self.parameters);
+                let c = match axis {
+                    ParameterAxis::X => p.x,
+                    ParameterAxis::Y => p.y,
+                };
+                span = Some(match span {
+                    None => (c, c),
+                    Some((lo, hi)) => (lo.min(c), hi.max(c)),
+                });
+            }
+        }
+        span
+    }
+
+    /// For an axis-aligned wall, the axis it RUNS along plus its two endpoint
+    /// vertices with their coordinates on that axis: `(along_axis, (start_vid,
+    /// start_coord), (end_vid, end_coord))`. `None` for a diagonal wall (no
+    /// single along-axis) or invalid indices. This is the geometry a
+    /// length-edit needs: the wall's length is `|end - start|`, and each
+    /// endpoint coordinate names the PLANE that moves if that end is chosen.
+    pub fn wall_along_ends(
+        &self,
+        ring: usize,
+        edge_start: usize,
+    ) -> Option<(ParameterAxis, (VertexId, f32), (VertexId, f32))> {
+        let ring_vec = self.rings.get(ring)?;
+        let n = ring_vec.len();
+        if n < 2 || edge_start >= n {
+            return None;
+        }
+        let v_a = &ring_vec[edge_start];
+        let v_b = &ring_vec[(edge_start + 1) % n];
+        let pa = v_a.evaluate(&self.parameters);
+        let pb = v_b.evaluate(&self.parameters);
+        if v_a.y_expr == v_b.y_expr {
+            Some((ParameterAxis::X, (v_a.id, pa.x), (v_b.id, pb.x)))
+        } else if v_a.x_expr == v_b.x_expr {
+            Some((ParameterAxis::Y, (v_a.id, pa.y), (v_b.id, pb.y)))
+        } else {
+            None
+        }
+    }
+
     /// Current length of the wall starting at `(ring, edge_start)`. None if
     /// the indices don't reference a valid edge.
     pub fn wall_length(&self, ring: usize, edge_start: usize) -> Option<f32> {

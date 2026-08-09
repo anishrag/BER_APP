@@ -43,8 +43,10 @@ mod partition;
 mod phase_regions;
 mod photos;
 mod porches;
+mod resize_dimension;
 mod roof;
 mod structure;
+mod structure_divide;
 mod structure_review;
 
 pub use assessment_phase::{AssessmentPhase, SelectMode, StructureProgress};
@@ -70,11 +72,13 @@ pub use followup::{
     FollowUpPointRow, FollowUpRenameKey, FollowUpRowKey, FollowUpSubRow, FollowUpView,
 };
 pub use phase_regions::PhaseDisplayRegion;
+pub use resize_dimension::{EditDimensionState, EditDimensionUiData};
 pub use roof::{
     PendingRoofSectionView, RoofContextRegion, RoofRegionView, RoofSectionStyle, RoofShape,
     RoofStage,
 };
 pub use step_regions::FloorStepZoneView;
+pub use structure_divide::StructureDivideView;
 // `ExposureSection` is re-exported above (the controller's public surface).
 
 use chrono::NaiveDate;
@@ -128,13 +132,14 @@ pub use mapping_review::ReviewView;
 pub use new_storey::{FloorLevelPromptUiData, NewStoreyPromptUiData, OverhangPromptUiData};
 use new_storey::{NewStoreyStage, PendingFloorLevels, PendingNewStorey};
 pub use objects::{
-    ActiveObjectRoomView, ObjectPinView, ObjectReviewView, ObjectRowView, ObjectTotalView,
-    PorchPromptView, PorchQuestion,
+    ActiveObjectRoomView, ObjectEditView, ObjectPinView, ObjectReviewView, ObjectRowView,
+    ObjectTotalView, PorchPromptView, PorchQuestion,
 };
 pub use openings::{
-    ComplexWindowPlacement, DoorEditPrefill, DoorSidelightsMode, DoorSidelightsPlacement,
-    ElevationView, ExistingWindowType, FullSpanInfo, OpeningEditPrefill, OpeningFieldSpec,
-    OpeningFieldsPrompt, OpeningPromptUiData, OpeningToolKind, OpeningViewKind, WindowTypeChoice,
+    AssemblyEditPrefill, ComplexWindowPlacement, DoorEditPrefill, DoorSidelightsMode,
+    DoorSidelightsPlacement, ElevationView, ExistingWindowType, FullSpanInfo, OpeningEditPrefill,
+    OpeningFieldSpec, OpeningFieldsPrompt, OpeningPromptUiData, OpeningToolKind, OpeningViewKind,
+    WindowTypeChoice,
 };
 use openings::{OpeningEdit, PendingOpening};
 pub use partition::{
@@ -571,6 +576,22 @@ pub struct AppController {
     /// insert+drag when the plan is dimensioned; up to 3 distances to
     /// neighbours that the user fills in to pin the vertex.
     vertex_drop_prompt: Option<VertexDropPrompt>,
+    /// Open edit-dimension prompt (re-dimension a finalised outline wall,
+    /// choosing which end moves). Transient — not persisted / undone.
+    edit_dimension: Option<EditDimensionState>,
+    /// Edit-dimension MODE: canvas taps pick an outline wall to re-dimension.
+    /// Transient interaction state, like `exposure_mode`.
+    edit_dimension_mode: bool,
+    /// The pin dropdown's per-object EDIT in flight: `(room, object)`.
+    /// Transient.
+    object_edit: Option<(ItemId, ItemId)>,
+    /// Structure-phase "Divide wall" in flight (the 1-D bound handles over
+    /// the selected wall region). Transient.
+    structure_divide: Option<structure_divide::StructureDivide>,
+    /// An opening (or its whole assembly) awaiting a "move to another wall"
+    /// target: the next openings-mode plan tap transfers it onto the tapped
+    /// wall. Set by the elevation's "Move to wall…" button. Transient.
+    pending_opening_move: Option<ber_model::ber::openings::OpeningRef>,
     /// Undo history. Each entry is a snapshot of the data state taken just
     /// before a user-visible mutation. Undo restores the most recent;
     /// cleared on new mutations.
@@ -893,6 +914,11 @@ impl AppController {
             last_snap_action: None,
             edit_drag_prompt: None,
             vertex_drop_prompt: None,
+            edit_dimension: None,
+            edit_dimension_mode: false,
+            pending_opening_move: None,
+            structure_divide: None,
+            object_edit: None,
             history: Vec::new(),
             redo: Vec::new(),
             view: ViewTransform::default(),

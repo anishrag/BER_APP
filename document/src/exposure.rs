@@ -519,6 +519,64 @@ impl StoreyDoc {
                 }
             }
         }
+        // KEPT vids LAST — after the fresh flanks have inherited from the
+        // pristine old sections above. A wall the splice SHORTENED onto a
+        // sub-segment of its old self (the trim's NEAR remnant, or a
+        // start-side cut) keeps its vid, but its stored along-coordinates
+        // are still measured on the OLD extent: translate them onto the
+        // surviving sub-segment and clip, or the stale sections outlive the
+        // wall and the plan overlay paints across the trimmed-away gap.
+        for (vid, a, b) in new_perimeter.iter().copied() {
+            if !old_vids.contains(&vid) {
+                continue;
+            }
+            let Some((_, oa, ob)) = old_perimeter.iter().copied().find(|(ov, _, _)| *ov == vid)
+            else {
+                continue;
+            };
+            let old_len = segment_len(oa, ob);
+            let new_len = segment_len(a, b);
+            // Same wall extent (a pure move/no-op) — nothing to remap. Only a
+            // genuine SUB-SEGMENT of the old edge remaps: same line, shorter.
+            let mid = Point2f32::new((a.x + b.x) * 0.5, (a.y + b.y) * 0.5);
+            let colinear = domain::points::point_to_segment_distance(
+                mid.x as f64,
+                mid.y as f64,
+                oa.x as f64,
+                oa.y as f64,
+                ob.x as f64,
+                ob.y as f64,
+            ) < 1e-2;
+            if !colinear || new_len >= old_len - 1e-3 {
+                continue;
+            }
+            let offset = project_distance_along(oa, ob, old_len, a.x, a.y);
+            if let Some(secs) = self.wall_sections.get_mut(&vid) {
+                secs.iter_mut().for_each(|s| {
+                    s.start_m = (s.start_m - offset).clamp(0.0, new_len);
+                    s.end_m = (s.end_m - offset).clamp(0.0, new_len);
+                });
+                secs.retain(|s| s.end_m - s.start_m > 1e-4);
+                if secs.is_empty() {
+                    self.wall_sections.remove(&vid);
+                }
+            }
+            if let Some(part) = self.wall_face_partitions.get_mut(&vid) {
+                for c in &mut part.cuts {
+                    c.a.x -= offset;
+                    c.b.x -= offset;
+                }
+                part.cuts
+                    .retain(|c| c.a.x.max(c.b.x) > 0.0 && c.a.x.min(c.b.x) < new_len);
+                for (p, _) in &mut part.regions {
+                    p.x -= offset;
+                }
+                part.regions.retain(|(p, _)| p.x >= 0.0 && p.x <= new_len);
+                if part.regions.is_empty() {
+                    self.wall_face_partitions.remove(&vid);
+                }
+            }
+        }
     }
 
     /// Rebuild the runtime section model from the persisted `WallRegions` (the

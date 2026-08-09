@@ -3025,6 +3025,89 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         }
     }
 
+    // Edit-dimension overlay: the picked wall highlighted in amber, with a
+    // filled circle marking the END THAT MOVES (the side toggle flips it).
+    if view.edit_dimension_mode {
+        if let Some(p) = &view.edit_dim_prompt {
+            let a = (p.wall_start_pt.x as f64, p.wall_start_pt.y as f64);
+            let b = (p.wall_end_pt.x as f64, p.wall_end_pt.y as f64);
+            render::render_wall_highlight(
+                &painter,
+                rect,
+                ber,
+                current_storey_idx,
+                mode,
+                vp,
+                a,
+                b,
+                egui::Color32::from_rgb(255, 170, 40),
+            );
+            if let Some(t) = canvas_transform(ber, current_storey_idx, rect, vp, true) {
+                let moving = match p.moving_end {
+                    document::WallEnd::Start => a,
+                    document::WallEnd::End => b,
+                };
+                let fixed = match p.moving_end {
+                    document::WallEnd::Start => b,
+                    document::WallEnd::End => a,
+                };
+                let m = t.apply(moving.0, moving.1);
+                let f = t.apply(fixed.0, fixed.1);
+                painter.circle_filled(m, 9.0, egui::Color32::from_rgb(255, 170, 40));
+                painter.circle_stroke(
+                    f,
+                    6.0,
+                    egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 170, 40)),
+                );
+            }
+        }
+    }
+
+    // Structure "Divide wall" overlay: the wall's base line with the two
+    // bound handles + the piece lengths, so the split is legible before it
+    // commits.
+    if view.current_phase == AssessmentPhase::Structure {
+        if let Some(d) = &view.structure_divide {
+            if let Some(t) = canvas_transform(ber, current_storey_idx, rect, vp, true) {
+                let at = |m: f32| {
+                    let f = if d.wall_len > 1e-6 {
+                        (m / d.wall_len) as f64
+                    } else {
+                        0.0
+                    };
+                    t.apply(
+                        d.wall_a.0 + f * (d.wall_b.0 - d.wall_a.0),
+                        d.wall_a.1 + f * (d.wall_b.1 - d.wall_a.1),
+                    )
+                };
+                let amber = egui::Color32::from_rgb(255, 170, 40);
+                painter.line_segment([at(d.span.0), at(d.span.1)], egui::Stroke::new(4.0, amber));
+                for (m, grabbed) in [(d.bounds.0, true), (d.bounds.1, true)] {
+                    let _ = grabbed;
+                    painter.circle_filled(at(m), 8.0, amber);
+                    painter.circle_stroke(at(m), 8.0, egui::Stroke::new(2.0, egui::Color32::BLACK));
+                }
+                // Piece lengths, labelled at each piece's midpoint.
+                let pieces = [
+                    (d.span.0, d.bounds.0),
+                    (d.bounds.0, d.bounds.1),
+                    (d.bounds.1, d.span.1),
+                ];
+                for (s0, s1) in pieces {
+                    if s1 - s0 > 0.05 {
+                        painter.text(
+                            at((s0 + s1) * 0.5) + egui::vec2(0.0, -14.0),
+                            egui::Align2::CENTER_CENTER,
+                            format!("{:.2}", s1 - s0),
+                            egui::FontId::proportional(13.0),
+                            amber,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     // Position-prompt overlay (mirrors the edit-drag prompt's):
     //
     //   * Area wall being measured highlighted in ORANGE, the
@@ -3159,6 +3242,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     // own drag (a mode picked after navigation was entered, or Structure phase).
     let tools_idle = !view.openings_mode
         && !view.exposure_mode
+        && !view.edit_dimension_mode
         && !view.floor_exposure_mode
         && !view.ceiling_exposure_mode
         && !view.roof_mode
@@ -3370,8 +3454,42 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     // the CARVE mode instead captures a stroke (handled in the stroke path
     // below). All Mapping primary input is gated off (`primary_available`).
     let structure_phase = view.current_phase == AssessmentPhase::Structure;
-    let structure_click =
-        structure_phase && matches!(view.structure_select, Some(SelectMode::Click));
+    // The open "Divide wall" owns structure-phase primary input: presses grab
+    // a bound handle, drags slide it (snapping), release drops it. Gated
+    // BEFORE the click-select so a divide drag never toggles the selection.
+    let structure_divide_active = structure_phase && view.structure_divide.is_some();
+    if structure_divide_active && matches!(mode, SketchMode::Storey2D) && !touch_nav_active {
+        if let Some(t) = canvas_transform(ber, current_storey_idx, rect, vp, true) {
+            let tol_world = (14.0 / t.scale()) as f64;
+            if response.drag_started_by(egui::PointerButton::Primary)
+                || response.clicked_by(egui::PointerButton::Primary)
+            {
+                if let Some(pos) = response.interact_pointer_pos() {
+                    let (wx, wy) = t.inverse(pos.x, pos.y);
+                    on_event(UiEvent::Sketch(SketchEvent::StructureDividePointerDown {
+                        world_x: wx,
+                        world_y: wy,
+                        tol: tol_world,
+                    }));
+                }
+            }
+            if response.dragged_by(egui::PointerButton::Primary) {
+                if let Some(pos) = response.interact_pointer_pos() {
+                    let (wx, wy) = t.inverse(pos.x, pos.y);
+                    on_event(UiEvent::Sketch(SketchEvent::StructureDividePointerDrag {
+                        world_x: wx,
+                        world_y: wy,
+                    }));
+                }
+            }
+            if response.drag_stopped_by(egui::PointerButton::Primary) {
+                on_event(UiEvent::Sketch(SketchEvent::StructureDividePointerUp));
+            }
+        }
+    }
+    let structure_click = structure_phase
+        && !structure_divide_active
+        && matches!(view.structure_select, Some(SelectMode::Click));
     let structure_carve =
         structure_phase && matches!(view.structure_select, Some(SelectMode::Carve));
     if structure_click && matches!(mode, SketchMode::Storey2D) && !touch_nav_active && !copy_pick {
@@ -3850,6 +3968,31 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         }
     }
 
+    // Edit-dimension mode: a tap picks the outline wall to re-dimension. Same
+    // transform discipline as exposure mode (watermark-inclusive fit so taps
+    // land in the same space the walls are drawn in).
+    if view.edit_dimension_mode
+        && matches!(mode, SketchMode::Storey2D)
+        && !view.exposure_mode
+        && !view.openings_mode
+        && !cut_pending
+        && !touch_nav_active
+    {
+        if let Some(t) = canvas_transform(ber, current_storey_idx, rect, vp, true) {
+            let tol_world = (12.0 / t.scale()) as f64;
+            if response.clicked_by(egui::PointerButton::Primary) {
+                if let Some(pos) = response.interact_pointer_pos() {
+                    let (wx, wy) = t.inverse(pos.x, pos.y);
+                    on_event(UiEvent::Sketch(SketchEvent::EditDimensionTap {
+                        world_x: wx,
+                        world_y: wy,
+                        tol: tol_world,
+                    }));
+                }
+            }
+        }
+    }
+
     // Openings mode (no elevation open): a tap near a wall drops the selected
     // opening type on the nearest wall (or opens the wall's elevation in Edit).
     // The elevation overlay, when open, captures its own input (see the
@@ -3874,12 +4017,33 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             if tap {
                 if let Some(pos) = response.interact_pointer_pos() {
                     let (wx, wy) = t.inverse(pos.x, pos.y);
-                    on_event(UiEvent::Sketch(SketchEvent::OpeningsPointerDown {
-                        world_x: wx,
-                        world_y: wy,
-                        tol: tol_world,
-                    }));
+                    // An armed "move to another wall" pick owns the next tap:
+                    // it transfers the opening onto the tapped wall instead of
+                    // starting a placement/elevation pick.
+                    if view.opening_move_pending {
+                        on_event(UiEvent::Sketch(SketchEvent::MoveOpeningTap {
+                            world_x: wx,
+                            world_y: wy,
+                            tol: tol_world,
+                        }));
+                    } else {
+                        on_event(UiEvent::Sketch(SketchEvent::OpeningsPointerDown {
+                            world_x: wx,
+                            world_y: wy,
+                            tol: tol_world,
+                        }));
+                    }
                 }
+            }
+            // The armed-move hint, drawn where the elevation instruction goes.
+            if view.opening_move_pending {
+                painter.text(
+                    rect.left_top() + egui::vec2(8.0, 8.0),
+                    egui::Align2::LEFT_TOP,
+                    "Move: tap the wall to move the opening onto (a doorset moves whole) · tap empty space to cancel",
+                    egui::FontId::proportional(14.0),
+                    egui::Color32::from_rgb(255, 200, 80),
+                );
             }
             // Continue / end a plan drag of a grabbed ROOF window (Edit tool). A
             // no-op for the placement tools (nothing is grabbed).
@@ -3898,6 +4062,18 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         }
     }
 
+    // A tap landing on one of the FLOATING panels (the pin dropdown, the
+    // category bar, the add/edit windows, the lightbox) must never fall
+    // through to the plan as a pin tap: the non-interactive parts of an egui
+    // Area (labels, padding, frames) don't consume clicks, so without this a
+    // tap on a panel's quiet spot dropped a NEW pin under it (the field
+    // scare: "zooming a photo created a point?"). The top layer at the
+    // pointer tells us whether the press is really on the canvas.
+    let tap_on_floating_panel = response
+        .interact_pointer_pos()
+        .and_then(|pos| ui.ctx().layer_id_at(pos))
+        .is_some_and(|l| l != response.layer_id);
+
     // Phase-3 (Objects): a primary tap on the 2D plan drops / opens a room pin
     // at that world point (the entry panel then adds objects to it). Gated to the
     // Objects phase + 2D, and off while navigating / two-finger panning.
@@ -3906,6 +4082,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     if matches!(view.current_phase, AssessmentPhase::Objects)
         && matches!(mode, SketchMode::Storey2D)
         && !touch_nav_active
+        && !tap_on_floating_panel
     {
         // watermark = true: match the storey render, or the pin drops at the
         // wrong world point on a setback upper storey (same fix as elsewhere).
@@ -3954,6 +4131,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     if matches!(view.current_phase, AssessmentPhase::Objects)
         && matches!(mode, SketchMode::Storey3D)
         && !touch_nav_active
+        && !tap_on_floating_panel
         && response.clicked_by(egui::PointerButton::Primary)
     {
         if let (Some(ber), Some(pos)) = (ber, response.interact_pointer_pos()) {
@@ -4099,6 +4277,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         && !view.ceiling_rect_pending
         && !view.centre_between_picking
         && !view.exposure_mode
+        && !view.edit_dimension_mode
         && !view.floor_exposure_mode
         && !view.ceiling_exposure_mode
         && !view.roof_mode
@@ -4631,11 +4810,11 @@ fn external_photo_entry<F: FnMut(UiEvent)>(
         for p in photos {
             match p.thumbnail_path.as_deref() {
                 Some(src) => {
-                    ui.add(
-                        egui::Image::new(format!("file://{src}"))
-                            .fit_to_exact_size(thumb_size)
-                            .maintain_aspect_ratio(true)
-                            .corner_radius(4.0),
+                    crate::ui::widgets::clickable_photo(
+                        ui,
+                        &format!("file://{src}"),
+                        &format!("file://{}", p.file_path),
+                        thumb_size,
                     );
                 }
                 None => {
@@ -5045,9 +5224,10 @@ fn elevation_overlay<F: FnMut(UiEvent)>(
         egui::FontId::proportional(13.0),
         egui::Color32::from_gray(160),
     );
-    // "Edit window…" / "Edit door…" for the selected STANDALONE opening
-    // (assembly members — sidelights/transom/panel — are sized by their
-    // assembly and keep their placement flow). Opens the attribute box prefilled.
+    // "Edit window…" / "Edit door…" for the selected STANDALONE opening.
+    // An assembly member — the door panel or a sidelight/transom pane — opens
+    // the whole DOORSET instead (the members are sized by the assembly, so
+    // the piece-by-piece composer re-edits all of them together).
     use crate::controller::app_controller::OpeningViewKind;
     let edit_button = match elev.openings.iter().find(|o| o.selected).map(|o| o.kind) {
         Some(OpeningViewKind::Window) => Some((
@@ -5060,6 +5240,11 @@ fn elevation_overlay<F: FnMut(UiEvent)>(
             "Change this door's size, type, kind, or draught-stripped",
             SketchEvent::EditSelectedDoor,
         )),
+        Some(OpeningViewKind::DoorPanel) | Some(OpeningViewKind::SidelightWindow) => Some((
+            "Edit doorset…",
+            "Change this door + sidelights: door size, lights, sills, transom, glazing",
+            SketchEvent::EditSelectedAssembly,
+        )),
         _ => None,
     };
     if let Some((label, hint, event)) = edit_button {
@@ -5068,9 +5253,24 @@ fn elevation_overlay<F: FnMut(UiEvent)>(
             .fixed_pos(rect.left_top() + egui::vec2(8.0, 30.0))
             .show(ui.ctx(), |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    if ui.button(label).hint(hint).clicked() {
-                        on_event(UiEvent::Sketch(event));
-                    }
+                    ui.horizontal(|ui| {
+                        if ui.button(label).hint(hint).clicked() {
+                            on_event(UiEvent::Sketch(event));
+                        }
+                        // Any selected wall opening can move to another wall
+                        // (a doorset member moves its whole assembly): closes
+                        // this elevation, then the next plan tap is the target.
+                        if ui
+                            .button("Move to wall…")
+                            .hint(
+                                "Move this opening onto a different wall — \
+                                 tap the target wall on the plan next",
+                            )
+                            .clicked()
+                        {
+                            on_event(UiEvent::Sketch(SketchEvent::MoveSelectedOpening));
+                        }
+                    });
                 });
             });
     }
@@ -5149,7 +5349,7 @@ fn object_pin_dropdown<F: FnMut(UiEvent)>(
         .fixed_pos(sp + egui::vec2(14.0, 10.0))
         .show(ui.ctx(), |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
-                ui.set_max_width(220.0);
+                ui.set_max_width(300.0);
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new(&title).strong());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -5184,8 +5384,22 @@ fn object_pin_dropdown<F: FnMut(UiEvent)>(
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    if ui.small_button("✕").on_hover_text("Remove").clicked() {
+                                    // "🗑" — the earlier "✕" (U+2715) is missing
+                                    // from the tablet's font and drew as a box.
+                                    if ui.small_button("🗑").on_hover_text("Remove").clicked() {
                                         on_event(UiEvent::Sketch(SketchEvent::DeleteObject {
+                                            room: room.id,
+                                            object: o.id,
+                                        }));
+                                    }
+                                    if ui
+                                        .small_button("➕")
+                                        .on_hover_text(
+                                            "Edit this item — change the count/note or add photos",
+                                        )
+                                        .clicked()
+                                    {
+                                        on_event(UiEvent::Sketch(SketchEvent::BeginEditObject {
                                             room: room.id,
                                             object: o.id,
                                         }));
@@ -6238,12 +6452,11 @@ fn structure_review_overlay<F: FnMut(UiEvent)>(
                     ui.horizontal_wrapped(|ui| {
                         for p in &srv.photos {
                             let src = p.thumbnail_path.as_deref().unwrap_or(&p.file_path);
-                            ui.add(
-                                egui::Image::new(format!("file://{src}"))
-                                    .fit_to_exact_size(egui::vec2(120.0, 120.0))
-                                    .maintain_aspect_ratio(true)
-                                    .corner_radius(4.0)
-                                    .show_loading_spinner(false),
+                            crate::ui::widgets::clickable_photo(
+                                ui,
+                                &format!("file://{src}"),
+                                &format!("file://{}", p.file_path),
+                                egui::vec2(120.0, 120.0),
                             );
                         }
                     });

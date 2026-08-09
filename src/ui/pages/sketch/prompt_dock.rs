@@ -496,6 +496,14 @@ pub(super) fn render_controls<F: FnMut(UiEvent)>(
                     on_event,
                 );
             }
+        } else if let Some(d) = &view.structure_divide {
+            structure_divide_toolbar(
+                ui,
+                d,
+                view.structure_divide_a_input,
+                view.structure_divide_b_input,
+                on_event,
+            );
         } else if view.exposure_mode {
             exposure_toolbar(
                 ui,
@@ -1679,6 +1687,69 @@ fn partition_toolbar<F: FnMut(UiEvent)>(
             }
             if ui.button("Done").clicked() {
                 on_event(UiEvent::Sketch(SketchEvent::CloseWallPartition));
+            }
+        });
+    });
+}
+
+/// The Structure "Divide wall" controls: the three piece lengths, two typed
+/// distances (from the selected piece's LEFT end — enter to set), Split and
+/// Cancel. The handles on the canvas mirror the same bounds.
+fn structure_divide_toolbar<F: FnMut(UiEvent)>(
+    ui: &mut egui::Ui,
+    d: &crate::controller::app_controller::StructureDivideView,
+    a_input: &mut String,
+    b_input: &mut String,
+    on_event: &mut F,
+) {
+    ui.vertical(|ui| {
+        let pieces = [
+            (d.span.0, d.bounds.0),
+            (d.bounds.0, d.bounds.1),
+            (d.bounds.1, d.span.1),
+        ];
+        let mut label = String::from("Divide wall:");
+        for (s0, s1) in pieces {
+            if s1 - s0 > 0.02 {
+                label.push_str(&format!(" {:.2} m", s1 - s0));
+                label.push_str(" |");
+            }
+        }
+        ui.label(label.trim_end_matches(" |"));
+        ui.horizontal(|ui| {
+            ui.label("cut 1 at")
+                .hint("Distance of the first cut from the piece's left end");
+            let r1 = metre_input(ui, a_input, 52.0, "m");
+            if r1.submitted {
+                if let Some(v) = parse_dimension_expression(a_input) {
+                    on_event(UiEvent::Sketch(SketchEvent::SetStructureDivideBound {
+                        first: true,
+                        value: v,
+                    }));
+                }
+            }
+            ui.label("cut 2 at")
+                .hint("Distance of the second cut from the piece's left end");
+            let r2 = metre_input(ui, b_input, 52.0, "m");
+            if r2.submitted {
+                if let Some(v) = parse_dimension_expression(b_input) {
+                    on_event(UiEvent::Sketch(SketchEvent::SetStructureDivideBound {
+                        first: false,
+                        value: v,
+                    }));
+                }
+            }
+            if ui
+                .button("Split")
+                .hint("Cut the wall at the placed bound(s)")
+                .clicked()
+            {
+                on_event(UiEvent::Sketch(SketchEvent::ApplyStructureDivide));
+            }
+            if ui.button("Cancel").clicked() {
+                a_input.clear();
+                b_input.clear();
+                on_event(UiEvent::Sketch(SketchEvent::CancelStructureDivide));
             }
         });
     });

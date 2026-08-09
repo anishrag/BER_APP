@@ -32,13 +32,13 @@ use egui::Pos2;
 use crate::controller::app_controller::FinalDetails;
 use crate::controller::app_controller::{
     ActiveObjectRoomView, AssessmentPhase, CeilingRidgeSnapTag, ChecklistItem,
-    ComplexWindowPlacement, DimensionPromptUiData, DoorSidelightsPlacement, EditDragPromptUiData,
-    ElevationView, ExistingGroup, ExistingWindowType, ExposureSelection, FinalMode,
-    FloorLevelPromptUiData, FloorStepZoneView, NewStoreyPromptUiData, ObjectPinView,
+    ComplexWindowPlacement, DimensionPromptUiData, DoorSidelightsPlacement, EditDimensionUiData,
+    EditDragPromptUiData, ElevationView, ExistingGroup, ExistingWindowType, ExposureSelection,
+    FinalMode, FloorLevelPromptUiData, FloorStepZoneView, NewStoreyPromptUiData, ObjectPinView,
     ObjectReviewView, OpeningFieldsPrompt, OpeningToolKind, PartitionView, PhaseDisplayRegion,
     PhotoView, PositionPromptUiData, ReviewView, RidgeDof, RiserView, SelectMode, SnapTagView,
-    StructureEdit, StructureReviewView, SurfaceKind, VertexDropPromptUiData, WallExposureView,
-    WallFinishField, WallInclusionPromptView, WindowTypeChoice,
+    StructureDivideView, StructureEdit, StructureReviewView, SurfaceKind, VertexDropPromptUiData,
+    WallExposureView, WallFinishField, WallInclusionPromptView, WindowTypeChoice,
 };
 use crate::ui::pages::events::UiEvent;
 use crate::ui::render::ViewParams;
@@ -199,6 +199,21 @@ pub enum SketchEvent {
     ApplyDimension(f32),
     /// User skipped the current dimension prompt.
     SkipDimension,
+    /// Toggle edit-dimension mode: tap a finalised outline wall, type its
+    /// corrected length, choose which end of the wall moves.
+    SetEditDimensionMode(bool),
+    /// Edit-dimension-mode tap: pick the outline wall under the pointer.
+    EditDimensionTap {
+        world_x: f64,
+        world_y: f64,
+        tol: f64,
+    },
+    /// User submitted the corrected length for the picked wall.
+    ApplyEditDimension(f32),
+    /// Flip which end of the picked wall absorbs the length change.
+    ToggleEditDimensionSide,
+    /// Close the edit-dimension prompt without changing anything.
+    CancelEditDimension,
     /// While the dimension prompt was up, the user tapped a wall carrying a
     /// length label on the canvas: copy that displayed length (metres, shown
     /// at 2 dp) into the dimension expression as the term at the caret. The
@@ -630,6 +645,65 @@ pub enum SketchEvent {
     /// "Edit roof window…" on the plan-selected rooflight: open the box in edit
     /// mode, prefilled with its size / window type / overshading.
     EditSelectedRoofWindow,
+    /// "Edit doorset…" on the elevation's selected door+sidelights MEMBER
+    /// (panel or pane): open the piece-by-piece composer in edit mode on the
+    /// whole assembly.
+    EditSelectedAssembly,
+    /// "Move to wall…" on the elevation's selected opening: close the
+    /// elevation and arm the next plan tap as the target-wall pick (a doorset
+    /// member moves its whole assembly).
+    MoveSelectedOpening,
+    /// The armed move's target pick: transfer the opening onto the wall under
+    /// the tap, centred there.
+    MoveOpeningTap {
+        world_x: f64,
+        world_y: f64,
+        tol: f64,
+    },
+    /// Disarm the pending opening move without changing anything.
+    CancelOpeningMove,
+    /// Structure phase: open the 1-D "Divide wall" on the selected wall
+    /// region (drag the two bound handles / type distances, then Split).
+    BeginStructureDivide,
+    StructureDividePointerDown {
+        world_x: f64,
+        world_y: f64,
+        tol: f64,
+    },
+    StructureDividePointerDrag {
+        world_x: f64,
+        world_y: f64,
+    },
+    StructureDividePointerUp,
+    /// Type a divide bound exactly: distance (m) from the selected piece's
+    /// left end; `first` picks which cut.
+    SetStructureDivideBound {
+        first: bool,
+        value: f32,
+    },
+    /// Commit the divide as durable wall splits (the pieces become regions).
+    ApplyStructureDivide,
+    CancelStructureDivide,
+    /// Apply the doorset edit: re-compose the assembly from the typed pieces
+    /// at its current centre (see the Detailed composer's field meaning).
+    ApplyAssemblyEdit {
+        door_w: f32,
+        door_h: f32,
+        left: Option<f32>,
+        left_sill: Option<f32>,
+        right: Option<f32>,
+        right_sill: Option<f32>,
+        transom: Option<f32>,
+        transom_semicircular: bool,
+        /// Which shared window type the panes join after the edit.
+        window_type: WindowTypeChoice,
+        overshading: Overshading,
+        num_opes: Option<u32>,
+        /// The door panel's draught-stripped tick.
+        door_draught_stripped: bool,
+        /// Photos picked in the box, attached to the panes' type group.
+        photos: Vec<(std::path::PathBuf, crate::ui::widgets::PhotoQuality)>,
+    },
     /// Apply the door edit: resize + set the door's type name / kind / draught
     /// from the box's values.
     ApplyDoorEdit {
@@ -782,6 +856,20 @@ pub enum SketchEvent {
     },
     /// Delete a whole object room pin (the Delete panel).
     DeleteObjectRoom(ItemId),
+    /// The pin dropdown's ➕ on an object row: open the per-object edit
+    /// window (count / note / kWh + add photos).
+    BeginEditObject {
+        room: ItemId,
+        object: ItemId,
+    },
+    /// Apply the object edit; `photos` APPEND to the object's evidence.
+    UpdateObject {
+        count: u32,
+        note: Option<String>,
+        kwh: Option<f32>,
+        photos: Vec<(std::path::PathBuf, crate::ui::widgets::PhotoQuality)>,
+    },
+    CancelEditObject,
     /// Toggle an object's "separate control for water & space" flag (item 2) —
     /// shown on Boiler / Programmer rows; re-derives `heating_system`.
     SetObjectSeparateHwControl {
@@ -1230,6 +1318,24 @@ pub struct SketchView<'a> {
     pub dim_input: &'a mut String,
     pub dim_scale_set: bool,
     pub dim_error: Option<&'a str>,
+    /// Edit-dimension mode (re-dimension a finalised outline wall) + its open
+    /// prompt: the picked wall, current length, and which end moves (the
+    /// canvas marks that end; the number box holds the input + side toggle).
+    pub edit_dimension_mode: bool,
+    /// A "move opening to another wall" pick is armed: the canvas routes the
+    /// next openings-mode plan tap to the transfer and shows the hint banner.
+    pub opening_move_pending: bool,
+    /// Structure-phase "Divide wall" in flight: the wall + span + bounds the
+    /// canvas draws handles for and the dock's inputs edit.
+    pub structure_divide: Option<StructureDivideView>,
+    pub structure_divide_a_input: &'a mut String,
+    pub structure_divide_b_input: &'a mut String,
+    /// The open per-object EDIT (Objects phase) + its add-photos buffer.
+    pub object_edit: Option<crate::controller::app_controller::ObjectEditView>,
+    pub object_edit_photos: &'a mut Vec<(std::path::PathBuf, crate::ui::widgets::PhotoQuality)>,
+    pub edit_dim_prompt: Option<EditDimensionUiData>,
+    pub edit_dim_input: &'a mut String,
+    pub edit_dim_error: Option<&'a str>,
     pub dimensioned_walls: &'a [(usize, usize)],
     /// Tap-to-copy label set while a dimension prompt is open: every wall
     /// with a determinable current length, as `(start, end, length)` in

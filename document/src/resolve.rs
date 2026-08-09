@@ -1373,6 +1373,90 @@ pub fn reseed_wall_anchors_on_load(plan: &manip_plan::FloorPlan, storey: &mut St
     }
 }
 
+/// The OUTLINE-SPLICE variant of [`reseed_wall_anchors_on_load`]: same
+/// placement-derived reseed, plus a RE-HOME fallback for an opening whose
+/// wall span the splice REMOVED. A trim notch carved through a doorway is
+/// the door's RECESS — the door belongs on the notch's new back wall, a
+/// parallel wall a step behind its old position. When the exact-position
+/// anchor fails (`opening_wall_anchor`'s 0.05 m tolerance — no wall left
+/// under the opening), fall back to the nearest perimeter wall whose span
+/// CONTAINS the opening's projection, within `REHOME_MAX_DIST_M`; members of
+/// an assembly project onto the same wall at the same scale, so the doorset
+/// stays rigid. An opening with no such wall keeps its old anchor and takes
+/// the ordinary re-home/prune.
+pub fn reseed_wall_anchors_after_splice(plan: &manip_plan::FloorPlan, storey: &mut Storey) {
+    use ber_model::ber::fenestration::OpeningPlacement;
+    /// How far a removed wall's opening may step to a parallel replacement —
+    /// generous enough for a deep porch recess, small enough not to jump
+    /// across a room.
+    const REHOME_MAX_DIST_M: f32 = 1.5;
+    let rehomed_anchor = |centre: Point2f32| {
+        let mut best: Option<(f32, ber_model::ber::fenestration::WallAnchor)> = None;
+        for (vid, a, b) in plan.perimeter_walls() {
+            let len = ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt();
+            if len < 1e-3 {
+                continue;
+            }
+            let t = ((centre.x - a.x) * (b.x - a.x) + (centre.y - a.y) * (b.y - a.y)) / (len * len);
+            // Strictly INSIDE the span: an end-projection is a corner graze,
+            // not a wall this opening can live on.
+            if !(0.02..=0.98).contains(&t) {
+                continue;
+            }
+            let px = a.x + t * (b.x - a.x);
+            let py = a.y + t * (b.y - a.y);
+            let dist = ((centre.x - px).powi(2) + (centre.y - py).powi(2)).sqrt();
+            if dist <= REHOME_MAX_DIST_M && best.as_ref().is_none_or(|(d, _)| dist < *d) {
+                best = Some((
+                    dist,
+                    ber_model::ber::fenestration::WallAnchor {
+                        wall: manip_plan::SurfaceRef::wall(vid),
+                        along_fraction: t,
+                        porch: None,
+                    },
+                ));
+            }
+        }
+        best.map(|(_, a)| a)
+    };
+    let anchor_of = |placement: &Option<OpeningPlacement>| {
+        let Some(OpeningPlacement::Wall {
+            wall_id, along_m, ..
+        }) = placement
+        else {
+            return None;
+        };
+        let wall = storey.walls.regions.iter().find(|r| r.id == *wall_id)?;
+        opening_wall_anchor(plan, wall, *along_m).or_else(|| {
+            let (origin, (ux, uy), _, _) = wall.base_frame()?;
+            rehomed_anchor(Point2f32::new(
+                (origin.x + ux * *along_m as f64) as f32,
+                (origin.y + uy * *along_m as f64) as f32,
+            ))
+        })
+    };
+    let win: Vec<_> = storey
+        .windows
+        .iter()
+        .map(|w| anchor_of(&w.placement))
+        .collect();
+    let drs: Vec<_> = storey
+        .doors
+        .iter()
+        .map(|d| anchor_of(&d.placement))
+        .collect();
+    for (w, a) in storey.windows.iter_mut().zip(win) {
+        if a.is_some() {
+            w.wall_anchor = a;
+        }
+    }
+    for (d, a) in storey.doors.iter_mut().zip(drs) {
+        if a.is_some() {
+            d.wall_anchor = a;
+        }
+    }
+}
+
 /// The PORCH sibling of [`reseed_wall_anchors_on_load`]: re-derive each
 /// porch-wall opening's durable anchor from its saved host PORCH wall's
 /// geometry against the just-RELOADED porch slots.
@@ -1901,6 +1985,10 @@ pub fn relink_openings_after_derive(
     // move the opening clear (up, else along) rather than leave it looking
     // into the dwelling's own neighbouring storey.
     nudge_openings_off_buried_pieces(s, storey);
+    // Both passes above act PER OPENING (anchor fractions, band nudges), so a
+    // door+sidelights assembly can come out of them with drifted members — a
+    // pane overlapping its door. Re-flush every assembly against its panel.
+    ber_model::ber::openings::realign_assembly_members(storey);
     ber_model::ber::openings::derive_opening_vertices(storey);
     ber_model::ber::openings::rebuild_opes(storey);
 }

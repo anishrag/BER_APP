@@ -27,6 +27,9 @@ use domain::sketch::{EditTools, SketchMode};
 pub enum Tool {
     /// Exclusive edit-tool selection (the sketch engine's active tool).
     EditTool(EditTools),
+    /// Edit-dimension mode toggle: tap a finalised outline wall, type its
+    /// corrected length, choose which end of the wall moves.
+    EditDimension,
     /// Living-area drawing mode toggle (+ a delete button for the active area).
     LivingArea,
     /// Porch drawing mode toggle (+ a delete button for the active porch).
@@ -109,6 +112,7 @@ pub const CATEGORIES: &[Category] = &[
             Tool::EditTool(EditTools::DrawPerpWalls),
             Tool::EditTool(EditTools::AddDetachedSection),
             Tool::EditTool(EditTools::Move),
+            Tool::EditDimension,
             Tool::EditTool(EditTools::ExtendOrtho),
             Tool::EditTool(EditTools::ExtendCurve),
             Tool::EditTool(EditTools::Trim),
@@ -269,6 +273,9 @@ pub struct ToolFlags {
     pub active_living_area: Option<usize>,
     pub porch_mode: bool,
     pub active_porch: Option<usize>,
+    /// Edit-dimension mode + its gate (outline fully measured).
+    pub edit_dimension_mode: bool,
+    pub outline_finalised: bool,
     pub exposure_mode: bool,
     /// The floor-exposure tool is active (all-storeys overlaid floor view).
     pub floor_exposure_mode: bool,
@@ -355,6 +362,8 @@ impl ToolFlags {
             active_living_area: view.active_living_area,
             porch_mode: view.porch_mode,
             active_porch: view.active_porch,
+            edit_dimension_mode: view.edit_dimension_mode,
+            outline_finalised: view.dim_scale_set && view.dim_prompt.is_none(),
             exposure_mode: view.exposure_mode,
             floor_exposure_mode: view.floor_exposure_mode,
             ceiling_exposure_mode: view.ceiling_exposure_mode,
@@ -644,6 +653,28 @@ fn tool_ui<F: FnMut(UiEvent)>(
             }
             if resp.clicked() {
                 on_event(UiEvent::Sketch(SketchEvent::ChangeEditTool(t)));
+            }
+        }
+        Tool::EditDimension => {
+            // An edit of a COMPLETED dimension — only offered once the outline
+            // is fully measured (mid-loop, the dimension prompt owns lengths).
+            let enabled = !flags.read_only && flags.has_floor_plan && flags.outline_finalised;
+            if ui
+                .add_enabled(
+                    enabled,
+                    egui::Button::selectable(flags.edit_dimension_mode, "📐 Edit dimension"),
+                )
+                .hint(
+                    "Correct a measured wall length: tap the wall, type the \
+                     right length, and pick which end of the house moves — \
+                     areas, windows and exposure follow",
+                )
+                .disabled_hint("Finish measuring the outline first")
+                .clicked()
+            {
+                on_event(UiEvent::Sketch(SketchEvent::SetEditDimensionMode(
+                    !flags.edit_dimension_mode,
+                )));
             }
         }
         Tool::LivingArea => {

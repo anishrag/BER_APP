@@ -1488,8 +1488,19 @@ pub fn render_wall_exposure(
             );
         }
         for s in &w.sections {
-            let pa = along(w.a, w.b, w.length_m, s.start_m);
-            let pb = along(w.a, w.b, w.length_m, s.end_m);
+            // Clamp to the wall's own extent: a stored section can outlive a
+            // wall that SHRANK (e.g. a trim's remnant keeps its vid), and an
+            // unclamped lerp would paint past the wall's end — across the
+            // trimmed-away gap, onto wall that no longer exists.
+            let (s0, s1) = (
+                s.start_m.clamp(0.0, w.length_m),
+                s.end_m.clamp(0.0, w.length_m),
+            );
+            if s1 - s0 < 1e-4 {
+                continue;
+            }
+            let pa = along(w.a, w.b, w.length_m, s0);
+            let pb = along(w.a, w.b, w.length_m, s1);
             painter.line_segment([pa, pb], egui::Stroke::new(width, color_of(s.exposure)));
         }
     }

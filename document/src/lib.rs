@@ -25,6 +25,7 @@ mod identity;
 mod load;
 mod phase;
 mod position;
+mod resize;
 mod resolve;
 mod step;
 mod wall_partition;
@@ -60,11 +61,14 @@ pub use phase::{
     CentroidKey, PhaseRegion,
 };
 pub use position::{PositionOption, PositionPrompt, PositionPromptKind};
+pub use resize::{
+    resize_record_storey, PlaneMove, PlaneMoveOutcome, WallEnd, WallLengthChange, PLANE_MATCH_TOL_M,
+};
 pub use resolve::{
     ensure_storey_constructions, living_area_ceiling_height, opening_porch_wall_anchor,
     opening_wall_anchor, relink_openings_after_derive, reseed_porch_wall_anchors_on_load,
-    reseed_wall_anchors_on_load, resolve_porch_wall_anchor, resolve_storey, resolve_wall_anchor,
-    stamp_horizontal_exposure, stamp_riser_exposure,
+    reseed_wall_anchors_after_splice, reseed_wall_anchors_on_load, resolve_porch_wall_anchor,
+    resolve_storey, resolve_wall_anchor, stamp_horizontal_exposure, stamp_riser_exposure,
 };
 pub use step::{
     inherited_step_regions, inherited_step_regions_with, junction_mismatch_reasons_by_storey,

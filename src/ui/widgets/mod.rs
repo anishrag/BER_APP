@@ -9,7 +9,10 @@ pub mod photo_annotate;
 
 pub use hint::HintExt;
 pub use pads::{metre_input, text_input, text_input_multiline, PadResponse};
-pub use photo::{photo_button, photo_button_pair, PhotoConfig, PhotoQuality};
+pub use photo::{
+    clickable_photo, open_photo_viewer, photo_button, photo_button_pair, render_photo_viewer,
+    PhotoConfig, PhotoQuality,
+};
 pub use photo_annotate::PhotoAnnotator;
 
 /// The native soft keyboard's height in egui points — 0 when it's hidden and

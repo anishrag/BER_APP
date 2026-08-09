@@ -1537,6 +1537,123 @@ pub fn move_opening(
         .or_else(|_| redistribute_wall_openings(storey, wall_id))
 }
 
+/// Move an opening onto a DIFFERENT wall, its (assembly-aware) body centred
+/// at `along_m` on the target. An assembly member transfers the WHOLE
+/// assembly rigidly: every member keeps its sill and its along-offset from
+/// the body centre, so a door+sidelights lands on the new wall exactly as
+/// composed. Feasibility-checked on the target (margins + redistribution,
+/// the moved refs pinned); on failure every placement is restored and the
+/// error returned. The source wall's remaining openings re-spread. Same-wall
+/// targets defer to [`move_opening`] (the plain drag semantics).
+pub fn transfer_opening_to_wall(
+    storey: &mut Storey,
+    opening: OpeningRef,
+    target_wall: ItemId,
+    along_m: f32,
+) -> Result<(), OpeningError> {
+    let Some((src_wall, _, old_sill, assembly)) = wall_placement_of(storey, opening) else {
+        return Ok(()); // roof / unplaced — nothing to transfer
+    };
+    if src_wall == target_wall {
+        return move_opening(storey, opening, along_m, old_sill);
+    }
+    let Some(target_len) = wall_length(storey, target_wall) else {
+        return Err(OpeningError::NoHostRegion);
+    };
+    let body = moved_body(storey, src_wall, opening, assembly).unwrap_or(MovedBody {
+        centre: along_m,
+        vmin: old_sill,
+        vmax: old_sill,
+    });
+    // Sanity-clamp the requested centre so the body starts inside the target
+    // span; the redistribution below owns the exact margins.
+    let along_m = along_m.clamp(0.0, target_len);
+    let d_along = along_m - body.centre;
+
+    // The member set + a placement snapshot for the rollback.
+    let member_refs: Vec<OpeningRef> = match assembly {
+        Some(aid) => storey
+            .windows
+            .iter()
+            .filter(|w| w.assembly_id == Some(aid))
+            .map(|w| OpeningRef::Window(w.id))
+            .chain(
+                storey
+                    .doors
+                    .iter()
+                    .filter(|d| d.assembly_id == Some(aid))
+                    .map(|d| OpeningRef::Door(d.id)),
+            )
+            .collect(),
+        None => vec![opening],
+    };
+    let saved: Vec<(OpeningRef, Option<OpeningPlacement>)> = member_refs
+        .iter()
+        .map(|r| {
+            let p = match r {
+                OpeningRef::Window(id) => storey
+                    .windows
+                    .iter()
+                    .find(|w| w.id == *id)
+                    .and_then(|w| w.placement.clone()),
+                OpeningRef::Door(id) => storey
+                    .doors
+                    .iter()
+                    .find(|d| d.id == *id)
+                    .and_then(|d| d.placement.clone()),
+            };
+            (*r, p)
+        })
+        .collect();
+
+    let shift = |p: &mut Option<OpeningPlacement>| {
+        if let Some(OpeningPlacement::Wall {
+            wall_id, along_m, ..
+        }) = p
+        {
+            *wall_id = target_wall;
+            *along_m += d_along;
+        }
+    };
+    for r in &member_refs {
+        match r {
+            OpeningRef::Window(id) => {
+                if let Some(w) = storey.windows.iter_mut().find(|w| w.id == *id) {
+                    shift(&mut w.placement);
+                }
+            }
+            OpeningRef::Door(id) => {
+                if let Some(d) = storey.doors.iter_mut().find(|d| d.id == *id) {
+                    shift(&mut d.placement);
+                }
+            }
+        }
+    }
+    let feasible = redistribute_wall_openings_pinned(storey, target_wall, &member_refs)
+        .or_else(|_| redistribute_wall_openings(storey, target_wall));
+    if let Err(e) = feasible {
+        for (r, p) in saved {
+            match r {
+                OpeningRef::Window(id) => {
+                    if let Some(w) = storey.windows.iter_mut().find(|w| w.id == id) {
+                        w.placement = p;
+                    }
+                }
+                OpeningRef::Door(id) => {
+                    if let Some(d) = storey.doors.iter_mut().find(|d| d.id == id) {
+                        d.placement = p;
+                    }
+                }
+            }
+        }
+        return Err(e);
+    }
+    // The leavers freed space on the source wall — re-spread what remains.
+    let _ = redistribute_wall_openings(storey, src_wall);
+    rebuild_opes(storey);
+    Ok(())
+}
+
 /// Resize a WALL opening in place (width/height), under the same feasibility
 /// rules as placement: end margins + auto-redistribution, the resized opening
 /// PINNED at its along while the rest flow around it (if pinning is infeasible
@@ -2345,6 +2462,91 @@ pub fn confine_wall_openings_to_host(storey: &mut Storey) {
         .collect();
     for (d, up) in storey.doors.iter_mut().zip(drs) {
         set(&mut d.placement, up, &mut d.width_m);
+    }
+}
+
+/// Re-FLUSH every door+sidelights assembly's members against their door
+/// panel, horizontally. The relink passes act PER MEMBER — each re-derives
+/// its along from its own anchor fraction, and the buried-band nudge moves
+/// one opening at a time — so a wall reshape can drift the members of a
+/// rigid assembly apart, or into each other (a sidelight intersecting the
+/// door). This pass restores the composed invariant: the door panel keeps
+/// its position; sidelights snap flush against its edges (below the door's
+/// top) in their current side/order; the transom re-centres per its width
+/// (a whole-assembly transom over the assembly, a door-width one over the
+/// door). Vertical positions are untouched (sills are absolute and survive
+/// the relink). A no-op for already-flush assemblies.
+pub fn realign_assembly_members(storey: &mut Storey) {
+    let aids: Vec<ItemId> = storey.doors.iter().filter_map(|d| d.assembly_id).collect();
+    for aid in aids {
+        let Some(door) = storey.doors.iter().find(|d| d.assembly_id == Some(aid)) else {
+            continue;
+        };
+        let Some(OpeningPlacement::Wall {
+            along_m: d_al,
+            sill_m: d_sl,
+            ..
+        }) = door.placement
+        else {
+            continue;
+        };
+        let (d_w, d_top) = (door.width_m, d_sl + door.height_m);
+        // Members split by role from their CURRENT geometry: a pane whose sill
+        // sits at (or above) the door's top is the transom; the rest are
+        // sidelights, sided against the door's centre.
+        let mut left: Vec<(usize, f32, f32)> = Vec::new(); // (idx, along, width)
+        let mut right: Vec<(usize, f32, f32)> = Vec::new();
+        let mut transom: Option<(usize, f32)> = None; // (idx, width)
+        for (i, w) in storey.windows.iter().enumerate() {
+            if w.assembly_id != Some(aid) {
+                continue;
+            }
+            let Some(OpeningPlacement::Wall {
+                along_m, sill_m, ..
+            }) = w.placement
+            else {
+                continue;
+            };
+            if sill_m >= d_top - 0.05 {
+                transom = Some((i, w.width_m));
+            } else if along_m < d_al {
+                left.push((i, along_m, w.width_m));
+            } else {
+                right.push((i, along_m, w.width_m));
+            }
+        }
+        let set_along = |w: &mut Window, v: f32| {
+            if let Some(OpeningPlacement::Wall { along_m, .. }) = &mut w.placement {
+                *along_m = v;
+            }
+        };
+        // Left panes flush leftward from the door's left edge (nearest first)…
+        left.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let mut cursor = d_al - d_w * 0.5;
+        for (i, _, w) in &left {
+            set_along(&mut storey.windows[*i], cursor - w * 0.5);
+            cursor -= w;
+        }
+        let left_outer = cursor;
+        // …right panes flush rightward from the door's right edge.
+        right.sort_by(|a, b| a.1.total_cmp(&b.1));
+        let mut cursor = d_al + d_w * 0.5;
+        for (i, _, w) in &right {
+            set_along(&mut storey.windows[*i], cursor + w * 0.5);
+            cursor += w;
+        }
+        let right_outer = cursor;
+        // The transom re-centres to whichever span its width matches better:
+        // the whole assembly (normal layout) or the door alone (full-height).
+        if let Some((i, t_w)) = transom {
+            let total = right_outer - left_outer;
+            let centre = if (t_w - d_w).abs() < (t_w - total).abs() {
+                d_al
+            } else {
+                (left_outer + right_outer) * 0.5
+            };
+            set_along(&mut storey.windows[i], centre);
+        }
     }
 }
 

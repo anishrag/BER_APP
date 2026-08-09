@@ -87,6 +87,16 @@ pub struct SketchState {
     /// Last error from `apply_dimension`. Shown next to the textbox so the
     /// user can correct without losing what they typed.
     pub dimension_error: Option<String>,
+    /// Backing string for the edit-dimension prompt's text input.
+    pub edit_dim_input: String,
+    /// Backing strings for the Structure "Divide wall" distance inputs.
+    pub structure_divide_a_input: String,
+    pub structure_divide_b_input: String,
+    /// Photos picked in the per-object EDIT window, awaiting Apply.
+    pub object_edit_photos: Vec<(std::path::PathBuf, crate::ui::widgets::PhotoQuality)>,
+    /// Last error from `apply_edit_dimension` — same lifecycle as
+    /// `dimension_error`.
+    pub edit_dim_error: Option<String>,
     /// Backing string for the position prompt's text input. PREFILLED with
     /// the prompt's current (drawn) distance whenever the prompt identity
     /// changes (see `position_prompt_key`); the user overtypes or accepts.
@@ -1715,6 +1725,18 @@ impl eframe::App for BerApp {
                             };
 
                             let navigation = self.app_controller.borrow().navigation_mode();
+                            let (edit_dimension_mode, edit_dim_prompt, opening_move_pending) = {
+                                let c = self.app_controller.borrow();
+                                (
+                                    c.edit_dimension_mode(),
+                                    c.edit_dimension_for_ui(),
+                                    c.opening_move_pending(),
+                                )
+                            };
+                            let structure_divide =
+                                self.app_controller.borrow().structure_divide_view();
+                            let object_edit = self.app_controller.borrow().object_edit_view();
+                            let edit_dim_error = self.sketch_state.edit_dim_error.clone();
                             let view = SketchView {
                                 current: stroke.as_ref().map(EguiStroke::from),
                                 mode,
@@ -1733,6 +1755,20 @@ impl eframe::App for BerApp {
                                 dim_input: &mut self.sketch_state.dimension_input,
                                 dim_scale_set,
                                 dim_error: dim_error.as_deref(),
+                                edit_dimension_mode,
+                                opening_move_pending,
+                                structure_divide,
+                                structure_divide_a_input: &mut self
+                                    .sketch_state
+                                    .structure_divide_a_input,
+                                structure_divide_b_input: &mut self
+                                    .sketch_state
+                                    .structure_divide_b_input,
+                                object_edit,
+                                object_edit_photos: &mut self.sketch_state.object_edit_photos,
+                                edit_dim_prompt,
+                                edit_dim_input: &mut self.sketch_state.edit_dim_input,
+                                edit_dim_error: edit_dim_error.as_deref(),
                                 dimensioned_walls: &dimensioned_walls,
                                 copy_wall_labels: &copy_wall_labels,
                                 position_prompt,
@@ -2156,6 +2192,41 @@ impl eframe::App for BerApp {
                                         SketchEvent::SkipDimension => {
                                             controller.borrow_mut().skip_current_dimension();
                                             self.sketch_state.dimension_error = None;
+                                        }
+                                        SketchEvent::SetEditDimensionMode(on) => {
+                                            controller.borrow_mut().set_edit_dimension_mode(on);
+                                            self.sketch_state.edit_dim_error = None;
+                                        }
+                                        SketchEvent::EditDimensionTap {
+                                            world_x,
+                                            world_y,
+                                            tol,
+                                        } => {
+                                            controller
+                                                .borrow_mut()
+                                                .edit_dimension_tap(world_x, world_y, tol);
+                                            self.sketch_state.edit_dim_error = None;
+                                        }
+                                        SketchEvent::ApplyEditDimension(value) => {
+                                            match controller
+                                                .borrow_mut()
+                                                .apply_edit_dimension(value)
+                                            {
+                                                Ok(()) => {
+                                                    self.sketch_state.edit_dim_error = None;
+                                                }
+                                                Err(e) => {
+                                                    log::error!("apply_edit_dimension: {}", e);
+                                                    self.sketch_state.edit_dim_error = Some(e);
+                                                }
+                                            }
+                                        }
+                                        SketchEvent::ToggleEditDimensionSide => {
+                                            controller.borrow_mut().toggle_edit_dimension_side();
+                                        }
+                                        SketchEvent::CancelEditDimension => {
+                                            controller.borrow_mut().cancel_edit_dimension();
+                                            self.sketch_state.edit_dim_error = None;
                                         }
                                         SketchEvent::CopyWallLengthIntoDimension(metres) => {
                                             // The buffer is mutably borrowed by the
@@ -2821,6 +2892,130 @@ impl eframe::App for BerApp {
                                             controller
                                                 .borrow_mut()
                                                 .start_edit_selected_roof_window();
+                                        }
+                                        SketchEvent::EditSelectedAssembly => {
+                                            controller.borrow_mut().start_edit_selected_assembly();
+                                        }
+                                        SketchEvent::MoveSelectedOpening => {
+                                            controller.borrow_mut().begin_move_selected_opening();
+                                        }
+                                        SketchEvent::MoveOpeningTap {
+                                            world_x,
+                                            world_y,
+                                            tol,
+                                        } => {
+                                            match controller
+                                                .borrow_mut()
+                                                .move_opening_tap(world_x, world_y, tol)
+                                            {
+                                                Ok(()) => {
+                                                    self.sketch_state.stroke_error = None;
+                                                }
+                                                Err(e) => {
+                                                    log::warn!("move_opening_tap: {}", e);
+                                                    self.sketch_state.stroke_error = Some(e);
+                                                }
+                                            }
+                                        }
+                                        SketchEvent::CancelOpeningMove => {
+                                            controller.borrow_mut().cancel_opening_move();
+                                        }
+                                        SketchEvent::BeginStructureDivide => {
+                                            controller.borrow_mut().begin_structure_divide();
+                                        }
+                                        SketchEvent::StructureDividePointerDown {
+                                            world_x,
+                                            world_y,
+                                            tol,
+                                        } => {
+                                            controller.borrow_mut().structure_divide_pointer_down(
+                                                world_x, world_y, tol,
+                                            );
+                                        }
+                                        SketchEvent::StructureDividePointerDrag {
+                                            world_x,
+                                            world_y,
+                                        } => {
+                                            controller
+                                                .borrow_mut()
+                                                .structure_divide_pointer_drag(world_x, world_y);
+                                        }
+                                        SketchEvent::StructureDividePointerUp => {
+                                            controller.borrow_mut().structure_divide_pointer_up();
+                                        }
+                                        SketchEvent::SetStructureDivideBound { first, value } => {
+                                            if let Err(e) = controller
+                                                .borrow_mut()
+                                                .set_structure_divide_bound(first, value)
+                                            {
+                                                log::warn!("set_structure_divide_bound: {}", e);
+                                                self.sketch_state.stroke_error = Some(e);
+                                            }
+                                        }
+                                        SketchEvent::ApplyStructureDivide => {
+                                            match controller.borrow_mut().apply_structure_divide() {
+                                                Ok(()) => {
+                                                    self.sketch_state.stroke_error = None;
+                                                }
+                                                Err(e) => {
+                                                    log::warn!("apply_structure_divide: {}", e);
+                                                    self.sketch_state.stroke_error = Some(e);
+                                                }
+                                            }
+                                        }
+                                        SketchEvent::CancelStructureDivide => {
+                                            controller.borrow_mut().cancel_structure_divide();
+                                        }
+                                        SketchEvent::BeginEditObject { room, object } => {
+                                            controller.borrow_mut().begin_edit_object(room, object);
+                                        }
+                                        SketchEvent::UpdateObject {
+                                            count,
+                                            note,
+                                            kwh,
+                                            photos,
+                                        } => {
+                                            if let Err(e) = controller
+                                                .borrow_mut()
+                                                .update_object(count, note, kwh, photos)
+                                            {
+                                                log::warn!("update_object: {}", e);
+                                                self.sketch_state.stroke_error = Some(e);
+                                            }
+                                        }
+                                        SketchEvent::CancelEditObject => {
+                                            controller.borrow_mut().cancel_edit_object();
+                                        }
+                                        SketchEvent::ApplyAssemblyEdit {
+                                            door_w,
+                                            door_h,
+                                            left,
+                                            left_sill,
+                                            right,
+                                            right_sill,
+                                            transom,
+                                            transom_semicircular,
+                                            window_type,
+                                            overshading,
+                                            num_opes,
+                                            door_draught_stripped,
+                                            photos,
+                                        } => {
+                                            let _ = controller.borrow_mut().apply_assembly_edit(
+                                                door_w,
+                                                door_h,
+                                                left,
+                                                left_sill,
+                                                right,
+                                                right_sill,
+                                                transom,
+                                                transom_semicircular,
+                                                window_type,
+                                                overshading,
+                                                num_opes,
+                                                door_draught_stripped,
+                                                photos,
+                                            );
                                         }
                                         SketchEvent::ApplyDoorEdit {
                                             width_m,
@@ -3831,5 +4026,9 @@ impl eframe::App for BerApp {
         // over whatever page is active (so the assessor can flag an issue at any
         // stage of a BER). Also drains the "WiFi came up" signal to poke uploads.
         self.bug_overlay(ctx);
+
+        // Global photo lightbox: any thumbnail tapped anywhere (via
+        // `clickable_photo`) opens large here, over everything.
+        crate::ui::widgets::render_photo_viewer(ctx);
     }
 }

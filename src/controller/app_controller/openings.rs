@@ -173,6 +173,11 @@ pub struct OpeningFieldsPrompt {
     /// exclusive with `edit`; the primary action becomes Apply (a door-edit
     /// event). `None` otherwise.
     pub door_edit: Option<DoorEditPrefill>,
+    /// `Some` when this box EDITS a door+sidelights ASSEMBLY ("Edit
+    /// doorset…"): the composer opens in its piece-by-piece (Detailed) shape
+    /// prefilled from the members, and Apply RE-COMPOSES the assembly.
+    /// Mutually exclusive with `edit` / `door_edit`.
+    pub assembly_edit: Option<AssemblyEditPrefill>,
 }
 
 /// The resolved spans behind the "Full width" / "Full height" checkboxes (see
@@ -199,6 +204,10 @@ pub(super) enum OpeningEdit {
     Door(ItemId),
     /// A roof window (rooflight) — no host wall, no sill/redistribution.
     RoofWindow(ItemId),
+    /// A whole DOOR+SIDELIGHTS assembly (selected via any member): the edit
+    /// re-opens the piece-by-piece composer prefilled from the members and
+    /// Apply RE-COMPOSES the assembly in place at its current centre.
+    Assembly(ItemId),
 }
 
 /// Prefill for the on-surface "Edit…" box for a WINDOW (wall or roof): its
@@ -228,6 +237,27 @@ pub struct DoorEditPrefill {
     pub height_m: f32,
     pub type_name: String,
     pub kind: DoorKind,
+    pub draught_stripped: bool,
+}
+
+/// Prefill for the on-surface "Edit doorset…" box (a door+sidelights
+/// assembly): the pieces reconstructed from the stored members, in the
+/// Detailed composer's shape (see [`OpeningFieldsPrompt::assembly_edit`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AssemblyEditPrefill {
+    pub door_width_m: f32,
+    pub door_height_m: f32,
+    /// Left sidelight `(width, sill)` — `None` when the assembly has none.
+    pub left: Option<(f32, f32)>,
+    /// Right sidelight `(width, sill)`.
+    pub right: Option<(f32, f32)>,
+    /// Transom pane HEIGHT — `None` when the assembly has none.
+    pub transom_m: Option<f32>,
+    pub transom_semicircular: bool,
+    /// The panes' shared window type + overshading, seeding the picker.
+    pub window_type_id: ItemId,
+    pub overshading: Overshading,
+    /// The door panel's draught-stripped flag, seeding the checkbox.
     pub draught_stripped: bool,
 }
 
@@ -864,6 +894,7 @@ impl AppController {
             seq: self.placement_seq,
             edit: None,
             door_edit: None,
+            assembly_edit: None,
         })
     }
 
@@ -901,6 +932,7 @@ impl AppController {
                 let d = storey.doors.iter().find(|d| d.id == did)?;
                 Some(self.door_edit_prompt(d))
             }
+            OpeningEdit::Assembly(aid) => self.assembly_edit_prompt(storey, aid),
         }
     }
 
@@ -964,6 +996,7 @@ impl AppController {
                 top,
             }),
             door_edit: None,
+            assembly_edit: None,
         })
     }
 
@@ -1000,6 +1033,7 @@ impl AppController {
                 top: None,
             }),
             door_edit: None,
+            assembly_edit: None,
         })
     }
 
@@ -1033,7 +1067,50 @@ impl AppController {
                 kind: d.kind.clone().unwrap_or(DoorKind::Solid),
                 draught_stripped: d.draught_stripped.unwrap_or(false),
             }),
+            assembly_edit: None,
         }
+    }
+
+    /// The edit prompt for a DOOR+SIDELIGHTS assembly — the piece-by-piece
+    /// composer shape (door W/H, sidelight widths + sills, transom) prefilled
+    /// from the stored members, plus the window-type picker for the panes.
+    /// The Overall/Detailed switch isn't offered: the members are known
+    /// pieces, so the Detailed shape is the faithful one.
+    fn assembly_edit_prompt(&self, storey: &Storey, aid: ItemId) -> Option<OpeningFieldsPrompt> {
+        let prefill = assembly_prefill(storey, aid)?;
+        let req = |label: &str, hint| OpeningFieldSpec {
+            label: label.to_string(),
+            hint,
+            required: true,
+        };
+        let opt = |label: &str, hint| OpeningFieldSpec {
+            label: label.to_string(),
+            hint,
+            required: false,
+        };
+        Some(OpeningFieldsPrompt {
+            title: "Edit door + sidelights".to_string(),
+            fields: vec![
+                req("door width (m)", "e.g. 0.9"),
+                req("door height (m)", "e.g. 2.0"),
+                opt("left light W (m)", "blank = none"),
+                opt("left sill (m)", "blank = to floor"),
+                opt("right light W (m)", "blank = none"),
+                opt("right sill (m)", "blank = to floor"),
+                opt("transom H (m)", "blank = none"),
+            ],
+            offer_full_surface: false,
+            door_sidelights: Some(DoorSidelightsMode::Detailed),
+            complex_window: None,
+            window_top: None,
+            offer_window_type: true,
+            full_span: None,
+            default_overshading: Overshading::Average,
+            seq: self.placement_seq,
+            edit: None,
+            door_edit: None,
+            assembly_edit: Some(prefill),
+        })
     }
 
     /// The placement inline error (wall too short, …), for the floating box.
@@ -1650,6 +1727,42 @@ impl AppController {
         }
     }
 
+    /// Re-seed the active storey's opening anchors after an OUTLINE SPLICE
+    /// (trim/extend) or a dimension entry moved its walls. An anchor is
+    /// `(parent wall, fraction along it)` — a splice that SPLITS a wall (or a
+    /// dimension that changes its length) silently re-scopes every fraction:
+    /// the kept vid now names only the NEAR remnant, so an opening past the
+    /// cut re-derives onto the wrong wall at the wrong spot (the field
+    /// report: a doorset + window teleported toward a trim notch, overlapping
+    /// each other). The heal is the load path's: while the RECORD still holds
+    /// the pre-splice walls (resolve defers), each opening's PLACEMENT is its
+    /// true world position — re-derive every anchor from it against the
+    /// post-splice plan. Openings whose wall was trimmed away keep their old
+    /// anchor (nothing to re-derive against) and take the ordinary re-home.
+    pub(super) fn reseed_anchors_after_outline_splice(&mut self) {
+        if !matches!(self.document.active, ActiveShape::Outline) {
+            return;
+        }
+        let Some(idx) = self.current_storey_idx else {
+            return;
+        };
+        // The reseed reads the outline SLOT; the splice edited the live buffer.
+        self.document.sync_active();
+        let Some(sd) = self.document.storeys.get(idx) else {
+            return;
+        };
+        if let Some(storey) = self
+            .current_record
+            .as_mut()
+            .and_then(|r| r.data.storeys.get_mut(idx))
+        {
+            // The splice variant: placement-derived anchors, plus the
+            // parallel-wall re-home for an opening whose span was trimmed
+            // away (a door in its freshly-carved recess).
+            document::reseed_wall_anchors_after_splice(&sd.outline.floor_plan, storey);
+        }
+    }
+
     pub(super) fn reseed_opening_anchors(&mut self, idx: usize) {
         // Disjoint field borrows: the storey doc (read — supplies the outline
         // plan and the porch slots) and the record (mut — healed in place).
@@ -1827,6 +1940,43 @@ impl AppController {
         self.pending_opening = None;
         self.opening_dim_error = None;
         self.opening_edit = Some(OpeningEdit::Door(did));
+        self.placement_seq = self.placement_seq.wrapping_add(1);
+    }
+
+    /// "Edit doorset…" on the elevation's selected assembly MEMBER (the door
+    /// panel or a sidelight/transom pane): open the piece-by-piece composer in
+    /// edit mode on the WHOLE assembly. No-op when the selection isn't an
+    /// assembly member. The standalone window/door entry points stay no-ops
+    /// for members — this is the flow that owns them.
+    pub fn start_edit_selected_assembly(&mut self) {
+        let Some(sel) = self.elevation_selection else {
+            return;
+        };
+        let Some(idx) = self.current_storey_idx else {
+            return;
+        };
+        let aid = self
+            .current_record
+            .as_ref()
+            .and_then(|r| r.data.storeys.get(idx))
+            .and_then(|s| match sel {
+                OpeningRef::Window(wid) => s
+                    .windows
+                    .iter()
+                    .find(|w| w.id == wid)
+                    .and_then(|w| w.assembly_id),
+                OpeningRef::Door(did) => s
+                    .doors
+                    .iter()
+                    .find(|d| d.id == did)
+                    .and_then(|d| d.assembly_id),
+            });
+        let Some(aid) = aid else {
+            return;
+        };
+        self.pending_opening = None;
+        self.opening_dim_error = None;
+        self.opening_edit = Some(OpeningEdit::Assembly(aid));
         self.placement_seq = self.placement_seq.wrapping_add(1);
     }
 
@@ -2102,6 +2252,234 @@ impl AppController {
 
     /// Drag a grabbed ROOF window in the plan view to a new point (Edit-on-surface
     /// tool). No-op if nothing is grabbed. The drag was snapshotted on pointer-down.
+    /// "Move to wall…" on the elevation's selected opening: close the
+    /// elevation and arm the next plan tap as the TARGET-WALL pick. Works for
+    /// any wall opening — a doorset member moves its whole assembly.
+    pub fn begin_move_selected_opening(&mut self) {
+        let Some(r) = self.elevation_selection else {
+            return;
+        };
+        self.pending_opening_move = Some(r);
+        self.close_elevation();
+        self.pending_opening = None;
+        self.opening_edit = None;
+        self.opening_dim_error = None;
+    }
+
+    /// Whether a "move to another wall" pick is armed (routes the next
+    /// openings-mode plan tap).
+    pub fn opening_move_pending(&self) -> bool {
+        self.pending_opening_move.is_some()
+    }
+
+    /// Disarm the pending move without changing anything.
+    pub fn cancel_opening_move(&mut self) {
+        self.pending_opening_move = None;
+    }
+
+    /// The armed move's TARGET pick: transfer the opening (whole assembly for
+    /// a member) onto the tapped wall, centred at the tap. A miss cancels the
+    /// move; an infeasible target (too short for the body) is refused with
+    /// the model untouched and the move still armed for another tap. One
+    /// undoable action; anchors re-seed from the new placements so the next
+    /// resolve keeps them there.
+    pub fn move_opening_tap(&mut self, wx: f64, wy: f64, tol: f64) -> Result<(), String> {
+        let Some(opening) = self.pending_opening_move else {
+            return Ok(());
+        };
+        let Some(idx) = self.current_storey_idx else {
+            return Ok(());
+        };
+        self.materialize();
+        let pick = self
+            .current_record
+            .as_ref()
+            .and_then(|r| r.data.storeys.get(idx))
+            .and_then(|s| openings::pick_wall_along(s, wx, wy, tol));
+        let Some((target_wall, along_m, _len)) = pick else {
+            self.pending_opening_move = None;
+            return Err("no wall there — the move was cancelled".into());
+        };
+        let undo_snap = self.current_history_snapshot();
+        let Some(record) = self.current_record.as_mut() else {
+            return Ok(());
+        };
+        let Some(storey) = record.data.storeys.get_mut(idx) else {
+            return Ok(());
+        };
+        openings::transfer_opening_to_wall(storey, opening, target_wall, along_m)
+            .map_err(opening_error_msg)?;
+        self.pending_opening_move = None;
+        // Anchors must follow the transfer BEFORE the next resolve, or the
+        // stale anchor re-derives the opening straight back to the old wall.
+        self.reseed_opening_anchors(idx);
+        let _ = self.mark_dirty();
+        self.materialize();
+        self.push_history_snapshot(undo_snap);
+        Ok(())
+    }
+
+    /// Apply the "Edit door + sidelights" box: RE-COMPOSE the assembly from
+    /// the typed pieces at its current centre. Runs delete + compose on a
+    /// CLONE of the storey first, so a refused edit (wall too short, zero
+    /// size) leaves the model fully untouched and the box open with the
+    /// inline error. The door's own attributes (type name/kind/draught,
+    /// photos) carry over from the old panel; the panes take the picked
+    /// window type + overshading; box photos join the type's group. One undo
+    /// action.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_assembly_edit(
+        &mut self,
+        door_w: f32,
+        door_h: f32,
+        left: Option<f32>,
+        left_sill: Option<f32>,
+        right: Option<f32>,
+        right_sill: Option<f32>,
+        transom: Option<f32>,
+        transom_semicircular: bool,
+        window_type: WindowTypeChoice,
+        overshading: Overshading,
+        num_opes: Option<u32>,
+        door_draught_stripped: bool,
+        photos: Vec<(std::path::PathBuf, PhotoQuality)>,
+    ) -> Result<(), String> {
+        let Some(OpeningEdit::Assembly(aid)) = self.opening_edit else {
+            return Ok(());
+        };
+        let Some(idx) = self.current_storey_idx else {
+            return Ok(());
+        };
+        self.materialize();
+        let undo_snap = self.current_history_snapshot();
+        let stored_photos: Vec<Evidence> = photos
+            .iter()
+            .filter_map(|(p, quality)| self.ingest_photo(p, *quality))
+            .collect();
+        let Some(record) = self.current_record.as_mut() else {
+            return Ok(());
+        };
+        let Some(storey) = record.data.storeys.get_mut(idx) else {
+            return Ok(());
+        };
+        // The old members: the door panel carries the anchor + its own
+        // attributes; the assembly centre is the members' combined extent.
+        let Some(old_door) = storey.doors.iter().find(|d| d.assembly_id == Some(aid)) else {
+            self.discard_stored_photos(&stored_photos);
+            return Err("that doorset no longer exists — reopen the elevation".into());
+        };
+        let door_id = old_door.id;
+        let door_type_name = old_door.type_name.clone();
+        let door_kind = old_door.kind.clone();
+        let door_draught = Some(door_draught_stripped);
+        let door_photos = old_door.photos.clone();
+        let old_type_id = storey
+            .windows
+            .iter()
+            .find(|w| w.assembly_id == Some(aid))
+            .map(|w| w.window_type_id)
+            .unwrap_or_default();
+        let Some(OpeningPlacement::Wall { wall_id, .. }) = old_door.placement else {
+            self.discard_stored_photos(&stored_photos);
+            return Err("that doorset has no wall placement".into());
+        };
+        let mut lo = f32::MAX;
+        let mut hi = f32::MIN;
+        let mut span = |placement: &Option<OpeningPlacement>, w: f32| {
+            if let Some(OpeningPlacement::Wall { along_m, .. }) = placement {
+                lo = lo.min(along_m - w * 0.5);
+                hi = hi.max(along_m + w * 0.5);
+            }
+        };
+        span(&old_door.placement, old_door.width_m);
+        for w in storey.windows.iter().filter(|w| w.assembly_id == Some(aid)) {
+            span(&w.placement, w.width_m);
+        }
+        let centre = (lo + hi) * 0.5;
+
+        // Trial on a clone: delete the old assembly, compose the new one. Only
+        // a feasible result is written back.
+        let mut trial = storey.clone();
+        openings::delete_opening(&mut trial, OpeningRef::Door(door_id));
+        let composed = openings::compose_door_sidelights(
+            &mut trial,
+            wall_id,
+            centre,
+            DoorSidelightsSpec {
+                door_width_m: door_w,
+                door_height_m: door_h,
+                left_sidelight_m: left,
+                right_sidelight_m: right,
+                left_sill_m: left_sill,
+                right_sill_m: right_sill,
+                transom_m: transom,
+                transom_semicircular,
+                // Placeholder — the panes re-type below, after the resolve
+                // (so a refused edit mints no window type).
+                window_type_id: old_type_id,
+                door_type_name: door_type_name.clone(),
+            },
+        );
+        let new_aid = match composed {
+            Ok(id) => id,
+            Err(e) => {
+                self.discard_stored_photos(&stored_photos);
+                let msg = opening_error_msg(e);
+                self.opening_dim_error = Some(msg.clone());
+                return Err(msg);
+            }
+        };
+        *storey = trial;
+        // Carry the door panel's own attributes + photos onto the new panel.
+        let new_door_id = storey
+            .doors
+            .iter()
+            .find(|d| d.assembly_id == Some(new_aid))
+            .map(|d| d.id);
+        if let Some(did) = new_door_id {
+            openings::set_door_attributes(storey, did, door_type_name, door_kind, door_draught);
+            if let Some(d) = storey.doors.iter_mut().find(|d| d.id == did) {
+                d.photos.extend(door_photos);
+            }
+        }
+        // The panes take the PICKED type + overshading (+ opes).
+        let pane_ids: Vec<ItemId> = storey
+            .windows
+            .iter()
+            .filter(|w| w.assembly_id == Some(new_aid))
+            .map(|w| w.id)
+            .collect();
+        let type_id = resolve_window_type(&mut record.data, window_type);
+        for wid in pane_ids {
+            openings::set_window_attributes(
+                &mut record.data.storeys[idx],
+                wid,
+                type_id,
+                overshading,
+                num_opes,
+            );
+        }
+        if !stored_photos.is_empty() {
+            if let Some(t) = record
+                .data
+                .window_types
+                .iter_mut()
+                .find(|t| t.id == type_id)
+            {
+                t.photos.extend(stored_photos.iter().cloned());
+            }
+        }
+        // The old member ids are gone — keep the elevation open on the new
+        // panel so the selection stays meaningful.
+        self.elevation_selection = new_door_id.map(OpeningRef::Door);
+        self.opening_edit = None;
+        self.opening_dim_error = None;
+        self.reseed_opening_anchors(idx);
+        let _ = self.mark_dirty();
+        self.push_history_snapshot(undo_snap);
+        Ok(())
+    }
+
     pub fn openings_pointer_drag(&mut self, wx: f64, wy: f64) {
         let Some(wid) = self.roof_window_drag else {
             return;
@@ -2247,6 +2625,58 @@ impl super::AppController {
 /// existing id (verified to still exist), or a new attribute set find-or-created
 /// via [`Ber::ensure_window_type`] (which dedups, so a "new" type that matches an
 /// existing one joins it — the "only add if different" rule).
+/// Reconstruct the piece-by-piece composer prefill from a stored assembly's
+/// members: the door panel's size, each sidelight's width + sill (sides told
+/// apart against the door's centre), the transom's height + shape (it's the
+/// pane sitting at the door's top), and the panes' shared type/overshading.
+/// `None` when the assembly has no door panel or no wall placement.
+fn assembly_prefill(storey: &Storey, aid: ItemId) -> Option<AssemblyEditPrefill> {
+    let door = storey.doors.iter().find(|d| d.assembly_id == Some(aid))?;
+    let Some(OpeningPlacement::Wall {
+        along_m: door_along,
+        ..
+    }) = door.placement
+    else {
+        return None;
+    };
+    let mut prefill = AssemblyEditPrefill {
+        door_width_m: door.width_m,
+        door_height_m: door.height_m,
+        left: None,
+        right: None,
+        transom_m: None,
+        transom_semicircular: false,
+        window_type_id: ItemId::default(),
+        overshading: Overshading::Average,
+        draught_stripped: door.draught_stripped.unwrap_or(false),
+    };
+    let mut have_pane = false;
+    for w in storey.windows.iter().filter(|w| w.assembly_id == Some(aid)) {
+        let Some(OpeningPlacement::Wall {
+            along_m, sill_m, ..
+        }) = w.placement
+        else {
+            continue;
+        };
+        if !have_pane {
+            prefill.window_type_id = w.window_type_id;
+            prefill.overshading = w.overshading;
+            have_pane = true;
+        }
+        if sill_m >= door.height_m - 0.05 {
+            // Sits at the door's top — the transom (both layouts put it there).
+            prefill.transom_m = Some(w.height_m);
+            prefill.transom_semicircular =
+                matches!(w.shape, ber_model::ber::fenestration::WindowShape::Arched);
+        } else if along_m < door_along {
+            prefill.left = Some((w.width_m, sill_m));
+        } else {
+            prefill.right = Some((w.width_m, sill_m));
+        }
+    }
+    Some(prefill)
+}
+
 fn resolve_window_type(data: &mut Ber, choice: WindowTypeChoice) -> ItemId {
     match choice {
         WindowTypeChoice::Existing(id) if data.window_types.iter().any(|t| t.id == id) => id,

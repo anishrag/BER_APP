@@ -135,6 +135,108 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             });
         });
 
+    // ── Per-object EDIT window: opened from the pin dropdown's ➕. Takes
+    // priority over the add-details window (the flows share the count / note /
+    // kWh buffers). Prefilled once per opened object; photos picked here
+    // APPEND to the object's evidence on Apply.
+    if let Some(edit) = view.object_edit.clone() {
+        let ident = (edit.room, edit.object);
+        let seeded_id = Id::new("ber_object_edit_seeded_for");
+        if ctx.data(|d| {
+            d.get_temp::<(
+                ber_model::ber::common::ItemId,
+                ber_model::ber::common::ItemId,
+            )>(seeded_id)
+        }) != Some(ident)
+        {
+            ctx.data_mut(|d| d.insert_temp(seeded_id, ident));
+            *view.object_count_input = edit.count.to_string();
+            *view.object_note_input = edit.note.clone();
+            *view.object_kwh_input = edit.kwh.map(|k| k.to_string()).unwrap_or_default();
+            view.object_edit_photos.clear();
+        }
+        egui::Window::new(format!("Edit {}", edit.label))
+            .id(Id::new("ber_object_edit"))
+            .order(egui::Order::Foreground)
+            .default_pos(rect.left_bottom() + egui::vec2(16.0, -240.0))
+            .pivot(Align2::LEFT_TOP)
+            .constrain_to(rect)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.set_min_width(300.0);
+                if !edit.photos.is_empty() {
+                    ui.label(
+                        RichText::new(format!("📷 {} attached - tap to view", edit.photos.len()))
+                            .small()
+                            .color(egui::Color32::from_gray(150)),
+                    );
+                    ui.horizontal_wrapped(|ui| {
+                        for (thumb, full) in &edit.photos {
+                            crate::ui::widgets::clickable_photo(
+                                ui,
+                                &format!("file://{thumb}"),
+                                &format!("file://{full}"),
+                                egui::vec2(56.0, 56.0),
+                            );
+                        }
+                    });
+                }
+                ui.horizontal(|ui| {
+                    ui.label("count");
+                    metre_input(ui, view.object_count_input, 48.0, "1");
+                    ui.label("note");
+                    text_input(ui, view.object_note_input, 110.0, "optional");
+                    if edit.kwh_required {
+                        ui.label("kWh");
+                        metre_input(ui, view.object_kwh_input, 48.0, "e.g. 5");
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    for (p, _quality) in view.object_edit_photos.iter() {
+                        let uri = format!("file://{}", p.to_string_lossy());
+                        crate::ui::widgets::clickable_photo(ui, &uri, &uri, egui::vec2(40.0, 40.0));
+                    }
+                    if let Some(captured) =
+                        photo_button_pair(ui, "📷 Add photo", true, PhotoQuality::High, false)
+                    {
+                        view.object_edit_photos.push(captured);
+                    }
+                });
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(egui::Button::new(RichText::new("Apply").strong()))
+                        .clicked()
+                    {
+                        let count = view.object_count_input.trim().parse::<u32>().unwrap_or(1);
+                        let note = {
+                            let n = view.object_note_input.trim();
+                            (!n.is_empty()).then(|| n.to_string())
+                        };
+                        let kwh = view.object_kwh_input.trim().parse::<f32>().ok();
+                        let photos = std::mem::take(view.object_edit_photos);
+                        on_event(UiEvent::Sketch(SketchEvent::UpdateObject {
+                            count,
+                            note,
+                            kwh,
+                            photos,
+                        }));
+                        view.object_count_input.clear();
+                        view.object_note_input.clear();
+                        view.object_kwh_input.clear();
+                    }
+                    if ui.button("Cancel").clicked() {
+                        view.object_edit_photos.clear();
+                        view.object_count_input.clear();
+                        view.object_note_input.clear();
+                        view.object_kwh_input.clear();
+                        on_event(UiEvent::Sketch(SketchEvent::CancelEditObject));
+                    }
+                });
+            });
+        return; // the edit window replaces the add-details window this frame
+    }
+
     // ── Details window: shown only once a category is picked from the top bar.
     // Positioned bottom-left, clear of the centred top bar and the pin dropdown.
     // OK adds the object to the room (appears in the pin dropdown) and closes this
@@ -278,12 +380,12 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                         for (p, _quality) in
                             view.object_pending_photos.for_kind(room_id, &kind).iter()
                         {
-                            let src = p.to_string_lossy();
-                            ui.add(
-                                egui::Image::new(format!("file://{src}"))
-                                    .fit_to_exact_size(egui::vec2(40.0, 40.0))
-                                    .maintain_aspect_ratio(true)
-                                    .corner_radius(3.0),
+                            let uri = format!("file://{}", p.to_string_lossy());
+                            crate::ui::widgets::clickable_photo(
+                                ui,
+                                &uri,
+                                &uri,
+                                egui::vec2(40.0, 40.0),
                             );
                         }
                         // TEMPORARY dual hi/lo capture (see `photo_button_pair`).

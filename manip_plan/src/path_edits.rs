@@ -33,7 +33,17 @@ impl FloorPlan {
         // yields the shape PLUS the drawn bump (a trim stroke, inside, yields the
         // shape MINUS the notch). Records the same debug stages as trim, so the
         // app's stage overlay shows every step. See `splice_ortho_via_cut`.
-        self.splice_ortho_via_cut(stroke, false)
+        self.splice_ortho_via_cut(stroke, false, None)
+    }
+
+    /// [`extend_ortho`](Self::extend_ortho) with the shell's viewport-relative
+    /// wall-snap tolerance — see [`trim_ortho_snapped`](Self::trim_ortho_snapped).
+    pub fn extend_ortho_snapped(
+        &mut self,
+        stroke: &[Point2f32],
+        wall_snap_tol: Option<f32>,
+    ) -> Result<Vec<ParameterId>, Error> {
+        self.splice_ortho_via_cut(stroke, false, wall_snap_tol)
     }
 
     /// Extend a wall with a faceted freeform CURVE (adds area): the drawn arc is
@@ -223,7 +233,20 @@ impl FloorPlan {
     /// the new trim walls mint params. (The cut finalize, `build_region`, rebuilds
     /// fresh instead; that's the only divergence from the cut.)
     pub fn trim_ortho(&mut self, stroke: &[Point2f32]) -> Result<Vec<ParameterId>, Error> {
-        self.splice_ortho_via_cut(stroke, true)
+        self.splice_ortho_via_cut(stroke, true, None)
+    }
+
+    /// [`trim_ortho`](Self::trim_ortho) with the shell's viewport-relative
+    /// wall-snap tolerance. Without it the cleanup falls back to 6% of the
+    /// RING's diagonal — nearly a metre on a full house, which silently
+    /// snapped a genuinely-drawn shallow recess (a 0.6 m door nook) flat
+    /// onto its wall: the trim reported success and changed nothing.
+    pub fn trim_ortho_snapped(
+        &mut self,
+        stroke: &[Point2f32],
+        wall_snap_tol: Option<f32>,
+    ) -> Result<Vec<ParameterId>, Error> {
+        self.splice_ortho_via_cut(stroke, true, wall_snap_tol)
     }
 
     /// Shared backbone for orthogonal EXTEND and TRIM: splice the drawn path onto
@@ -239,8 +262,12 @@ impl FloorPlan {
         &mut self,
         stroke: &[Point2f32],
         is_trim: bool,
+        wall_snap_tol: Option<f32>,
     ) -> Result<Vec<ParameterId>, Error> {
         use crate::splice::SpliceElem;
+        // Viewport-relative wall-snap for the cut + cleanup (falls back to the
+        // size-relative default when None); the guard clears it on any return.
+        let _snap_tol_guard = crate::carve::set_splice_wall_snap_tol(wall_snap_tol);
         let err = |m: &str| {
             if is_trim {
                 Error::TrimError(m.into())

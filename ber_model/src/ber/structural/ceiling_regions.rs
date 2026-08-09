@@ -1601,6 +1601,108 @@ impl CeilingRegions {
         Self { regions: next }
     }
 
+    /// An interior plan point of the resolved ceilings on one SIDE of an
+    /// axis-aligned line: each region's plan polygon is clipped to the
+    /// half-plane, and the largest surviving piece's interior point wins.
+    /// `None` when no ceiling area lies on that side. This is the sampler
+    /// behind "which height is that side of the step line currently at" — a
+    /// bounding-box midpoint is NOT a safe stand-in: for a bay/protrusion the
+    /// side-strip only spans part of the house's extent, and the bbox middle
+    /// lands outside the ceiling entirely (the "no resolved ceiling under
+    /// that area" field report).
+    ///
+    /// `axis_is_x` = the line's POSITION varies on x (a vertical line);
+    /// `greater` picks the side with larger coordinates.
+    pub fn interior_point_on_side(
+        &self,
+        axis_is_x: bool,
+        coord: f64,
+        greater: bool,
+    ) -> Option<Point2f64> {
+        use geo::bool_ops::BooleanOps;
+        use geo::{Area, InteriorPoint};
+        // The regions' overall extent, padded — the half-plane as a clip rect.
+        let (mut lo_x, mut lo_y, mut hi_x, mut hi_y) = (
+            f64::INFINITY,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NEG_INFINITY,
+        );
+        for r in &self.regions {
+            for p in &r.polygon.exterior {
+                lo_x = lo_x.min(p.x);
+                lo_y = lo_y.min(p.y);
+                hi_x = hi_x.max(p.x);
+                hi_y = hi_y.max(p.y);
+            }
+        }
+        if lo_x > hi_x {
+            return None; // no regions
+        }
+        let pad = 1.0;
+        let (rx0, rx1, ry0, ry1) = match (axis_is_x, greater) {
+            (true, true) => (coord, hi_x + pad, lo_y - pad, hi_y + pad),
+            (true, false) => (lo_x - pad, coord, lo_y - pad, hi_y + pad),
+            (false, true) => (lo_x - pad, hi_x + pad, coord, hi_y + pad),
+            (false, false) => (lo_x - pad, hi_x + pad, lo_y - pad, coord),
+        };
+        if rx1 - rx0 <= 0.0 || ry1 - ry0 <= 0.0 {
+            return None;
+        }
+        let rect = ring_to_poly(&[
+            Point2f64::new(rx0, ry0),
+            Point2f64::new(rx1, ry0),
+            Point2f64::new(rx1, ry1),
+            Point2f64::new(rx0, ry1),
+        ]);
+        let mut best: Option<(f64, Point2f64)> = None;
+        for r in &self.regions {
+            let plan: Polygon<f64> = r.polygon.clone().into();
+            for piece in plan.intersection(&rect).0 {
+                let area = piece.unsigned_area();
+                if area < SLIVER_AREA_M2 {
+                    continue;
+                }
+                if best.as_ref().is_none_or(|(a, _)| area > *a) {
+                    if let Some(p) = piece.interior_point() {
+                        best = Some((area, Point2f64::new(p.x(), p.y())));
+                    }
+                }
+            }
+        }
+        best.map(|(_, p)| p)
+    }
+
+    /// Carry the stored regions through an outline PLANE MOVE (the
+    /// edit-dimension resize): every 3D vertex whose PLAN coordinate on the
+    /// moving axis lies within `tol` of `plane` shifts by `delta`, its z
+    /// recomputed from the region's own plane — a flat ceiling stays flat, a
+    /// sloped face CONTINUES its pitch into the moved boundary. Regions not
+    /// touching the plane are untouched. Run BEFORE
+    /// [`refit_to_footprint`](Self::refit_to_footprint): the stretched
+    /// regions then already cover the moved footprint, so the refit's clip is
+    /// an identity and no separate flat fill piece (an extra region + an
+    /// unjustified seam) is minted for the grown strip. Overshoot on a shrink
+    /// is fine — the refit clips it away.
+    pub fn stretch_boundary_plane(&mut self, axis_is_x: bool, plane: f64, tol: f64, delta: f64) {
+        for region in &mut self.regions {
+            let Some((c0, cx, cy)) = region_plane(region) else {
+                continue;
+            };
+            for p in &mut region.polygon.exterior {
+                let c = if axis_is_x { p.x } else { p.y };
+                if (c - plane).abs() <= tol {
+                    if axis_is_x {
+                        p.x += delta;
+                    } else {
+                        p.y += delta;
+                    }
+                    p.z = c0 + cx * p.x + cy * p.y;
+                }
+            }
+        }
+    }
+
     /// Whether the stored regions carry an OUTLINE-EDIT SCAR (field report
     /// eddc2f3f): an interior SEAM between two FLAT regions at the SAME height
     /// where at least one side is an `Unset`-exposure, opening-free region and

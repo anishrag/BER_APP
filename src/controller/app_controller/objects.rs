@@ -43,6 +43,22 @@ pub struct ObjectRowView {
     pub separate_hw_control: bool,
 }
 
+/// The open per-object EDIT: current values prefill the edit window; photos
+/// picked there APPEND to the object's evidence.
+#[derive(Debug, Clone)]
+pub struct ObjectEditView {
+    pub room: ItemId,
+    pub object: ItemId,
+    pub label: String,
+    pub count: u32,
+    pub note: String,
+    pub kwh: Option<f32>,
+    pub kwh_required: bool,
+    /// The photos already attached, `(thumb_path, full_path)` — the edit
+    /// window shows them (tappable via the global lightbox).
+    pub photos: Vec<(String, String)>,
+}
+
 /// The open room's details for the entry panel: its name, the objects recorded
 /// so far, and which categories are already present (to highlight them).
 pub struct ActiveObjectRoomView {
@@ -276,6 +292,8 @@ impl AppController {
     /// A pin that never received an object is an accidental / dismissed tap, so
     /// it's dropped rather than left on the plan as an empty "0" hotspot.
     pub fn close_object_room(&mut self) {
+        // A per-object edit belongs to the open room's dropdown — leave with it.
+        self.object_edit = None;
         if let Some(id) = self.active_object_room.take() {
             self.prune_object_room_if_empty(id);
         }
@@ -573,6 +591,85 @@ impl AppController {
     /// Mutable borrow of a room by id, searching every storey (a pin placed
     /// from the full-house 3D view can live off the current storey) plus the
     /// attic bucket.
+    /// Open the per-object EDIT (the pin dropdown's ➕ button): the edit
+    /// window opens with the object's current count / note / kWh prefilled
+    /// and lets the assessor change them and ADD photos.
+    pub fn begin_edit_object(&mut self, room: ItemId, object: ItemId) {
+        self.object_edit = Some((room, object));
+    }
+
+    /// Close the object edit without changing anything.
+    pub fn cancel_edit_object(&mut self) {
+        self.object_edit = None;
+    }
+
+    /// The open object edit for the UI, or `None`.
+    pub fn object_edit_view(&self) -> Option<ObjectEditView> {
+        let (room_id, object_id) = self.object_edit?;
+        let record = self.current_record.as_ref()?;
+        let room = record.data.object_rooms_iter().find(|r| r.id == room_id)?;
+        let o = room.objects.iter().find(|o| o.id == object_id)?;
+        Some(ObjectEditView {
+            room: room_id,
+            object: object_id,
+            label: o.kind.label(),
+            count: o.count,
+            note: o.note.clone().unwrap_or_default(),
+            kwh: o.kwh,
+            kwh_required: o.kind.kwh_required(),
+            photos: o
+                .photos
+                .iter()
+                .map(|p| {
+                    (
+                        p.thumbnail_path
+                            .clone()
+                            .unwrap_or_else(|| p.file_path.clone()),
+                        p.file_path.clone(),
+                    )
+                })
+                .collect(),
+        })
+    }
+
+    /// Apply the object edit: new count / note / kWh, and APPEND the picked
+    /// photos to the object's evidence. One undoable action; the heating /
+    /// ventilation rollups re-derive (count changes can matter there).
+    pub fn update_object(
+        &mut self,
+        count: u32,
+        note: Option<String>,
+        kwh: Option<f32>,
+        photos: Vec<(std::path::PathBuf, PhotoQuality)>,
+    ) -> Result<(), String> {
+        let Some((room_id, object_id)) = self.object_edit else {
+            return Ok(());
+        };
+        let stored: Vec<Evidence> = photos
+            .iter()
+            .filter_map(|(p, quality)| self.ingest_photo(p, *quality))
+            .collect();
+        let snap = self.current_history_snapshot();
+        let Some(room) = self.object_room_mut(room_id) else {
+            return Err("that room no longer exists".into());
+        };
+        let Some(o) = room.objects.iter_mut().find(|o| o.id == object_id) else {
+            return Err("that object no longer exists".into());
+        };
+        o.count = count.max(1);
+        o.note = note;
+        if o.kind.kwh_required() {
+            o.kwh = kwh;
+        }
+        o.photos.extend(stored);
+        self.object_edit = None;
+        self.resync_heating_from_objects();
+        self.resync_ventilation_from_objects();
+        let _ = self.mark_dirty();
+        self.push_history_snapshot(snap);
+        Ok(())
+    }
+
     fn object_room_mut(&mut self, room_id: ItemId) -> Option<&mut ObjectRoom> {
         self.current_record
             .as_mut()?

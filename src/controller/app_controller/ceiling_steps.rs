@@ -720,20 +720,21 @@ impl AppController {
                 side,
                 ..
             }) => {
-                let ((min_x, min_y), (max_x, max_y)) =
-                    self.document.outline.floor_plan.bounding_box()?;
-                let (lo, hi, cross_mid) = match axis {
-                    ParameterAxis::X => (min_x, max_x, (min_y + max_y) / 2.0),
-                    ParameterAxis::Y => (min_y, max_y, (min_x + max_x) / 2.0),
-                };
-                let along = match side {
-                    LineSide::Greater => (*coord_m + hi) / 2.0,
-                    LineSide::Less => (lo + *coord_m) / 2.0,
-                };
-                Some(match axis {
-                    ParameterAxis::X => Point2f64::new(along as f64, cross_mid as f64),
-                    ParameterAxis::Y => Point2f64::new(cross_mid as f64, along as f64),
-                })
+                // Sample the RESOLVED ceilings on the line's chosen side —
+                // clip-and-pick, not a bbox midpoint: over a bay/protrusion
+                // the side-strip spans only part of the house's extent, and
+                // the bbox middle lands outside the ceiling entirely ("no
+                // resolved ceiling under that area" on a perfectly good bay).
+                let idx = self.current_storey_idx.unwrap_or(0);
+                let storey = self
+                    .current_record
+                    .as_ref()
+                    .and_then(|r| r.data.storeys.get(idx))?;
+                storey.ceilings.interior_point_on_side(
+                    matches!(axis, ParameterAxis::X),
+                    *coord_m as f64,
+                    matches!(side, LineSide::Greater),
+                )
             }
             Some(PendingCeilingStep::EditExisting { region }) => {
                 let idx = self.current_storey_idx.unwrap_or(0);

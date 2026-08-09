@@ -238,12 +238,22 @@ thread_local! {
 /// also run from the ortho-trim path (`clean_region_ring` in `path_edits`),
 /// which doesn't go through [`carve_or_cut`] and must see an empty ref set and
 /// the size-relative default tol, not a previous carve's leftovers.
-struct CarveRefWallsGuard;
+pub(crate) struct CarveRefWallsGuard;
 impl Drop for CarveRefWallsGuard {
     fn drop(&mut self) {
         CARVE_REF_WALLS.with(|c| c.borrow_mut().clear());
         CARVE_WALL_SNAP_TOL.with(|c| *c.borrow_mut() = None);
     }
+}
+
+/// Set the wall-leveling snap tolerance for a splice pipeline that reaches
+/// [`clean_region_ring`] WITHOUT going through [`carve_or_cut`] — the ortho
+/// trim/extend path. Returns the guard that clears it (and the ref walls) on
+/// drop, so it can't leak into a later carve. `None` keeps the size-relative
+/// default (the pre-viewport behaviour).
+pub(crate) fn set_splice_wall_snap_tol(tol: Option<f32>) -> CarveRefWallsGuard {
+    CARVE_WALL_SNAP_TOL.with(|c| *c.borrow_mut() = tol);
+    CarveRefWallsGuard
 }
 
 /// Resolve a freehand sub-area stroke against `outline`: clip it onto the storey

@@ -464,6 +464,42 @@ impl FloorPlan {
         self.parametric.set_parameter(param_id, value);
     }
 
+    /// Translate every coordinate on ONE axis by `delta` (rigid move; the
+    /// single-axis form of [`translate_all`](Self::translate_all)).
+    pub fn translate_axis(&mut self, axis: ParameterAxis, delta: f32) {
+        self.parametric.translate_axis(axis, delta);
+    }
+
+    /// Move every coordinate plane on `axis` within `tol` of `plane` by
+    /// `delta` — a building face (and anything coplanar with it) moves as one;
+    /// everything else stays. Returns how many distinct planes moved.
+    pub fn move_coordinate_planes(
+        &mut self,
+        axis: ParameterAxis,
+        plane: f32,
+        tol: f32,
+        delta: f32,
+    ) -> usize {
+        self.parametric
+            .move_coordinate_planes(axis, plane, tol, delta)
+    }
+
+    /// The min/max coordinate on `axis` over every vertex (all rings).
+    pub fn axis_span(&self, axis: ParameterAxis) -> Option<(f32, f32)> {
+        self.parametric.axis_span(axis)
+    }
+
+    /// For an axis-aligned wall: the axis it runs along and its two endpoint
+    /// vertices with their along-axis coordinates. See
+    /// [`ParametricPlan::wall_along_ends`].
+    pub fn wall_along_ends(
+        &self,
+        ring: usize,
+        edge_start: usize,
+    ) -> Option<(ParameterAxis, (VertexId, f32), (VertexId, f32))> {
+        self.parametric.wall_along_ends(ring, edge_start)
+    }
+
     /// Change `unknown_param` so the wall has the given length. Returns an
     /// error if the wall isn't axis-aligned or doesn't reference the param.
     pub fn set_wall_length(

@@ -246,6 +246,30 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 *view.door_kind = edit.kind.clone();
                 *view.door_draught_stripped = edit.draught_stripped;
             }
+            // A door+sidelights assembly: seed every piece-by-piece field +
+            // toggle from the members (fields 0/1 are the door leaf's W/H in
+            // the Detailed shape this prompt always uses).
+            if let Some(edit) = &prompt.assembly_edit {
+                let fmt_opt = |v: Option<f32>| v.map(fmt).unwrap_or_default();
+                *view.opening_width_input = fmt(edit.door_width_m);
+                *view.opening_height_input = fmt(edit.door_height_m);
+                *view.sidelight_left_input = fmt_opt(edit.left.map(|(w, _)| w));
+                *view.sidelight_right_input = fmt_opt(edit.right.map(|(w, _)| w));
+                // A sill only counts when its tick is on — recover the tick
+                // from a sill that's meaningfully above the floor.
+                let sill = |s: f32| (s > 0.005).then_some(s);
+                let left_sill = edit.left.and_then(|(_, s)| sill(s));
+                let right_sill = edit.right.and_then(|(_, s)| sill(s));
+                *view.sidelight_left_sill_input = fmt_opt(left_sill);
+                *view.sidelight_right_sill_input = fmt_opt(right_sill);
+                *view.sidelight_left_has_sill = left_sill.is_some();
+                *view.sidelight_right_has_sill = right_sill.is_some();
+                *view.transom_input = fmt_opt(edit.transom_m);
+                *view.transom_semicircular = edit.transom_semicircular;
+                *view.wt_existing_id = Some(edit.window_type_id);
+                *view.overshading = edit.overshading;
+                *view.door_draught_stripped = edit.draught_stripped;
+            }
         }
         // The toggles are captured into the Place event by value (the checkboxes
         // below mutate them for the NEXT frame; a Place click is always a separate
@@ -363,6 +387,35 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                         type_name: door_type_name.clone(),
                         kind: door_kind.clone(),
                         draught_stripped: door_draught_stripped,
+                        photos: apply_photos.clone(),
+                    }
+                },
+            )
+        } else if prompt.assembly_edit.is_some() {
+            // Doorset edit: rebuild the assembly from the typed pieces. The
+            // field order is the Detailed composer contract: [door W, door H,
+            // left W, left sill, right W, right sill, transom H]; blank
+            // optional fields drop that piece, un-ticked sills read as none.
+            let apply_window_type = window_type.clone();
+            let apply_photos = photos.clone();
+            Action::new_multi(
+                "Apply",
+                "Rebuild this doorset with the new pieces / type",
+                move |vs| {
+                    let g = |i: usize| vs.get(i).copied().flatten();
+                    SketchEvent::ApplyAssemblyEdit {
+                        door_w: g(0).unwrap_or(0.0),
+                        door_h: g(1).unwrap_or(0.0),
+                        left: g(2),
+                        left_sill: if left_has_sill { g(3) } else { None },
+                        right: g(4),
+                        right_sill: if right_has_sill { g(5) } else { None },
+                        transom: g(6),
+                        transom_semicircular: semicircular,
+                        window_type: apply_window_type.clone(),
+                        overshading,
+                        num_opes,
+                        door_draught_stripped,
                         photos: apply_photos.clone(),
                     }
                 },
@@ -766,11 +819,12 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             }
         };
         // The Overall/Detailed mode switch — only for the Door + sidelights tool,
-        // drawn at the top of the box (above the fields it reshapes).
-        let ds_mode_toggle: Option<&mut DoorSidelightsMode> = prompt
-            .door_sidelights
-            .is_some()
-            .then_some(&mut view.cat_state.door_sidelights_mode);
+        // drawn at the top of the box (above the fields it reshapes). NOT for
+        // a doorset EDIT: that prompt is fixed to the Detailed shape (the
+        // members are known pieces), so the switch would be a dead control.
+        let ds_mode_toggle: Option<&mut DoorSidelightsMode> = (prompt.door_sidelights.is_some()
+            && prompt.assembly_edit.is_none())
+        .then_some(&mut view.cat_state.door_sidelights_mode);
         // The shape dropdown — only for the Complex-window tool, at the box top.
         let cx_kind_toggle: Option<&mut ComplexWindowKind> = prompt
             .complex_window
@@ -983,6 +1037,51 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             "e.g. 4.2",
             view.dim_error,
             view.dim_input,
+            &actions,
+            &mut view.cat_state.input_mode,
+            &mut view.cat_state.input_mode_pinned,
+            view.laser,
+            None,
+            on_event,
+        );
+        return;
+    }
+
+    // ── Edit dimension (corrected length of a picked finalised wall) ────────
+    if let Some(p) = view.edit_dim_prompt.as_ref() {
+        let sub = format!(
+            "currently {:.2} m — the ● end moves; areas, windows and \
+             exposure on that side follow",
+            p.current_length
+        );
+        let actions = vec![
+            Action::new(
+                "Apply",
+                "Set this length; the marked end (and everything on that side) moves",
+                SketchEvent::ApplyEditDimension,
+            )
+            .primary(),
+            Action::new(
+                "Swap end",
+                "Move the other end of the wall instead (the ● marker flips)",
+                |_| SketchEvent::ToggleEditDimensionSide,
+            )
+            .bare()
+            .keep_buffer(),
+            Action::new("Cancel", "Close without changing the wall", |_| {
+                SketchEvent::CancelEditDimension
+            })
+            .bare()
+            .with_clear(),
+        ];
+        show_box(
+            ctx,
+            rect,
+            "Corrected wall length (m)",
+            Some(&sub),
+            "e.g. 4.2",
+            view.edit_dim_error,
+            view.edit_dim_input,
             &actions,
             &mut view.cat_state.input_mode,
             &mut view.cat_state.input_mode_pinned,
@@ -1733,13 +1832,8 @@ fn window_photo_picker(
     ui.horizontal(|ui| {
         ui.label("photo");
         for (p, _quality) in pending.iter() {
-            let src = p.to_string_lossy();
-            ui.add(
-                egui::Image::new(format!("file://{src}"))
-                    .fit_to_exact_size(egui::vec2(40.0, 40.0))
-                    .maintain_aspect_ratio(true)
-                    .corner_radius(3.0),
-            );
+            let uri = format!("file://{}", p.to_string_lossy());
+            crate::ui::widgets::clickable_photo(ui, &uri, &uri, egui::vec2(40.0, 40.0));
         }
         // TEMPORARY dual hi/lo capture (see `photo_button_pair`).
         if let Some(captured) =

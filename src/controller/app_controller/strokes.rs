@@ -654,10 +654,11 @@ impl AppController {
         // Perimeter BEFORE the splice — the source for re-homing split-wall
         // attributes once `extend_ortho` may have carved a wall into two flanks.
         let old_perim = self.document.floor_plan.perimeter_walls();
+        let snap_tol = self.snap_tol_extend();
         let minted = self
             .document
             .floor_plan
-            .extend_ortho(points)
+            .extend_ortho_snapped(points, Some(snap_tol))
             .map_err(|e| format!("{}", e))?;
         log::debug!("Extend: {} new param(s) {:?}", minted.len(), minted);
         self.warn_if_non_orthogonal("extend");
@@ -673,6 +674,9 @@ impl AppController {
         let new_perim = self.document.floor_plan.perimeter_walls();
         self.document
             .rehome_split_wall_attributes(&old_perim, &new_perim);
+        // The splice re-scoped the wall identities the opening anchors name —
+        // re-derive them from the openings' (still-valid) placements.
+        self.reseed_anchors_after_outline_splice();
         // A far wall the pre-snap dropped onto the storey-BELOW outline is now a
         // KNOWN wall — its position is implied by the snap, exactly as a shared
         // wall's is in the new-storey outline flow. Pin it (via the same
@@ -805,8 +809,12 @@ impl AppController {
         // Perimeter BEFORE the splice — the source for re-homing split-wall
         // attributes if the trim carves a wall into two flanks.
         let old_perim = self.document.floor_plan.perimeter_walls();
+        let snap_tol = self.snap_tol_extend();
         let minted = match self.sketch_engine.edit_tool {
-            EditTools::TrimOrtho => self.document.floor_plan.trim_ortho(points),
+            EditTools::TrimOrtho => self
+                .document
+                .floor_plan
+                .trim_ortho_snapped(points, Some(snap_tol)),
             _ => self.document.floor_plan.trim_by_stroke(points),
         }
         .map_err(|e| format!("{}", e))?;
@@ -819,6 +827,9 @@ impl AppController {
         let new_perim = self.document.floor_plan.perimeter_walls();
         self.document
             .rehome_split_wall_attributes(&old_perim, &new_perim);
+        // The splice re-scoped the wall identities the opening anchors name —
+        // re-derive them from the openings' (still-valid) placements.
+        self.reseed_anchors_after_outline_splice();
         // History snapshotted before the commit (consistent across apply_*). A
         // plain Trim never asks about collinearity, so no review step here.
         self.push_history_snapshot(undo_snap);

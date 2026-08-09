@@ -31291,3 +31291,1379 @@ fn reset_of_named_groups_reopens_as_one_unnamed_group() {
     );
     assert_eq!(groups[0].explicit_name, None, "with no name carried over");
 }
+
+// ── Edit dimension (side-aware resize of a finalised wall) ──────────────────
+
+/// End-to-end resize through the controller: tap the south wall of the
+/// committed 10×6, apply 12.0 moving the East end. The record footprint
+/// grows east; a window anchored 2 m from the WEST (fixed) end stays 2 m
+/// from it; the painted south-wall exposure covers the full new length;
+/// undo restores everything.
+#[test]
+fn edit_dimension_grows_east_and_satellites_follow() {
+    use ber_model::ber::fenestration::{OpeningPlacement, WallAnchor, Window, WindowShape};
+
+    let mut c = dimensioned_10x6_controller();
+    c.materialize();
+
+    // South wall of the plan: (0,0) → (10,0).
+    let south_vid = c
+        .document
+        .outline
+        .floor_plan
+        .perimeter_walls()
+        .into_iter()
+        .find(|(_, a, b)| a.y.abs() < 1e-3 && b.y.abs() < 1e-3)
+        .map(|(v, _, _)| v)
+        .expect("south wall");
+
+    // Paint the whole south wall Exposed (1-D section).
+    c.document.wall_sections.insert(
+        south_vid,
+        vec![document::ExposureSection {
+            start_m: 0.0,
+            end_m: 10.0,
+            exposure: WallExposure::Exposed,
+        }],
+    );
+
+    // A window on the south wall, centred 2 m from its start (the west end),
+    // with its durable anchor already seeded (fraction 0.2 of 10 m).
+    let south_region_id = {
+        let record = c.current_record.as_ref().unwrap();
+        record.data.storeys[0]
+            .walls
+            .regions
+            .iter()
+            .find(|r| r.polygon.exterior.iter().all(|p| p.y.abs() < 1e-3))
+            .map(|r| r.id)
+            .expect("south wall region")
+    };
+    {
+        let record = c.current_record.as_mut().unwrap();
+        record.data.storeys[0].windows.push(Window {
+            id: ItemId::default(),
+            vertices: vec![],
+            width_m: 1.0,
+            height_m: 1.2,
+            window_type_id: ItemId::default(),
+            placement: Some(OpeningPlacement::Wall {
+                wall_id: south_region_id,
+                along_m: 2.0,
+                sill_m: 1.0,
+            }),
+            wall_anchor: Some(WallAnchor {
+                wall: manip_plan::SurfaceRef::wall(south_vid),
+                along_fraction: 0.2,
+                porch: None,
+            }),
+            assembly_id: None,
+            multi_storey: false,
+            shape: WindowShape::Rectangular,
+            overshading: Default::default(),
+            num_opes: None,
+        });
+    }
+
+    // Tap the south wall in edit-dimension mode and apply 12 m, East end.
+    c.set_edit_dimension_mode(true);
+    assert!(c.edit_dimension_tap(5.0, 0.0, 0.5), "tap picked the wall");
+    let prompt = c.edit_dimension_for_ui().unwrap();
+    assert!((prompt.current_length - 10.0).abs() < 1e-3);
+    // Default moving end is End — for the ring order here that's the EAST end.
+    c.apply_edit_dimension(12.0).unwrap();
+
+    // The record footprint now spans x ∈ [0, 12].
+    let record = c.current_record.as_ref().unwrap();
+    let xs: Vec<f64> = record.data.storeys[0]
+        .floors
+        .footprint_ring()
+        .unwrap()
+        .iter()
+        .map(|p| p.x)
+        .collect();
+    let max_x = xs.iter().cloned().fold(f64::MIN, f64::max);
+    let min_x = xs.iter().cloned().fold(f64::MAX, f64::min);
+    assert!((max_x - 12.0).abs() < 1e-3, "east face at 12 (got {max_x})");
+    assert!(min_x.abs() < 1e-3, "west face anchored");
+
+    // The window kept its 2 m distance from the fixed WEST end.
+    let w = &record.data.storeys[0].windows[0];
+    let frac = w.wall_anchor.unwrap().along_fraction;
+    assert!(
+        (frac - 2.0 / 12.0).abs() < 1e-3,
+        "fraction re-derived (got {frac})"
+    );
+    if let Some(OpeningPlacement::Wall { along_m, .. }) = &w.placement {
+        assert!(
+            (along_m - 2.0).abs() < 0.05,
+            "placement re-derived at 2 m from the west corner (got {along_m})"
+        );
+    } else {
+        panic!("window lost its wall placement");
+    }
+
+    // The south wall's painted exposure covers the full 12 m: its derived
+    // region is Exposed with a 12 m base edge.
+    let south_region = record.data.storeys[0]
+        .walls
+        .regions
+        .iter()
+        .find(|r| r.polygon.exterior.iter().all(|p| p.y.abs() < 1e-3))
+        .expect("south wall region");
+    assert_eq!(south_region.exposure, WallExposure::Exposed);
+    let (_, _, len, _) = south_region.base_frame().unwrap();
+    assert!((len - 12.0).abs() < 1e-3, "region spans the new length");
+
+    // One undo restores the pre-edit geometry AND the window.
+    c.undo().unwrap();
+    let record = c.current_record.as_ref().unwrap();
+    let xs: Vec<f64> = record.data.storeys[0]
+        .floors
+        .footprint_ring()
+        .unwrap()
+        .iter()
+        .map(|p| p.x)
+        .collect();
+    let max_x = xs.iter().cloned().fold(f64::MIN, f64::max);
+    assert!((max_x - 10.0).abs() < 1e-3, "undo restored the 10 m width");
+    let w = &record.data.storeys[0].windows[0];
+    assert!(
+        (w.wall_anchor.unwrap().along_fraction - 0.2).abs() < 1e-3,
+        "undo restored the window anchor"
+    );
+}
+
+/// A shrink that would leave the outline self-intersecting is rejected with
+/// everything rolled back and the prompt still open.
+#[test]
+fn edit_dimension_rejects_and_rolls_back_cleanly() {
+    let mut c = dimensioned_10x6_controller();
+    c.materialize();
+    c.set_edit_dimension_mode(true);
+    assert!(c.edit_dimension_tap(5.0, 0.0, 0.5));
+    // 0-length is invalid input; a negative is too.
+    assert!(c.apply_edit_dimension(-3.0).is_err());
+    // The plan is untouched and the prompt is still open.
+    let p = c.edit_dimension_for_ui().expect("prompt stays open");
+    assert!((p.current_length - 10.0).abs() < 1e-3);
+}
+
+/// The side toggle flips which end the plane move targets: moving the START
+/// (west) end of the south wall grows the house westward instead.
+#[test]
+fn edit_dimension_swap_side_grows_west() {
+    let mut c = dimensioned_10x6_controller();
+    c.materialize();
+    c.set_edit_dimension_mode(true);
+    assert!(c.edit_dimension_tap(5.0, 0.0, 0.5));
+    c.toggle_edit_dimension_side();
+    c.apply_edit_dimension(12.0).unwrap();
+    let record = c.current_record.as_ref().unwrap();
+    let xs: Vec<f64> = record.data.storeys[0]
+        .floors
+        .footprint_ring()
+        .unwrap()
+        .iter()
+        .map(|p| p.x)
+        .collect();
+    let min_x = xs.iter().cloned().fold(f64::MAX, f64::min);
+    let max_x = xs.iter().cloned().fold(f64::MIN, f64::max);
+    assert!(
+        (min_x + 2.0).abs() < 1e-3,
+        "west face moved to -2 (got {min_x})"
+    );
+    assert!((max_x - 10.0).abs() < 1e-3, "east face anchored");
+}
+
+/// A session phase zone drawn against the moving face CONTINUES into the
+/// grown strip: its ring stretches with the face, so the resolved floor
+/// partition keeps the zone boundary at its interior line and the new strip
+/// lands in the zone it grew from.
+#[test]
+fn edit_dimension_extends_the_phase_zone_on_the_moving_side() {
+    let mut c = dimensioned_10x6_controller();
+    c.materialize();
+    // An east zone x ∈ [7, 10] (session ring, as the phase workflow stores it).
+    c.phase_regions.insert(
+        0,
+        vec![document::PhaseRegion {
+            polygon: vec![
+                Point2f64::new(7.0, 0.0),
+                Point2f64::new(10.0, 0.0),
+                Point2f64::new(10.0, 6.0),
+                Point2f64::new(7.0, 6.0),
+            ],
+            phase: ConstructionPhase::Extension1,
+        }],
+    );
+    c.mark_dirty().unwrap();
+    c.materialize();
+
+    c.set_edit_dimension_mode(true);
+    assert!(c.edit_dimension_tap(5.0, 0.0, 0.5));
+    c.apply_edit_dimension(12.0).unwrap();
+
+    // The session ring followed the face…
+    let ring = &c.phase_regions[&0][0].polygon;
+    let max_x = ring.iter().map(|p| p.x).fold(f64::MIN, f64::max);
+    let min_x = ring.iter().map(|p| p.x).fold(f64::MAX, f64::min);
+    assert!((max_x - 12.0).abs() < 1e-6, "zone grew east (got {max_x})");
+    assert!((min_x - 7.0).abs() < 1e-6, "interior boundary stayed at 7");
+
+    // …and the resolved floors keep two regions split at x = 7, with the
+    // grown strip inside the extension zone.
+    let record = c.current_record.as_ref().unwrap();
+    let floors = &record.data.storeys[0].floors.regions;
+    assert_eq!(floors.len(), 2, "still partitioned into two zones");
+    let contains = |px: f64, py: f64| {
+        floors
+            .iter()
+            .position(|r| {
+                let ring: Vec<(f64, f64)> =
+                    r.polygon.exterior().coords().map(|p| (p.x, p.y)).collect();
+                point_in_ring(px, py, &ring)
+            })
+            .expect("point inside some region")
+    };
+    assert_eq!(
+        contains(11.0, 3.0),
+        contains(8.0, 3.0),
+        "the grown strip continues the east zone"
+    );
+    assert_ne!(
+        contains(11.0, 3.0),
+        contains(2.0, 3.0),
+        "the west zone stays separate"
+    );
+}
+
+/// Winding-agnostic point-in-polygon for the phase-zone test.
+fn point_in_ring(px: f64, py: f64, ring: &[(f64, f64)]) -> bool {
+    let mut inside = false;
+    let n = ring.len();
+    for i in 0..n {
+        let (x1, y1) = ring[i];
+        let (x2, y2) = ring[(i + 1) % n];
+        if ((y1 > py) != (y2 > py)) && (px < (x2 - x1) * (py - y1) / (y2 - y1) + x1) {
+            inside = !inside;
+        }
+    }
+    inside
+}
+
+// ── Doorset (door+sidelights assembly) EDIT ─────────────────────────────────
+
+/// Shared setup: a committed square storey with a door+sidelights assembly on
+/// the south wall (0.9×2.0 door, 0.4 sidelights both sides, 0.4 transom).
+fn controller_with_doorset() -> AppController {
+    use ber_model::ber::fenestration::{Frame, Glazing};
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    c.set_openings_mode(true);
+    c.set_openings_tool(OpeningToolKind::DoorSidelights);
+    c.openings_pointer_down(5.0, -0.2, 0.5);
+    c.place_pending_door_sidelights(
+        0.9,
+        2.0,
+        Some(0.4),
+        Some(0.4),
+        Some(0.4),
+        Glazing::Double,
+        Frame::WoodUPVC,
+        2010,
+    )
+    .expect("assembly places");
+    c.materialize();
+    c
+}
+
+/// Selecting ANY member of a doorset offers the assembly edit: the prompt
+/// opens in the piece-by-piece shape, prefilled from the members.
+#[test]
+fn doorset_member_opens_the_assembly_edit_prompt() {
+    let mut c = controller_with_doorset();
+    let (panel_id, pane_id) = {
+        let s = &c.current_record.as_ref().unwrap().data.storeys[0];
+        (s.doors[0].id, s.windows[0].id)
+    };
+    // Via the door panel…
+    c.elevation_selection = Some(ber_model::ber::openings::OpeningRef::Door(panel_id));
+    c.start_edit_selected_assembly();
+    let p = c
+        .opening_fields_prompt(
+            DoorSidelightsMode::default(),
+            ber_model::ber::fenestration::ComplexWindowKind::default(),
+            ber_model::ber::fenestration::WindowTopShape::default(),
+        )
+        .expect("assembly edit prompt");
+    assert_eq!(p.fields.len(), 7, "piece-by-piece field set");
+    assert_eq!(p.door_sidelights, Some(DoorSidelightsMode::Detailed));
+    let e = p.assembly_edit.expect("prefill present");
+    assert!((e.door_width_m - 0.9).abs() < 1e-4);
+    assert!((e.door_height_m - 2.0).abs() < 1e-4);
+    assert!((e.left.unwrap().0 - 0.4).abs() < 1e-4, "left width");
+    assert!((e.right.unwrap().0 - 0.4).abs() < 1e-4, "right width");
+    assert!((e.transom_m.unwrap() - 0.4).abs() < 1e-4, "transom height");
+    // …and via a glass pane.
+    c.cancel_opening_placement();
+    c.elevation_selection = Some(ber_model::ber::openings::OpeningRef::Window(pane_id));
+    c.start_edit_selected_assembly();
+    assert!(matches!(c.opening_edit, Some(OpeningEdit::Assembly(_))));
+}
+
+/// Applying the doorset edit re-composes the assembly in place: new piece
+/// sizes, flush layout, same centre, door attributes carried, one undo.
+#[test]
+fn doorset_edit_recomposes_with_new_sizes() {
+    use ber_model::ber::fenestration::OpeningPlacement;
+    let mut c = controller_with_doorset();
+    let (panel_id, old_centre) = {
+        let s = &c.current_record.as_ref().unwrap().data.storeys[0];
+        let d = &s.doors[0];
+        let Some(OpeningPlacement::Wall { along_m, .. }) = d.placement else {
+            panic!("door placed on a wall");
+        };
+        // centre of door = centre of a symmetric assembly
+        (d.id, along_m)
+    };
+    c.elevation_selection = Some(ber_model::ber::openings::OpeningRef::Door(panel_id));
+    c.start_edit_selected_assembly();
+    // Wider door (1.1), one WIDER left light (0.6), drop the right light,
+    // taller transom (0.5).
+    c.apply_assembly_edit(
+        1.1,
+        2.0,
+        Some(0.6),
+        None,
+        None,
+        None,
+        Some(0.5),
+        false,
+        WindowTypeChoice::Existing(c.current_record.as_ref().unwrap().data.window_types[0].id),
+        ber_model::ber::fenestration::Overshading::Average,
+        Some(1),
+        true,
+        vec![],
+    )
+    .expect("doorset edit applies");
+    c.materialize();
+    let s = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert_eq!(s.doors.len(), 1, "still one door panel");
+    assert_eq!(s.windows.len(), 2, "left light + transom (right dropped)");
+    let d = &s.doors[0];
+    assert!((d.width_m - 1.1).abs() < 1e-4);
+    assert_eq!(d.draught_stripped, Some(true), "draught tick applied");
+    let aid = d.assembly_id.expect("still an assembly");
+    assert!(s.windows.iter().all(|w| w.assembly_id == Some(aid)));
+    // Flush: left light's right edge == door's left edge.
+    let Some(OpeningPlacement::Wall { along_m: d_al, .. }) = d.placement else {
+        panic!()
+    };
+    let left = s
+        .windows
+        .iter()
+        .find(|w| {
+            matches!(w.placement, Some(OpeningPlacement::Wall { along_m, .. }) if along_m < d_al)
+        })
+        .expect("left light");
+    let Some(OpeningPlacement::Wall { along_m: l_al, .. }) = left.placement else {
+        panic!()
+    };
+    assert!(
+        ((l_al + left.width_m / 2.0) - (d_al - d.width_m / 2.0)).abs() < 1e-3,
+        "left light flush against the door"
+    );
+    // Same centre: total = 0.6 + 1.1 = 1.7 → centre where the old one was.
+    let centre = ((l_al - left.width_m / 2.0) + (d_al + d.width_m / 2.0)) / 2.0;
+    assert!(
+        (centre - old_centre).abs() < 1e-3,
+        "assembly re-centres where it was (old {old_centre}, new {centre})"
+    );
+    // One undo restores the original 4-member assembly.
+    c.undo().unwrap();
+    let s = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert_eq!(s.windows.len(), 3, "undo restored both lights + transom");
+    assert!((s.doors[0].width_m - 0.9).abs() < 1e-4);
+}
+
+/// An infeasible doorset edit (wider than the wall) is refused with the model
+/// untouched and the box still open.
+#[test]
+fn doorset_edit_too_wide_is_refused_untouched() {
+    let mut c = controller_with_doorset();
+    let panel_id = c.current_record.as_ref().unwrap().data.storeys[0].doors[0].id;
+    c.elevation_selection = Some(ber_model::ber::openings::OpeningRef::Door(panel_id));
+    c.start_edit_selected_assembly();
+    let type_id = c.current_record.as_ref().unwrap().data.window_types[0].id;
+    let err = c.apply_assembly_edit(
+        9.0,
+        2.0,
+        Some(1.5),
+        None,
+        Some(1.5),
+        None,
+        None,
+        false,
+        WindowTypeChoice::Existing(type_id),
+        ber_model::ber::fenestration::Overshading::Average,
+        Some(1),
+        false,
+        vec![],
+    );
+    assert!(err.is_err(), "12 m of doorset on a 10 m wall with margins");
+    let s = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert_eq!(s.windows.len(), 3, "members untouched");
+    assert!((s.doors[0].width_m - 0.9).abs() < 1e-4, "door untouched");
+    assert!(
+        matches!(c.opening_edit, Some(OpeningEdit::Assembly(_))),
+        "box still open for a retry"
+    );
+}
+
+/// Elevation DRAG of any doorset member moves the whole assembly rigidly —
+/// the members' relative offsets (flush edges, transom above the door) are
+/// preserved, so the door and its lights can never intersect.
+#[test]
+fn doorset_drag_stays_rigid() {
+    use ber_model::ber::fenestration::OpeningPlacement;
+    let mut c = controller_with_doorset();
+    let offsets = |c: &AppController| -> Vec<(f32, f32)> {
+        let s = &c.current_record.as_ref().unwrap().data.storeys[0];
+        let Some(OpeningPlacement::Wall {
+            along_m: d_al,
+            sill_m: d_sl,
+            ..
+        }) = s.doors[0].placement
+        else {
+            panic!()
+        };
+        let mut v: Vec<(f32, f32)> = s
+            .windows
+            .iter()
+            .filter_map(|w| match w.placement {
+                Some(OpeningPlacement::Wall {
+                    along_m, sill_m, ..
+                }) => Some((along_m - d_al, sill_m - d_sl)),
+                _ => None,
+            })
+            .collect();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v
+    };
+    let before = offsets(&c);
+    // Grab the TRANSOM (the pane above the door) and drag it around.
+    let transom_id = {
+        let s = &c.current_record.as_ref().unwrap().data.storeys[0];
+        s.windows
+            .iter()
+            .find(|w| matches!(w.placement, Some(OpeningPlacement::Wall { sill_m, .. }) if sill_m > 1.9))
+            .unwrap()
+            .id
+    };
+    c.elevation_wall = c.current_record.as_ref().unwrap().data.storeys[0]
+        .walls
+        .regions
+        .first()
+        .map(|r| r.id);
+    c.elevation_drag = Some(ber_model::ber::openings::OpeningRef::Window(transom_id));
+    c.elevation_pointer_drag(3.0, 1.4);
+    c.elevation_pointer_drag(6.5, 2.6);
+    c.elevation_pointer_up();
+    let after = offsets(&c);
+    assert_eq!(before.len(), after.len());
+    for (b, a) in before.iter().zip(after.iter()) {
+        assert!(
+            (b.0 - a.0).abs() < 1e-3 && (b.1 - a.1).abs() < 1e-3,
+            "member offsets preserved through the drag: {before:?} vs {after:?}"
+        );
+    }
+}
+
+/// A drifted doorset member (its anchor fraction perturbed — the fingerprint
+/// a wall reshape's per-member relink leaves) re-flushes against the door on
+/// the next re-derive instead of intersecting it.
+#[test]
+fn drifted_doorset_member_reflushes_on_rederive() {
+    use ber_model::ber::fenestration::OpeningPlacement;
+    let mut c = controller_with_doorset();
+    // Perturb the LEFT sidelight's durable anchor so its re-derived along
+    // lands INSIDE the door.
+    {
+        let s = &mut c.current_record.as_mut().unwrap().data.storeys[0];
+        let d_al = match s.doors[0].placement {
+            Some(OpeningPlacement::Wall { along_m, .. }) => along_m,
+            _ => panic!(),
+        };
+        let w = s
+            .windows
+            .iter_mut()
+            .find(|w| {
+                matches!(w.placement, Some(OpeningPlacement::Wall { along_m, sill_m, .. })
+                    if along_m < d_al && sill_m < 1.5)
+            })
+            .expect("left sidelight");
+        if let Some(a) = w.wall_anchor.as_mut() {
+            a.along_fraction += 0.06; // ~0.6 m rightward on a 10 m wall → into the door
+        }
+    }
+    c.mark_dirty().unwrap();
+    c.materialize();
+    let s = &c.current_record.as_ref().unwrap().data.storeys[0];
+    let (d_al, d_w) = match s.doors[0].placement {
+        Some(OpeningPlacement::Wall { along_m, .. }) => (along_m, s.doors[0].width_m),
+        _ => panic!(),
+    };
+    let left = s
+        .windows
+        .iter()
+        .find(|w| {
+            matches!(w.placement, Some(OpeningPlacement::Wall { along_m, sill_m, .. })
+                if along_m < d_al && sill_m < 1.5)
+        })
+        .expect("left sidelight survives");
+    let l_al = match left.placement {
+        Some(OpeningPlacement::Wall { along_m, .. }) => along_m,
+        _ => panic!(),
+    };
+    assert!(
+        ((l_al + left.width_m / 2.0) - (d_al - d_w / 2.0)).abs() < 1e-3,
+        "sidelight re-flushed against the door (pane right edge {:.3} vs door left edge {:.3})",
+        l_al + left.width_m / 2.0,
+        d_al - d_w / 2.0
+    );
+}
+
+/// USER REPORT (tablet, 2026-08-08): TrimOrtho a notch out of the MIDDLE of a
+/// fully-painted wall. The two surviving remnants must inherit the paint over
+/// exactly their spans; the notch gap has no wall (nothing to claim an
+/// exposure); the trim-minted notch walls start Unset for the assessor.
+#[test]
+fn trim_ortho_notch_inherits_paint_on_remnants_only() {
+    let mut c = dimensioned_square_controller(); // 10×10, storey 0
+    c.set_default_ceiling_height(2.4).unwrap();
+    // Paint the whole BOTTOM wall (y=0) Exposed.
+    let (vid, a, b) = c
+        .document
+        .outline
+        .floor_plan
+        .perimeter_walls()
+        .into_iter()
+        .find(|(_, a, b)| a.y.abs() < 1e-4 && b.y.abs() < 1e-4)
+        .expect("a y=0 wall");
+    let len = ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt();
+    c.document
+        .set_wall_section(vid, 0.0, len, len, WallExposure::Exposed);
+    c.commit_to_ber().unwrap();
+
+    // TrimOrtho a 2 m wide, 1 m deep notch out of the middle: the stroke
+    // enters at (4,0), steps inward to y=1, and exits at (6,0).
+    c.set_edit_mode(EditTools::TrimOrtho);
+    c.apply_trim_stroke(&[
+        Point2f32::new(4.0, -0.05),
+        Point2f32::new(4.0, 1.0),
+        Point2f32::new(6.0, 1.0),
+        Point2f32::new(6.0, -0.05),
+    ])
+    .expect("trim-ortho applies");
+    c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
+    c.mark_dirty().unwrap();
+    c.materialize();
+
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    // The y=0 remnants: everything left of the notch and right of it.
+    let bottom: Vec<_> = storey
+        .walls
+        .regions
+        .iter()
+        .filter(|r| {
+            r.base_edge()
+                .is_some_and(|(a, b)| a.y.abs() < 1e-3 && b.y.abs() < 1e-3)
+        })
+        .collect();
+    assert!(
+        bottom.len() >= 2,
+        "two bottom remnants resolve: {:?}",
+        bottom
+            .iter()
+            .map(|w| w.base_edge().unwrap())
+            .collect::<Vec<_>>()
+    );
+    let mut covered = 0.0_f64;
+    for w in &bottom {
+        let (a, b) = w.base_edge().unwrap();
+        let (lo, hi) = (a.x.min(b.x), a.x.max(b.x));
+        assert!(
+            hi <= 4.0 + 1e-3 || lo >= 6.0 - 1e-3,
+            "no bottom wall region spans the notch gap: {:?}",
+            (a, b)
+        );
+        assert_eq!(
+            w.exposure,
+            WallExposure::Exposed,
+            "remnant inherits the paint over {:?}",
+            (a, b)
+        );
+        covered += hi - lo;
+    }
+    assert!(
+        (covered - 8.0).abs() < 1e-2,
+        "the paint covers exactly the surviving 8 m (got {covered:.3})"
+    );
+    // The notch's own walls (x=4, x=6 risers into the notch + the y=1 back)
+    // are NEW — they start Unset for the assessor to mark.
+    let notch: Vec<_> = storey
+        .walls
+        .regions
+        .iter()
+        .filter(|r| {
+            r.base_edge().is_some_and(|(a, b)| {
+                let mid_y = (a.y + b.y) * 0.5;
+                mid_y > 0.01 && mid_y <= 1.01
+            })
+        })
+        .collect();
+    assert!(!notch.is_empty(), "the notch walls resolve");
+    for w in &notch {
+        assert_eq!(
+            w.exposure,
+            WallExposure::Unset,
+            "a trim-minted wall starts Unset: {:?}",
+            w.base_edge()
+        );
+    }
+}
+
+/// The tablet screenshot bug: after a middle-notch trim, the NEAR remnant
+/// keeps its vid — its STORED sections must be clipped to the surviving span
+/// (not just clamped at derive time), or the plan overlay lerps the stale
+/// 0..old_len paint straight across the trimmed-away gap.
+#[test]
+fn trim_clips_the_kept_walls_stored_sections() {
+    let mut c = dimensioned_square_controller();
+    let (vid, a, b) = c
+        .document
+        .outline
+        .floor_plan
+        .perimeter_walls()
+        .into_iter()
+        .find(|(_, a, b)| a.y.abs() < 1e-4 && b.y.abs() < 1e-4)
+        .expect("a y=0 wall");
+    let len = ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt();
+    c.document
+        .set_wall_section(vid, 0.0, len, len, WallExposure::Exposed);
+    c.commit_to_ber().unwrap();
+    c.set_edit_mode(EditTools::TrimOrtho);
+    c.apply_trim_stroke(&[
+        Point2f32::new(4.0, -0.05),
+        Point2f32::new(4.0, 1.0),
+        Point2f32::new(6.0, 1.0),
+        Point2f32::new(6.0, -0.05),
+    ])
+    .expect("trim-ortho applies");
+    // Every stored section now fits ITS wall — none paints past a wall's end.
+    for (vid, a, b) in c.document.outline.floor_plan.perimeter_walls() {
+        let wall_len = ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt();
+        if let Some(secs) = c.document.wall_sections.get(&vid) {
+            for s in secs {
+                assert!(
+                    s.end_m <= wall_len + 1e-3 && s.start_m >= -1e-3,
+                    "section {s:?} exceeds its {wall_len:.2} m wall ({a:?} -> {b:?})"
+                );
+            }
+        }
+    }
+}
+
+/// THE FIELD REPORT (Glengara re-test): a wall carries a window AND a
+/// door+sidelights; a TrimOrtho notch is carved BETWEEN them out of the same
+/// wall. Both openings sit on untouched flanks — they must stay at their
+/// WORLD positions on their own remnants (not teleport toward the notch as
+/// their anchor fractions silently re-scope to the shortened kept wall, the
+/// window ending up off the wall and inside the doorset).
+#[test]
+fn trim_between_openings_keeps_them_in_place() {
+    use ber_model::ber::fenestration::{Frame, Glazing, OpeningPlacement};
+    let mut c = dimensioned_square_controller(); // 10×10
+    c.materialize();
+    c.set_openings_mode(true);
+    // A 1 m window centred at along 2.0 on the south wall (y=0)…
+    c.set_openings_tool(OpeningToolKind::Window);
+    c.openings_pointer_down(2.0, -0.2, 0.5);
+    c.place_opening(
+        1.0,
+        1.2,
+        false,
+        false,
+        None,
+        None,
+        None,
+        WindowTypeChoice::default(),
+        ber_model::ber::fenestration::Overshading::Average,
+        None,
+        true,
+        Vec::new(),
+    )
+    .expect("window places");
+    // …and a doorset centred at along 7.5 (0.9 door + 0.4 lights each side).
+    c.set_openings_tool(OpeningToolKind::DoorSidelights);
+    c.openings_pointer_down(7.5, -0.2, 0.5);
+    c.place_pending_door_sidelights(
+        0.9,
+        2.0,
+        Some(0.4),
+        Some(0.4),
+        None,
+        Glazing::Double,
+        Frame::WoodUPVC,
+        2010,
+    )
+    .expect("doorset places");
+    c.materialize();
+    c.set_openings_mode(false);
+
+    // Trim a 1 m wide notch between them: along 4.0 → 5.0, 0.8 deep.
+    c.set_edit_mode(EditTools::TrimOrtho);
+    c.apply_trim_stroke(&[
+        Point2f32::new(4.0, -0.05),
+        Point2f32::new(4.0, 0.8),
+        Point2f32::new(5.0, 0.8),
+        Point2f32::new(5.0, -0.05),
+    ])
+    .expect("trim-ortho applies");
+    c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
+    c.mark_dirty().unwrap();
+    c.materialize();
+
+    let s = &c.current_record.as_ref().unwrap().data.storeys[0];
+    // The window: still centred at world x ≈ 2.0 on the NEAR remnant.
+    let w = &s.windows[0];
+    let host_of = |wall_id| {
+        s.walls
+            .regions
+            .iter()
+            .find(|r| r.id == wall_id)
+            .and_then(|r| r.base_frame())
+    };
+    let world_x = |placement: &Option<OpeningPlacement>| -> f64 {
+        let Some(OpeningPlacement::Wall {
+            wall_id, along_m, ..
+        }) = placement
+        else {
+            panic!("wall placement")
+        };
+        let (origin, (ux, _), _, _) = host_of(*wall_id).expect("host resolves");
+        origin.x + ux * *along_m as f64
+    };
+    let wx = world_x(&w.placement);
+    assert!(
+        (wx - 2.0).abs() < 0.05,
+        "window stayed at world x≈2.0 (got {wx:.3})"
+    );
+    // The doorset: door panel still centred at world x ≈ 7.5, panes flush.
+    let d = &s.doors[0];
+    let dx = world_x(&d.placement);
+    assert!(
+        (dx - 7.5).abs() < 0.05,
+        "doorset door stayed at world x≈7.5 (got {dx:.3})"
+    );
+    // No pane intersects the door or the window; everything on-wall.
+    let mut spans: Vec<(f64, f64)> = Vec::new();
+    let mut push_span = |placement: &Option<OpeningPlacement>, width: f32| {
+        let x = world_x(placement);
+        spans.push((x - width as f64 / 2.0, x + width as f64 / 2.0));
+    };
+    push_span(&w.placement, w.width_m);
+    push_span(&d.placement, d.width_m);
+    for pane in s.windows.iter().skip(1) {
+        push_span(&pane.placement, pane.width_m);
+    }
+    spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+    for pair in spans.windows(2) {
+        assert!(
+            pair[0].1 <= pair[1].0 + 1e-3,
+            "openings must not overlap: {spans:?}"
+        );
+    }
+    // And nothing hangs over the notch gap (4.0..5.0).
+    for (lo, hi) in &spans {
+        assert!(
+            *hi <= 4.0 + 1e-3 || *lo >= 5.0 - 1e-3,
+            "no opening spans the trimmed-away gap: {spans:?}"
+        );
+    }
+}
+
+/// THE REAL-RECORD reproduction (50 Glengara Park, field report 2026-08-08):
+/// the east wall carries a door+sidelights (the front door, at the position
+/// of its recess) and a standalone window further south. Trimming the recess
+/// notch must (a) leave the window at its world position on the surviving
+/// remnant, and (b) re-home the doorset onto the notch's new BACK wall — not
+/// teleport both onto the shortened kept wall where they collide. Runs only
+/// with `BER_RESIZE_RECORD` pointing at the backed-up Glengara data.json.
+#[test]
+fn real_record_trim_recess_rehomes_the_doorset() {
+    use ber_model::ber::fenestration::OpeningPlacement;
+    let Ok(path) = std::env::var("BER_RESIZE_RECORD") else {
+        eprintln!("BER_RESIZE_RECORD not set — skipping");
+        return;
+    };
+    let json = std::fs::read_to_string(&path).expect("read record");
+    let ber: ber_model::ber::ber_struct::Ber = serde_json::from_str(&json).expect("parse");
+    let id = ber.id;
+    let conn = crate::engine::open_db(":memory:").unwrap();
+    {
+        let repo = crate::engine::ber_repository::BerRepository::new(&conn);
+        repo.init_db().unwrap();
+        repo.upsert(&crate::engine::ber_repository::BerRecord {
+            id,
+            name: ber.address.clone(),
+            date_assessed: chrono::NaiveDate::from_ymd_opt(2026, 8, 8).unwrap(),
+            data: ber.clone(),
+        })
+        .unwrap();
+    }
+    let mut c = AppController::new(conn);
+    c.open_ber(&id).unwrap();
+    c.materialize();
+
+    // World position of every wall opening, keyed by id.
+    let world_pos = |c: &AppController| -> std::collections::HashMap<ItemId, (f64, f64)> {
+        let s = &c.current_record.as_ref().unwrap().data.storeys[0];
+        let host = |wid: &ItemId| {
+            s.walls
+                .regions
+                .iter()
+                .find(|r| r.id == *wid)
+                .and_then(|r| r.base_frame())
+        };
+        let mut out = std::collections::HashMap::new();
+        let mut put = |oid: ItemId, placement: &Option<OpeningPlacement>| {
+            if let Some(OpeningPlacement::Wall {
+                wall_id, along_m, ..
+            }) = placement
+            {
+                if let Some((origin, (ux, uy), _, _)) = host(wall_id) {
+                    out.insert(
+                        oid,
+                        (
+                            origin.x + ux * *along_m as f64,
+                            origin.y + uy * *along_m as f64,
+                        ),
+                    );
+                }
+            }
+        };
+        for w in &s.windows {
+            put(w.id, &w.placement);
+        }
+        for d in &s.doors {
+            put(d.id, &d.placement);
+        }
+        out
+    };
+    let before = world_pos(&c);
+    let (door_id, aid, sidelight_id, lone_window_id) = {
+        let s = &c.current_record.as_ref().unwrap().data.storeys[0];
+        let d = &s.doors[0];
+        let aid = d.assembly_id.expect("front door is a doorset");
+        let pane = s
+            .windows
+            .iter()
+            .find(|w| w.assembly_id == Some(aid))
+            .expect("sidelight");
+        // The standalone window on the same (east) wall as the door.
+        let east_x = before[&d.id].0;
+        let lone = s
+            .windows
+            .iter()
+            .find(|w| {
+                w.assembly_id.is_none()
+                    && before
+                        .get(&w.id)
+                        .is_some_and(|(x, _)| (x - east_x).abs() < 0.05)
+            })
+            .expect("standalone window on the east wall");
+        (d.id, aid, pane.id, lone.id)
+    };
+
+    // Trim the door's RECESS: a 0.6 m deep notch spanning y 6.76..8.67 on the
+    // east wall (x = 7.295) — right through the doorset's position.
+    c.set_edit_mode(EditTools::TrimOrtho);
+    c.apply_trim_stroke(&[
+        Point2f32::new(7.35, 6.76),
+        Point2f32::new(6.695, 6.76),
+        Point2f32::new(6.695, 8.67),
+        Point2f32::new(7.35, 8.67),
+    ])
+    .expect("recess trim applies");
+    c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
+    c.mark_dirty().unwrap();
+    c.materialize();
+
+    let after = world_pos(&c);
+    // (a) The standalone window stayed at its world position.
+    let (bx, by) = before[&lone_window_id];
+    let (ax, ay) = after[&lone_window_id];
+    assert!(
+        (ax - bx).abs() < 0.05 && (ay - by).abs() < 0.05,
+        "the untouched window stayed put (was ({bx:.2},{by:.2}), now ({ax:.2},{ay:.2}))"
+    );
+    // (b) The doorset re-homed onto the recess back wall: x ≈ 6.695, same y.
+    let (dax, day) = after[&door_id];
+    let (_, dby) = before[&door_id];
+    assert!(
+        (dax - 6.695).abs() < 0.05,
+        "door re-homed onto the recess back wall (x = {dax:.3})"
+    );
+    assert!(
+        (day - dby).abs() < 0.2,
+        "door kept its position along the wall (was y {dby:.2}, now {day:.2})"
+    );
+    let (sax, _) = after[&sidelight_id];
+    assert!(
+        (sax - 6.695).abs() < 0.05,
+        "sidelight followed its door onto the back wall (x = {sax:.3})"
+    );
+    // (c) The assembly is still rigid and nothing overlaps the lone window.
+    let s = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert_eq!(
+        s.doors[0].assembly_id,
+        Some(aid),
+        "doorset survived as an assembly"
+    );
+    let door_span = {
+        let (_, y) = after[&door_id];
+        let hw = s.doors[0].width_m as f64 / 2.0;
+        (y - hw, y + hw)
+    };
+    let lone_span = {
+        let (_, y) = after[&lone_window_id];
+        let w = s
+            .windows
+            .iter()
+            .find(|w| w.id == lone_window_id)
+            .unwrap()
+            .width_m as f64;
+        (y - w / 2.0, y + w / 2.0)
+    };
+    assert!(
+        door_span.1 <= lone_span.0 + 1e-3 || lone_span.1 <= door_span.0 + 1e-3,
+        "the doorset and the window do not intersect ({door_span:?} vs {lone_span:?})"
+    );
+}
+
+// ── Move opening to another wall ────────────────────────────────────────────
+
+/// "Move to wall…": a doorset on the south wall transfers RIGIDLY onto a
+/// trimmed recess's back wall — the user's Glengara flow (the front door
+/// belongs on the recess). Members keep sills + relative offsets; the anchors
+/// follow, so a re-derive keeps it there; one undo returns it.
+#[test]
+fn move_doorset_onto_the_recess_back_wall() {
+    use ber_model::ber::fenestration::OpeningPlacement;
+    use ber_model::ber::openings::OpeningRef;
+    let mut c = controller_with_doorset(); // 0.9 door + 0.4 lights at along 5.0, south wall
+                                           // Trim a recess into the EAST wall (x=10): 1.9 wide, 0.7 deep.
+    c.set_edit_mode(EditTools::TrimOrtho);
+    c.apply_trim_stroke(&[
+        Point2f32::new(10.05, 4.0),
+        Point2f32::new(9.3, 4.0),
+        Point2f32::new(9.3, 5.9),
+        Point2f32::new(10.05, 5.9),
+    ])
+    .expect("recess trims");
+    c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
+    c.mark_dirty().unwrap();
+    c.materialize();
+
+    // Select the door panel in the (conceptual) elevation and arm the move.
+    let panel_id = c.current_record.as_ref().unwrap().data.storeys[0].doors[0].id;
+    c.set_openings_mode(true);
+    c.elevation_selection = Some(OpeningRef::Door(panel_id));
+    c.elevation_wall = c.current_record.as_ref().unwrap().data.storeys[0]
+        .walls
+        .regions
+        .first()
+        .map(|r| r.id);
+    c.begin_move_selected_opening();
+    assert!(c.opening_move_pending());
+    assert!(
+        c.elevation_wall().is_none(),
+        "elevation closed for the pick"
+    );
+
+    // Tap the recess BACK wall (x=9.3, mid-height y=4.95).
+    c.move_opening_tap(9.3, 4.95, 0.3).expect("transfer lands");
+    assert!(!c.opening_move_pending());
+    c.materialize();
+
+    let s = &c.current_record.as_ref().unwrap().data.storeys[0];
+    let world = |placement: &Option<OpeningPlacement>| -> (f64, f64) {
+        let Some(OpeningPlacement::Wall {
+            wall_id, along_m, ..
+        }) = placement
+        else {
+            panic!("wall placement")
+        };
+        let (origin, (ux, uy), _, _) = s
+            .walls
+            .regions
+            .iter()
+            .find(|r| r.id == *wall_id)
+            .unwrap()
+            .base_frame()
+            .unwrap();
+        (
+            origin.x + ux * *along_m as f64,
+            origin.y + uy * *along_m as f64,
+        )
+    };
+    let d = &s.doors[0];
+    let (dx, dy) = world(&d.placement);
+    assert!(
+        (dx - 9.3).abs() < 1e-3,
+        "door on the recess back wall (x = {dx:.3})"
+    );
+    // Panes came along, flush, on the SAME wall.
+    let aid = d.assembly_id.unwrap();
+    for pane in s.windows.iter().filter(|w| w.assembly_id == Some(aid)) {
+        let (px, py) = world(&pane.placement);
+        assert!(
+            (px - 9.3).abs() < 1e-3,
+            "pane followed onto the back wall (x = {px:.3})"
+        );
+        let sill = match &pane.placement {
+            Some(OpeningPlacement::Wall { sill_m, .. }) => *sill_m,
+            _ => 0.0,
+        };
+        if sill < 1.0 {
+            // A sidelight (sill at the floor): flush against a door edge.
+            let gap = ((py - dy).abs() - (d.width_m + pane.width_m) as f64 / 2.0).abs();
+            assert!(gap < 1e-3, "sidelight flush (gap err {gap:.4})");
+        } else {
+            // The transom (at the door's top): centred over the assembly.
+            assert!(
+                (py - dy).abs() < 0.5,
+                "transom stayed over the doorset (offset {:.3})",
+                py - dy
+            );
+        }
+    }
+    // Undo returns the doorset to the south wall.
+    c.undo().unwrap();
+    let s = &c.current_record.as_ref().unwrap().data.storeys[0];
+    let Some(OpeningPlacement::Wall { wall_id, .. }) = s.doors[0].placement else {
+        panic!()
+    };
+    let (_, (ux, _), _, _) = s
+        .walls
+        .regions
+        .iter()
+        .find(|r| r.id == wall_id)
+        .unwrap()
+        .base_frame()
+        .unwrap();
+    assert!(
+        ux.abs() > 0.9,
+        "undo restored the doorset to the horizontal south wall"
+    );
+}
+
+/// A target wall too short for the body is refused: model untouched, the
+/// move still armed for another tap; a MISS cancels the move.
+#[test]
+fn move_opening_refuses_too_short_and_cancels_on_miss() {
+    use ber_model::ber::openings::OpeningRef;
+    let mut c = controller_with_doorset(); // total doorset width 1.7 + margins
+                                           // Trim a NARROW recess (0.6 wide) into the east wall — too short for it.
+    c.set_edit_mode(EditTools::TrimOrtho);
+    c.apply_trim_stroke(&[
+        Point2f32::new(10.05, 4.0),
+        Point2f32::new(9.3, 4.0),
+        Point2f32::new(9.3, 4.6),
+        Point2f32::new(10.05, 4.6),
+    ])
+    .expect("narrow recess trims");
+    c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
+    c.mark_dirty().unwrap();
+    c.materialize();
+    let panel_id = c.current_record.as_ref().unwrap().data.storeys[0].doors[0].id;
+    c.set_openings_mode(true);
+    c.elevation_selection = Some(OpeningRef::Door(panel_id));
+    c.begin_move_selected_opening();
+    let err = c.move_opening_tap(9.3, 4.3, 0.25);
+    assert!(err.is_err(), "1.7 m doorset can't fit a 0.6 m wall");
+    assert!(
+        c.opening_move_pending(),
+        "still armed — the assessor can tap a better wall"
+    );
+    // The doorset never left the south wall.
+    let s = &c.current_record.as_ref().unwrap().data.storeys[0];
+    let Some(ber_model::ber::fenestration::OpeningPlacement::Wall { wall_id, .. }) =
+        s.doors[0].placement
+    else {
+        panic!()
+    };
+    let (_, (ux, _), _, _) = s
+        .walls
+        .regions
+        .iter()
+        .find(|r| r.id == wall_id)
+        .unwrap()
+        .base_frame()
+        .unwrap();
+    assert!(ux.abs() > 0.9, "doorset untouched on the south wall");
+    // A tap on empty space cancels the armed move.
+    let err = c.move_opening_tap(5.0, 3.0, 0.25);
+    assert!(err.is_err(), "miss reports the cancel");
+    assert!(!c.opening_move_pending(), "move disarmed");
+}
+
+/// FIELD REPORT (Glengara bay): lowering a BAY's ceiling via a step line at
+/// the bay's base said "No resolved ceiling under that area". The side
+/// sampler took the bbox-middle of the strip — outside the bay, which only
+/// spans part of the house's width. The sampler now clips the resolved
+/// ceilings to the line's side and picks an interior point, so the bay flow
+/// works end-to-end: current height reads, the absolute assign lands, and
+/// the bay's ceiling region ends at the typed height.
+#[test]
+fn bay_ceiling_step_line_reads_height_and_lowers_the_bay() {
+    use document::LineSide;
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    let _ = c.create_ber(
+        "Bay".into(),
+        chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+    );
+    // A Glengara-like plan: 6.1 × 11.6 body with a 2.3 × 0.8 bay on the north.
+    c.document.floor_plan = FloorPlan::from_points_to_orthogonal(
+        &[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(6.1, 0.0),
+            Point2f32::new(6.1, 11.6),
+            Point2f32::new(5.4, 11.6),
+            Point2f32::new(5.4, 12.4),
+            Point2f32::new(3.1, 12.4),
+            Point2f32::new(3.1, 11.6),
+            Point2f32::new(0.0, 11.6),
+            Point2f32::new(0.05, 0.05),
+        ],
+        0.2,
+        true,
+    )
+    .unwrap();
+    c.document.dimensioning.scale_set = true;
+    c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
+    c.commit_to_ber().unwrap();
+    c.set_default_ceiling_height(2.42).unwrap();
+    c.materialize();
+
+    // The step LINE along the bay's base (y = 11.6), lowering the bay side.
+    c.pending_ceiling_step = Some(PendingCeilingStep::Amount {
+        axis: ParameterAxis::Y,
+        coord_m: 11.6,
+        side: LineSide::Greater,
+        snap: None,
+    });
+    let current = c
+        .ceiling_step_current_height()
+        .expect("the bay side has a resolved ceiling (the field failure)");
+    assert!(
+        (current - 2.42).abs() < 1e-3,
+        "reads the default height (got {current})"
+    );
+    c.assign_ceiling_step_absolute(1.9)
+        .expect("bay lowers to the typed height");
+    c.materialize();
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    // The ceiling piece over the bay sits at 1.9; the body stays at 2.42.
+    let z_at = |x: f64, y: f64| {
+        storey
+            .ceilings
+            .top_z_at(domain::points::Point2f64::new(x, y))
+            .unwrap_or(f64::NAN)
+    };
+    assert!(
+        (z_at(4.25, 12.0) - 1.9).abs() < 1e-3,
+        "bay ceiling at 1.9 (got {})",
+        z_at(4.25, 12.0)
+    );
+    assert!(
+        (z_at(3.0, 6.0) - 2.42).abs() < 1e-3,
+        "main body stays at 2.42 (got {})",
+        z_at(3.0, 6.0)
+    );
+}
+
+/// Structure "Divide wall": select one wall, type two cut distances, Split →
+/// the wall resolves as THREE regions with the typed spans, the middle one
+/// selected for attribution; each part then holds its own construction. The
+/// exposure-mode ergonomics (handles/typed bounds), now for structure.
+#[test]
+fn structure_divide_splits_the_selected_wall() {
+    let mut c = dimensioned_square_controller(); // 10×10
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.materialize();
+    // Select the south wall's region.
+    let south_id = {
+        let s = &c.current_record.as_ref().unwrap().data.storeys[0];
+        s.walls
+            .regions
+            .iter()
+            .find(|r| r.polygon.exterior.iter().all(|p| p.y.abs() < 1e-3))
+            .unwrap()
+            .id
+    };
+    c.structure_selected.insert(south_id);
+    assert!(
+        c.structure_can_divide(),
+        "one wall selected → divide offered"
+    );
+    c.begin_structure_divide();
+    let v = c.structure_divide_view().expect("divide open");
+    assert!((v.span.0 - 0.0).abs() < 1e-3 && (v.span.1 - 10.0).abs() < 1e-3);
+    // Type the two cuts: 3 m and 5 m from the piece's left end.
+    c.set_structure_divide_bound(true, 3.0).unwrap();
+    c.set_structure_divide_bound(false, 5.0).unwrap();
+    c.apply_structure_divide().expect("split lands");
+    // The south base line now resolves as three regions: 0..3, 3..5, 5..10.
+    let s = &c.current_record.as_ref().unwrap().data.storeys[0];
+    let sd = &c.document.storeys[0];
+    let mut spans: Vec<(f32, f32)> = s
+        .walls
+        .regions
+        .iter()
+        .filter(|r| r.polygon.exterior.iter().all(|p| p.y.abs() < 1e-3))
+        .filter_map(|r| {
+            sd.recover_wall_region_span(r)
+                .map(|(_, s0, s1, _)| (s0, s1))
+        })
+        .collect();
+    spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+    assert_eq!(spans.len(), 3, "three pieces: {spans:?}");
+    for (got, want) in spans.iter().zip([(0.0, 3.0), (3.0, 5.0), (5.0, 10.0)]) {
+        assert!(
+            (got.0 - want.0).abs() < 0.02 && (got.1 - want.1).abs() < 0.02,
+            "piece {got:?} ≈ {want:?}"
+        );
+    }
+    // The MIDDLE piece is selected, ready for "Edit attributes".
+    assert_eq!(c.structure_selected.len(), 1, "middle piece selected");
+    let sel = *c.structure_selected.iter().next().unwrap();
+    let (_, s0, s1, _) = {
+        let s = &c.current_record.as_ref().unwrap().data.storeys[0];
+        let r = s.walls.regions.iter().find(|r| r.id == sel).unwrap();
+        c.document.storeys[0].recover_wall_region_span(r).unwrap()
+    };
+    assert!(
+        (s0 - 3.0).abs() < 0.02 && (s1 - 5.0).abs() < 0.02,
+        "selected span {s0:.2}..{s1:.2}"
+    );
+    // Undo restores the single full-length wall.
+    c.undo().unwrap();
+    let s = &c.current_record.as_ref().unwrap().data.storeys[0];
+    let south: Vec<_> = s
+        .walls
+        .regions
+        .iter()
+        .filter(|r| r.polygon.exterior.iter().all(|p| p.y.abs() < 1e-3))
+        .collect();
+    assert_eq!(south.len(), 1, "undo re-joined the wall");
+}
+
+/// Divide with NO cut placed (both bounds still at the span ends) refuses
+/// with a helpful message; the drag-handle path clamps into the span.
+#[test]
+fn structure_divide_needs_a_cut_and_clamps() {
+    let mut c = dimensioned_square_controller();
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.materialize();
+    let south_id = {
+        let s = &c.current_record.as_ref().unwrap().data.storeys[0];
+        s.walls
+            .regions
+            .iter()
+            .find(|r| r.polygon.exterior.iter().all(|p| p.y.abs() < 1e-3))
+            .unwrap()
+            .id
+    };
+    c.structure_selected.insert(south_id);
+    c.begin_structure_divide();
+    assert!(c.apply_structure_divide().is_err(), "no cut placed yet");
+    // A typed bound beyond the span clamps to it (no cut → still refused).
+    c.set_structure_divide_bound(true, 99.0).unwrap();
+    assert!(
+        c.apply_structure_divide().is_err(),
+        "clamped to the end = no cut"
+    );
+    // The clamp parked BOTH bounds at the far end — grab there, drag inward.
+    c.structure_divide_pointer_down(10.0, 0.0, 0.5);
+    c.structure_divide_pointer_drag(4.0, 0.2);
+    c.structure_divide_pointer_up();
+    c.apply_structure_divide().expect("dragged cut lands");
+    let s = &c.current_record.as_ref().unwrap().data.storeys[0];
+    let south: Vec<_> = s
+        .walls
+        .regions
+        .iter()
+        .filter(|r| r.polygon.exterior.iter().all(|p| p.y.abs() < 1e-3))
+        .collect();
+    assert_eq!(south.len(), 2, "one cut → two pieces");
+}
+
+/// The pin dropdown's ➕ edit: an already-added object's count / note update
+/// in place and new photos APPEND — no duplicate object needed (the field
+/// complaint), and one undo restores the original.
+#[test]
+fn object_edit_updates_in_place_and_appends_photos() {
+    use ber_model::ber::objects::{ObjectKind, VentKind};
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    // Open a room pin and add a vent with a note.
+    c.objects_pointer_down(5.0, 5.0, 0.5);
+    c.add_object(
+        ObjectKind::Vent(VentKind::Open),
+        1,
+        Some("living room".into()),
+        None,
+        vec![],
+    );
+    let (room_id, object_id) = {
+        let room = c.active_object_room_view().expect("room open");
+        (room.id, room.objects[0].id)
+    };
+    // Edit: bump the count, extend the note.
+    c.begin_edit_object(room_id, object_id);
+    let v = c.object_edit_view().expect("edit open");
+    assert_eq!(v.count, 1);
+    assert_eq!(v.note, "living room");
+    c.update_object(
+        2,
+        Some("living room — behind the couch".into()),
+        None,
+        vec![],
+    )
+    .expect("edit applies");
+    assert!(c.object_edit_view().is_none(), "edit closed");
+    {
+        let room = c.active_object_room_view().unwrap();
+        assert_eq!(room.objects.len(), 1, "no duplicate object");
+        assert_eq!(room.objects[0].count, 2);
+    }
+    let note = {
+        let record = c.current_record.as_ref().unwrap();
+        record
+            .data
+            .object_rooms_iter()
+            .find(|r| r.id == room_id)
+            .unwrap()
+            .objects[0]
+            .note
+            .clone()
+    };
+    assert_eq!(note.as_deref(), Some("living room — behind the couch"));
+    // Undo restores the original values.
+    c.undo().unwrap();
+    let room = c.active_object_room_view().unwrap();
+    assert_eq!(room.objects[0].count, 1);
+}
