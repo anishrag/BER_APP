@@ -32997,4 +32997,21 @@ fn millimetre_phase_mismatch_partitions_without_a_sliver() {
             "no near-degenerate ceiling strip survives (y-span {span:.4})"
         );
     }
+    // The WALL fan must not mint a crumb either: the 2 mm partition jog left
+    // a full-height 2 mm wall (the "infinite lines" — its per-length exposure
+    // lerp exploded across the view) before `without_degenerate_crumbs`.
+    for r in &s.walls.regions {
+        let (mut lox, mut hix, mut loy, mut hiy) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+        for p in &r.polygon.exterior {
+            lox = lox.min(p.x);
+            hix = hix.max(p.x);
+            loy = loy.min(p.y);
+            hiy = hiy.max(p.y);
+        }
+        let plan = (hix - lox).hypot(hiy - loy);
+        assert!(
+            plan > 0.02,
+            "no degenerate wall crumb survives (plan length {plan:.4})"
+        );
+    }
 }

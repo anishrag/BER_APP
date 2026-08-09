@@ -408,6 +408,30 @@ pub struct WallRegions {
 }
 
 impl WallRegions {
+    /// Drop DEGENERATE wall crumbs: regions whose whole plan footprint is
+    /// shorter than [`MIN_PIECE_MINOR_M`](crate::ber::structural::ceiling_geom)
+    /// — the wall counterpart of the floor/ceiling sliver guard. A phase ring
+    /// typed millimetres off the outline (26 Birchfield Road) leaves a
+    /// millimetre jog in the partition boundary; the wall fan then mints a
+    /// 2 mm-wide full-height wall there, and downstream per-length math
+    /// (exposure section lerp) explodes it across the view. Below survey
+    /// resolution nothing real is lost; openings never host on such a crumb.
+    pub fn without_degenerate_crumbs(mut self) -> Self {
+        use super::ceiling_geom::MIN_PIECE_MINOR_M;
+        self.regions.retain(|r| {
+            let e = &r.polygon.exterior;
+            let (mut lox, mut hix, mut loy, mut hiy) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+            for p in e {
+                lox = lox.min(p.x);
+                hix = hix.max(p.x);
+                loy = loy.min(p.y);
+                hiy = hiy.max(p.y);
+            }
+            e.is_empty() || (hix - lox).hypot(hiy - loy) >= MIN_PIECE_MINOR_M
+        });
+        self
+    }
+
     /// Re-derive the storey's walls from `segments` (each a footprint edge
     /// `(a, b)` with its thermal `exposure`), tracing each wall's BASE along
     /// the `floors` step profile and its TOP along the `ceilings` profile, and

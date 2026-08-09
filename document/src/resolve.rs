@@ -565,7 +565,12 @@ pub fn resolve_storey(
         .collect();
     storey.walls = walls
         .with_risers(ceiling_risers, wall_cid)
-        .with_interior_risers(floor_risers, wall_cid);
+        .with_interior_risers(floor_risers, wall_cid)
+        // Millimetre phase-ring/outline mismatches jog the partition boundary
+        // and the wall fan mints a full-height crumb there (26 Birchfield's
+        // "infinite lines" — the exposure lerp explodes on its ~2 mm base).
+        // The wall counterpart of the floor/ceiling sliver guard.
+        .without_degenerate_crumbs();
     // The pre-projection porch walls — like `previous_walls`, kept only to
     // seed opening anchors whose placement still references a pre-projection
     // porch-wall id.
