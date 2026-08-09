@@ -4794,6 +4794,56 @@ fn external_photos_button<F: FnMut(UiEvent)>(
                                         });
                                 });
                         });
+                    // The EXTRA-pictures bucket: shots with no other home
+                    // (no side / object / surface). Same capture widget;
+                    // thumbnails open in the global lightbox; Remove is
+                    // id-keyed (shared with the external remove).
+                    egui::CollapsingHeader::new(format!(
+                        "🖼 Extra pictures ({})",
+                        view.extra_photos.len()
+                    ))
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        let max_h = (rect.height() - 70.0).max(220.0);
+                        egui::ScrollArea::vertical()
+                            .id_salt("extra_photos_scroll")
+                            .max_height(max_h)
+                            .auto_shrink([true, true])
+                            .show(ui, |ui| {
+                                let thumb_w = 300.0_f32.min((rect.width() - 60.0).max(150.0));
+                                let thumb = egui::vec2(thumb_w, thumb_w * 0.75);
+                                for p in &view.extra_photos {
+                                    let src =
+                                        p.thumbnail_path.as_deref().unwrap_or(&p.file_path);
+                                    crate::ui::widgets::clickable_photo(
+                                        ui,
+                                        &format!("file://{src}"),
+                                        &format!("file://{}", p.file_path),
+                                        thumb,
+                                    );
+                                    if ui.button("Remove").clicked() {
+                                        on_event(UiEvent::Sketch(
+                                            SketchEvent::RemoveExternalPhoto { id: p.id },
+                                        ));
+                                    }
+                                    ui.add_space(8.0);
+                                }
+                                if let Some((path, quality)) =
+                                    crate::ui::widgets::photo_button_pair(
+                                        ui,
+                                        "Add picture",
+                                        true,
+                                        crate::ui::widgets::PhotoQuality::High,
+                                        false,
+                                    )
+                                {
+                                    on_event(UiEvent::Sketch(SketchEvent::AddExtraPhoto {
+                                        path,
+                                        quality,
+                                    }));
+                                }
+                            });
+                    });
                 });
             });
         });

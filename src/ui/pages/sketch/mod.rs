@@ -1265,6 +1265,12 @@ pub enum SketchEvent {
         path: std::path::PathBuf,
         quality: crate::ui::widgets::PhotoQuality,
     },
+    /// Add an EXTRA photo (the general no-other-home bucket, bottom-right
+    /// panel) from a captured/picked path.
+    AddExtraPhoto {
+        path: std::path::PathBuf,
+        quality: crate::ui::widgets::PhotoQuality,
+    },
     /// Remove one external photo (by its id — a side can hold several).
     RemoveExternalPhoto {
         id: ItemId,
@@ -1765,6 +1771,8 @@ pub struct SketchView<'a> {
     /// Backs the floating "Add external pictures" panel. Shown in the Mapping
     /// phase when a record is loaded.
     pub external_photos: Vec<(ExternalSide, Vec<PhotoView>)>,
+    /// The untagged EXTRA photos (the general bucket) for the same panel.
+    pub extra_photos: Vec<crate::controller::app_controller::PhotoView>,
     /// The sides whose external photo is DEFERRED to the end of the
     /// assessment (never contains Front — it isn't deferrable, see
     /// [`ExternalSide::photo_deferrable`]). Backs the panel's per-side Defer

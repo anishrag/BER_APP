@@ -186,6 +186,45 @@ impl AppController {
 
     /// Remove one external photo by its id. Snapshots for undo like
     /// [`add_external_photo`](Self::add_external_photo).
+    /// Attach an EXTRA photo — the general bucket for shots with no other
+    /// home (no side tag, no object, no surface): appended to `Ber::photos`
+    /// with `side: None`. Same store/undo mechanics as the external sides;
+    /// removal shares [`remove_external_photo`] (an id-keyed retain).
+    pub fn add_extra_photo(&mut self, source: &std::path::Path, quality: PhotoQuality) {
+        if self.current_record.is_none() {
+            return;
+        }
+        let Some(photo) = self.ingest_photo(source, quality) else {
+            return;
+        };
+        let undo_snap = self.current_history_snapshot();
+        {
+            let record = self.current_record.as_mut().unwrap();
+            record.data.photos.push(photo);
+        }
+        let _ = self.mark_dirty();
+        self.push_history_snapshot(undo_snap);
+    }
+
+    /// The untagged EXTRA photos (`side: None`) for the floating panel.
+    pub fn extra_photos_view(&self) -> Vec<PhotoView> {
+        let Some(record) = self.current_record.as_ref() else {
+            return Vec::new();
+        };
+        record
+            .data
+            .photos
+            .iter()
+            .filter(|p| p.side.is_none())
+            .map(|p| PhotoView {
+                id: p.id,
+                file_path: p.file_path.clone(),
+                thumbnail_path: p.thumbnail_path.clone(),
+                description: p.description.clone(),
+            })
+            .collect()
+    }
+
     pub fn remove_external_photo(&mut self, target: ber_model::ber::common::ItemId) {
         if self.current_record.is_none() {
             return;

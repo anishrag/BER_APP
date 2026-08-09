@@ -1495,6 +1495,7 @@ impl eframe::App for BerApp {
                             // for the floating "Add external pictures" panel,
                             // plus which sides are DEFERRED to the end (the
                             // panel's Defer toggles + the Final-phase prompt).
+                            let extra_photos = self.app_controller.borrow().extra_photos_view();
                             let (external_photos, deferred_photo_sides) = {
                                 let c = self.app_controller.borrow();
                                 (c.external_photos(), c.deferred_photo_sides())
@@ -1967,6 +1968,7 @@ impl eframe::App for BerApp {
                                 delete_confirm_pending,
                                 checklist,
                                 external_photos,
+                                extra_photos,
                                 deferred_photo_sides,
                                 current_phase,
                                 mapping_complete,
@@ -3801,6 +3803,9 @@ impl eframe::App for BerApp {
                                             controller
                                                 .borrow_mut()
                                                 .add_external_photo(side, &path, quality);
+                                        }
+                                        SketchEvent::AddExtraPhoto { path, quality } => {
+                                            controller.borrow_mut().add_extra_photo(&path, quality);
                                         }
                                         SketchEvent::RemoveExternalPhoto { id } => {
                                             controller.borrow_mut().remove_external_photo(id);

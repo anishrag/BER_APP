@@ -32893,3 +32893,45 @@ fn solar_tubes_record_and_edit_the_collector_area() {
         .objects[0];
     assert_eq!(o.area_m2, Some(4.2), "area edited in place");
 }
+
+/// The EXTRA-pictures bucket: untagged `Ber::photos` entries (side: None)
+/// are the general bucket — the panel view returns exactly those, external
+/// side shots stay out of it, and the shared id-keyed remove works.
+#[test]
+fn extra_photos_bucket_holds_untagged_shots() {
+    use ber_model::ber::common::{Evidence, ItemId};
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    let (extra_id, side_id) = (ItemId::default(), ItemId::default());
+    {
+        let record = c.current_record.as_mut().unwrap();
+        record.data.photos.push(Evidence {
+            id: extra_id,
+            file_path: "/tmp/extra.jpg".into(),
+            thumbnail_path: None,
+            description: Some("meter box".into()),
+            side: None,
+            ..Default::default()
+        });
+        record.data.photos.push(Evidence {
+            id: side_id,
+            file_path: "/tmp/front.jpg".into(),
+            thumbnail_path: None,
+            description: None,
+            side: Some(ber_model::ber::common::ExternalSide::Front),
+            ..Default::default()
+        });
+    }
+    let extra = c.extra_photos_view();
+    assert_eq!(extra.len(), 1, "only the untagged shot is in the bucket");
+    assert_eq!(extra[0].id, extra_id);
+    assert_eq!(extra[0].description.as_deref(), Some("meter box"));
+    // The shared remove drops it; the tagged side shot stays.
+    c.remove_external_photo(extra_id);
+    assert!(c.extra_photos_view().is_empty());
+    assert_eq!(
+        c.current_record.as_ref().unwrap().data.photos.len(),
+        1,
+        "the front-side shot survives"
+    );
+}
