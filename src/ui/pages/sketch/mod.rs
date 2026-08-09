@@ -847,6 +847,7 @@ pub enum SketchEvent {
         count: u32,
         note: Option<String>,
         kwh: Option<f32>,
+        area_m2: Option<f32>,
         photos: Vec<(std::path::PathBuf, crate::ui::widgets::PhotoQuality)>,
     },
     /// Delete one object from a room (the Delete panel).
@@ -867,6 +868,7 @@ pub enum SketchEvent {
         count: u32,
         note: Option<String>,
         kwh: Option<f32>,
+        area_m2: Option<f32>,
         photos: Vec<(std::path::PathBuf, crate::ui::widgets::PhotoQuality)>,
     },
     CancelEditObject,
@@ -1857,6 +1859,7 @@ pub struct SketchView<'a> {
     pub object_note_input: &'a mut String,
     /// Battery capacity entry (kWh) — shown only for the battery kind.
     pub object_kwh_input: &'a mut String,
+    pub object_area_input: &'a mut String,
     pub object_other_name: &'a mut String,
     pub object_pending_photos: &'a mut PendingObjectPhotos,
     /// Whether the "how many heating zones?" numeric prompt is open (item 3) —

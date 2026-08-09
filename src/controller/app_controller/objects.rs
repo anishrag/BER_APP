@@ -54,6 +54,8 @@ pub struct ObjectEditView {
     pub note: String,
     pub kwh: Option<f32>,
     pub kwh_required: bool,
+    pub area_m2: Option<f32>,
+    pub area_required: bool,
     /// The photos already attached, `(thumb_path, full_path)` — the edit
     /// window shows them (tappable via the global lightbox).
     pub photos: Vec<(String, String)>,
@@ -374,6 +376,7 @@ impl AppController {
         count: u32,
         note: Option<String>,
         kwh: Option<f32>,
+        area_m2: Option<f32>,
         photos: Vec<(std::path::PathBuf, PhotoQuality)>,
     ) {
         let Some(room_id) = self.active_object_room else {
@@ -392,6 +395,7 @@ impl AppController {
             let mut obj = BuildingObject::new(kind, count);
             obj.note = note.filter(|s| !s.trim().is_empty());
             obj.kwh = kwh;
+            obj.area_m2 = area_m2;
             obj.photos = stored;
             let new_id = obj.id;
             room.objects.push(obj);
@@ -617,6 +621,8 @@ impl AppController {
             note: o.note.clone().unwrap_or_default(),
             kwh: o.kwh,
             kwh_required: o.kind.kwh_required(),
+            area_m2: o.area_m2,
+            area_required: o.kind.area_required(),
             photos: o
                 .photos
                 .iter()
@@ -640,6 +646,7 @@ impl AppController {
         count: u32,
         note: Option<String>,
         kwh: Option<f32>,
+        area_m2: Option<f32>,
         photos: Vec<(std::path::PathBuf, PhotoQuality)>,
     ) -> Result<(), String> {
         let Some((room_id, object_id)) = self.object_edit else {
@@ -660,6 +667,9 @@ impl AppController {
         o.note = note;
         if o.kind.kwh_required() {
             o.kwh = kwh;
+        }
+        if o.kind.area_required() {
+            o.area_m2 = area_m2;
         }
         o.photos.extend(stored);
         self.object_edit = None;

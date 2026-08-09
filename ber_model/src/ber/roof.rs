@@ -354,6 +354,15 @@ impl RoofArea {
         if self.apexes.len() != 2 {
             return None;
         }
+        // A ridge with a HIP end is never a gable/barge solve: its endpoints
+        // are deliberately INSET and the fan owns the end triangles. Without
+        // this, a hip ridge MOVED flush against a wall (both endpoints landing
+        // on the boundary) classified as a mono-pitch shed — the ridge
+        // extended full-length and the half-hip's end slopes vanished (the
+        // field report: "my bay hip became a gable with one slope").
+        if matches!(self.ends, Some(ends) if ends.iter().any(|e| *e == RoofEnd::Hip)) {
+            return None;
+        }
         let (a, b) = (&self.apexes[0], &self.apexes[1]);
         // Auto-nearest anchors ONLY (`&[]`): the storey's
         // `ceiling_plane_anchors` overrides are a CEILING-solve concern —
@@ -2689,5 +2698,63 @@ mod generate_tests {
             .expect("key was present");
         let loaded: RoofArea = serde_json::from_value(json).expect("old record loads");
         assert_eq!(loaded.ends, None);
+    }
+}
+
+#[cfg(test)]
+mod edge_ridge_tests {
+    use super::*;
+    use crate::ber::common::ItemId;
+
+    /// FIELD REPORT: a HIP ridge dragged flush against a wall (both inset
+    /// endpoints ON the boundary edge) must stay a HALF-HIP — the big slope
+    /// plus two hip end triangles — not collapse into the one-plane "true
+    /// gable" solve (whose other side is empty here).
+    #[test]
+    fn hip_ridge_on_a_boundary_edge_keeps_its_end_slopes() {
+        // 10 × 4 bay; ridge along y=4 (the house junction), endpoints inset
+        // 2 m from each end — the user's dragged half-hip.
+        let footprint = vec![vec![
+            Point2f64::new(0.0, 0.0),
+            Point2f64::new(10.0, 0.0),
+            Point2f64::new(10.0, 4.0),
+            Point2f64::new(0.0, 4.0),
+        ]];
+        let apexes = vec![
+            CeilingApex {
+                point: Point2f64::new(2.0, 4.0),
+                z_m: 2.0,
+            },
+            CeilingApex {
+                point: Point2f64::new(8.0, 4.0),
+                z_m: 2.0,
+            },
+        ];
+        let area = RoofArea {
+            id: ItemId::default(),
+            storey_idx: 0,
+            covered_storeys: vec![0],
+            shape: RoofShape::Hip,
+            pitch_deg: 35.0,
+            eave_z: 0.0,
+            ridge: Some((Point2f64::new(2.0, 4.0), Point2f64::new(8.0, 4.0))),
+            footprint: footprint.clone(),
+            apexes: apexes.clone(),
+            ends: Some([RoofEnd::Hip, RoofEnd::Hip]),
+        };
+        // The app renders through the OVERHANG path — the collapse lived in
+        // its endpoint-on-boundary gable branch, not the raw fan.
+        let regions = area.regions(0.3, ItemId::default());
+        let sloped: Vec<_> = regions
+            .regions
+            .iter()
+            .filter(|r| region_slope_deg(r).is_some_and(|d| d > 1.0))
+            .collect();
+        assert!(
+            sloped.len() >= 3,
+            "half-hip keeps the main slope + two hip ends (got {} sloped of {} total)",
+            sloped.len(),
+            regions.regions.len()
+        );
     }
 }

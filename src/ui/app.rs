@@ -329,6 +329,8 @@ pub struct SketchState {
     pub object_count_input: String,
     pub object_note_input: String,
     pub object_kwh_input: String,
+    /// Backing string for the object AREA input (m² — solar hot-water tubes).
+    pub object_area_input: String,
     pub object_other_name: String,
     /// Zone-count entry buffer for the "how many heating zones?" prompt (item 3).
     pub zone_input: String,
@@ -437,6 +439,7 @@ impl BerApp {
                 &st.object_count_input,
                 &st.object_note_input,
                 &st.object_kwh_input,
+                &st.object_area_input,
                 |k| ctrl.object_photo_required(k),
                 &mut st.object_pending_photos,
             )
@@ -449,10 +452,11 @@ impl BerApp {
         st.object_count_input.clear();
         st.object_note_input.clear();
         st.object_kwh_input.clear();
+        st.object_area_input.clear();
         st.object_other_name.clear();
         let mut ctrl = self.app_controller.borrow_mut();
         for c in commits {
-            ctrl.add_object(c.kind, c.count, c.note, c.kwh, c.photos);
+            ctrl.add_object(c.kind, c.count, c.note, c.kwh, c.area_m2, c.photos);
         }
         ctrl.close_object_room();
     }
@@ -2001,6 +2005,7 @@ impl eframe::App for BerApp {
                                 object_count_input: &mut self.sketch_state.object_count_input,
                                 object_note_input: &mut self.sketch_state.object_note_input,
                                 object_kwh_input: &mut self.sketch_state.object_kwh_input,
+                                object_area_input: &mut self.sketch_state.object_area_input,
                                 object_other_name: &mut self.sketch_state.object_other_name,
                                 object_pending_photos: &mut self.sketch_state.object_pending_photos,
                                 heating_zones_prompt_open,
@@ -2973,11 +2978,12 @@ impl eframe::App for BerApp {
                                             count,
                                             note,
                                             kwh,
+                                            area_m2,
                                             photos,
                                         } => {
                                             if let Err(e) = controller
                                                 .borrow_mut()
-                                                .update_object(count, note, kwh, photos)
+                                                .update_object(count, note, kwh, area_m2, photos)
                                             {
                                                 log::warn!("update_object: {}", e);
                                                 self.sketch_state.stroke_error = Some(e);
@@ -3196,11 +3202,12 @@ impl eframe::App for BerApp {
                                             count,
                                             note,
                                             kwh,
+                                            area_m2,
                                             photos,
                                         } => {
-                                            controller
-                                                .borrow_mut()
-                                                .add_object(kind, count, note, kwh, photos);
+                                            controller.borrow_mut().add_object(
+                                                kind, count, note, kwh, area_m2, photos,
+                                            );
                                         }
                                         SketchEvent::DeleteObject { room, object } => {
                                             controller.borrow_mut().delete_object(room, object);

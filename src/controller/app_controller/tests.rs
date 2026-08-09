@@ -20523,11 +20523,13 @@ fn objects_capture_pins_counts_and_undo() {
         1,
         None,
         None,
+        None,
         Vec::new(),
     );
     c.add_object(
         ObjectKind::Radiator(RadiatorTrv::WithTrv),
         5,
+        None,
         None,
         None,
         Vec::new(),
@@ -20608,6 +20610,7 @@ fn objects_3d_placement_stores_surface_point_and_pitch() {
         1,
         None,
         None,
+        None,
         Vec::new(),
     );
     assert_eq!(
@@ -20681,6 +20684,7 @@ fn roof_pins_hidden_from_storey_views() {
         10,
         None,
         None,
+        None,
         Vec::new(),
     );
     c.close_object_room();
@@ -20747,10 +20751,11 @@ fn attic_bucket_and_review_question() {
     // A normal room first, so the review has content. A gas boiler gives the
     // house a primary heat source (else the item-6 heating gate blocks confirm).
     c.objects_pointer_down(2.0, 2.0, 0.5);
-    c.add_object(ObjectKind::Thermostat, 1, None, None, Vec::new());
+    c.add_object(ObjectKind::Thermostat, 1, None, None, None, Vec::new());
     c.add_object(
         ObjectKind::Boiler(ber_model::ber::objects::BoilerFuel::Gas),
         1,
+        None,
         None,
         None,
         Vec::new(),
@@ -20795,6 +20800,7 @@ fn attic_bucket_and_review_question() {
         1,
         None,
         None,
+        None,
         Vec::new(),
     );
     c.close_object_room();
@@ -20817,7 +20823,7 @@ fn attic_bucket_and_review_question() {
     let mut c2 = dimensioned_square_controller();
     c2.materialize();
     c2.objects_pointer_down(2.0, 2.0, 0.5);
-    c2.add_object(ObjectKind::Thermostat, 1, None, None, Vec::new());
+    c2.add_object(ObjectKind::Thermostat, 1, None, None, None, Vec::new());
     c2.close_object_room();
     c2.set_object_review_mode(true);
     c2.confirm_attic_absent();
@@ -20850,7 +20856,7 @@ fn object_photo_requirement_by_policy_and_first_instance() {
     let led = ObjectKind::Light(LightKind::Led);
     assert!(c.object_photo_required(&led), "first LED requires a photo");
     c.objects_pointer_down(2.0, 2.0, 0.5);
-    c.add_object(led.clone(), 1, None, None, Vec::new());
+    c.add_object(led.clone(), 1, None, None, None, Vec::new());
     assert!(!c.object_photo_required(&led), "a later LED is optional");
     // A DIFFERENT first-instance kind is still on its own first instance.
     assert!(
@@ -20862,7 +20868,7 @@ fn object_photo_requirement_by_policy_and_first_instance() {
     assert!(!c.object_photo_required(&ObjectKind::Other("meter".into())));
 
     // Always-required stays required even after one is recorded.
-    c.add_object(boiler.clone(), 1, None, None, Vec::new());
+    c.add_object(boiler.clone(), 1, None, None, None, Vec::new());
     assert!(
         c.object_photo_required(&boiler),
         "always-required stays required"
@@ -20895,6 +20901,7 @@ fn empty_object_pin_pruned_and_open_box_dismisses_on_tap() {
     c.add_object(
         ObjectKind::Boiler(BoilerFuel::Gas),
         1,
+        None,
         None,
         None,
         Vec::new(),
@@ -20933,11 +20940,13 @@ fn object_review_totals_and_hotspots() {
         1,
         None,
         None,
+        None,
         Vec::new(),
     );
     c.add_object(
         ObjectKind::Radiator(RadiatorTrv::WithTrv),
         3,
+        None,
         None,
         None,
         Vec::new(),
@@ -20948,6 +20957,7 @@ fn object_review_totals_and_hotspots() {
     c.add_object(
         ObjectKind::Radiator(RadiatorTrv::WithTrv),
         2,
+        None,
         None,
         None,
         Vec::new(),
@@ -21055,6 +21065,7 @@ fn object_review_absence_confirmation() {
         1,
         None,
         None,
+        None,
         Vec::new(),
     );
     c.close_object_room();
@@ -21124,6 +21135,7 @@ fn object_review_flagged_present_blocks_confirm_until_added() {
         1,
         None,
         None,
+        None,
         Vec::new(),
     );
     c.close_object_room();
@@ -21155,6 +21167,7 @@ fn object_review_flagged_present_blocks_confirm_until_added() {
     c.add_object(
         ObjectKind::SolarPanel(SolarPanelKind::Photovoltaic),
         1,
+        None,
         None,
         None,
         Vec::new(),
@@ -21192,12 +21205,13 @@ fn add_object_attaches_only_the_event_photos() {
         1,
         None,
         None,
+        None,
         vec![(
             std::path::PathBuf::from("/nonexistent/fan.jpg"),
             PhotoQuality::High,
         )],
     );
-    c.add_object(ObjectKind::Thermostat, 1, None, None, Vec::new());
+    c.add_object(ObjectKind::Thermostat, 1, None, None, None, Vec::new());
 
     let rows = c.active_object_room_view().expect("room open").objects;
     assert_eq!(rows.len(), 2);
@@ -28732,6 +28746,7 @@ fn gas_boiler_add_sets_system_type_delete_reverts() {
         1,
         None,
         None,
+        None,
         Vec::new(),
     );
     assert_eq!(
@@ -28772,6 +28787,7 @@ fn boiler_separate_hw_control_sets_separate_hot_water() {
     c.add_object(
         ObjectKind::Boiler(BoilerFuel::Gas),
         1,
+        None,
         None,
         None,
         Vec::new(),
@@ -28820,7 +28836,7 @@ fn heating_zones_prompt_sets_and_removal_clears_zones() {
     c.materialize();
     c.objects_pointer_down(2.0, 2.0, 0.5);
     let room = c.active_object_room().expect("a room opened");
-    c.add_object(ObjectKind::HeatingZones, 1, None, None, Vec::new());
+    c.add_object(ObjectKind::HeatingZones, 1, None, None, None, Vec::new());
     assert!(
         c.heating_zones_prompt_open(),
         "zones object raises the prompt"
@@ -28840,7 +28856,7 @@ fn heating_zones_prompt_sets_and_removal_clears_zones() {
     );
     // A later object add/remove must NOT wipe zones (the sync doesn't own it).
     use ber_model::ber::objects::{BoilerFuel, ObjectKind as OK};
-    c.add_object(OK::Boiler(BoilerFuel::Oil), 1, None, None, Vec::new());
+    c.add_object(OK::Boiler(BoilerFuel::Oil), 1, None, None, None, Vec::new());
     assert_eq!(
         c.current_record
             .as_ref()
@@ -28889,6 +28905,7 @@ fn heating_source_gate_blocks_review_until_boiler_or_panel() {
         1,
         None,
         None,
+        None,
         Vec::new(),
     );
     c.close_object_room();
@@ -28903,7 +28920,7 @@ fn heating_source_gate_blocks_review_until_boiler_or_panel() {
     // Add a panel heater → the gate clears; answering the panel question then
     // lets the review confirm.
     c.objects_pointer_down(3.0, 3.0, 0.5);
-    c.add_object(ObjectKind::PanelHeater, 1, None, None, Vec::new());
+    c.add_object(ObjectKind::PanelHeater, 1, None, None, None, Vec::new());
     c.close_object_room();
     assert!(
         !c.heating_source_missing(),
@@ -28944,11 +28961,13 @@ fn multiple_sources_prompt_primary_pick_and_preserve() {
         1,
         None,
         None,
+        None,
         Vec::new(),
     );
     c.add_object(
         ObjectKind::Boiler(BoilerFuel::HeatPump),
         1,
+        None,
         None,
         None,
         Vec::new(),
@@ -28974,7 +28993,7 @@ fn multiple_sources_prompt_primary_pick_and_preserve() {
     );
     // A later object add must NOT clobber the chosen primary (sync preserves it).
     c.objects_pointer_down(6.0, 6.0, 0.5);
-    c.add_object(ObjectKind::Thermostat, 1, None, None, Vec::new());
+    c.add_object(ObjectKind::Thermostat, 1, None, None, None, Vec::new());
     assert_eq!(
         c.current_record
             .as_ref()
@@ -29002,6 +29021,7 @@ fn vent_unit_add_sets_system_type_delete_reverts() {
         ObjectKind::Fan(FanType::Central),
         1,
         Some("Vent Axia Sentinel".into()),
+        None,
         None,
         Vec::new(),
     );
@@ -32626,6 +32646,7 @@ fn object_edit_updates_in_place_and_appends_photos() {
         1,
         Some("living room".into()),
         None,
+        None,
         vec![],
     );
     let (room_id, object_id) = {
@@ -32640,6 +32661,7 @@ fn object_edit_updates_in_place_and_appends_photos() {
     c.update_object(
         2,
         Some("living room — behind the couch".into()),
+        None,
         None,
         vec![],
     )
@@ -32782,4 +32804,92 @@ fn roof_ridge_moves_by_drag_and_centres_between_points() {
         apex_ys.iter().all(|y| (y - 6.5).abs() < 1e-3),
         "committed ridge at the moved position: {apex_ys:?}"
     );
+}
+
+/// Solar hot water is its own category: Tubes + Controls are offered there
+/// (each with the mandatory photo), PV/Battery stay under Solar PV, and a
+/// legacy undifferentiated SolarThermal record groups under the new category.
+#[test]
+fn solar_hot_water_category_splits_tubes_and_controls() {
+    use ber_model::ber::objects::{ObjectCategory, ObjectKind, SolarPanelKind};
+    assert!(ObjectCategory::ALL.contains(&ObjectCategory::SolarWaterHeating));
+    let hw = ObjectCategory::SolarWaterHeating.subtypes();
+    assert_eq!(
+        hw,
+        vec![
+            ObjectKind::SolarPanel(SolarPanelKind::SolarTubes),
+            ObjectKind::SolarPanel(SolarPanelKind::SolarControls),
+        ]
+    );
+    let pv = ObjectCategory::SolarPanel.subtypes();
+    assert!(
+        !pv.contains(&ObjectKind::SolarPanel(SolarPanelKind::SolarThermal)),
+        "the undifferentiated legacy kind is no longer offered"
+    );
+    // Category grouping: new kinds + the legacy one live under hot water.
+    for k in [
+        SolarPanelKind::SolarTubes,
+        SolarPanelKind::SolarControls,
+        SolarPanelKind::SolarThermal,
+    ] {
+        assert_eq!(
+            ObjectKind::SolarPanel(k).category(),
+            ObjectCategory::SolarWaterHeating
+        );
+    }
+    assert_eq!(
+        ObjectKind::SolarPanel(SolarPanelKind::Photovoltaic).category(),
+        ObjectCategory::SolarPanel
+    );
+    // Photos stay mandatory; no battery-style kWh demanded.
+    assert!(ObjectKind::SolarPanel(SolarPanelKind::SolarTubes).photo_required(true));
+    assert!(!ObjectKind::SolarPanel(SolarPanelKind::SolarControls).kwh_required());
+    assert_eq!(
+        ObjectKind::SolarPanel(SolarPanelKind::SolarTubes).label(),
+        "Solar hot water (Tubes)"
+    );
+}
+
+/// Solar hot-water TUBES record their collector area: required to add,
+/// stored on the object, editable via the per-object edit; the count is the
+/// number of tubes. (The roof pitch comes from the pin's 3D surface pick,
+/// as for any roof-mounted object.)
+#[test]
+fn solar_tubes_record_and_edit_the_collector_area() {
+    use ber_model::ber::objects::{ObjectKind, SolarPanelKind};
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    c.objects_pointer_down(5.0, 5.0, 0.5);
+    let tubes = ObjectKind::SolarPanel(SolarPanelKind::SolarTubes);
+    assert!(tubes.area_required(), "tubes demand the collector area");
+    c.add_object(tubes.clone(), 20, None, None, Some(3.8), Vec::new());
+    let (room_id, object_id) = {
+        let room = c.active_object_room_view().unwrap();
+        (room.id, room.objects[0].id)
+    };
+    {
+        let record = c.current_record.as_ref().unwrap();
+        let o = &record
+            .data
+            .object_rooms_iter()
+            .find(|r| r.id == room_id)
+            .unwrap()
+            .objects[0];
+        assert_eq!(o.count, 20, "count = number of tubes");
+        assert_eq!(o.area_m2, Some(3.8));
+    }
+    // Edit the area in place.
+    c.begin_edit_object(room_id, object_id);
+    let v = c.object_edit_view().unwrap();
+    assert!(v.area_required);
+    assert_eq!(v.area_m2, Some(3.8));
+    c.update_object(20, None, None, Some(4.2), vec![]).unwrap();
+    let record = c.current_record.as_ref().unwrap();
+    let o = &record
+        .data
+        .object_rooms_iter()
+        .find(|r| r.id == room_id)
+        .unwrap()
+        .objects[0];
+    assert_eq!(o.area_m2, Some(4.2), "area edited in place");
 }

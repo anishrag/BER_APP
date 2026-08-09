@@ -34,12 +34,16 @@ pub enum ObjectCategory {
     AtticHatch,
     WaterFixture,
     SolarPanel,
+    /// Solar HOT WATER (thermal) — the tube/panel collector and its controls
+    /// (pump station / controller), split so each is recorded with its own
+    /// photo. Legacy undifferentiated `SolarThermal` records group here too.
+    SolarWaterHeating,
     Other,
 }
 
 impl ObjectCategory {
     /// The categories in picker order.
-    pub const ALL: [ObjectCategory; 11] = [
+    pub const ALL: [ObjectCategory; 12] = [
         ObjectCategory::Vent,
         ObjectCategory::Fan,
         ObjectCategory::Light,
@@ -50,6 +54,7 @@ impl ObjectCategory {
         ObjectCategory::AtticHatch,
         ObjectCategory::WaterFixture,
         ObjectCategory::SolarPanel,
+        ObjectCategory::SolarWaterHeating,
         ObjectCategory::Other,
     ];
 
@@ -64,7 +69,8 @@ impl ObjectCategory {
             ObjectCategory::Chimney => "Chimney",
             ObjectCategory::AtticHatch => "Attic hatch",
             ObjectCategory::WaterFixture => "Shower / bath",
-            ObjectCategory::SolarPanel => "Solar",
+            ObjectCategory::SolarPanel => "Solar PV",
+            ObjectCategory::SolarWaterHeating => "Solar hot water",
             ObjectCategory::Other => "Other",
         }
     }
@@ -123,8 +129,13 @@ impl ObjectCategory {
             ],
             ObjectCategory::SolarPanel => vec![
                 ObjectKind::SolarPanel(SolarPanelKind::Photovoltaic),
-                ObjectKind::SolarPanel(SolarPanelKind::SolarThermal),
                 ObjectKind::SolarPanel(SolarPanelKind::Battery),
+            ],
+            // Legacy undifferentiated `SolarThermal` isn't offered any more —
+            // the split kinds are; old records still display through it.
+            ObjectCategory::SolarWaterHeating => vec![
+                ObjectKind::SolarPanel(SolarPanelKind::SolarTubes),
+                ObjectKind::SolarPanel(SolarPanelKind::SolarControls),
             ],
             // Singletons (no sub-choice).
             ObjectCategory::Other => Vec::new(),
@@ -227,6 +238,11 @@ pub enum SolarPanelKind {
     /// A home BATTERY (PV storage) — records its capacity in
     /// [`BuildingObject::kwh`] (the panel requires it) plus a photo.
     Battery,
+    /// Solar hot water COLLECTOR (evacuated tubes / flat plate) — additive
+    /// (2026-08): older records never contain it.
+    SolarTubes,
+    /// Solar hot water CONTROLS (pump station / controller) — additive.
+    SolarControls,
 }
 
 /// An 8-way compass sector the ASSESSOR enters (e.g. the roof side a PV
@@ -374,6 +390,12 @@ impl ObjectKind {
         matches!(self, ObjectKind::SolarPanel(SolarPanelKind::Battery))
     }
 
+    /// Whether recording this kind REQUIRES a collector area in m² (the
+    /// solar hot-water tubes).
+    pub fn area_required(&self) -> bool {
+        matches!(self, ObjectKind::SolarPanel(SolarPanelKind::SolarTubes))
+    }
+
     pub fn category(&self) -> ObjectCategory {
         match self {
             ObjectKind::Vent(_) => ObjectCategory::Vent,
@@ -393,6 +415,11 @@ impl ObjectKind {
             ObjectKind::Chimney(_) => ObjectCategory::Chimney,
             ObjectKind::AtticHatch(_) => ObjectCategory::AtticHatch,
             ObjectKind::WaterFixture(_) => ObjectCategory::WaterFixture,
+            ObjectKind::SolarPanel(
+                SolarPanelKind::SolarThermal
+                | SolarPanelKind::SolarTubes
+                | SolarPanelKind::SolarControls,
+            ) => ObjectCategory::SolarWaterHeating,
             ObjectKind::SolarPanel(_) => ObjectCategory::SolarPanel,
             ObjectKind::Other(_) => ObjectCategory::Other,
         }
@@ -435,6 +462,8 @@ impl ObjectKind {
             ObjectKind::WaterFixture(WaterFixtureKind::ElectricShower) => "Electric shower",
             ObjectKind::SolarPanel(SolarPanelKind::Photovoltaic) => "Photovoltaic (PV)",
             ObjectKind::SolarPanel(SolarPanelKind::SolarThermal) => "Solar water heating",
+            ObjectKind::SolarPanel(SolarPanelKind::SolarTubes) => "Tubes",
+            ObjectKind::SolarPanel(SolarPanelKind::SolarControls) => "Controls",
             ObjectKind::SolarPanel(SolarPanelKind::Battery) => "Battery",
             ObjectKind::Other(s) => s,
         }
@@ -476,6 +505,12 @@ pub struct BuildingObject {
     /// panel requires it there); `None` for every other kind.
     #[serde(default)]
     pub kwh: Option<f32>,
+    /// Collector AREA in m² — recorded for a
+    /// [`SolarPanelKind::SolarTubes`] solar hot-water collector (the panel
+    /// requires it there); `None` for every other kind. ADDITIVE (2026-08):
+    /// older records never contain it and load as `None`.
+    #[serde(default)]
+    pub area_m2: Option<f32>,
     pub photos: Vec<Evidence>,
     /// The "separate time/temperature control for water and space" checkbox —
     /// meaningful only for `Boiler` and `Programmer` objects; drives
@@ -509,6 +544,7 @@ impl BuildingObject {
             count: count.max(1),
             note: None,
             kwh: None,
+            area_m2: None,
             photos: Vec::new(),
             separate_hw_control: false,
             panel_wp: None,

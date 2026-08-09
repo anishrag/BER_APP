@@ -30,6 +30,7 @@ fn category_icon(cat: ObjectCategory) -> &'static str {
         ObjectCategory::AtticHatch => "🪜",
         ObjectCategory::WaterFixture => "🚿",
         ObjectCategory::SolarPanel => "☀",
+        ObjectCategory::SolarWaterHeating => "💧",
         ObjectCategory::Other => "➕",
     }
 }
@@ -153,6 +154,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             *view.object_count_input = edit.count.to_string();
             *view.object_note_input = edit.note.clone();
             *view.object_kwh_input = edit.kwh.map(|k| k.to_string()).unwrap_or_default();
+            *view.object_area_input = edit.area_m2.map(|a| a.to_string()).unwrap_or_default();
             view.object_edit_photos.clear();
         }
         egui::Window::new(format!("Edit {}", edit.label))
@@ -191,6 +193,10 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                         ui.label("kWh");
                         metre_input(ui, view.object_kwh_input, 48.0, "e.g. 5");
                     }
+                    if edit.area_required {
+                        ui.label("area m²");
+                        metre_input(ui, view.object_area_input, 48.0, "e.g. 4");
+                    }
                 });
                 ui.horizontal_wrapped(|ui| {
                     for (p, _quality) in view.object_edit_photos.iter() {
@@ -214,22 +220,26 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                             (!n.is_empty()).then(|| n.to_string())
                         };
                         let kwh = view.object_kwh_input.trim().parse::<f32>().ok();
+                        let area_m2 = view.object_area_input.trim().parse::<f32>().ok();
                         let photos = std::mem::take(view.object_edit_photos);
                         on_event(UiEvent::Sketch(SketchEvent::UpdateObject {
                             count,
                             note,
                             kwh,
+                            area_m2,
                             photos,
                         }));
                         view.object_count_input.clear();
                         view.object_note_input.clear();
                         view.object_kwh_input.clear();
+                        view.object_area_input.clear();
                     }
                     if ui.button("Cancel").clicked() {
                         view.object_edit_photos.clear();
                         view.object_count_input.clear();
                         view.object_note_input.clear();
                         view.object_kwh_input.clear();
+                        view.object_area_input.clear();
                         on_event(UiEvent::Sketch(SketchEvent::CancelEditObject));
                     }
                 });
@@ -331,6 +341,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     // battery REQUIRES its capacity in kWh.
                     let name_required = kind.name_required();
                     let kwh_required = kind.kwh_required();
+                    let area_required = kind.area_required();
                     ui.horizontal(|ui| {
                         ui.label("count");
                         metre_input(ui, view.object_count_input, 48.0, "1");
@@ -349,12 +360,24 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                             ui.label("kWh");
                             metre_input(ui, view.object_kwh_input, 48.0, "e.g. 5");
                         }
+                        if area_required {
+                            ui.label("area m²");
+                            metre_input(ui, view.object_area_input, 48.0, "e.g. 4");
+                        }
                     });
                     let have_name = !view.object_note_input.trim().is_empty();
                     let kwh_value = view.object_kwh_input.trim().parse::<f32>().ok();
+                    let area_value = view.object_area_input.trim().parse::<f32>().ok();
                     if name_required && !have_name {
                         ui.label(
                             RichText::new("✎ A name (make & model) is required for this item")
+                                .small()
+                                .color(egui::Color32::from_rgb(220, 160, 80)),
+                        );
+                    }
+                    if area_required && area_value.is_none() {
+                        ui.label(
+                            RichText::new("⬜ The collector area (m²) is required")
                                 .small()
                                 .color(egui::Color32::from_rgb(220, 160, 80)),
                         );
@@ -412,7 +435,8 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     // name / kWh requirements above.
                     let can_ok = (!photo_required || have_photo)
                         && (!name_required || have_name)
-                        && (!kwh_required || kwh_value.is_some());
+                        && (!kwh_required || kwh_value.is_some())
+                        && (!area_required || area_value.is_some());
                     if ui
                         .add_enabled(can_ok, egui::Button::new(RichText::new("OK").strong()))
                         .clicked()
@@ -431,6 +455,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                             count,
                             note,
                             kwh: if kwh_required { kwh_value } else { None },
+                            area_m2: if area_required { area_value } else { None },
                             photos,
                         }));
                         *view.object_selected_category = None;
@@ -439,6 +464,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                         view.object_count_input.clear();
                         view.object_note_input.clear();
                         view.object_kwh_input.clear();
+                        view.object_area_input.clear();
                         view.object_other_name.clear();
                     }
                 }
