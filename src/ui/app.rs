@@ -301,6 +301,8 @@ pub struct SketchState {
     pub opening_num_opes: String,
     /// Door placements' draught-stripped checkbox (default ON).
     pub door_draught_stripped: bool,
+    /// Door placements' certified checkbox (default OFF).
+    pub door_certified: bool,
     /// "Edit door" box: the door's type name (free text) and construction kind.
     /// Seeded from the door being edited when the box opens.
     pub door_type_name_input: String,
@@ -1956,6 +1958,7 @@ impl eframe::App for BerApp {
                                 wt_draught_stripped: &mut self.sketch_state.wt_draught_stripped,
                                 opening_num_opes: &mut self.sketch_state.opening_num_opes,
                                 door_draught_stripped: &mut self.sketch_state.door_draught_stripped,
+                                door_certified: &mut self.sketch_state.door_certified,
                                 door_type_name_input: &mut self.sketch_state.door_type_name_input,
                                 door_kind: &mut self.sketch_state.door_kind,
                                 wt_gap_input: &mut self.sketch_state.wt_gap_input,
@@ -2843,6 +2846,7 @@ impl eframe::App for BerApp {
                                             overshading,
                                             num_opes,
                                             door_draught_stripped,
+                                            door_certified,
                                             photos,
                                         } => {
                                             let _ = controller.borrow_mut().place_opening(
@@ -2857,6 +2861,7 @@ impl eframe::App for BerApp {
                                                 overshading,
                                                 num_opes,
                                                 door_draught_stripped,
+                                                door_certified,
                                                 photos,
                                             );
                                         }
@@ -3007,6 +3012,7 @@ impl eframe::App for BerApp {
                                             overshading,
                                             num_opes,
                                             door_draught_stripped,
+                                            door_certified,
                                             photos,
                                         } => {
                                             let _ = controller.borrow_mut().apply_assembly_edit(
@@ -3022,6 +3028,7 @@ impl eframe::App for BerApp {
                                                 overshading,
                                                 num_opes,
                                                 door_draught_stripped,
+                                                door_certified,
                                                 photos,
                                             );
                                         }
@@ -3031,6 +3038,7 @@ impl eframe::App for BerApp {
                                             type_name,
                                             kind,
                                             draught_stripped,
+                                            certified,
                                             photos,
                                         } => {
                                             let _ = controller.borrow_mut().apply_door_edit(
@@ -3039,6 +3047,7 @@ impl eframe::App for BerApp {
                                                 type_name,
                                                 kind,
                                                 draught_stripped,
+                                                certified,
                                                 photos,
                                             );
                                         }

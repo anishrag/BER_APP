@@ -15336,6 +15336,7 @@ fn full_span_checkbox_composes_a_full_width_doorset() {
         ber_model::ber::fenestration::Overshading::Average,
         None,
         true,
+        false,
         Vec::new(),
     )
     .expect("full-width doorset places");
@@ -15417,6 +15418,7 @@ fn multi_field_window_places_with_default_sill() {
         ber_model::ber::fenestration::Overshading::Average,
         None,
         true,
+        false,
         Vec::new(),
     )
     .expect("window places");
@@ -15491,6 +15493,7 @@ fn full_span_checkboxes_place_a_full_wall_door() {
         ber_model::ber::fenestration::Overshading::Average,
         None,
         true,
+        false,
         Vec::new(),
     )
     .expect("full-wall door places");
@@ -15548,6 +15551,7 @@ fn exact_wall_width_door_without_the_tick_is_refused() {
         ber_model::ber::fenestration::Overshading::Average,
         None,
         true,
+        false,
         Vec::new(),
     );
     assert!(r.is_err(), "no auto-detect: the margin path refuses");
@@ -15585,6 +15589,7 @@ fn window_type_picker_reuses_existing_and_adds_only_when_different() {
             Overshading::Average,
             None,
             true,
+            false,
             Vec::new(),
         )
         .expect("window places");
@@ -15729,6 +15734,7 @@ fn overshading_is_applied_per_window_at_placement() {
             overshading,
             None,
             true,
+            false,
             Vec::new(),
         )
         .expect("window places");
@@ -15787,6 +15793,7 @@ fn window_photo_is_attached_at_placement() {
         Overshading::Average,
         None,
         true,
+        false,
         vec![(src, PhotoQuality::Full)],
     )
     .expect("window places");
@@ -15848,6 +15855,7 @@ fn failed_placement_discards_copied_photos() {
         Overshading::Average,
         None,
         true,
+        false,
         vec![(src, PhotoQuality::Full)],
     );
     assert!(r.is_err(), "oversized window fails to place");
@@ -15983,6 +15991,7 @@ fn place_door_sidelights_overall_mode() {
         Overshading::Average,
         None,
         true,
+        false,
         Vec::new(),
     )
     .expect("assembly places");
@@ -16052,6 +16061,7 @@ fn place_complex_window_shapes() {
         Overshading::Average,
         None,
         true,
+        false,
         Vec::new(),
     )
     .expect("circular window places");
@@ -16072,6 +16082,7 @@ fn place_complex_window_shapes() {
         Overshading::Average,
         None,
         true,
+        false,
         Vec::new(),
     )
     .expect("rounded-top window places");
@@ -16151,6 +16162,7 @@ fn shaped_top_window_places_through_full_flow() {
             Overshading::Average,
             None,
             true,
+            false,
             Vec::new(),
         )
         .expect("shaped window places");
@@ -16235,6 +16247,7 @@ fn editing_window_to_pointed_top_persists_and_survives_reopen() {
         Overshading::Average,
         None,
         true,
+        false,
         Vec::new(),
     )
     .expect("flat window places");
@@ -16348,6 +16361,7 @@ fn complex_shape_window_offers_no_top_tick() {
         Overshading::Average,
         None,
         true,
+        false,
         Vec::new(),
     )
     .expect("circular window places");
@@ -16443,6 +16457,7 @@ fn shaped_top_window_places_on_porch_wall() {
         Overshading::Average,
         None,
         true,
+        false,
         Vec::new(),
     )
     .expect("shaped window places on the porch wall");
@@ -26593,6 +26608,7 @@ fn field_state_ff5a5ee3_sloped_junction_wall_hosts_the_wide_window() {
         ber_model::ber::fenestration::Overshading::Average,
         None,
         true,
+        false,
         Vec::new(),
     )
     .expect("the 2.36 × 1.35 window places on the sloped-junction wall");
@@ -26736,6 +26752,7 @@ fn place_window_on_porch_wall_via_controller() {
         Overshading::Average,
         None,
         true,
+        false,
         Vec::new(),
     )
     .expect("window places on the re-minted porch wall");
@@ -26802,6 +26819,7 @@ fn porch_wall_window_survives_save_and_reopen() {
         Overshading::Average,
         None,
         true,
+        false,
         Vec::new(),
     )
     .expect("window places");
@@ -26855,6 +26873,7 @@ fn elevation_editing_repositions_a_porch_wall_opening() {
         Overshading::Average,
         None,
         true,
+        false,
         Vec::new(),
     )
     .expect("window places");
@@ -26918,6 +26937,7 @@ fn deleting_the_porch_prunes_its_openings_and_keeps_outline_ones() {
         Overshading::Average,
         None,
         true,
+        false,
         Vec::new(),
     )
     .expect("porch window places");
@@ -26935,6 +26955,7 @@ fn deleting_the_porch_prunes_its_openings_and_keeps_outline_ones() {
         Overshading::Average,
         None,
         true,
+        false,
         Vec::new(),
     )
     .expect("outline window places");
@@ -27122,6 +27143,7 @@ fn field_db_17e15dc7_painted_staircase_heals_to_two_pieces_on_open() {
             ber_model::ber::fenestration::Overshading::Average,
             None,
             true,
+            false,
             Vec::new(),
         )
         .expect("the 2.36 × 1.35 window places on the healed wall");
@@ -27826,7 +27848,8 @@ fn editing_a_standalone_door_persists_and_survives_reopen() {
         WindowTypeChoice::default(),
         Overshading::Average,
         None,
-        true, // draught-stripped
+        true,
+        false, // draught-stripped
         Vec::new(),
     )
     .expect("door places");
@@ -27871,6 +27894,7 @@ fn editing_a_standalone_door_persists_and_survives_reopen() {
         2.1,
         "Front door".to_string(),
         DoorKind::HalfGlazed,
+        false,
         false,
         Vec::new(),
     )
@@ -27944,6 +27968,7 @@ fn assembly_member_door_offers_no_edit() {
         ber_model::ber::fenestration::Overshading::Average,
         None,
         true,
+        false,
         Vec::new(),
     )
     .expect("door+sidelights places");
@@ -28396,6 +28421,9 @@ fn followup_openings_controller() -> (
         wall_anchor: None,
         assembly_id: None,
         draught_stripped: None,
+        certified: None,
+        assessed_u_value: None,
+        cert_skipped: false,
     };
 
     let ber = &mut c.current_record.as_mut().unwrap().data;
@@ -29173,6 +29201,7 @@ fn review_rename_door_type_bulk_renames_matching_doors() {
             Overshading::Average,
             None,
             true,
+            false,
             Vec::new(),
         )
         .expect("door places");
@@ -29234,6 +29263,7 @@ fn structure_review_items_carry_window_and_door_rename_info() {
         Overshading::Average,
         None,
         true,
+        false,
         Vec::new(),
     )
     .expect("window places");
@@ -29251,6 +29281,7 @@ fn structure_review_items_carry_window_and_door_rename_info() {
         Overshading::Average,
         None,
         true,
+        false,
         Vec::new(),
     )
     .expect("door places");
@@ -31625,6 +31656,7 @@ fn doorset_member_opens_the_assembly_edit_prompt() {
     assert!((e.left.unwrap().0 - 0.4).abs() < 1e-4, "left width");
     assert!((e.right.unwrap().0 - 0.4).abs() < 1e-4, "right width");
     assert!((e.transom_m.unwrap() - 0.4).abs() < 1e-4, "transom height");
+    assert!(!e.certified, "uncertified door seeds the tick off");
     // …and via a glass pane.
     c.cancel_opening_placement();
     c.elevation_selection = Some(ber_model::ber::openings::OpeningRef::Window(pane_id));
@@ -31664,6 +31696,7 @@ fn doorset_edit_recomposes_with_new_sizes() {
         ber_model::ber::fenestration::Overshading::Average,
         Some(1),
         true,
+        true,
         vec![],
     )
     .expect("doorset edit applies");
@@ -31674,6 +31707,7 @@ fn doorset_edit_recomposes_with_new_sizes() {
     let d = &s.doors[0];
     assert!((d.width_m - 1.1).abs() < 1e-4);
     assert_eq!(d.draught_stripped, Some(true), "draught tick applied");
+    assert_eq!(d.certified, Some(true), "certified tick applied");
     let aid = d.assembly_id.expect("still an assembly");
     assert!(s.windows.iter().all(|w| w.assembly_id == Some(aid)));
     // Flush: left light's right edge == door's left edge.
@@ -31728,6 +31762,7 @@ fn doorset_edit_too_wide_is_refused_untouched() {
         WindowTypeChoice::Existing(type_id),
         ber_model::ber::fenestration::Overshading::Average,
         Some(1),
+        false,
         false,
         vec![],
     );
@@ -32022,6 +32057,7 @@ fn trim_between_openings_keeps_them_in_place() {
         ber_model::ber::fenestration::Overshading::Average,
         None,
         true,
+        false,
         Vec::new(),
     )
     .expect("window places");

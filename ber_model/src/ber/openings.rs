@@ -457,6 +457,9 @@ pub fn add_wall_door(
         wall_anchor: None,
         assembly_id: None,
         draught_stripped: None,
+        certified: None,
+        assessed_u_value: None,
+        cert_skipped: false,
     });
     link_door(storey, wall_id, id);
     // Lift the door's sill onto the wall underside (a sloped inter-storey
@@ -697,6 +700,9 @@ pub fn add_full_wall_door(
         wall_anchor: None,
         assembly_id: None,
         draught_stripped: None,
+        certified: None,
+        assessed_u_value: None,
+        cert_skipped: false,
     });
     link_door(storey, wall_id, id);
     Ok(id)
@@ -1252,6 +1258,9 @@ fn push_door_sidelights_members(
         wall_anchor: None,
         assembly_id: Some(assembly_id),
         draught_stripped: None,
+        certified: None,
+        assessed_u_value: None,
+        cert_skipped: false,
     });
     link_door(storey, wall_id, door_id);
     added.push(OpeningRef::Door(door_id));
@@ -1833,17 +1842,19 @@ pub fn set_window_attributes(
     }
 }
 
-/// Retype an existing DOOR in place: set its `type_name`, `kind`, and
-/// draught-stripped flag. Geometry (size, placement) is untouched — pair with
-/// [`resize_opening`] for size edits. `None` for `kind`/`draught_stripped`
-/// leaves that attribute as-is (mirrors [`set_window_attributes`]'s `num_opes`
-/// hold). No-op if `door_id` isn't in the storey.
+/// Retype an existing DOOR in place: set its `type_name`, `kind`,
+/// draught-stripped and certified flags. Geometry (size, placement) is
+/// untouched — pair with [`resize_opening`] for size edits. `None` for
+/// `kind`/`draught_stripped`/`certified` leaves that attribute as-is (mirrors
+/// [`set_window_attributes`]'s `num_opes` hold). No-op if `door_id` isn't in
+/// the storey.
 pub fn set_door_attributes(
     storey: &mut Storey,
     door_id: ItemId,
     type_name: String,
     kind: Option<DoorKind>,
     draught_stripped: Option<bool>,
+    certified: Option<bool>,
 ) {
     if let Some(d) = storey.doors.iter_mut().find(|d| d.id == door_id) {
         d.type_name = type_name;
@@ -1852,6 +1863,9 @@ pub fn set_door_attributes(
         }
         if draught_stripped.is_some() {
             d.draught_stripped = draught_stripped;
+        }
+        if certified.is_some() {
+            d.certified = certified;
         }
     }
 }
@@ -3440,6 +3454,9 @@ mod tests {
                 wall_anchor: None,
                 assembly_id: None,
                 draught_stripped: Some(true),
+                certified: None,
+                assessed_u_value: None,
+                cert_skipped: false,
             }],
             ..Storey::default()
         };
@@ -3449,17 +3466,21 @@ mod tests {
             "Front door".to_string(),
             Some(DoorKind::HalfGlazed),
             Some(false),
+            Some(true),
         );
         let d = &storey.doors[0];
         assert_eq!(d.type_name, "Front door");
         assert_eq!(d.kind, Some(DoorKind::HalfGlazed));
         assert_eq!(d.draught_stripped, Some(false));
-        // `None` holds the previous kind/draught (only the type name changes).
-        set_door_attributes(&mut storey, did, "Back door".to_string(), None, None);
+        assert_eq!(d.certified, Some(true));
+        // `None` holds the previous kind/draught/certified (only the type
+        // name changes).
+        set_door_attributes(&mut storey, did, "Back door".to_string(), None, None, None);
         let d = &storey.doors[0];
         assert_eq!(d.type_name, "Back door");
         assert_eq!(d.kind, Some(DoorKind::HalfGlazed), "kind held");
         assert_eq!(d.draught_stripped, Some(false), "draught held");
+        assert_eq!(d.certified, Some(true), "certified held");
     }
 
     #[test]
@@ -3827,6 +3848,9 @@ mod tests {
                 wall_anchor: None,
                 assembly_id: None,
                 draught_stripped: None,
+                certified: None,
+                assessed_u_value: None,
+                cert_skipped: false,
             }],
             ..Storey::default()
         };

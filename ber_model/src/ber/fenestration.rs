@@ -330,6 +330,22 @@ pub struct Door {
     /// inference / query).
     #[serde(default)]
     pub draught_stripped: Option<bool>,
+    /// Whether this door has a CERTIFIED U-value (manufacturer / NSAI cert)
+    /// the office should chase — the door-box counterpart of
+    /// [`WindowType::certified`]. Unlike windows a door carries its flag
+    /// directly (doors have no shared type record). `None` on records from
+    /// before the field — treated as not certified.
+    #[serde(default)]
+    pub certified: Option<bool>,
+    /// CERTIFIED U-value (W/m²K) from the cert — entered at the office
+    /// (BERresolve Certificates stage) for a `certified` door; the cert
+    /// document itself is attached to `photos`. `None` until resolved.
+    #[serde(default)]
+    pub assessed_u_value: Option<f32>,
+    /// "Skip for now" ticked in the resolver's Certificates stage — see
+    /// [`WindowType::cert_skipped`].
+    #[serde(default)]
+    pub cert_skipped: bool,
 }
 
 /// The non-rectangular shapes the Complex-window tool offers as picker options

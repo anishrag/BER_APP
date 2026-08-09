@@ -238,6 +238,8 @@ pub struct DoorEditPrefill {
     pub type_name: String,
     pub kind: DoorKind,
     pub draught_stripped: bool,
+    /// Whether the door has a certified U-value (cert chased at the office).
+    pub certified: bool,
 }
 
 /// Prefill for the on-surface "Edit doorset…" box (a door+sidelights
@@ -259,6 +261,8 @@ pub struct AssemblyEditPrefill {
     pub overshading: Overshading,
     /// The door panel's draught-stripped flag, seeding the checkbox.
     pub draught_stripped: bool,
+    /// The door panel's certified flag, seeding the checkbox.
+    pub certified: bool,
 }
 
 /// What kind of opening a view rectangle is (for colour/label in plan + elevation).
@@ -1066,6 +1070,7 @@ impl AppController {
                 type_name: d.type_name.clone(),
                 kind: d.kind.clone().unwrap_or(DoorKind::Solid),
                 draught_stripped: d.draught_stripped.unwrap_or(false),
+                certified: d.certified.unwrap_or(false),
             }),
             assembly_edit: None,
         }
@@ -1165,6 +1170,7 @@ impl AppController {
         overshading: Overshading,
         num_opes: Option<u32>,
         door_draught_stripped: bool,
+        door_certified: bool,
         photos: Vec<(std::path::PathBuf, PhotoQuality)>,
     ) -> Result<(), String> {
         /// Sill the placement defaults to; the assessor drags it in the 2D view.
@@ -1423,6 +1429,7 @@ impl AppController {
             }
             for d in record.data.storeys[idx].doors[doors_before..].iter_mut() {
                 d.draught_stripped = Some(door_draught_stripped);
+                d.certified = Some(door_certified);
             }
             // Photos belong to the GROUP (window type), shared by all its
             // windows — append to the resolved type (none for a plain Door).
@@ -2208,6 +2215,7 @@ impl AppController {
         type_name: String,
         kind: DoorKind,
         draught_stripped: bool,
+        certified: bool,
         photos: Vec<(std::path::PathBuf, PhotoQuality)>,
     ) -> Result<(), String> {
         let Some(OpeningEdit::Door(did)) = self.opening_edit else {
@@ -2235,7 +2243,14 @@ impl AppController {
             self.opening_dim_error = Some(msg.clone());
             return Err(msg);
         }
-        openings::set_door_attributes(storey, did, type_name, Some(kind), Some(draught_stripped));
+        openings::set_door_attributes(
+            storey,
+            did,
+            type_name,
+            Some(kind),
+            Some(draught_stripped),
+            Some(certified),
+        );
         // Door photos are per-door (not a shared window-type group).
         if !stored_photos.is_empty() {
             if let Some(d) = storey.doors.iter_mut().find(|d| d.id == did) {
@@ -2342,6 +2357,7 @@ impl AppController {
         overshading: Overshading,
         num_opes: Option<u32>,
         door_draught_stripped: bool,
+        door_certified: bool,
         photos: Vec<(std::path::PathBuf, PhotoQuality)>,
     ) -> Result<(), String> {
         let Some(OpeningEdit::Assembly(aid)) = self.opening_edit else {
@@ -2372,6 +2388,7 @@ impl AppController {
         let door_type_name = old_door.type_name.clone();
         let door_kind = old_door.kind.clone();
         let door_draught = Some(door_draught_stripped);
+        let door_cert = Some(door_certified);
         let door_photos = old_door.photos.clone();
         let old_type_id = storey
             .windows
@@ -2437,7 +2454,14 @@ impl AppController {
             .find(|d| d.assembly_id == Some(new_aid))
             .map(|d| d.id);
         if let Some(did) = new_door_id {
-            openings::set_door_attributes(storey, did, door_type_name, door_kind, door_draught);
+            openings::set_door_attributes(
+                storey,
+                did,
+                door_type_name,
+                door_kind,
+                door_draught,
+                door_cert,
+            );
             if let Some(d) = storey.doors.iter_mut().find(|d| d.id == did) {
                 d.photos.extend(door_photos);
             }
@@ -2649,6 +2673,7 @@ fn assembly_prefill(storey: &Storey, aid: ItemId) -> Option<AssemblyEditPrefill>
         window_type_id: ItemId::default(),
         overshading: Overshading::Average,
         draught_stripped: door.draught_stripped.unwrap_or(false),
+        certified: door.certified.unwrap_or(false),
     };
     let mut have_pane = false;
     for w in storey.windows.iter().filter(|w| w.assembly_id == Some(aid)) {

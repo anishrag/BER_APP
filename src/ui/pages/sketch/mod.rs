@@ -597,6 +597,9 @@ pub enum SketchEvent {
         /// counts as one opening in DEAP's ventilation count). Ignored for
         /// windows.
         door_draught_stripped: bool,
+        /// Door placements: whether the door has a CERTIFIED U-value (the
+        /// office chases the cert in BERresolve). Ignored for windows.
+        door_certified: bool,
         /// Source paths of photos picked in the box (each with the capture
         /// tier its button asked for — see the TEMPORARY dual hi/lo buttons,
         /// `photo_button_pair`), attached to the window(s) this placement
@@ -701,6 +704,8 @@ pub enum SketchEvent {
         num_opes: Option<u32>,
         /// The door panel's draught-stripped tick.
         door_draught_stripped: bool,
+        /// The door panel's certified tick.
+        door_certified: bool,
         /// Photos picked in the box, attached to the panes' type group.
         photos: Vec<(std::path::PathBuf, crate::ui::widgets::PhotoQuality)>,
     },
@@ -712,6 +717,7 @@ pub enum SketchEvent {
         type_name: String,
         kind: DoorKind,
         draught_stripped: bool,
+        certified: bool,
         /// Photos picked in the box, attached to this door (per-door, not a
         /// shared group).
         photos: Vec<(std::path::PathBuf, crate::ui::widgets::PhotoQuality)>,
@@ -1741,6 +1747,9 @@ pub struct SketchView<'a> {
     pub opening_num_opes: &'a mut String,
     /// The door placement's draught-stripped checkbox (default ON).
     pub door_draught_stripped: &'a mut bool,
+    /// The door placement's certified checkbox (default OFF — most doors
+    /// have no manufacturer/NSAI cert to chase).
+    pub door_certified: &'a mut bool,
     /// "Edit door" box: the door's type name (free text) and construction kind,
     /// seeded from the door being edited. See [`crate::ui::app::SketchState`].
     pub door_type_name_input: &'a mut String,

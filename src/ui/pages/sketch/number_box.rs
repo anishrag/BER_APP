@@ -245,6 +245,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 *view.door_type_name_input = edit.type_name.clone();
                 *view.door_kind = edit.kind.clone();
                 *view.door_draught_stripped = edit.draught_stripped;
+                *view.door_certified = edit.certified;
             }
             // A door+sidelights assembly: seed every piece-by-piece field +
             // toggle from the members (fields 0/1 are the door leaf's W/H in
@@ -269,6 +270,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 *view.wt_existing_id = Some(edit.window_type_id);
                 *view.overshading = edit.overshading;
                 *view.door_draught_stripped = edit.draught_stripped;
+                *view.door_certified = edit.certified;
             }
         }
         // The toggles are captured into the Place event by value (the checkboxes
@@ -361,6 +363,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         let overshading = *view.overshading;
         let num_opes = view.opening_num_opes.trim().parse::<u32>().ok();
         let door_draught_stripped = *view.door_draught_stripped;
+        let door_certified = *view.door_certified;
         // "Edit door" attributes, captured by value into the ApplyDoorEdit event.
         let is_door_edit = prompt.door_edit.is_some();
         let door_type_name = view.door_type_name_input.clone();
@@ -387,6 +390,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                         type_name: door_type_name.clone(),
                         kind: door_kind.clone(),
                         draught_stripped: door_draught_stripped,
+                        certified: door_certified,
                         photos: apply_photos.clone(),
                     }
                 },
@@ -416,6 +420,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                         overshading,
                         num_opes,
                         door_draught_stripped,
+                        door_certified,
                         photos: apply_photos.clone(),
                     }
                 },
@@ -499,6 +504,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     overshading,
                     num_opes,
                     door_draught_stripped,
+                    door_certified,
                     photos: place_photos.clone(),
                 }
             })
@@ -771,6 +777,8 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 });
                 door_kind_picker(ui, &mut *view.door_kind);
                 ui.checkbox(view.door_draught_stripped, "draught stripped");
+                ui.checkbox(view.door_certified, "certified")
+                    .hint("The door has a certified U-value — the office will chase the cert");
                 window_photo_picker(ui, &mut *view.pending_window_photos, false);
                 return;
             }
@@ -802,6 +810,8 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             // door+sidelights announces itself via its mode switch.
             if prompt.door_sidelights.is_some() || !prompt.offer_window_type {
                 ui.checkbox(view.door_draught_stripped, "door draught stripped");
+                ui.checkbox(view.door_certified, "door certified")
+                    .hint("The door has a certified U-value — the office will chase the cert");
             }
             // Photos belong to the GROUP (window type). At least one is REQUIRED
             // when defining a new group; for an existing group adding more is

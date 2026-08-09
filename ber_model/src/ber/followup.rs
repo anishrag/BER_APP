@@ -642,9 +642,15 @@ pub fn auto_selected(ber: &Ber, reference_year: Year) -> Vec<FollowUpPointId> {
         out.push(WindowDop);
     }
 
-    if intake
-        .door_year
-        .is_some_and(|y| newer_than_recent(y, reference_year))
+    let certified_door = ber
+        .storeys
+        .iter()
+        .flat_map(|s| s.doors.iter())
+        .any(|d| d.certified == Some(true));
+    if certified_door
+        || intake
+            .door_year
+            .is_some_and(|y| newer_than_recent(y, reference_year))
     {
         out.push(DoorDop);
     }
@@ -951,6 +957,9 @@ mod tests {
             wall_anchor: None,
             assembly_id: None,
             draught_stripped: None,
+            certified: None,
+            assessed_u_value: None,
+            cert_skipped: false,
         }
     }
 

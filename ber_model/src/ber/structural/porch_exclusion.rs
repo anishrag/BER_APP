@@ -832,6 +832,9 @@ mod tests {
             }),
             assembly_id: None,
             draught_stripped: None,
+            certified: None,
+            assessed_u_value: None,
+            cert_skipped: false,
         }
     }
 
