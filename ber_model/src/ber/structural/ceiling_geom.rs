@@ -72,10 +72,15 @@ pub(crate) const SLIVER_AREA_M2: f64 = 1e-6;
 /// degenerate SLIVER — a long-thin strip that slips past the area guard. A
 /// 6 m × 0.48 µm strip is 2.87e-6 m² (> [`SLIVER_AREA_M2`], so the
 /// area-only check misses it) yet is physically not a region (field report
-/// 797a7ff5: a phase boundary one f32 ULP off the shared storey edge). ~1 mm
-/// is far below any real floor/ceiling division and far above the
-/// f32↔f64 / near-coincident-edge noise that produces these strips.
-pub(crate) const MIN_PIECE_MINOR_M: f64 = 1e-3;
+/// 797a7ff5: a phase boundary one f32 ULP off the shared storey edge). The
+/// original 1 mm threshold covered float noise but NOT millimetre-scale
+/// TYPED-DIMENSION mismatches: 26 Birchfield Road's front-section boundary
+/// sat 2 mm off the outline edge (two separately-typed dims), and the
+/// partition emitted a 2.5 m × 2 mm floor+ceiling strip whose near-degenerate
+/// plane shot infinite lines across the 3D view. 20 mm kills the whole
+/// entry-noise class while staying far below any real floor/ceiling division
+/// (no genuine region is under a few centimetres across).
+pub(crate) const MIN_PIECE_MINOR_M: f64 = 0.02;
 
 /// Whether a plan piece must be dropped at split time: sub-[`SLIVER_AREA_M2`]
 /// area OR a minor bbox dimension below [`MIN_PIECE_MINOR_M`] (the

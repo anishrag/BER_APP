@@ -155,11 +155,23 @@ mod tests {
         // A real 6 m × 6 m region survives.
         let real = poly(&[(0.0, 0.0), (6.0, 0.0), (6.0, 6.0), (0.0, 6.0)]);
         assert!(!plan_piece_is_degenerate(&real), "a real region is kept");
-        // A borderline strip AT the 1 mm threshold is kept.
-        let ok = poly(&[(0.0, 0.0), (6.0, 0.0), (6.0, 1.1e-3), (0.0, 1.1e-3)]);
+        // The 26 Birchfield strip: 2.5 m long, 2 mm thick (a typed-dimension
+        // mismatch, not float noise) — the raised threshold drops it.
+        let birchfield = poly(&[
+            (9.98, 0.8509),
+            (12.54, 0.8509),
+            (12.54, 0.8529),
+            (9.98, 0.8529),
+        ]);
+        assert!(
+            plan_piece_is_degenerate(&birchfield),
+            "millimetre-scale entry-noise strips are dropped"
+        );
+        // A borderline strip just ABOVE the 20 mm threshold is kept.
+        let ok = poly(&[(0.0, 0.0), (6.0, 0.0), (6.0, 0.022), (0.0, 0.022)]);
         assert!(
             !plan_piece_is_degenerate(&ok),
-            "≥ 1 mm thick is a real strip"
+            "≥ 2 cm thick is a real strip"
         );
         // A sub-area-floor speck is still dropped (the area arm).
         let speck = poly(&[(0.0, 0.0), (5e-4, 0.0), (5e-4, 5e-4), (0.0, 5e-4)]);

@@ -32935,3 +32935,66 @@ fn extra_photos_bucket_holds_untagged_shots() {
         "the front-side shot survives"
     );
 }
+
+/// 26 BIRCHFIELD ROAD's infinite lines: a 2 mm typed-dimension mismatch
+/// between a phase ring and the outline edge partitioned a 2.5 m × 2 mm
+/// floor+ceiling strip, whose near-degenerate plane drew lines across the
+/// whole 3D view. The raised thickness guard drops the strip at partition
+/// time — and because floors/ceilings re-derive every resolve, an already
+/// scarred record heals on its next materialize.
+#[test]
+fn millimetre_phase_mismatch_partitions_without_a_sliver() {
+    let mut c = dimensioned_10x6_controller();
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.materialize();
+    // A phase zone whose north edge sits 2 mm SHORT of the outline's y=6 —
+    // the Birchfield-style entry mismatch.
+    c.phase_regions.insert(
+        0,
+        vec![document::PhaseRegion {
+            polygon: vec![
+                Point2f64::new(0.0, 3.0),
+                Point2f64::new(10.0, 3.0),
+                Point2f64::new(10.0, 5.998),
+                Point2f64::new(0.0, 5.998),
+            ],
+            phase: ConstructionPhase::Extension1,
+        }],
+    );
+    c.mark_dirty().unwrap();
+    c.materialize();
+    let s = &c.current_record.as_ref().unwrap().data.storeys[0];
+    for (name, regions) in [(
+        "floors",
+        &s.floors
+            .regions
+            .iter()
+            .map(|r| {
+                r.polygon
+                    .exterior()
+                    .coords()
+                    .map(|p| (p.x, p.y))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>(),
+    )] {
+        for ring in regions.iter() {
+            let ys: Vec<f64> = ring.iter().map(|p| p.1).collect();
+            let span = ys.iter().cloned().fold(f64::MIN, f64::max)
+                - ys.iter().cloned().fold(f64::MAX, f64::min);
+            assert!(
+                span > 0.02,
+                "no near-degenerate {name} strip survives (y-span {span:.4})"
+            );
+        }
+    }
+    for r in &s.ceilings.regions {
+        let ys: Vec<f64> = r.polygon.exterior.iter().map(|p| p.y).collect();
+        let span = ys.iter().cloned().fold(f64::MIN, f64::max)
+            - ys.iter().cloned().fold(f64::MAX, f64::min);
+        assert!(
+            span > 0.02,
+            "no near-degenerate ceiling strip survives (y-span {span:.4})"
+        );
+    }
+}
