@@ -1182,6 +1182,9 @@ pub enum SketchEvent {
     /// sloped picks become one FollowCeiling area, flat picks a Flat area per
     /// storey; an empty selection is a valid answer. Advances to Section.
     ConfirmRoofFollow,
+    /// Classify's "None — pick a roof style next": advance to the style
+    /// stage without committing any follow/flat areas.
+    SkipRoofFollow,
     /// Roof step (Section): pick the style for the grouped section (Flat
     /// commits; the sloped styles open the generated-candidate preview).
     PickRoofSectionStyle(crate::controller::app_controller::RoofSectionStyle),

@@ -32667,3 +32667,48 @@ fn object_edit_updates_in_place_and_appends_photos() {
     let room = c.active_object_room_view().unwrap();
     assert_eq!(room.objects[0].count, 1);
 }
+
+/// THE FOUR-BUNGALOW ROOF FAILURE: in the roof step's Classify stage the
+/// assessor naturally SELECTS the regions to roof — but the old one-button
+/// stage committed selected FLAT ceilings as finished FLAT roofs, and stage B
+/// (Gable/Hip) then had nothing left to offer. The new "None — pick a roof
+/// style next" advances WITHOUT committing, discarding the misleading
+/// selection, so the gable flow proceeds normally.
+#[test]
+fn roof_skip_follow_reaches_the_gable_flow_without_flat_committing() {
+    let mut c = dimensioned_square_controller();
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.set_roof_mode(true);
+    c.confirm_all_storeys_added_roof();
+    assert_eq!(c.roof_stage(), Some(RoofStage::Classify));
+    // The field mistake: select the (flat) ceiling region in Classify…
+    c.roof_region_tap(5.0, 5.0, 0.5);
+    assert!(
+        c.roof_regions_view().iter().any(|r| r.selected),
+        "region selected in Classify"
+    );
+    // …but take the NEW escape instead of committing it as a flat roof.
+    c.skip_roof_follow();
+    assert_eq!(c.roof_stage(), Some(RoofStage::Section));
+    assert!(
+        c.current_record.as_ref().unwrap().data.roof.is_empty(),
+        "nothing committed — no phantom flat roof"
+    );
+    assert!(
+        !c.roof_regions_view().iter().any(|r| r.selected),
+        "the misleading Classify selection was discarded"
+    );
+    // Stage B proceeds to a real gable.
+    c.roof_region_tap(5.0, 5.0, 0.5);
+    c.pick_roof_section_style(RoofSectionStyle::GableBoth)
+        .unwrap();
+    c.assign_roof_section_pitch(40.0).unwrap();
+    c.confirm_roof_section().unwrap();
+    let roof = &c.current_record.as_ref().unwrap().data.roof;
+    assert_eq!(roof.areas.len(), 1);
+    assert!(
+        !matches!(roof.areas[0].shape, ber_model::ber::roof::RoofShape::Flat),
+        "a pitched roof, not the phantom flat: {:?}",
+        roof.areas[0].shape
+    );
+}

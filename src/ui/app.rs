@@ -3663,6 +3663,9 @@ impl eframe::App for BerApp {
                                                 Err(e) => self.sketch_state.roof_error = Some(e),
                                             }
                                         }
+                                        SketchEvent::SkipRoofFollow => {
+                                            controller.borrow_mut().skip_roof_follow();
+                                        }
                                         SketchEvent::PickRoofSectionStyle(style) => {
                                             let r = controller
                                                 .borrow_mut()

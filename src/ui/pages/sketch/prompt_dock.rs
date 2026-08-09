@@ -1431,10 +1431,34 @@ fn roof_toolbar<F: FnMut(UiEvent)>(ui: &mut egui::Ui, view: &mut SketchView<'_>,
     use crate::controller::app_controller::{RoofSectionStyle, RoofStage};
     ui.horizontal_wrapped(|ui| {
         if view.roof_stage == Some(RoofStage::Classify) {
-            // Stage A: the empty selection is a valid answer (nothing follows).
+            // Stage A: only about ceilings that ARE the roof skin. The common
+            // pitched house says "None" and picks Gable/Hip in stage B — the
+            // one-button version of this stage silently committed selected
+            // FLAT ceilings as finished FLAT ROOFS (the four-bungalow field
+            // failure), so the escape is now explicit and first.
+            ui.label(
+                egui::RichText::new(
+                    "Step 1 of 2 — is any ceiling the roof itself? (converted-attic \
+                     sloped ceiling, or a genuinely FLAT roof)",
+                )
+                .size(11.0)
+                .weak(),
+            );
             if ui
-                .button("These follow the roof ✓")
-                .hint("Commit the selected ceilings as the roof surface itself")
+                .button("None — pick a roof style next ▸")
+                .hint("Nothing follows: go to step 2 and choose Gable / Hip / Flat over the plan")
+                .clicked()
+            {
+                on_event(UiEvent::Sketch(SketchEvent::SkipRoofFollow));
+            }
+            let any_selected = view.roof_regions.iter().any(|r| r.selected);
+            if ui
+                .add_enabled(any_selected, egui::Button::new("These follow the roof ✓"))
+                .hint(
+                    "Commit the SELECTED ceilings as the roof surface itself: a sloped \
+                     ceiling becomes the roof skin, a FLAT ceiling becomes a FLAT ROOF",
+                )
+                .disabled_hint("Select the ceiling(s) that are the roof skin first")
                 .clicked()
             {
                 on_event(UiEvent::Sketch(SketchEvent::ConfirmRoofFollow));
@@ -1547,7 +1571,16 @@ fn roof_toolbar<F: FnMut(UiEvent)>(ui: &mut egui::Ui, view: &mut SketchView<'_>,
                 on_event(UiEvent::Sketch(SketchEvent::CancelClearRoof));
             }
         } else {
-            // Section stage, nothing selected: the escape hatch back to Classify.
+            // Section stage, nothing selected: say what this step IS, plus the
+            // escape hatch back to Classify.
+            ui.label(
+                egui::RichText::new(
+                    "Step 2 of 2 — select the area(s) to roof on the plan, then pick \
+                     Gable / Hip / Flat",
+                )
+                .size(11.0)
+                .weak(),
+            );
             if ui
                 .button("Start roof again")
                 .hint("Delete every roof area and re-answer which ceilings are the roof")

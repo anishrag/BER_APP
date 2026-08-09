@@ -555,6 +555,19 @@ impl AppController {
         Ok(())
     }
 
+    /// Classify's "None — pick a roof style next": advance to the Section
+    /// stage WITHOUT committing anything. The escape for the ordinary pitched
+    /// house whose flat ceilings merely sit UNDER the roof — selecting them
+    /// and confirming "follow" would wrongly commit them as FLAT ROOFS (the
+    /// field failure that flat-roofed four bungalows in a day).
+    pub fn skip_roof_follow(&mut self) {
+        if self.roof_stage() != Some(RoofStage::Classify) {
+            return;
+        }
+        self.roof_selected.clear();
+        self.roof_stage = RoofStage::Section;
+    }
+
     // ── Stage B: Section ────────────────────────────────────────────────────
 
     /// The end combinations a style asks for, in axis order `[low, high]`.
