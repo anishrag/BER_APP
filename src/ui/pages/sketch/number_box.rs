@@ -537,31 +537,33 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             .with_clear(),
         );
         // Bind each field to its own buffer (disjoint borrows of distinct view
-        // fields). Width + Height are always present; the door+sidelights extras
-        // (left W, left sill, right W, right sill, transom H) only when listed.
+        // fields). Field 0 is always present; a single-dimension complex shape
+        // (Circular / Half-round collect one diameter) has no second field, so
+        // the height binding is conditional. The door+sidelights extras (left W,
+        // left sill, right W, right sill, transom H) only when listed.
         let f = &prompt.fields;
         // Width/Height: when a Full toggle is on, the field is disabled and
         // shows the resolved span (a per-frame display string — the typed
         // buffer is kept, so unticking restores it). The toggle itself is the
         // inline checkbox beside the field, offered only with a `full_span`.
-        let mut box_fields = vec![
-            BoxField {
-                label: &f[0].label,
-                hint: f[0].hint,
-                buf: if full_width {
-                    &mut full_width_display
-                } else {
-                    &mut *view.opening_width_input
-                },
-                required: f[0].required,
-                enabled: !full_width,
-                measurable: true,
-                check: offer_full.then(|| BoxCheck {
-                    label: "Full width",
-                    value: &mut *view.opening_full_width,
-                }),
+        let mut box_fields = vec![BoxField {
+            label: &f[0].label,
+            hint: f[0].hint,
+            buf: if full_width {
+                &mut full_width_display
+            } else {
+                &mut *view.opening_width_input
             },
-            BoxField {
+            required: f[0].required,
+            enabled: !full_width,
+            measurable: true,
+            check: offer_full.then(|| BoxCheck {
+                label: "Full width",
+                value: &mut *view.opening_full_width,
+            }),
+        }];
+        if f.len() > 1 {
+            box_fields.push(BoxField {
                 label: &f[1].label,
                 hint: f[1].hint,
                 buf: if full_height {
@@ -576,8 +578,8 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     label: "Full height",
                     value: &mut *view.opening_full_height,
                 }),
-            },
-        ];
+            });
+        }
         // The door+sidelights extra fields, bound by mode. Fields 0/1 (above) are
         // the whole-doorset W/H in Overall mode, or the door leaf W/H otherwise.
         match ds_mode {
@@ -1753,8 +1755,9 @@ fn effective_year(unknown: bool, input: &str) -> u32 {
 }
 
 /// Parse the gap field into mm values — comma/space/slash separated (triple
-/// glazing has two gaps). Non-numeric and zero entries are dropped.
-fn parse_gaps(input: &str) -> Vec<u32> {
+/// glazing has two gaps). Non-numeric and zero entries are dropped. Shared
+/// with the Structure review's window-type field form (`canvas`).
+pub(super) fn parse_gaps(input: &str) -> Vec<u32> {
     input
         .split([',', ' ', '/'])
         .filter_map(|s| s.trim().parse::<u32>().ok())
@@ -1762,7 +1765,7 @@ fn parse_gaps(input: &str) -> Vec<u32> {
         .collect()
 }
 
-fn glazing_label(g: &Glazing) -> String {
+pub(super) fn glazing_label(g: &Glazing) -> String {
     match g {
         Glazing::Single => "Single".to_string(),
         Glazing::Double => "Double".to_string(),
@@ -1771,7 +1774,7 @@ fn glazing_label(g: &Glazing) -> String {
     }
 }
 
-fn frame_label(f: &Frame) -> String {
+pub(super) fn frame_label(f: &Frame) -> String {
     match f {
         Frame::WoodUPVC => "Wood/UPVC".to_string(),
         Frame::Metal => "Metal".to_string(),

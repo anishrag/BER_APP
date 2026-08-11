@@ -1666,6 +1666,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 view.structure_merge_phase,
                 view.structure_rename_window_type,
                 view.structure_rename_door,
+                view.structure_edit_window_type,
                 on_event,
             );
         }
@@ -6124,6 +6125,9 @@ fn structure_review_overlay<F: FnMut(UiEvent)>(
     merge_phase: &std::cell::RefCell<Option<Option<ber_model::ber::common::ConstructionPhase>>>,
     rename_window_type: &std::cell::RefCell<Option<(ber_model::ber::common::ItemId, String)>>,
     rename_door: &std::cell::RefCell<Option<(String, String)>>,
+    edit_window_type: &std::cell::RefCell<
+        Option<(ber_model::ber::common::ItemId, super::WindowTypeFieldBufs)>,
+    >,
     on_event: &mut F,
 ) {
     use crate::controller::app_controller::StructureReviewRename as Srr;
@@ -6264,14 +6268,50 @@ fn structure_review_overlay<F: FnMut(UiEvent)>(
                                 }
                             }
                         }
-                        Some(Srr::WindowType { id, name, .. }) => {
-                            if rename_window_type.borrow().is_none()
-                                && ui
+                        Some(Srr::WindowType {
+                            id, name, fields, ..
+                        }) => {
+                            let editing = rename_window_type.borrow().is_some()
+                                || edit_window_type.borrow().is_some();
+                            if !editing {
+                                if ui
                                     .small_button("✏ Rename")
                                     .on_hover_text("Rename this window type")
                                     .clicked()
-                            {
-                                *rename_window_type.borrow_mut() = Some((*id, name.clone()));
+                                {
+                                    *rename_window_type.borrow_mut() = Some((*id, name.clone()));
+                                }
+                                if ui
+                                    .small_button("✏ Edit fields")
+                                    .on_hover_text(
+                                        "Edit this type's glazing/frame/year/gap/cert — \
+                                         applies to every window of the type",
+                                    )
+                                    .clicked()
+                                {
+                                    *edit_window_type.borrow_mut() = Some((
+                                        *id,
+                                        super::WindowTypeFieldBufs {
+                                            glazing: fields.glazing.clone(),
+                                            frame: fields.frame.clone(),
+                                            year: if fields.year == 0 {
+                                                String::new()
+                                            } else {
+                                                fields.year.to_string()
+                                            },
+                                            gap: fields
+                                                .gap
+                                                .iter()
+                                                .map(|n| n.to_string())
+                                                .collect::<Vec<_>>()
+                                                .join("/"),
+                                            certified: fields.certified,
+                                            draught_stripped: fields
+                                                .draught_stripped
+                                                .unwrap_or(false),
+                                        },
+                                    ));
+                                }
                             }
                         }
                         Some(Srr::Door { type_name }) => {
@@ -6481,6 +6521,93 @@ fn structure_review_overlay<F: FnMut(UiEvent)>(
                                 egui::RichText::new(format!("⚠ {hint}"))
                                     .color(egui::Color32::from_rgb(255, 120, 90)),
                             );
+                        }
+                        // The "Edit fields" form: the shared type's survey
+                        // fields, committed as ONE event on Save — windows
+                        // point at the type by id, so the commit applies to
+                        // every window of the type.
+                        if edit_window_type
+                            .borrow()
+                            .as_ref()
+                            .is_some_and(|(bid, _)| bid != id)
+                        {
+                            // A buffer left over from another type dies here.
+                            *edit_window_type.borrow_mut() = None;
+                        }
+                        let mut edit_done = false;
+                        if let Some((tid, buf)) = edit_window_type.borrow_mut().as_mut() {
+                            use super::number_box::{frame_label, glazing_label, parse_gaps};
+                            use ber_model::ber::fenestration::{Frame, Glazing};
+                            ui.horizontal(|ui| {
+                                egui::ComboBox::from_id_salt("srv_wt_glazing")
+                                    .selected_text(glazing_label(&buf.glazing))
+                                    .show_ui(ui, |ui| {
+                                        for g in [Glazing::Single, Glazing::Double, Glazing::Triple]
+                                        {
+                                            let t = glazing_label(&g);
+                                            ui.selectable_value(&mut buf.glazing, g, t);
+                                        }
+                                    });
+                                egui::ComboBox::from_id_salt("srv_wt_frame")
+                                    .selected_text(frame_label(&buf.frame))
+                                    .show_ui(ui, |ui| {
+                                        for f in [Frame::WoodUPVC, Frame::Metal] {
+                                            let t = frame_label(&f);
+                                            ui.selectable_value(&mut buf.frame, f, t);
+                                        }
+                                    });
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new("Year:")
+                                        .color(egui::Color32::from_gray(160)),
+                                );
+                                crate::ui::widgets::text_input(
+                                    ui,
+                                    &mut buf.year,
+                                    80.0,
+                                    "blank = unknown",
+                                );
+                                ui.label(
+                                    egui::RichText::new("Gap:")
+                                        .color(egui::Color32::from_gray(160)),
+                                );
+                                crate::ui::widgets::text_input(ui, &mut buf.gap, 80.0, "mm");
+                            });
+                            ui.horizontal(|ui| {
+                                ui.checkbox(&mut buf.certified, "certified").hint(
+                                    "The windows have a certified U-/g-value — the office \
+                                     will chase the cert",
+                                );
+                                ui.checkbox(&mut buf.draught_stripped, "draught stripped");
+                            });
+                            ui.horizontal(|ui| {
+                                if ui.button("Save").clicked() {
+                                    on_event(UiEvent::Sketch(SketchEvent::SetWindowTypeFields {
+                                        id: *tid,
+                                        glazing: buf.glazing.clone(),
+                                        frame: buf.frame.clone(),
+                                        year: buf.year.trim().parse().unwrap_or(0),
+                                        certified: buf.certified,
+                                        draught_stripped: buf.draught_stripped,
+                                        gap: parse_gaps(&buf.gap),
+                                    }));
+                                    edit_done = true;
+                                }
+                                if ui.button("Cancel").clicked() {
+                                    edit_done = true;
+                                }
+                            });
+                            ui.label(
+                                egui::RichText::new(
+                                    "Applies to every window of this type at once.",
+                                )
+                                .size(11.0)
+                                .color(egui::Color32::from_gray(120)),
+                            );
+                        }
+                        if edit_done {
+                            *edit_window_type.borrow_mut() = None;
                         }
                     }
                     // A DOOR: one field for its type label — Save retypes

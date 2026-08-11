@@ -736,6 +736,20 @@ pub enum SketchEvent {
         old: String,
         new: String,
     },
+    /// Structure review: set the shared window TYPE `id`'s survey fields
+    /// (committed by the review's "Edit fields" Save). GROUP-level — one
+    /// commit re-attributes every window of the type.
+    SetWindowTypeFields {
+        id: ItemId,
+        glazing: Glazing,
+        frame: Frame,
+        /// Install year; `0` = unknown.
+        year: u32,
+        certified: bool,
+        draught_stripped: bool,
+        /// Glazing gap(s) in mm.
+        gap: Vec<u32>,
+    },
     /// Apply the elevation window edit (a wall window, or a roof window — the
     /// controller dispatches on what's being edited): resize + retype from the
     /// box's values.
@@ -1323,6 +1337,22 @@ pub enum SketchEvent {
     },
 }
 
+/// Backing buffers for the Structure review's window-type "Edit fields" form
+/// (`SketchView::structure_edit_window_type`): year and gap are typed text,
+/// so the form commits on Save (one `SetWindowTypeFields` event), not per
+/// change. Prefilled from the review item's current field values.
+#[derive(Clone)]
+pub struct WindowTypeFieldBufs {
+    pub glazing: Glazing,
+    pub frame: Frame,
+    /// Year text; blank or unparseable commits as `0` (unknown).
+    pub year: String,
+    /// Gap text in mm, comma/space/slash separated for triple glazing.
+    pub gap: String,
+    pub certified: bool,
+    pub draught_stripped: bool,
+}
+
 /// Everything the Sketch page needs for one frame, built by the app shell
 /// (`BerApp`) from controller view data plus the page's own backing state.
 /// `&mut` fields are the cross-frame text-input buffers and the category UI
@@ -1852,6 +1882,10 @@ pub struct SketchView<'a> {
     /// In-flight review DOOR-type rename: `(old type label, edit buffer)` —
     /// committing retypes every door sharing the old label.
     pub structure_rename_door: &'a std::cell::RefCell<Option<(String, String)>>,
+    /// In-flight review WINDOW-TYPE field edit: `(type id, form buffers)` —
+    /// the shared type's glazing/frame/year/gap/cert/draught form. Committing
+    /// applies to every window of the type.
+    pub structure_edit_window_type: &'a std::cell::RefCell<Option<(ItemId, WindowTypeFieldBufs)>>,
     /// Review MERGE-phase picker: `Some(None)` = target list open,
     /// `Some(Some(target))` = confirm stage.
     pub structure_merge_phase:

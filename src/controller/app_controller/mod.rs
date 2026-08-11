@@ -154,7 +154,9 @@ pub use review::CollinearityReview;
 pub use snap::SnapTagView;
 use snap::{LastSnapAction, SnapAction, SubareaFlow};
 pub use strokes::PendingRedraw;
-pub use structure_review::{StructureReviewKind, StructureReviewRename, StructureReviewView};
+pub use structure_review::{
+    StructureReviewKind, StructureReviewRename, StructureReviewView, WindowTypeFields,
+};
 pub use view::{ViewTransform, DEFAULT_PITCH_DEG, DEFAULT_YAW_DEG};
 
 /// Print a stroke as a `vec![p(x,y), …]` literal (matching the curve-debug

@@ -721,6 +721,39 @@ impl AppController {
         self.window_type_rename_error.as_ref()
     }
 
+    /// Set the shared window TYPE `id`'s survey fields — committed from the
+    /// Structure review's "Edit fields" form. GROUP-level: windows point at
+    /// the type by id, so one Save re-attributes every window of the type
+    /// (the model also absorbs a now-identical twin type —
+    /// `Ber::update_window_type_fields`). Like the review renames: no undo
+    /// snapshot, marks dirty only when something actually changed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_window_type_fields(
+        &mut self,
+        id: ItemId,
+        glazing: Glazing,
+        frame: Frame,
+        year: u32,
+        certified: bool,
+        draught_stripped: bool,
+        gap: Vec<u32>,
+    ) {
+        let Some(record) = self.current_record.as_mut() else {
+            return;
+        };
+        if record.data.update_window_type_fields(
+            id,
+            glazing,
+            frame,
+            year,
+            certified,
+            draught_stripped,
+            gap,
+        ) {
+            let _ = self.mark_dirty();
+        }
+    }
+
     /// Place a FULL-SURFACE window — turn the (empty) host wall into a "window
     /// wall" filling the whole face. No size entry: width = wall length, height =
     /// floor-to-roof at the tap, sill 0. Walls only.

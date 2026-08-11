@@ -735,6 +735,100 @@ impl Ber {
         Ok(())
     }
 
+    /// Set the shared window TYPE `id`'s survey fields in one commit — the
+    /// Structure-review GROUP edit: one write re-attributes every window of
+    /// the type, since windows point at the type by id. If the edit makes the
+    /// type identical to another (the full `ensure_window_type` identity,
+    /// name included), the twin is ABSORBED into `id`: its windows and
+    /// follow-up tick re-point here, its photos/notes/cert values carry over,
+    /// and the twin is removed — the "identical attributes means the same
+    /// group" rule types already follow on creation. Returns whether anything
+    /// changed; a missing `id` is a no-op.
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_window_type_fields(
+        &mut self,
+        id: ItemId,
+        glazing: Glazing,
+        frame: Frame,
+        year: Year,
+        certified: bool,
+        draught_stripped: bool,
+        gap: Vec<u32>,
+    ) -> bool {
+        let Some(t) = self.window_types.iter_mut().find(|t| t.id == id) else {
+            return false;
+        };
+        if t.glazing == glazing
+            && t.frame == frame
+            && t.year == year
+            && t.certified == certified
+            && t.draught_stripped == Some(draught_stripped)
+            && t.gap == gap
+        {
+            return false;
+        }
+        t.glazing = glazing;
+        t.frame = frame;
+        t.year = year;
+        t.certified = certified;
+        t.draught_stripped = Some(draught_stripped);
+        t.gap = gap;
+        self.absorb_identical_window_type(id);
+        true
+    }
+
+    /// Merge any OTHER window type whose full identity now equals `id`'s into
+    /// `id` (see [`update_window_type_fields`](Self::update_window_type_fields)).
+    /// At most one twin can exist: `ensure_window_type` never creates a second.
+    fn absorb_identical_window_type(&mut self, id: ItemId) {
+        let Some(t) = self.window_types.iter().find(|t| t.id == id) else {
+            return;
+        };
+        let Some(pos) = self.window_types.iter().position(|o| {
+            o.id != id
+                && o.glazing == t.glazing
+                && o.frame == t.frame
+                && o.year == t.year
+                && o.certified == t.certified
+                && o.draught_stripped == t.draught_stripped
+                && o.gap == t.gap
+                && o.specifics == t.specifics
+        }) else {
+            return;
+        };
+        let twin = self.window_types.remove(pos);
+        for s in &mut self.storeys {
+            for w in &mut s.windows {
+                if w.window_type_id == twin.id {
+                    w.window_type_id = id;
+                }
+            }
+        }
+        // A follow-up tick on the twin moves over (without doubling up).
+        let ticks = &mut self.followup.window_types;
+        if ticks.contains(&twin.id) {
+            ticks.retain(|x| *x != twin.id);
+            if !ticks.contains(&id) {
+                ticks.push(id);
+            }
+        }
+        let survivor = self
+            .window_types
+            .iter_mut()
+            .find(|t| t.id == id)
+            .expect("survivor was found above");
+        survivor.photos.extend(twin.photos);
+        if survivor.notes.is_none() {
+            survivor.notes = twin.notes;
+        }
+        if survivor.assessed_u_value.is_none() {
+            survivor.assessed_u_value = twin.assessed_u_value;
+        }
+        if survivor.assessed_g_value.is_none() {
+            survivor.assessed_g_value = twin.assessed_g_value;
+        }
+    }
+
     /// Rename every DOOR whose `type_name` matches `old` (trimmed) to `new`,
     /// across all storeys — the door analogue of a group rename (doors group
     /// by their free-text type label, not a shared registry). An empty or
@@ -1386,6 +1480,132 @@ mod tests {
 
     fn p3(x: f64, y: f64, z: f64) -> Point3f64 {
         Point3f64::new(x, y, z)
+    }
+
+    /// A bare window pointing at shared type `tid` — enough for the type-edit
+    /// re-pointing tests.
+    fn window_of_type(tid: ItemId) -> crate::ber::fenestration::Window {
+        crate::ber::fenestration::Window {
+            id: ItemId::default(),
+            vertices: vec![],
+            width_m: 1.0,
+            height_m: 1.0,
+            window_type_id: tid,
+            placement: None,
+            wall_anchor: None,
+            assembly_id: None,
+            multi_storey: false,
+            shape: Default::default(),
+            overshading: Default::default(),
+            num_opes: None,
+        }
+    }
+
+    /// The Structure-review GROUP edit: one `update_window_type_fields` call
+    /// re-attributes the shared type (every window of it), and an unchanged
+    /// call reports no change.
+    #[test]
+    fn update_window_type_fields_edits_the_shared_type() {
+        let mut ber = Ber::default();
+        let tid = ber.ensure_window_type(
+            Glazing::Double,
+            Frame::WoodUPVC,
+            2013,
+            false,
+            true,
+            vec![16],
+            Some("nordan".to_string()),
+        );
+        // Tick certified + widen the gap, as one review commit.
+        assert!(ber.update_window_type_fields(
+            tid,
+            Glazing::Double,
+            Frame::WoodUPVC,
+            2013,
+            true,
+            true,
+            vec![20],
+        ));
+        let t = ber.window_types.iter().find(|t| t.id == tid).unwrap();
+        assert!(t.certified);
+        assert_eq!(t.gap, vec![20]);
+        assert_eq!(t.specifics.name(), Some("nordan"), "name untouched");
+        // The identical commit again is a no-op.
+        assert!(!ber.update_window_type_fields(
+            tid,
+            Glazing::Double,
+            Frame::WoodUPVC,
+            2013,
+            true,
+            true,
+            vec![20],
+        ));
+    }
+
+    /// An edit that makes a type IDENTICAL to another absorbs the twin —
+    /// "identical attributes means the same group": the twin's windows and
+    /// follow-up tick re-point to the edited type, its photos carry over, and
+    /// the twin is gone.
+    #[test]
+    fn update_window_type_fields_absorbs_a_now_identical_twin() {
+        let mut ber = Ber::default();
+        // Same name is what `rename_window_type` forbids, so a real twin can
+        // only be two UNNAMED (Standard) types differing on a survey field.
+        let certified = ber.ensure_window_type(
+            Glazing::Double,
+            Frame::WoodUPVC,
+            2013,
+            true,
+            true,
+            vec![16],
+            None,
+        );
+        let uncertified = ber.ensure_window_type(
+            Glazing::Double,
+            Frame::WoodUPVC,
+            2013,
+            false,
+            true,
+            vec![16],
+            None,
+        );
+        assert_ne!(certified, uncertified, "distinct until the edit");
+        ber.window_types
+            .iter_mut()
+            .find(|t| t.id == certified)
+            .unwrap()
+            .photos
+            .push(crate::ber::common::Evidence::default());
+        ber.storeys.push(Storey::default());
+        ber.storeys[0].windows.push(window_of_type(certified));
+        ber.storeys[0].windows.push(window_of_type(uncertified));
+        ber.followup.window_types.push(certified);
+        // The review ticks certified on the uncertified type → identical twin.
+        assert!(ber.update_window_type_fields(
+            uncertified,
+            Glazing::Double,
+            Frame::WoodUPVC,
+            2013,
+            true,
+            true,
+            vec![16],
+        ));
+        assert_eq!(ber.window_types.len(), 1, "twin absorbed");
+        let survivor = &ber.window_types[0];
+        assert_eq!(survivor.id, uncertified, "the EDITED id survives");
+        assert_eq!(survivor.photos.len(), 1, "twin's photos carried over");
+        assert!(
+            ber.storeys[0]
+                .windows
+                .iter()
+                .all(|w| w.window_type_id == uncertified),
+            "every window re-points to the survivor"
+        );
+        assert_eq!(
+            ber.followup.window_types,
+            vec![uncertified],
+            "the follow-up tick moved over without doubling"
+        );
     }
 
     /// An OLD-shape record (floor/wall finishes + heating in `final_details`,

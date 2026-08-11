@@ -185,6 +185,14 @@ pub struct SketchState {
         std::cell::RefCell<Option<(ber_model::ber::common::ItemId, String)>>,
     /// In-flight Structure-review DOOR-type rename: `(old label, buffer)`.
     pub structure_rename_door: std::cell::RefCell<Option<(String, String)>>,
+    /// In-flight Structure-review WINDOW-TYPE field edit: `(type id, form
+    /// buffers)` — committing applies to every window of the type.
+    pub structure_edit_window_type: std::cell::RefCell<
+        Option<(
+            ber_model::ber::common::ItemId,
+            crate::ui::pages::sketch::WindowTypeFieldBufs,
+        )>,
+    >,
     /// One-shot guard for the prefill above: set when the Height stage's
     /// prefill has been written, cleared when the stage closes, so the user's
     /// in-progress typing isn't clobbered every frame.
@@ -2000,6 +2008,9 @@ impl eframe::App for BerApp {
                                     .sketch_state
                                     .structure_rename_window_type,
                                 structure_rename_door: &self.sketch_state.structure_rename_door,
+                                structure_edit_window_type: &self
+                                    .sketch_state
+                                    .structure_edit_window_type,
                                 object_pins,
                                 object_pins_world,
                                 active_object_room,
@@ -3056,6 +3067,25 @@ impl eframe::App for BerApp {
                                         }
                                         SketchEvent::RenameDoorType { old, new } => {
                                             controller.borrow_mut().rename_door_type(old, new);
+                                        }
+                                        SketchEvent::SetWindowTypeFields {
+                                            id,
+                                            glazing,
+                                            frame,
+                                            year,
+                                            certified,
+                                            draught_stripped,
+                                            gap,
+                                        } => {
+                                            controller.borrow_mut().set_window_type_fields(
+                                                id,
+                                                glazing,
+                                                frame,
+                                                year,
+                                                certified,
+                                                draught_stripped,
+                                                gap,
+                                            );
                                         }
                                         // Sets its own inline error (read back via
                                         // `opening_dim_error()`) — Result dropped like

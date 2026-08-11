@@ -49,9 +49,11 @@ pub enum StructureReviewRename {
     Construction(StructureReviewConstructionRename),
     /// A shared window TYPE: rename its model name (via
     /// [`AppController::rename_window_type`] — the model rejects an empty
-    /// name or one held by another type).
+    /// name or one held by another type), or edit its survey fields as a
+    /// GROUP (via [`AppController::set_window_type_fields`] — windows point
+    /// at the type by id, so one Save re-attributes every window of it).
     WindowType {
-        /// The type's id (rename target).
+        /// The type's id (rename / field-edit target).
         id: ItemId,
         /// Its current model name ("" = none) — the edit-field prefill.
         name: String,
@@ -61,6 +63,8 @@ pub enum StructureReviewRename {
         /// The parked rejection hint from the last refused rename of THIS
         /// type, shown next to the field.
         error: Option<String>,
+        /// The type's current survey fields — the "Edit fields" form prefill.
+        fields: WindowTypeFields,
     },
     /// A door: rename its free-text type label — committing retypes EVERY
     /// door sharing it (doors group by label, not a shared registry).
@@ -69,6 +73,22 @@ pub enum StructureReviewRename {
         /// bulk-rename key.
         type_name: String,
     },
+}
+
+/// A shared window type's editable survey fields, prefilled into the review's
+/// "Edit fields" form ([`StructureReviewRename::WindowType`]). One commit
+/// applies to every window of the type.
+#[derive(Clone)]
+pub struct WindowTypeFields {
+    pub glazing: Glazing,
+    pub frame: Frame,
+    /// Install year; `0` = unknown.
+    pub year: u32,
+    pub certified: bool,
+    /// `None` on records from before the field existed.
+    pub draught_stripped: Option<bool>,
+    /// Glazing gap(s) in mm (two entries for triple glazing).
+    pub gap: Vec<u32>,
 }
 
 /// The construction-group rename targets + prefills
@@ -358,6 +378,14 @@ impl AppController {
                         .as_ref()
                         .filter(|(eid, _)| *eid == t.id)
                         .map(|(_, hint)| hint.clone()),
+                    fields: WindowTypeFields {
+                        glazing: t.glazing.clone(),
+                        frame: t.frame.clone(),
+                        year: t.year,
+                        certified: t.certified,
+                        draught_stripped: t.draught_stripped,
+                        gap: t.gap.clone(),
+                    },
                 }),
             });
         }
