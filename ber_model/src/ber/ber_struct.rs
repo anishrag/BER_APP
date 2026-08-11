@@ -665,7 +665,10 @@ impl Ber {
     /// window-type analogue of `ensure_*_construction`, so identical windows share
     /// one type. Every component is part of the identity: in particular a `name`
     /// distinguishes two otherwise-identical models, and `certified` separates a
-    /// certified from an uncertified type.
+    /// certified from an uncertified type. `year_proof` is NOT identity — a
+    /// "got proof" tick ORs onto whichever type the placement lands on (proof
+    /// status never forks a group).
+    #[allow(clippy::too_many_arguments)]
     pub fn ensure_window_type(
         &mut self,
         glazing: Glazing,
@@ -673,11 +676,12 @@ impl Ber {
         year: Year,
         certified: bool,
         draught_stripped: bool,
+        year_proof: bool,
         gap: Vec<u32>,
         name: Option<String>,
     ) -> ItemId {
         let specifics = WindowNameSpecifics::from_name(name);
-        if let Some(t) = self.window_types.iter().find(|t| {
+        if let Some(t) = self.window_types.iter_mut().find(|t| {
             t.glazing == glazing
                 && t.frame == frame
                 && t.year == year
@@ -686,6 +690,7 @@ impl Ber {
                 && t.gap == gap
                 && t.specifics == specifics
         }) {
+            t.year_proof |= year_proof;
             return t.id;
         }
         let id = ItemId::default();
@@ -697,7 +702,7 @@ impl Ber {
             frame,
             certified,
             draught_stripped: Some(draught_stripped),
-            year_proof: false,
+            year_proof,
             specifics,
             photos: vec![],
             notes: None,
@@ -1520,6 +1525,7 @@ mod tests {
             2013,
             false,
             true,
+            false,
             vec![16],
             Some("nordan".to_string()),
         );
@@ -1567,6 +1573,7 @@ mod tests {
             2013,
             true,
             true,
+            false,
             vec![16],
             None,
         );
@@ -1576,6 +1583,7 @@ mod tests {
             2013,
             false,
             true,
+            false,
             vec![16],
             None,
         );

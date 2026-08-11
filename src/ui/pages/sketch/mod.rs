@@ -1790,6 +1790,9 @@ pub struct SketchView<'a> {
     pub door_kind: &'a mut DoorKind,
     /// The new-window-type draught-stripped checkbox (default ON).
     pub wt_draught_stripped: &'a mut bool,
+    /// The new-window-type "got proof" (of the install year) checkbox
+    /// (default OFF — the office chases year documentation when unticked).
+    pub wt_year_proof: &'a mut bool,
     /// Photos picked in the placement box for the window being placed, each
     /// with the capture tier its button asked for (TEMPORARY dual hi/lo
     /// buttons). See [`crate::ui::app::SketchState`].

@@ -328,6 +328,9 @@ pub enum WindowTypeChoice {
         certified: bool,
         /// The new type's draught-stripped checkbox (Some — the box always answers).
         draught_stripped: bool,
+        /// The "got proof" (of the install year) checkbox. NOT part of the
+        /// type identity — it ORs onto whichever type the placement lands on.
+        year_proof: bool,
         /// Pane gap(s) in mm (one for double, two for triple). Part of identity.
         gap: Vec<u32>,
         /// Optional model name — distinguishes two otherwise-identical types.
@@ -348,6 +351,7 @@ impl Default for WindowTypeChoice {
             // Most catalogued types are modern gasketed units — default ON;
             // the assessor unticks for old un-stripped sashes.
             draught_stripped: true,
+            year_proof: false,
             gap: Vec::new(),
             name: None,
         }
@@ -795,10 +799,16 @@ impl AppController {
         let Some(record) = self.current_record.as_mut() else {
             return Ok(());
         };
-        let type_id =
-            record
-                .data
-                .ensure_window_type(glazing, frame, year, false, true, Vec::new(), None);
+        let type_id = record.data.ensure_window_type(
+            glazing,
+            frame,
+            year,
+            false,
+            true,
+            false,
+            Vec::new(),
+            None,
+        );
         let storey = &mut record.data.storeys[idx];
         let result = openings::add_full_wall_window(storey, wall_id, height_m, type_id);
         self.finish_opening(result.map(|_| ()), undo_snap, pending)
@@ -1601,10 +1611,16 @@ impl AppController {
         let Some(record) = self.current_record.as_mut() else {
             return Ok(());
         };
-        let type_id =
-            record
-                .data
-                .ensure_window_type(glazing, frame, year, false, true, Vec::new(), None);
+        let type_id = record.data.ensure_window_type(
+            glazing,
+            frame,
+            year,
+            false,
+            true,
+            false,
+            Vec::new(),
+            None,
+        );
         let storey = &mut record.data.storeys[idx];
         let result = match target {
             PendingOpeningTarget::Wall {
@@ -1697,10 +1713,16 @@ impl AppController {
         let Some(record) = self.current_record.as_mut() else {
             return Ok(());
         };
-        let window_type_id =
-            record
-                .data
-                .ensure_window_type(glazing, frame, year, false, true, Vec::new(), None);
+        let window_type_id = record.data.ensure_window_type(
+            glazing,
+            frame,
+            year,
+            false,
+            true,
+            false,
+            Vec::new(),
+            None,
+        );
         let storey = &mut record.data.storeys[idx];
         let result = openings::compose_door_sidelights(
             storey,
@@ -2747,6 +2769,7 @@ fn resolve_window_type(data: &mut Ber, choice: WindowTypeChoice) -> ItemId {
             0,
             false,
             true,
+            false,
             Vec::new(),
             None,
         ),
@@ -2756,9 +2779,19 @@ fn resolve_window_type(data: &mut Ber, choice: WindowTypeChoice) -> ItemId {
             year,
             certified,
             draught_stripped,
+            year_proof,
             gap,
             name,
-        } => data.ensure_window_type(glazing, frame, year, certified, draught_stripped, gap, name),
+        } => data.ensure_window_type(
+            glazing,
+            frame,
+            year,
+            certified,
+            draught_stripped,
+            year_proof,
+            gap,
+            name,
+        ),
     }
 }
 

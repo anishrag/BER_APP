@@ -305,6 +305,9 @@ pub struct SketchState {
     pub wt_certified: bool,
     /// New-window-type draught-stripped checkbox (default ON — modern units).
     pub wt_draught_stripped: bool,
+    /// New-window-type "got proof" (of the install year) checkbox (default
+    /// OFF — unticked, the office chases year documentation in BERresolve).
+    pub wt_year_proof: bool,
     /// Per-window "number of opening sections" typed in the placement box.
     pub opening_num_opes: String,
     /// Door placements' draught-stripped checkbox (default ON).
@@ -1964,6 +1967,7 @@ impl eframe::App for BerApp {
                                 wt_year_unknown: &mut self.sketch_state.wt_year_unknown,
                                 wt_certified: &mut self.sketch_state.wt_certified,
                                 wt_draught_stripped: &mut self.sketch_state.wt_draught_stripped,
+                                wt_year_proof: &mut self.sketch_state.wt_year_proof,
                                 opening_num_opes: &mut self.sketch_state.opening_num_opes,
                                 door_draught_stripped: &mut self.sketch_state.door_draught_stripped,
                                 door_certified: &mut self.sketch_state.door_certified,

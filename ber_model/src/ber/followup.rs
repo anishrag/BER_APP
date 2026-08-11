@@ -974,6 +974,7 @@ mod tests {
             2020,
             false,
             true,
+            false,
             vec![16],
             Some("Rationel front".to_string()),
         );
@@ -983,6 +984,7 @@ mod tests {
             2021,
             false,
             true,
+            false,
             vec![],
             Some("Velfac back".to_string()),
         );
@@ -993,6 +995,7 @@ mod tests {
             0,
             false,
             true,
+            false,
             vec![],
             Some("Orphan".to_string()),
         );

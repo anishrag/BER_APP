@@ -795,6 +795,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 &mut *view.wt_frame,
                 &mut *view.wt_certified,
                 &mut *view.wt_draught_stripped,
+                &mut *view.wt_year_proof,
                 &mut *view.wt_name_input,
             );
             // Overshading is per-WINDOW (not per type), so it shows for every
@@ -1732,6 +1733,7 @@ fn current_window_type(view: &SketchView<'_>) -> WindowTypeChoice {
             year: effective_year(*view.wt_year_unknown, view.wt_year_input),
             certified: *view.wt_certified,
             draught_stripped: *view.wt_draught_stripped,
+            year_proof: *view.wt_year_proof,
             gap: parse_gaps(view.wt_gap_input),
             name: {
                 let n = view.wt_name_input.trim();
@@ -1873,6 +1875,7 @@ fn window_type_picker(
     frame: &mut Frame,
     certified: &mut bool,
     draught_stripped: &mut bool,
+    year_proof: &mut bool,
     name: &mut String,
 ) {
     ui.separator();
@@ -1923,6 +1926,10 @@ fn window_type_picker(
         ui.horizontal(|ui| {
             ui.checkbox(certified, "certified");
             ui.checkbox(draught_stripped, "draught stripped");
+            ui.checkbox(year_proof, "got proof of year").hint(
+                "Proof of the install year is in hand (receipt / stamp photo) — \
+                 unticked, the office is offered a chance to attach year documentation",
+            );
         });
         ui.horizontal(|ui| {
             ui.label("name");
