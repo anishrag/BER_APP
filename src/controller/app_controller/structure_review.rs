@@ -87,6 +87,9 @@ pub struct WindowTypeFields {
     pub certified: bool,
     /// `None` on records from before the field existed.
     pub draught_stripped: Option<bool>,
+    /// "Got proof" of the install year (receipt / stamp photo) — when false,
+    /// BERresolve offers a chance to attach year documentation office-side.
+    pub year_proof: bool,
     /// Glazing gap(s) in mm (two entries for triple glazing).
     pub gap: Vec<u32>,
 }
@@ -384,6 +387,7 @@ impl AppController {
                         year: t.year,
                         certified: t.certified,
                         draught_stripped: t.draught_stripped,
+                        year_proof: t.year_proof,
                         gap: t.gap.clone(),
                     },
                 }),
@@ -558,6 +562,10 @@ fn window_type_lines(t: &WindowType, window_count: usize) -> Vec<(String, String
     if t.year != 0 {
         lines.push(("Year".to_string(), t.year.to_string()));
     }
+    lines.push((
+        "Year proof".to_string(),
+        if t.year_proof { "Yes" } else { "No" }.to_string(),
+    ));
     if !t.gap.is_empty() {
         let gaps = t
             .gap

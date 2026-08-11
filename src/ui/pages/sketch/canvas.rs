@@ -6309,6 +6309,7 @@ fn structure_review_overlay<F: FnMut(UiEvent)>(
                                             draught_stripped: fields
                                                 .draught_stripped
                                                 .unwrap_or(false),
+                                            year_proof: fields.year_proof,
                                         },
                                     ));
                                 }
@@ -6568,6 +6569,11 @@ fn structure_review_overlay<F: FnMut(UiEvent)>(
                                     80.0,
                                     "blank = unknown",
                                 );
+                                ui.checkbox(&mut buf.year_proof, "got proof").hint(
+                                    "Proof of the install year is in hand (receipt / \
+                                     stamp photo) — unticked, the office is offered a \
+                                     chance to attach year documentation",
+                                );
                                 ui.label(
                                     egui::RichText::new("Gap:")
                                         .color(egui::Color32::from_gray(160)),
@@ -6590,6 +6596,7 @@ fn structure_review_overlay<F: FnMut(UiEvent)>(
                                         year: buf.year.trim().parse().unwrap_or(0),
                                         certified: buf.certified,
                                         draught_stripped: buf.draught_stripped,
+                                        year_proof: buf.year_proof,
                                         gap: parse_gaps(&buf.gap),
                                     }));
                                     edit_done = true;

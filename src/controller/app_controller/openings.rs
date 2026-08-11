@@ -736,6 +736,7 @@ impl AppController {
         year: u32,
         certified: bool,
         draught_stripped: bool,
+        year_proof: bool,
         gap: Vec<u32>,
     ) {
         let Some(record) = self.current_record.as_mut() else {
@@ -748,6 +749,7 @@ impl AppController {
             year,
             certified,
             draught_stripped,
+            year_proof,
             gap,
         ) {
             let _ = self.mark_dirty();

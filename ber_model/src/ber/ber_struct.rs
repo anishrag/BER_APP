@@ -697,6 +697,7 @@ impl Ber {
             frame,
             certified,
             draught_stripped: Some(draught_stripped),
+            year_proof: false,
             specifics,
             photos: vec![],
             notes: None,
@@ -753,6 +754,7 @@ impl Ber {
         year: Year,
         certified: bool,
         draught_stripped: bool,
+        year_proof: bool,
         gap: Vec<u32>,
     ) -> bool {
         let Some(t) = self.window_types.iter_mut().find(|t| t.id == id) else {
@@ -763,6 +765,7 @@ impl Ber {
             && t.year == year
             && t.certified == certified
             && t.draught_stripped == Some(draught_stripped)
+            && t.year_proof == year_proof
             && t.gap == gap
         {
             return false;
@@ -772,6 +775,7 @@ impl Ber {
         t.year = year;
         t.certified = certified;
         t.draught_stripped = Some(draught_stripped);
+        t.year_proof = year_proof;
         t.gap = gap;
         self.absorb_identical_window_type(id);
         true
@@ -827,6 +831,9 @@ impl Ber {
         if survivor.assessed_g_value.is_none() {
             survivor.assessed_g_value = twin.assessed_g_value;
         }
+        // Proof status is NOT identity — either side having year proof means
+        // the merged group has it.
+        survivor.year_proof |= twin.year_proof;
     }
 
     /// Rename every DOOR whose `type_name` matches `old` (trimmed) to `new`,
@@ -1516,7 +1523,7 @@ mod tests {
             vec![16],
             Some("nordan".to_string()),
         );
-        // Tick certified + widen the gap, as one review commit.
+        // Tick certified + year proof + widen the gap, as one review commit.
         assert!(ber.update_window_type_fields(
             tid,
             Glazing::Double,
@@ -1524,10 +1531,12 @@ mod tests {
             2013,
             true,
             true,
+            true,
             vec![20],
         ));
         let t = ber.window_types.iter().find(|t| t.id == tid).unwrap();
         assert!(t.certified);
+        assert!(t.year_proof);
         assert_eq!(t.gap, vec![20]);
         assert_eq!(t.specifics.name(), Some("nordan"), "name untouched");
         // The identical commit again is a no-op.
@@ -1536,6 +1545,7 @@ mod tests {
             Glazing::Double,
             Frame::WoodUPVC,
             2013,
+            true,
             true,
             true,
             vec![20],
@@ -1580,6 +1590,13 @@ mod tests {
         ber.storeys[0].windows.push(window_of_type(certified));
         ber.storeys[0].windows.push(window_of_type(uncertified));
         ber.followup.window_types.push(certified);
+        // The twin (already-certified type) has year proof; the edited one
+        // doesn't — the merged group must keep it.
+        ber.window_types
+            .iter_mut()
+            .find(|t| t.id == certified)
+            .unwrap()
+            .year_proof = true;
         // The review ticks certified on the uncertified type → identical twin.
         assert!(ber.update_window_type_fields(
             uncertified,
@@ -1588,6 +1605,7 @@ mod tests {
             2013,
             true,
             true,
+            false,
             vec![16],
         ));
         assert_eq!(ber.window_types.len(), 1, "twin absorbed");
@@ -1605,6 +1623,10 @@ mod tests {
             ber.followup.window_types,
             vec![uncertified],
             "the follow-up tick moved over without doubling"
+        );
+        assert!(
+            survivor.year_proof,
+            "either side having year proof survives the merge"
         );
     }
 

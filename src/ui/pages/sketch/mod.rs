@@ -747,6 +747,8 @@ pub enum SketchEvent {
         year: u32,
         certified: bool,
         draught_stripped: bool,
+        /// "Got proof" of the install year (receipt / stamp photo).
+        year_proof: bool,
         /// Glazing gap(s) in mm.
         gap: Vec<u32>,
     },
@@ -1351,6 +1353,8 @@ pub struct WindowTypeFieldBufs {
     pub gap: String,
     pub certified: bool,
     pub draught_stripped: bool,
+    /// "Got proof" of the install year.
+    pub year_proof: bool,
 }
 
 /// Everything the Sketch page needs for one frame, built by the app shell

@@ -3075,6 +3075,7 @@ impl eframe::App for BerApp {
                                             year,
                                             certified,
                                             draught_stripped,
+                                            year_proof,
                                             gap,
                                         } => {
                                             controller.borrow_mut().set_window_type_fields(
@@ -3084,6 +3085,7 @@ impl eframe::App for BerApp {
                                                 year,
                                                 certified,
                                                 draught_stripped,
+                                                year_proof,
                                                 gap,
                                             );
                                         }

@@ -78,6 +78,14 @@ pub struct WindowType {
     /// those downstream (BER_deap query / year inference).
     #[serde(default)]
     pub draught_stripped: Option<bool>,
+    /// Whether the assessor GOT PROOF of the install `year` (receipt, frame
+    /// stamp photo, invoice) — the "got proof" tick in the Structure review.
+    /// When false, BERresolve's Certs stage offers a chance to attach year
+    /// documentation office-side (and ticks this on attach). NOT part of the
+    /// type identity — proof status never forks a group.
+    /// `#[serde(default)]` → false (no proof) on older records.
+    #[serde(default)]
+    pub year_proof: bool,
     pub specifics: WindowNameSpecifics,
     pub photos: Vec<Evidence>,
     pub notes: Option<String>,
