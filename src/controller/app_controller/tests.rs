@@ -29326,7 +29326,7 @@ fn structure_review_items_carry_window_and_door_rename_info() {
         .find(|i| i.kind == StructureReviewKind::Door)
         .expect("a door review item");
     match door_item.rename.as_ref() {
-        Some(StructureReviewRename::Door { type_name }) => {
+        Some(StructureReviewRename::Door { type_name, .. }) => {
             assert_eq!(type_name, "Door", "prefill/key is the door's label");
         }
         other => panic!("expected a Door rename, got {:?}", other.is_some()),

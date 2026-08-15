@@ -193,6 +193,13 @@ pub struct SketchState {
             crate::ui::pages::sketch::WindowTypeFieldBufs,
         )>,
     >,
+    /// In-flight Structure-review DOOR field edit: `(door id, form buffers)`.
+    pub structure_edit_door: std::cell::RefCell<
+        Option<(
+            ber_model::ber::common::ItemId,
+            crate::ui::pages::sketch::DoorFieldBufs,
+        )>,
+    >,
     /// One-shot guard for the prefill above: set when the Height stage's
     /// prefill has been written, cleared when the stage closes, so the user's
     /// in-progress typing isn't clobbered every frame.
@@ -2015,6 +2022,7 @@ impl eframe::App for BerApp {
                                 structure_edit_window_type: &self
                                     .sketch_state
                                     .structure_edit_window_type,
+                                structure_edit_door: &self.sketch_state.structure_edit_door,
                                 object_pins,
                                 object_pins_world,
                                 active_object_room,
@@ -3071,6 +3079,19 @@ impl eframe::App for BerApp {
                                         }
                                         SketchEvent::RenameDoorType { old, new } => {
                                             controller.borrow_mut().rename_door_type(old, new);
+                                        }
+                                        SketchEvent::SetDoorFields {
+                                            id,
+                                            kind,
+                                            draught_stripped,
+                                            certified,
+                                        } => {
+                                            controller.borrow_mut().set_door_fields(
+                                                id,
+                                                kind,
+                                                draught_stripped,
+                                                certified,
+                                            );
                                         }
                                         SketchEvent::SetWindowTypeFields {
                                             id,

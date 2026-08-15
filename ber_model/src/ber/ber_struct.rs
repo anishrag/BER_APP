@@ -709,6 +709,7 @@ impl Ber {
             assessed_u_value: None,
             assessed_g_value: None,
             cert_skipped: false,
+            cert_unavailable: false,
         });
         id
     }
@@ -783,6 +784,38 @@ impl Ber {
         t.year_proof = year_proof;
         t.gap = gap;
         self.absorb_identical_window_type(id);
+        true
+    }
+
+    /// Set door `id`'s survey fields (the Structure review's door "Edit
+    /// fields" form — the door-side counterpart of
+    /// [`update_window_type_fields`](Self::update_window_type_fields)).
+    /// Doors have no shared type record, so this edits the ONE door.
+    /// Returns whether anything changed.
+    pub fn update_door_fields(
+        &mut self,
+        id: ItemId,
+        kind: super::fenestration::DoorKind,
+        draught_stripped: bool,
+        certified: bool,
+    ) -> bool {
+        let Some(d) = self
+            .storeys
+            .iter_mut()
+            .flat_map(|s| s.doors.iter_mut())
+            .find(|d| d.id == id)
+        else {
+            return false;
+        };
+        if d.kind == Some(kind)
+            && d.draught_stripped == Some(draught_stripped)
+            && d.certified == Some(certified)
+        {
+            return false;
+        }
+        d.kind = Some(kind);
+        d.draught_stripped = Some(draught_stripped);
+        d.certified = Some(certified);
         true
     }
 

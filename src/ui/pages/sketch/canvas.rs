@@ -1667,6 +1667,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 view.structure_rename_window_type,
                 view.structure_rename_door,
                 view.structure_edit_window_type,
+                view.structure_edit_door,
                 on_event,
             );
         }
@@ -6128,6 +6129,7 @@ fn structure_review_overlay<F: FnMut(UiEvent)>(
     edit_window_type: &std::cell::RefCell<
         Option<(ber_model::ber::common::ItemId, super::WindowTypeFieldBufs)>,
     >,
+    edit_door: &std::cell::RefCell<Option<(ber_model::ber::common::ItemId, super::DoorFieldBufs)>>,
     on_event: &mut F,
 ) {
     use crate::controller::app_controller::StructureReviewRename as Srr;
@@ -6315,15 +6317,40 @@ fn structure_review_overlay<F: FnMut(UiEvent)>(
                                 }
                             }
                         }
-                        Some(Srr::Door { type_name }) => {
-                            if rename_door.borrow().is_none()
-                                && ui
+                        Some(Srr::Door {
+                            id,
+                            type_name,
+                            fields,
+                        }) => {
+                            let editing =
+                                rename_door.borrow().is_some() || edit_door.borrow().is_some();
+                            if !editing {
+                                if ui
                                     .small_button("✏ Rename")
                                     .on_hover_text("Rename this door type (every door sharing it)")
                                     .clicked()
-                            {
-                                *rename_door.borrow_mut() =
-                                    Some((type_name.clone(), type_name.clone()));
+                                {
+                                    *rename_door.borrow_mut() =
+                                        Some((type_name.clone(), type_name.clone()));
+                                }
+                                if ui
+                                    .small_button("✏ Edit fields")
+                                    .on_hover_text(
+                                        "Edit this door's kind / draught-stripped / certified",
+                                    )
+                                    .clicked()
+                                {
+                                    *edit_door.borrow_mut() = Some((
+                                        *id,
+                                        super::DoorFieldBufs {
+                                            kind: fields.kind.unwrap_or_default(),
+                                            draught_stripped: fields
+                                                .draught_stripped
+                                                .unwrap_or(false),
+                                            certified: fields.certified.unwrap_or(false),
+                                        },
+                                    ));
+                                }
                             }
                         }
                         None => {}
@@ -6619,8 +6646,10 @@ fn structure_review_overlay<F: FnMut(UiEvent)>(
                     }
                     // A DOOR: one field for its type label — Save retypes
                     // every door sharing the OLD label (the label is the
-                    // group).
-                    Some(Srr::Door { type_name }) => {
+                    // group) — plus the "Edit fields" form for its survey
+                    // fields (kind / draught-stripped / certified, this door
+                    // only).
+                    Some(Srr::Door { id, type_name, .. }) => {
                         // A buffer keyed to another door's label dies here.
                         if rename_door
                             .borrow()
@@ -6654,6 +6683,65 @@ fn structure_review_overlay<F: FnMut(UiEvent)>(
                         }
                         if done {
                             *rename_door.borrow_mut() = None;
+                        }
+                        // The "Edit fields" form: this door's survey fields,
+                        // committed as one event on Save.
+                        if edit_door.borrow().as_ref().is_some_and(|(bid, _)| bid != id) {
+                            // A buffer left over from another door dies here.
+                            *edit_door.borrow_mut() = None;
+                        }
+                        let mut edit_done = false;
+                        if let Some((did, buf)) = edit_door.borrow_mut().as_mut() {
+                            use ber_model::ber::fenestration::DoorKind;
+                            let kind_label = |k: &DoorKind| match k {
+                                DoorKind::Solid => "Solid",
+                                DoorKind::HalfGlazed => "Half glazed",
+                                DoorKind::FullyGlazed => "Fully glazed",
+                                DoorKind::AssemblyPanel => "Assembly panel",
+                            };
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new("Kind:")
+                                        .color(egui::Color32::from_gray(160)),
+                                );
+                                egui::ComboBox::from_id_salt("srv_door_kind")
+                                    .selected_text(kind_label(&buf.kind))
+                                    .show_ui(ui, |ui| {
+                                        for k in [
+                                            DoorKind::Solid,
+                                            DoorKind::HalfGlazed,
+                                            DoorKind::FullyGlazed,
+                                            DoorKind::AssemblyPanel,
+                                        ] {
+                                            let t = kind_label(&k);
+                                            ui.selectable_value(&mut buf.kind, k, t);
+                                        }
+                                    });
+                            });
+                            ui.horizontal(|ui| {
+                                ui.checkbox(&mut buf.draught_stripped, "draught stripped");
+                                ui.checkbox(&mut buf.certified, "certified").hint(
+                                    "The door has a certified U-value — the office \
+                                     will chase the cert",
+                                );
+                            });
+                            ui.horizontal(|ui| {
+                                if ui.button("Save").clicked() {
+                                    on_event(UiEvent::Sketch(SketchEvent::SetDoorFields {
+                                        id: *did,
+                                        kind: buf.kind,
+                                        draught_stripped: buf.draught_stripped,
+                                        certified: buf.certified,
+                                    }));
+                                    edit_done = true;
+                                }
+                                if ui.button("Cancel").clicked() {
+                                    edit_done = true;
+                                }
+                            });
+                        }
+                        if edit_done {
+                            *edit_door.borrow_mut() = None;
                         }
                     }
                     None => {}

@@ -67,12 +67,30 @@ pub enum StructureReviewRename {
         fields: WindowTypeFields,
     },
     /// A door: rename its free-text type label — committing retypes EVERY
-    /// door sharing it (doors group by label, not a shared registry).
+    /// door sharing it (doors group by label, not a shared registry) — or
+    /// edit its survey fields (kind / draught-stripped / certified). Unlike
+    /// windows the field edit targets THIS door alone: doors have no shared
+    /// type record.
     Door {
+        /// The door's id (the field-edit target).
+        id: ItemId,
         /// The door's current type label — the edit-field prefill AND the
         /// bulk-rename key.
         type_name: String,
+        /// The door's current survey fields — the "Edit fields" prefill.
+        fields: DoorFields,
     },
+}
+
+/// A door's editable survey fields, prefilled into the review's door
+/// "Edit fields" form ([`StructureReviewRename::Door`]).
+#[derive(Clone)]
+pub struct DoorFields {
+    pub kind: Option<ber_model::ber::fenestration::DoorKind>,
+    /// `None` on records from before the field existed.
+    pub draught_stripped: Option<bool>,
+    /// `None` on records from before the field existed (= not certified).
+    pub certified: Option<bool>,
 }
 
 /// A shared window type's editable survey fields, prefilled into the review's
@@ -193,6 +211,25 @@ impl AppController {
     pub fn rename_door_type(&mut self, old: String, new: String) {
         if let Some(record) = self.current_record.as_mut() {
             if record.data.rename_door_type(&old, &new) > 0 {
+                let _ = self.mark_dirty();
+            }
+        }
+    }
+
+    /// Set door `id`'s survey fields from the review's door "Edit fields"
+    /// form. This door only — doors have no shared type record.
+    pub fn set_door_fields(
+        &mut self,
+        id: ItemId,
+        kind: ber_model::ber::fenestration::DoorKind,
+        draught_stripped: bool,
+        certified: bool,
+    ) {
+        if let Some(record) = self.current_record.as_mut() {
+            if record
+                .data
+                .update_door_fields(id, kind, draught_stripped, certified)
+            {
                 let _ = self.mark_dirty();
             }
         }
@@ -417,11 +454,22 @@ impl AppController {
                     ),
                     ("Width".to_string(), format!("{:.2} m", door.width_m)),
                     ("Height".to_string(), format!("{:.2} m", door.height_m)),
+                    (
+                        "Draught stripped".to_string(),
+                        yes_no_unknown(door.draught_stripped),
+                    ),
+                    ("Certified".to_string(), yes_no_unknown(door.certified)),
                 ],
                 photos: photo_views(&door.photos),
                 highlight: std::iter::once(door.id).collect(),
                 rename: Some(StructureReviewRename::Door {
+                    id: door.id,
                     type_name: door.type_name.clone(),
+                    fields: DoorFields {
+                        kind: door.kind,
+                        draught_stripped: door.draught_stripped,
+                        certified: door.certified,
+                    },
                 }),
             });
         }
@@ -630,6 +678,16 @@ fn frame_label(f: &Frame) -> String {
         Frame::WoodUPVC => "Wood/UPVC".to_string(),
         Frame::Metal => "Metal".to_string(),
         Frame::Other(s) => s.clone(),
+    }
+}
+
+/// A tri-state survey flag for a detail line: unset (pre-field record) shows
+/// as "—" so the reviewer sees it was never asked, not silently "No".
+fn yes_no_unknown(v: Option<bool>) -> String {
+    match v {
+        Some(true) => "Yes".to_string(),
+        Some(false) => "No".to_string(),
+        None => "—".to_string(),
     }
 }
 

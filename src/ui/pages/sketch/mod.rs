@@ -736,6 +736,15 @@ pub enum SketchEvent {
         old: String,
         new: String,
     },
+    /// Structure review: set door `id`'s survey fields (committed by the
+    /// review's door "Edit fields" Save). This door only — doors have no
+    /// shared type record.
+    SetDoorFields {
+        id: ItemId,
+        kind: DoorKind,
+        draught_stripped: bool,
+        certified: bool,
+    },
     /// Structure review: set the shared window TYPE `id`'s survey fields
     /// (committed by the review's "Edit fields" Save). GROUP-level — one
     /// commit re-attributes every window of the type.
@@ -1357,6 +1366,17 @@ pub struct WindowTypeFieldBufs {
     pub year_proof: bool,
 }
 
+/// Backing buffers for the Structure review's door "Edit fields" form
+/// (`SketchView::structure_edit_door`) — kind / draught-stripped / certified,
+/// committed as one `SetDoorFields` event on Save. Prefilled from the door's
+/// current values (unset tri-states prefill unticked).
+#[derive(Clone)]
+pub struct DoorFieldBufs {
+    pub kind: DoorKind,
+    pub draught_stripped: bool,
+    pub certified: bool,
+}
+
 /// Everything the Sketch page needs for one frame, built by the app shell
 /// (`BerApp`) from controller view data plus the page's own backing state.
 /// `&mut` fields are the cross-frame text-input buffers and the category UI
@@ -1893,6 +1913,9 @@ pub struct SketchView<'a> {
     /// the shared type's glazing/frame/year/gap/cert/draught form. Committing
     /// applies to every window of the type.
     pub structure_edit_window_type: &'a std::cell::RefCell<Option<(ItemId, WindowTypeFieldBufs)>>,
+    /// In-flight review DOOR field edit: `(door id, form buffers)` — kind /
+    /// draught-stripped / certified. Committing edits that one door.
+    pub structure_edit_door: &'a std::cell::RefCell<Option<(ItemId, DoorFieldBufs)>>,
     /// Review MERGE-phase picker: `Some(None)` = target list open,
     /// `Some(Some(target))` = confirm stage.
     pub structure_merge_phase:

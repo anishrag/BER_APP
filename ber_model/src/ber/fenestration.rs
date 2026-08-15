@@ -104,9 +104,24 @@ pub struct WindowType {
     /// from before the field load unskipped.
     #[serde(default)]
     pub cert_skipped: bool,
+    /// The certificate turned out UNOBTAINABLE — ticked in the resolver's
+    /// Certificates stage when a `certified`-marked type's cert can't be
+    /// produced after all. The type then counts as uncertified everywhere
+    /// downstream (DEAP default U/g), and the office is asked for install-
+    /// YEAR proof instead — see [`WindowType::is_certified`]. Additive
+    /// `serde(default)`.
+    #[serde(default)]
+    pub cert_unavailable: bool,
 }
 
 impl WindowType {
+    /// Whether this type COUNTS as certified downstream: ticked certified on
+    /// site AND the cert didn't turn out unobtainable at the office. All
+    /// DEAP-default-vs-cert decisions should read this, not `certified` raw.
+    pub fn is_certified(&self) -> bool {
+        self.certified && !self.cert_unavailable
+    }
+
     /// Short display label for this shared type, e.g.
     /// `"North bay — Double · Wood/UPVC · 16mm · 2010 · Cert"`. The model name
     /// (when given) is prefixed; year `0` (unknown) and an empty gap are
@@ -206,7 +221,7 @@ pub enum OpeningPlacement {
 /// The make-up of a door panel. `AssemblyPanel` is the door element of a
 /// door+sidelights assembly (the glazed sidelights/transom are separate
 /// `Window`s sharing the door's `assembly_id`).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum DoorKind {
     #[default]
     Solid,
