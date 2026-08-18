@@ -16830,6 +16830,78 @@ fn structure_carve_snaps_to_phase_line_and_pins_the_wall() {
     );
 }
 
+/// A STRUCTURE carve levels onto the resolved CEILING-region edges — here the
+/// inter-storey line where the storey above ends. A ceiling section carved
+/// over the strip the upper storey doesn't cover is bounded by that footprint,
+/// which is on the plan only as the derived inter-storey region edge (not a
+/// phase line, not the outline) — with phase refs alone that side had nothing
+/// to grab and had to be dimensioned by hand (field report). The wall drawn
+/// ~0.3 m past the y=6 line lands ON it and is pinned pre-known, exactly like
+/// the phase-line case above.
+#[test]
+fn structure_carve_snaps_to_inter_storey_ceiling_edge_and_pins_the_wall() {
+    let mut c = dimensioned_square_controller(); // storey 0 = 10x10 m
+    c.set_default_ceiling_height(2.4).unwrap(); // ceilings seed only once the height is set
+    c.add_storey().unwrap();
+    finalise_current_storey_as_rect(&mut c, 10.0, 6.0); // storey 1 covers y∈[0,6]
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.set_current_storey(Some(0)).unwrap();
+    c.materialize();
+
+    // Sanity: the derive split storey 0's ceilings at the storey-1 footprint,
+    // so a reference edge exists along y=6.
+    let edges = document::ceiling_region_edges(
+        &c.current_record.as_ref().unwrap().data.storeys[0].ceilings,
+    );
+    assert!(
+        edges
+            .iter()
+            .any(|[a, b]| (a.y - 6.0).abs() < 1e-3 && (b.y - 6.0).abs() < 1e-3),
+        "storey 0's ceilings carry the inter-storey edge at y=6: {edges:?}"
+    );
+
+    set_only_kind(&mut c, SurfaceKind::Ceilings);
+    c.set_structure_select_mode(Some(SelectMode::Carve));
+
+    // Interior carve over the uncovered strip, its front wall drawn 0.3 m past
+    // the inter-storey line y=6. Starts at the far corner so the parametric
+    // origin doesn't land on the snapped wall (an origin wall is const, not a
+    // pinnable parameter — same shape as the phase-line test above).
+    c.apply_structure_carve_stroke(&[(2.0, 9.0), (2.0, 6.3), (8.0, 6.3), (8.0, 9.0), (2.1, 8.95)]);
+    assert!(c.dimensioning_active(), "the carve starts dimensioning");
+    let pts = c.document.floor_plan.get_points();
+    let min_y = pts.iter().map(|v| v.y).fold(f32::MAX, f32::min);
+    assert!(
+        (min_y - 6.0).abs() < 1e-2,
+        "the carved ring's wall snapped onto the inter-storey line y=6: {pts:?}"
+    );
+
+    // The pin matches the snap: no dimension prompt opens for the snapped wall.
+    let (ring, edge) = c
+        .document
+        .floor_plan
+        .hit_test_wall(5.0, 6.0, 0.05)
+        .expect("the snapped wall sits at y=6");
+    let (param, _axis) = c
+        .document
+        .floor_plan
+        .wall_movable_param(ring, edge)
+        .expect("the snapped wall has a coordinate parameter");
+    assert!(
+        c.document.dimensioning.known_params.contains(&param),
+        "the inter-storey-snapped wall is pinned pre-known: known {:?}",
+        c.document.dimensioning.known_params
+    );
+
+    // The leveling is elective and visible: a skippable "Don't snap" tag.
+    let tags = c.snap_overlay();
+    assert!(
+        tags.iter()
+            .any(|t| t.skippable && t.current_kind == Some(manip_plan::SnapKind::ToParallelWall)),
+        "the inter-storey leveling surfaces as a skippable snap tag: {tags:?}"
+    );
+}
+
 /// Wall inclusion is explicit where AMBIGUOUS: a carve edge on the storey
 /// outline (true exterior — nothing beyond it) auto-includes its wall, while
 /// an interior cut edge that a wall region actually STANDS ON (here a

@@ -2823,13 +2823,20 @@ impl AppController {
         // Carve against the whole outline (no holes) — the split ring is fixed
         // by dimensioning before it carves the surface.
         self.sync_active();
-        // Reference walls besides the outline: the construction-PHASE lines, as
-        // in the living-area flow. A carve edge drawn beside a phase line lands
-        // flush on it, and — because a snapped wall is a known wall — the SAME
-        // set feeds the pinning below so the snapped edge is pre-known in
-        // dimensioning (the pin matches the snap; declining the snap tag
+        // Reference walls besides the outline: every visible region boundary on
+        // the storey — phase lines, floor steps and ceiling sections
+        // ([`subarea_reference_walls`]), same as the living-area flow. The
+        // ceiling edges matter here: a structure carve of the piece a storey
+        // above doesn't cover is bounded by that storey's footprint, which is
+        // on the plan only as the inter-storey ceiling-region edge — with phase
+        // lines alone those sides had nothing to grab (field report: a ceiling
+        // section against the upper storey's rear wall wouldn't snap and every
+        // side had to be dimensioned). Because a snapped wall is a known wall,
+        // the SAME set feeds the pinning below so the snapped edge is pre-known
+        // in dimensioning (the pin matches the snap; declining the snap tag
         // reopens the question).
-        let ref_walls = self.phase_reference_walls();
+        self.materialize(); // regions must be current before the refs read them
+        let ref_walls = self.subarea_reference_walls();
         let wall_snap_tol = self.snap_tol_carve();
         match self.document.carve_or_cut_in_available(
             &pts,
