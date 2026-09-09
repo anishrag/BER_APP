@@ -38,7 +38,9 @@ pub use geom::{
     ring_contains_point, ring_interior_point, ring_within_ring, segment_len, segment_on_ring,
     snap_on_face, solve_axis_wall, subdivide_face, FaceSnap,
 };
-pub use parametric::{Axis, CollinearitySuggestion, ParameterAxis, ParameterId, VertexId};
+pub use parametric::{
+    Axis, CollinearitySuggestion, ParameterAxis, ParameterId, VertexId, ZeroCollapseKind,
+};
 pub use poly3d::{Polygon3D, SplitLine3D};
 pub use region::stroke_is_closed;
 pub use simplification::{lasso_ring, simplify_to_cut};

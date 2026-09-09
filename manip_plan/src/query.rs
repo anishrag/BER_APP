@@ -598,6 +598,32 @@ impl FloorPlan {
             .collapse_trim_wall(ring, edge_start, controlled_param)
     }
 
+    /// What a zero for this wall's dimension would collapse (trim remnant /
+    /// step), or `None` when a zero must be rejected. See
+    /// [`ParametricPlan::zero_collapse_kind`](parametric::ParametricPlan::zero_collapse_kind).
+    pub fn zero_collapse_kind(
+        &self,
+        ring: usize,
+        edge_start: usize,
+        controlled_param: ParameterId,
+    ) -> Option<parametric::ZeroCollapseKind> {
+        self.parametric
+            .zero_collapse_kind(ring, edge_start, controlled_param)
+    }
+
+    /// Collapse a STEP wall to zero, merging its flanking walls into one
+    /// exactly-collinear wall. See
+    /// [`ParametricPlan::collapse_step_wall`](parametric::ParametricPlan::collapse_step_wall).
+    pub fn collapse_step_wall(
+        &mut self,
+        ring: usize,
+        edge_start: usize,
+        controlled_param: ParameterId,
+    ) -> Result<(), Error> {
+        self.parametric
+            .collapse_step_wall(ring, edge_start, controlled_param)
+    }
+
     /// Every wall whose length is fully determined by `known` parameters — all
     /// the parameters in its length expression are known. A superset of the
     /// user-dimensioned walls (also catches lengths implied by shared

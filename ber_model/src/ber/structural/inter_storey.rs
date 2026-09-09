@@ -115,6 +115,12 @@ pub fn derive_inter_storey(ber: &mut Ber, dimensioned: &[bool]) {
             if r.exposure == CeilingExposure::InterStorey {
                 r.exposure = CeilingExposure::Unset;
             }
+            // Normalise away boolean-op SPIKE debris (46 Hazelton Road: a 6 m
+            // zero-width detour on the main ceiling piece). Ceilings are
+            // regions-as-truth, so a spike a past split baked into the record
+            // is durable — stripping here heals it on every re-derive (and is
+            // a no-op on clean rings, keeping the pass exactly idempotent).
+            strip_spike_vertices(&mut r.polygon.exterior);
         }
     }
     let n = ber.storeys.len();
@@ -207,7 +213,7 @@ pub fn derive_inter_storey(ber: &mut Ber, dimensioned: &[bool]) {
                 .iter()
                 .map(|v| Point2f64::new(v.x, v.y))
                 .collect();
-            if ring.len() >= 3 && fp.contains_ring(&ring) {
+            if ring.len() >= 3 && (fp.contains_ring(&ring) || fp.covers_ring_area(&ring)) {
                 r.exposure = CeilingExposure::InterStorey;
                 // See the floors arm: out-of-scope surfaces carry no
                 // construction — clears stale shares for good.
@@ -366,6 +372,40 @@ impl PlanFootprint {
         self.rings
             .iter()
             .any(|outer| ring_within_ring(ring, outer, CONTAINMENT_TOL_M))
+    }
+
+    /// Area-coverage fallback for [`contains_ring`](Self::contains_ring): the
+    /// ring counts as covered when all but a boundary sliver of its AREA lies
+    /// inside the footprint (uncovered ≤ perimeter × [`CONTAINMENT_TOL_M`] —
+    /// the same width of slack the vertex test grants, expressed as area).
+    /// Robust where the strict per-vertex test is brittle: one zero-area
+    /// boolean-op artefact poking outside (46 Hazelton Road's ceiling spike)
+    /// fails every vertex test while covering nothing real.
+    pub(crate) fn covers_ring_area(&self, ring: &[Point2f64]) -> bool {
+        use geo::bool_ops::BooleanOps;
+        use geo::Area;
+        if ring.len() < 3 {
+            return false;
+        }
+        let poly = ring_to_poly(ring);
+        let area = poly.unsigned_area();
+        if area < SLIVER_AREA_M2 {
+            return false;
+        }
+        // Footprint pieces are disjoint (union output), so per-piece
+        // intersection areas sum without double-counting.
+        let covered: f64 = self
+            .polys
+            .iter()
+            .map(|p| poly.intersection(p).unsigned_area())
+            .sum();
+        let perimeter: f64 = (0..ring.len())
+            .map(|i| {
+                let (a, b) = (ring[i], ring[(i + 1) % ring.len()]);
+                ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt()
+            })
+            .sum();
+        area - covered <= perimeter * CONTAINMENT_TOL_M
     }
 }
 
@@ -2776,6 +2816,190 @@ mod tests {
     /// y=4 wall is backed by band tops 0.34 / 0.79 / 0.34 storey-local, the
     /// field record's exact bottoms (real ceilings 2.548 / 2.998: the
     /// 0.45 m step is preserved verbatim).
+    /// Any vertex whose edges double back (near-anti-parallel in plan) — the
+    /// zero-width SPIKE artefact `strip_spike_vertices` exists to kill.
+    fn has_spike(ring: &[Point3f64]) -> bool {
+        let n = ring.len();
+        (0..n).any(|i| {
+            let (p, c, q) = (ring[(i + n - 1) % n], ring[i], ring[(i + 1) % n]);
+            let (ax, ay) = (c.x - p.x, c.y - p.y);
+            let (bx, by) = (q.x - c.x, q.y - c.y);
+            let (la, lb) = ((ax * ax + ay * ay).sqrt(), (bx * bx + by * by).sqrt());
+            la > f64::EPSILON && lb > f64::EPSILON && (ax * bx + ay * by) / (la * lb) < -0.9
+        })
+    }
+
+    /// 46 Hazelton Road, ground truth from the field record: main house and
+    /// extension whose right edges sit ~4 mm apart (a drawn step the assessor
+    /// tried to remove by TYPING a length — the residual jog), under an upper
+    /// storey whose footprint edge runs near-coincident with both.
+    fn hazelton_ber(ground_ceilings: CeilingRegions) -> Ber {
+        let cid = ItemId::default();
+        let main_ring = vec![
+            Point2f64::new(1.4436, 13.8630),
+            Point2f64::new(1.4436, 5.5020),
+            Point2f64::new(6.3336, 5.5020),
+            Point2f64::new(6.3336, 12.2620),
+            Point2f64::new(3.0236, 12.2620),
+            Point2f64::new(3.0236, 13.8630),
+        ];
+        let ext_ring = vec![
+            Point2f64::new(1.6746, 5.5020),
+            Point2f64::new(1.6746, -0.4400),
+            Point2f64::new(6.3376, -0.4400),
+            Point2f64::new(6.3358, 5.5020),
+        ];
+        let mut floors = FloorRegions::new(main_ring, cid);
+        floors
+            .regions
+            .extend(FloorRegions::new(ext_ring, cid).regions);
+        let ground = Storey {
+            floors,
+            ceilings: ground_ceilings,
+            ceiling_height_m: Some(2.41),
+            ..Storey::default()
+        };
+        let mut upper_floors = FloorRegions::new(square(1.4436, 5.5020, 6.3376, 12.2620), cid);
+        upper_floors
+            .regions
+            .extend(FloorRegions::new(square(2.4936, 0.4580, 5.6136, 5.5020), cid).regions);
+        let upper = Storey {
+            floors: upper_floors,
+            ceilings: CeilingRegions::default_for_footprint(
+                vec![square(1.4436, 5.5020, 6.3376, 12.2620)],
+                2.42,
+                cid,
+            ),
+            ceiling_height_m: Some(2.42),
+            floor_thickness_m: Some(0.3),
+            ..Storey::default()
+        };
+        let mut ber = Ber::default();
+        ber.storeys = vec![ground, upper];
+        ber
+    }
+
+    /// The ground ceiling region under a plan point (any z).
+    fn ceiling_at(ber: &Ber, x: f64, y: f64) -> &CeilingRegion {
+        ber.storeys[0]
+            .ceilings
+            .regions
+            .iter()
+            .find(|r| {
+                let ring: Vec<Point2f64> = r
+                    .polygon
+                    .exterior
+                    .iter()
+                    .map(|v| Point2f64::new(v.x, v.y))
+                    .collect();
+                ring_to_poly(&ring).contains(&GeoPoint::new(x, y))
+            })
+            .expect("a ceiling region covers the probe point")
+    }
+
+    #[test]
+    fn hazelton_spiked_record_heals_on_re_derive() {
+        // The corrupted region exactly as the field record stored it: the
+        // main-house ceiling rectangle dragging a 6 m zero-width spike down
+        // to the extension's front-right corner. It failed the containment
+        // stamp (stayed Unset) and drew a stray roof line in every 3D view.
+        let spiked = flat_ceiling(
+            vec![
+                Point2f64::new(1.4436, 12.2620),
+                Point2f64::new(1.4436, 5.5020),
+                Point2f64::new(6.3358, 5.5020),
+                Point2f64::new(6.3376, -0.4400), // the spike tip
+                Point2f64::new(6.3336, 12.2620),
+            ],
+            2.41,
+        );
+        let ceilings = CeilingRegions {
+            regions: vec![
+                flat_ceiling(square(1.4436, 12.2620, 3.0236, 13.8630), 2.262),
+                flat_ceiling(square(2.4936, 0.4580, 5.6136, 5.5020), 2.41),
+                flat_ceiling(
+                    vec![
+                        Point2f64::new(1.6746, 5.5020),
+                        Point2f64::new(1.6746, -0.4400),
+                        Point2f64::new(6.3376, -0.4400),
+                        Point2f64::new(6.3358, 5.5020),
+                        Point2f64::new(5.6136, 5.5020),
+                        Point2f64::new(5.6136, 0.4580),
+                        Point2f64::new(2.4936, 0.4580),
+                        Point2f64::new(2.4936, 5.5020),
+                    ],
+                    2.41,
+                ),
+                spiked,
+            ],
+        };
+        let mut ber = hazelton_ber(ceilings);
+        derive_all(&mut ber);
+        for r in &ber.storeys[0].ceilings.regions {
+            assert!(
+                !has_spike(&r.polygon.exterior),
+                "spike survived the re-derive: {:?}",
+                r.polygon.exterior
+            );
+        }
+        // The healed main piece sits fully under the upper storey — it must
+        // stamp InterStorey (it was prompted as a roof in the field).
+        let main = ceiling_at(&ber, 4.0, 9.0);
+        assert_eq!(main.exposure, CeilingExposure::InterStorey);
+        assert_eq!(main.construction_id, ItemId::nil());
+        // The extension's exposed frame (nothing above) must stay unstamped.
+        assert_ne!(
+            ceiling_at(&ber, 2.0, 2.5).exposure,
+            CeilingExposure::InterStorey
+        );
+    }
+
+    #[test]
+    fn hazelton_jogged_edge_split_emits_no_spike() {
+        // From-scratch derivation: ONE ceiling face over the jogged union
+        // footprint, split live by the upper storey's near-coincident rings —
+        // whatever debris the boolean op emits must never reach the record.
+        let union_ring = vec![
+            Point2f64::new(1.4436, 13.8630),
+            Point2f64::new(1.4436, 5.5020),
+            Point2f64::new(1.6746, 5.5020),
+            Point2f64::new(1.6746, -0.4400),
+            Point2f64::new(6.3376, -0.4400),
+            Point2f64::new(6.3358, 5.5020),
+            Point2f64::new(6.3336, 5.5020),
+            Point2f64::new(6.3336, 12.2620),
+            Point2f64::new(3.0236, 12.2620),
+            Point2f64::new(3.0236, 13.8630),
+        ];
+        let ceilings = CeilingRegions {
+            regions: vec![flat_ceiling(union_ring, 2.41)],
+        };
+        let mut ber = hazelton_ber(ceilings);
+        derive_all(&mut ber);
+        for r in &ber.storeys[0].ceilings.regions {
+            assert!(
+                !has_spike(&r.polygon.exterior),
+                "boolean split emitted a spike: {:?}",
+                r.polygon.exterior
+            );
+        }
+        assert_eq!(
+            ceiling_at(&ber, 4.0, 9.0).exposure,
+            CeilingExposure::InterStorey,
+            "the main-house ceiling sits fully under the first floor"
+        );
+        assert_eq!(
+            ceiling_at(&ber, 4.0, 2.0).exposure,
+            CeilingExposure::InterStorey,
+            "the extension's covered middle sits under the first floor"
+        );
+        assert_ne!(
+            ceiling_at(&ber, 2.0, 2.5).exposure,
+            CeilingExposure::InterStorey,
+            "the extension's exposed frame has nothing above it"
+        );
+    }
+
     fn elmwood_fixture() -> Ber {
         let mut ground = flat_storey(square(0.0, 0.0, 8.0, 4.0), 2.4, None);
         ground.ceilings = CeilingRegions {

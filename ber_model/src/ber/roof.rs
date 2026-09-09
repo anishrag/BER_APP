@@ -1283,6 +1283,74 @@ impl crate::ber::ber_struct::Ber {
     }
 }
 
+impl crate::ber::ber_struct::Ber {
+    /// The compass side the ROOF PLANE under plan point `p` faces — the
+    /// plane's DOWNHILL direction converted through the record's north
+    /// alignment. This is the app-side PREFILL for a solar-PV pin's
+    /// `roof_faces`: the assessor confirms or overrides it, and the record
+    /// always stores the explicit value (the report never derives — a derived
+    /// facing with no human eye on it proved wrong on real records).
+    ///
+    /// Areas on the pin's own storey are searched first, then the rest.
+    /// `None` when north isn't aligned yet, no roof plane covers the point,
+    /// or the covering plane is (near-)flat — a racked flat-roof array has no
+    /// plane facing to read.
+    ///
+    /// Bearing convention — must match BERreport's `plan_bearing`: the
+    /// satellite image is north-up and the align gesture rotates the IMAGE
+    /// clockwise by `orientation_deg`; plan coords are screen coords (y
+    /// down), so north = (sin θ, −cos θ) and east = (cos θ, sin θ).
+    pub fn pv_roof_facing(
+        &self,
+        storey_idx: usize,
+        p: Point2f64,
+    ) -> Option<crate::ber::objects::Compass8> {
+        use crate::ber::objects::Compass8;
+        use crate::ber::structural::region_plane;
+        use geo::Contains;
+        if !self.north_aligned {
+            return None;
+        }
+        // Below ~1° of slope the plane reads flat (gradient is rise per metre).
+        const FLAT_GRAD: f64 = 0.02;
+        let downhill_at = |area: &RoofArea| -> Option<Option<(f64, f64)>> {
+            for region in area
+                .regions_with_dormers(self, DEFAULT_OVERHANG_M, ItemId::default())
+                .regions
+            {
+                let ring: Vec<Point2f64> = region
+                    .polygon
+                    .exterior
+                    .iter()
+                    .map(|v| Point2f64::new(v.x, v.y))
+                    .collect();
+                if ring.len() < 3
+                    || !ring_polygon(&ring).contains(&geo::Point::new(p.x, p.y))
+                {
+                    continue;
+                }
+                let Some((_c0, cx, cy)) = region_plane(&region) else {
+                    continue;
+                };
+                let g = (cx * cx + cy * cy).sqrt();
+                // Covered: report the downhill direction, or "flat" (inner
+                // None) — a flat covering plane must NOT fall through to a
+                // lower storey's sloped roof underneath.
+                return Some((g >= FLAT_GRAD).then(|| (-cx / g, -cy / g)));
+            }
+            None
+        };
+        let own = self.roof.areas.iter().filter(|a| a.storey_idx == storey_idx);
+        let rest = self.roof.areas.iter().filter(|a| a.storey_idx != storey_idx);
+        let (dx, dy) = own.chain(rest).find_map(downhill_at)??;
+        let th = (self.orientation_deg as f64).to_radians();
+        let north = dx * th.sin() - dy * th.cos();
+        let east = dx * th.cos() + dy * th.sin();
+        let deg = east.atan2(north).to_degrees().rem_euclid(360.0);
+        Some(Compass8::ALL[(((deg + 22.5).rem_euclid(360.0)) / 45.0) as usize % 8])
+    }
+}
+
 /// A plan ring → a `geo` polygon (no holes) for point-in-polygon tests.
 fn ring_polygon(ring: &[Point2f64]) -> geo::Polygon<f64> {
     let coords: Vec<geo::Coord<f64>> = ring
@@ -1526,6 +1594,54 @@ mod tests {
         let (zmin, zmax) = z_extent(&regions);
         assert!((zmin - 2.4).abs() < 1e-6, "eave at 2.4, got {zmin}");
         assert!((zmax - 7.4).abs() < 1e-6, "ridge at 7.4, got {zmax}");
+    }
+
+    /// PV facing prefill: a gable with its ridge along x=5 has an east-side
+    /// and a west-side plane at orientation 0 (plan +y = south, +x = east —
+    /// the report's `plan_bearing` convention). A pin on each side reads the
+    /// plane's downhill compass side; rotating north by 90° rotates the
+    /// answer; unaligned north or a point off the roof gives nothing.
+    #[test]
+    fn pv_roof_facing_reads_the_plane_downhill_side() {
+        let ridge = (Point2f64::new(5.0, 0.0), Point2f64::new(5.0, 10.0));
+        let apexes = RoofArea::ridge_apexes(ridge, 45.0, 2.4, &square_10());
+        let area = RoofArea {
+            id: ItemId::default(),
+            storey_idx: 0,
+            covered_storeys: Vec::new(),
+            shape: RoofShape::Gable,
+            pitch_deg: 45.0,
+            eave_z: 2.4,
+            ridge: Some(ridge),
+            footprint: square_10(),
+            apexes,
+            ends: None,
+        };
+        let mut ber = crate::ber::ber_struct::Ber::default();
+        ber.roof = Roof { areas: vec![area] };
+        ber.north_aligned = true;
+        ber.orientation_deg = 0.0;
+        // θ=0 → north = (0,−1): +x is east, so the x>5 side (downhill +x)
+        // faces E and the x<5 side faces W.
+        assert_eq!(
+            ber.pv_roof_facing(0, Point2f64::new(7.5, 5.0)),
+            Some(crate::ber::objects::Compass8::E)
+        );
+        assert_eq!(
+            ber.pv_roof_facing(0, Point2f64::new(2.5, 5.0)),
+            Some(crate::ber::objects::Compass8::W)
+        );
+        // θ=90° puts plan-north at (sin 90, −cos 90) = (+1, 0) = +x, so the
+        // downhill-+x side now faces N.
+        ber.orientation_deg = 90.0;
+        assert_eq!(
+            ber.pv_roof_facing(0, Point2f64::new(7.5, 5.0)),
+            Some(crate::ber::objects::Compass8::N)
+        );
+        // Off the roof → nothing to read; unaligned north → no prefill.
+        assert_eq!(ber.pv_roof_facing(0, Point2f64::new(20.0, 20.0)), None);
+        ber.north_aligned = false;
+        assert_eq!(ber.pv_roof_facing(0, Point2f64::new(7.5, 5.0)), None);
     }
 
     /// A FollowCeiling roof adopts the covered storey's ceiling apexes (converted

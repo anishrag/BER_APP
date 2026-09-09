@@ -100,6 +100,62 @@ pub(crate) fn plan_piece_is_degenerate(poly: &Polygon<f64>) -> bool {
     }
 }
 
+/// How anti-parallel a vertex's two edges must be to read as a SPIKE — the
+/// out-and-back detour a `geo` boolean op can leave along near-coincident
+/// collinear edges (unit-vector dot below this). A genuine corner sits near 0;
+/// a deep thin notch tip approaches −1 but is saved by the width guard below.
+const SPIKE_DOT_MAX: f64 = -0.9;
+
+/// Strip SPIKE vertices from a 3D face ring (plan test, z carried): a vertex
+/// whose edges double back along (nearly) the same line, enclosing a detour
+/// thinner than [`MIN_PIECE_MINOR_M`] — physically nothing, but rendered as a
+/// stray roof line across every 3D view and fatal to containment tests.
+/// Field case 46 Hazelton Road: a step mis-dimensioned to a 4 mm residual jog
+/// made the ground-ceiling split emit its main piece with a 6 m spike down
+/// the near-coincident right edges — the piece then failed the InterStorey
+/// containment stamp and was prompted as a roof. Iterates to a fixpoint
+/// (removing a spike tip can expose another); never shrinks below a triangle.
+/// Returns whether anything was removed. Removal is safe: the enclosed area
+/// (`width × length / 2` at most) is sub-[`MIN_PIECE_MINOR_M`]-thin, so the
+/// face's plan area is unchanged beyond boolean noise.
+pub(crate) fn strip_spike_vertices(ring: &mut Vec<Point3f64>) -> bool {
+    let mut removed_any = false;
+    loop {
+        let n = ring.len();
+        if n <= 3 {
+            return removed_any;
+        }
+        let spike_at = (0..n).find(|&i| {
+            let p = ring[(i + n - 1) % n];
+            let c = ring[i];
+            let q = ring[(i + 1) % n];
+            let (ax, ay) = (c.x - p.x, c.y - p.y);
+            let (bx, by) = (q.x - c.x, q.y - c.y);
+            let (la, lb) = ((ax * ax + ay * ay).sqrt(), (bx * bx + by * by).sqrt());
+            if la <= f64::EPSILON || lb <= f64::EPSILON {
+                // Coincident neighbour — a zero-length edge is spike debris too.
+                return true;
+            }
+            let dot = (ax * bx + ay * by) / (la * lb);
+            if dot > SPIKE_DOT_MAX {
+                return false;
+            }
+            // Effective detour width: twice the enclosed triangle area over
+            // the longer edge. A real (drawn) thin feature is at least
+            // MIN_PIECE_MINOR_M wide; a boolean spike is micrometres.
+            let tri2 = (ax * (q.y - p.y) - ay * (q.x - p.x)).abs(); // 2 × area
+            tri2 / la.max(lb) < MIN_PIECE_MINOR_M
+        });
+        match spike_at {
+            Some(i) => {
+                ring.remove(i);
+                removed_any = true;
+            }
+            None => return removed_any,
+        }
+    }
+}
+
 /// Plan tolerance (m) for matching a ring vertex to a stored UNFANNED point
 /// (`Storey::ceiling_unfanned`). Looser than the 1e-6 apex-corner identity:
 /// the unfanned points are f32-quantized ring vertices, but the ring a later

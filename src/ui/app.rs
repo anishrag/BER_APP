@@ -87,6 +87,10 @@ pub struct SketchState {
     /// Last error from `apply_dimension`. Shown next to the textbox so the
     /// user can correct without losing what they typed.
     pub dimension_error: Option<String>,
+    /// A 0 was entered on a STEP wall and awaits the user's confirmation —
+    /// applying it removes the step (its flanking walls merge into one
+    /// straight wall), so the shape change is confirmed, never silent.
+    pub dimension_step_confirm: bool,
     /// Backing string for the edit-dimension prompt's text input.
     pub edit_dim_input: String,
     /// Backing strings for the Structure "Divide wall" distance inputs.
@@ -351,6 +355,12 @@ pub struct SketchState {
     pub object_kwh_input: String,
     /// Backing string for the object AREA input (m² — solar hot-water tubes).
     pub object_area_input: String,
+    /// Backing string for the PV per-panel Wp input (photovoltaic only).
+    pub object_wp_input: String,
+    /// PV roof-facing pick; `None` = accept the roof-derived prefill.
+    pub object_faces_pick: Option<ber_model::ber::objects::Compass8>,
+    /// PV overshading pick; `None` = the "Very little" default.
+    pub object_overshading_pick: Option<ber_model::ber::fenestration::Overshading>,
     pub object_other_name: String,
     /// Zone-count entry buffer for the "how many heating zones?" prompt (item 3).
     pub zone_input: String,
@@ -453,6 +463,14 @@ impl BerApp {
         let st = &mut self.sketch_state;
         let commits = {
             let ctrl = self.app_controller.borrow();
+            // The effective PV picks a dismissal commits — the pick, or the
+            // roof-derived prefill / the "Very little" default (matching OK).
+            let faces = st.object_faces_pick.or_else(|| {
+                ctrl.active_object_room_view().and_then(|r| r.roof_facing)
+            });
+            let overshading = Some(st.object_overshading_pick.unwrap_or(
+                ber_model::ber::fenestration::Overshading::VeryLittle,
+            ));
             crate::ui::pages::sketch::take_dismiss_commits(
                 room_id,
                 st.object_selected_kind.as_ref(),
@@ -460,6 +478,9 @@ impl BerApp {
                 &st.object_note_input,
                 &st.object_kwh_input,
                 &st.object_area_input,
+                &st.object_wp_input,
+                faces,
+                overshading,
                 |k| ctrl.object_photo_required(k),
                 &mut st.object_pending_photos,
             )
@@ -473,10 +494,23 @@ impl BerApp {
         st.object_note_input.clear();
         st.object_kwh_input.clear();
         st.object_area_input.clear();
+        st.object_wp_input.clear();
+        st.object_faces_pick = None;
+        st.object_overshading_pick = None;
         st.object_other_name.clear();
         let mut ctrl = self.app_controller.borrow_mut();
         for c in commits {
-            ctrl.add_object(c.kind, c.count, c.note, c.kwh, c.area_m2, c.photos);
+            ctrl.add_object(
+                c.kind,
+                c.count,
+                c.note,
+                c.kwh,
+                c.area_m2,
+                c.panel_wp,
+                c.roof_faces,
+                c.overshading,
+                c.photos,
+            );
         }
         ctrl.close_object_room();
     }
@@ -1780,6 +1814,7 @@ impl eframe::App for BerApp {
                                 dim_input: &mut self.sketch_state.dimension_input,
                                 dim_scale_set,
                                 dim_error: dim_error.as_deref(),
+                                dim_step_confirm: self.sketch_state.dimension_step_confirm,
                                 edit_dimension_mode,
                                 opening_move_pending,
                                 structure_divide,
@@ -2034,6 +2069,11 @@ impl eframe::App for BerApp {
                                 object_note_input: &mut self.sketch_state.object_note_input,
                                 object_kwh_input: &mut self.sketch_state.object_kwh_input,
                                 object_area_input: &mut self.sketch_state.object_area_input,
+                                object_wp_input: &mut self.sketch_state.object_wp_input,
+                                object_faces_pick: &mut self.sketch_state.object_faces_pick,
+                                object_overshading_pick: &mut self
+                                    .sketch_state
+                                    .object_overshading_pick,
                                 object_other_name: &mut self.sketch_state.object_other_name,
                                 object_pending_photos: &mut self.sketch_state.object_pending_photos,
                                 heating_zones_prompt_open,
@@ -2212,19 +2252,48 @@ impl eframe::App for BerApp {
                                             );
                                         }
                                         SketchEvent::ApplyDimension(value) => {
-                                            match controller.borrow_mut().apply_dimension(value) {
+                                            // A 0 on a STEP wall changes the shape (the
+                                            // flanking walls merge collinear) — hold it
+                                            // for confirmation instead of applying.
+                                            if value == 0.0
+                                                && controller
+                                                    .borrow()
+                                                    .dimension_zero_is_step_collapse()
+                                            {
+                                                self.sketch_state.dimension_step_confirm = true;
+                                                self.sketch_state.dimension_error = None;
+                                            } else {
+                                                match controller.borrow_mut().apply_dimension(value)
+                                                {
+                                                    Ok(()) => {
+                                                        self.sketch_state.dimension_error = None;
+                                                    }
+                                                    Err(e) => {
+                                                        log::error!("apply_dimension: {}", e);
+                                                        self.sketch_state.dimension_error = Some(e);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        SketchEvent::ConfirmStepCollapse => {
+                                            self.sketch_state.dimension_step_confirm = false;
+                                            match controller.borrow_mut().apply_dimension(0.0) {
                                                 Ok(()) => {
                                                     self.sketch_state.dimension_error = None;
                                                 }
                                                 Err(e) => {
-                                                    log::error!("apply_dimension: {}", e);
+                                                    log::error!("apply_dimension(0): {}", e);
                                                     self.sketch_state.dimension_error = Some(e);
                                                 }
                                             }
                                         }
+                                        SketchEvent::CancelStepCollapse => {
+                                            self.sketch_state.dimension_step_confirm = false;
+                                        }
                                         SketchEvent::SkipDimension => {
                                             controller.borrow_mut().skip_current_dimension();
                                             self.sketch_state.dimension_error = None;
+                                            self.sketch_state.dimension_step_confirm = false;
                                         }
                                         SketchEvent::SetEditDimensionMode(on) => {
                                             controller.borrow_mut().set_edit_dimension_mode(on);
@@ -3009,12 +3078,21 @@ impl eframe::App for BerApp {
                                             note,
                                             kwh,
                                             area_m2,
+                                            panel_wp,
+                                            roof_faces,
+                                            overshading,
                                             photos,
                                         } => {
-                                            if let Err(e) = controller
-                                                .borrow_mut()
-                                                .update_object(count, note, kwh, area_m2, photos)
-                                            {
+                                            if let Err(e) = controller.borrow_mut().update_object(
+                                                count,
+                                                note,
+                                                kwh,
+                                                area_m2,
+                                                panel_wp,
+                                                roof_faces,
+                                                overshading,
+                                                photos,
+                                            ) {
                                                 log::warn!("update_object: {}", e);
                                                 self.sketch_state.stroke_error = Some(e);
                                             }
@@ -3259,6 +3337,9 @@ impl eframe::App for BerApp {
                                                 );
                                             }
                                         }
+                                        SketchEvent::OpenObjectPin(id) => {
+                                            controller.borrow_mut().open_object_room_pin(id);
+                                        }
                                         SketchEvent::CloseObjectRoom => {
                                             object_dismiss_request.set(true);
                                         }
@@ -3271,10 +3352,21 @@ impl eframe::App for BerApp {
                                             note,
                                             kwh,
                                             area_m2,
+                                            panel_wp,
+                                            roof_faces,
+                                            overshading,
                                             photos,
                                         } => {
                                             controller.borrow_mut().add_object(
-                                                kind, count, note, kwh, area_m2, photos,
+                                                kind,
+                                                count,
+                                                note,
+                                                kwh,
+                                                area_m2,
+                                                panel_wp,
+                                                roof_faces,
+                                                overshading,
+                                                photos,
                                             );
                                         }
                                         SketchEvent::DeleteObject { room, object } => {

@@ -837,6 +837,11 @@ impl CeilingRegions {
                     if pts.len() > 1 && pts.first() == pts.last() {
                         pts.pop();
                     }
+                    // Near-coincident collinear edges can make the boolean op
+                    // emit a piece dragging a zero-width SPIKE (46 Hazelton
+                    // Road) — physically nothing, but it draws as a stray
+                    // roof line and breaks the InterStorey containment stamp.
+                    strip_spike_vertices(&mut pts);
                     CeilingRegion {
                         id: ItemId::default(),
                         polygon: Polygon3D::new(pts),

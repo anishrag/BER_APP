@@ -14,6 +14,7 @@ use crate::ui::render;
 use crate::ui::render::ViewParams;
 use crate::ui::widgets::HintExt;
 use ber_model::ber::ber_struct::Ber;
+use ber_model::ber::common::ItemId;
 use ber_model::ber::structural::WallExposure;
 use domain::sketch::{EditTools, SketchMode};
 
@@ -1965,7 +1966,10 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     .collect()
             } else {
                 // Full-house 3D (the All tab): every storey's pins in world z.
-                view.object_pins_world.clone()
+                view.object_pins_world
+                    .iter()
+                    .map(|&(_, x, y, z)| (x, y, z))
+                    .collect()
             }
         } else {
             Vec::new()
@@ -4181,7 +4185,38 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         && response.clicked_by(egui::PointerButton::Primary)
     {
         if let (Some(ber), Some(pos)) = (ber, response.interact_pointer_pos()) {
-            if let Some(hit) =
+            // A tap landing ON a hotspot dot opens that pin directly — tested
+            // in SCREEN space against the same projection the dots were drawn
+            // with, and BEFORE the surface pick. Without this, the pick ray
+            // sails past the floating dot to the surface behind it, whose
+            // plan point can be metres from the pin (or on another storey in
+            // the full-house view) — so the reopen tolerance never matched
+            // and the tap dropped a stray new pin instead.
+            const PIN_HIT_PX: f32 = 16.0;
+            let dot_hit = render::pick_3d::transform_3d(rect, ber, current_storey_idx, vp)
+                .and_then(|t| {
+                    // Hit-test exactly the dots that are DRAWN: the current
+                    // storey's pins (storey-local z, datum 0) in single-storey
+                    // 3D, every storey's pins in world z on the All tab.
+                    let pins: Vec<(ItemId, f64, f64, f64)> = if current_storey_idx.is_some() {
+                        view.object_pins
+                            .iter()
+                            .map(|p| (p.id, p.x, p.y, p.z_m.unwrap_or(1.0)))
+                            .collect()
+                    } else {
+                        view.object_pins_world.clone()
+                    };
+                    pins.into_iter()
+                        .map(|(id, x, y, z)| {
+                            let (px, py) = vp.project_3d(x, y, z);
+                            (id, t.apply(px, py).distance(pos))
+                        })
+                        .filter(|(_, d)| *d <= PIN_HIT_PX)
+                        .min_by(|a, b| a.1.total_cmp(&b.1))
+                });
+            if let Some((id, _)) = dot_hit {
+                on_event(UiEvent::Sketch(SketchEvent::OpenObjectPin(id)));
+            } else if let Some(hit) =
                 render::pick_3d::pick_surface_3d(rect, ber, current_storey_idx, vp, pos)
             {
                 // Same 16-px reopen tolerance as the 2D tap, converted to
@@ -4257,6 +4292,40 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             // Dropdown of the OPEN room's objects, anchored just below its pin.
             if let (Some(sp), Some(room)) = (active_sp, view.active_object_room.as_ref()) {
                 object_pin_dropdown(ui, sp, room, on_event);
+            }
+        }
+    }
+
+    // The same dropdown in the 3D views, anchored below the open pin's
+    // hotspot dot — a pin opened from 3D (the dot tap) must show the room's
+    // contents with edit/delete too, exactly like 2D, not just the entry
+    // panel. The dot's screen position comes from the same projection the
+    // renderer drew it with.
+    if matches!(view.current_phase, AssessmentPhase::Objects)
+        && matches!(mode, SketchMode::Storey3D)
+    {
+        if let (Some(room), Some(ber)) = (
+            view.active_object_room.as_ref().filter(|r| !r.is_attic),
+            ber,
+        ) {
+            if let Some(t) = render::pick_3d::transform_3d(rect, ber, current_storey_idx, vp) {
+                // Single-storey 3D: the active pin in storey-local z (datum
+                // 0); the All tab: the room's world point.
+                let world = if current_storey_idx.is_some() {
+                    view.object_pins
+                        .iter()
+                        .find(|p| p.active)
+                        .map(|p| (p.x, p.y, p.z_m.unwrap_or(1.0)))
+                } else {
+                    view.object_pins_world
+                        .iter()
+                        .find(|(id, ..)| *id == room.id)
+                        .map(|&(_, x, y, z)| (x, y, z))
+                };
+                if let Some((x, y, z)) = world {
+                    let (px, py) = vp.project_3d(x, y, z);
+                    object_pin_dropdown(ui, t.apply(px, py), room, on_event);
+                }
             }
         }
     }

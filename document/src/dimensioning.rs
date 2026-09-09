@@ -35,15 +35,34 @@ impl StoreyDoc {
             .find_vertex(prompt.wall_start_vertex)
             .ok_or_else(|| "prompt wall vertex no longer exists".to_string())?;
 
-        // Zero length → collapse this wall (TRIM remnant only; the first dimension
-        // can't be zero since it sets scale). Geometry lives in the plan.
+        // Zero length → collapse this wall: a TRIM remnant deletes silently; a
+        // STEP merges its flanking walls into one exactly-collinear wall (the
+        // UI confirms that shape change first — see `zero_would_collapse_step`).
+        // The first dimension can't be zero since it sets scale. Geometry
+        // lives in the plan.
         if value == 0.0 {
             if !self.dimensioning.scale_set {
                 return Err("the first dimension can't be zero".into());
             }
-            self.floor_plan
-                .collapse_trim_wall(ring, edge_start, prompt.controlled_param)
-                .map_err(|e| format!("{}", e))?;
+            match self
+                .floor_plan
+                .zero_collapse_kind(ring, edge_start, prompt.controlled_param)
+            {
+                Some(manip_plan::ZeroCollapseKind::TrimCut) => self
+                    .floor_plan
+                    .collapse_trim_wall(ring, edge_start, prompt.controlled_param)
+                    .map_err(|e| format!("{}", e))?,
+                Some(manip_plan::ZeroCollapseKind::Step) => self
+                    .floor_plan
+                    .collapse_step_wall(ring, edge_start, prompt.controlled_param)
+                    .map_err(|e| format!("{}", e))?,
+                None => {
+                    return Err(
+                        "0 can only collapse a trim remnant or a step — this wall is neither"
+                            .into(),
+                    )
+                }
+            }
             self.resync_dimensioning();
             self.recompute_prompt();
             return Ok(());
@@ -189,6 +208,27 @@ impl StoreyDoc {
         );
         self.recompute_prompt();
         Ok(())
+    }
+
+    /// Would entering 0 for the CURRENT dimension prompt collapse a STEP
+    /// (merging its flanking walls collinear — a shape change the UI must
+    /// confirm with the user before applying)? False for a trim remnant
+    /// (zero deletes it silently, the established behaviour), for a wall a
+    /// zero would reject, and when no prompt is active or scale isn't set.
+    pub fn zero_would_collapse_step(&self) -> bool {
+        if !self.dimensioning.scale_set {
+            return false;
+        }
+        let Some(prompt) = self.dimensioning.current_prompt.as_ref() else {
+            return false;
+        };
+        let Some((ring, edge_start)) = self.floor_plan.find_vertex(prompt.wall_start_vertex)
+        else {
+            return false;
+        };
+        self.floor_plan
+            .zero_collapse_kind(ring, edge_start, prompt.controlled_param)
+            == Some(manip_plan::ZeroCollapseKind::Step)
     }
 
     /// Skip the current prompt's wall: suppress it from future prompts (the param

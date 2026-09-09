@@ -34,6 +34,25 @@ pub enum Overshading {
     VeryLittle,
 }
 
+impl Overshading {
+    pub const ALL: [Overshading; 4] = [
+        Overshading::Heavy,
+        Overshading::MoreThanAverage,
+        Overshading::Average,
+        Overshading::VeryLittle,
+    ];
+
+    /// Table H3's wording, shared by the pickers and the report.
+    pub fn label(self) -> &'static str {
+        match self {
+            Overshading::Heavy => "Heavy",
+            Overshading::MoreThanAverage => "More than average",
+            Overshading::Average => "Average",
+            Overshading::VeryLittle => "Very little",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum WindowNameSpecifics {
     Standard,

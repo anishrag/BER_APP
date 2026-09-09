@@ -1022,6 +1022,44 @@ pub(super) fn render<F: FnMut(UiEvent)>(
 
     // ── Wall dimension ──────────────────────────────────────────────────────
     if let Some(p) = view.dim_prompt.as_ref() {
+        // A 0 entered on a STEP wall: confirm the shape change before applying
+        // — the step disappears and its two side walls become one straight
+        // wall (exactly collinear, which a typed length can never achieve).
+        if view.dim_step_confirm {
+            let actions = vec![
+                Action::new(
+                    "Remove step",
+                    "Merge the two side walls into one straight wall",
+                    |_| SketchEvent::ConfirmStepCollapse,
+                )
+                .primary()
+                .with_clear(),
+                Action::new("Cancel", "Keep the step; enter its length instead", |_| {
+                    SketchEvent::CancelStepCollapse
+                })
+                .bare()
+                .with_clear(),
+            ];
+            show_box(
+                ctx,
+                rect,
+                "Remove this step?",
+                Some(
+                    "0 removes the highlighted step: its two side walls join \
+                     into one straight wall, and the outline changes shape.",
+                ),
+                "0",
+                view.dim_error,
+                view.dim_input,
+                &actions,
+                &mut view.cat_state.input_mode,
+                &mut view.cat_state.input_mode_pinned,
+                view.laser,
+                None,
+                on_event,
+            );
+            return;
+        }
         let title = if view.dim_scale_set {
             "Length of highlighted wall (m)".to_string()
         } else {

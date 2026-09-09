@@ -56,6 +56,11 @@ pub struct ObjectEditView {
     pub kwh_required: bool,
     pub area_m2: Option<f32>,
     pub area_required: bool,
+    /// PHOTOVOLTAIC objects only: show the PV controls, seeded with these.
+    pub pv: bool,
+    pub panel_wp: Option<f32>,
+    pub roof_faces: Option<ber_model::ber::objects::Compass8>,
+    pub overshading: Option<ber_model::ber::fenestration::Overshading>,
     /// The photos already attached, `(thumb_path, full_path)` — the edit
     /// window shows them (tappable via the global lightbox).
     pub photos: Vec<(String, String)>,
@@ -73,6 +78,10 @@ pub struct ActiveObjectRoomView {
     /// or a sloped ceiling). Shown read-only in the add-object dialog so the
     /// assessor sees the roof angle while recording e.g. a solar panel.
     pub surface_pitch_deg: Option<f32>,
+    /// The compass side the roof plane UNDER this pin faces, derived from the
+    /// plane + north alignment ([`Ber::pv_roof_facing`]) — the PV "faces"
+    /// picker's prefill; `None` off-roof / flat / north not aligned.
+    pub roof_facing: Option<ber_model::ber::objects::Compass8>,
     /// Whether this is the house-level ATTIC bucket (no plan pin — the UI
     /// anchors its box to the Attic button instead of a pin).
     pub is_attic: bool,
@@ -370,6 +379,7 @@ impl AppController {
     /// Add an object to the open room: store its photos (each at the capture
     /// tier its button asked for — dual hi/lo buttons), then push it. `count`
     /// is clamped to ≥1. No-op if no room is open.
+    #[allow(clippy::too_many_arguments)]
     pub fn add_object(
         &mut self,
         kind: ObjectKind,
@@ -377,6 +387,9 @@ impl AppController {
         note: Option<String>,
         kwh: Option<f32>,
         area_m2: Option<f32>,
+        panel_wp: Option<f32>,
+        roof_faces: Option<ber_model::ber::objects::Compass8>,
+        overshading: Option<ber_model::ber::fenestration::Overshading>,
         photos: Vec<(std::path::PathBuf, PhotoQuality)>,
     ) {
         let Some(room_id) = self.active_object_room else {
@@ -392,10 +405,16 @@ impl AppController {
             // Whether this is a HeatingZones record — captured before `kind` is
             // moved so the zone-count prompt can be raised after the push.
             let is_zones = matches!(kind, ObjectKind::HeatingZones);
+            let is_pv = kind.is_pv();
             let mut obj = BuildingObject::new(kind, count);
             obj.note = note.filter(|s| !s.trim().is_empty());
             obj.kwh = kwh;
             obj.area_m2 = area_m2;
+            if is_pv {
+                obj.panel_wp = panel_wp;
+                obj.roof_faces = roof_faces;
+                obj.overshading = overshading;
+            }
             obj.photos = stored;
             let new_id = obj.id;
             room.objects.push(obj);
@@ -516,8 +535,9 @@ impl AppController {
     /// EVERY storey's room pins as world-3D points (each at its storey's floor
     /// datum + its surface height, legacy plan pins at +1 m) — the hotspot
     /// markers for the full-house 3D view, where the current-storey pin list
-    /// doesn't apply.
-    pub fn object_pin_world_points(&self) -> Vec<(f64, f64, f64)> {
+    /// doesn't apply. Each point carries its room id so the canvas can
+    /// hit-test the drawn dots in screen space and open the tapped pin.
+    pub fn object_pin_world_points(&self) -> Vec<(ItemId, f64, f64, f64)> {
         let Some(record) = self.current_record.as_ref() else {
             return Vec::new();
         };
@@ -527,6 +547,7 @@ impl AppController {
             let datum = datums.get(i).copied().unwrap_or(0.0);
             for r in &s.object_rooms {
                 pts.push((
+                    r.id,
                     r.plan_position.x as f64,
                     r.plan_position.y as f64,
                     datum + r.z_m.unwrap_or(1.0),
@@ -536,6 +557,20 @@ impl AppController {
         pts
     }
 
+    /// Open room pin `id`'s panel directly — a tap landing ON its 3D hotspot
+    /// dot (screen-space hit in the canvas, both the single-storey and
+    /// full-house 3D views). Tapping the pin whose panel is already open
+    /// dismisses it, mirroring the surface-tap dismiss; a previously open pin
+    /// left empty is pruned as usual by `close_object_room`.
+    pub fn open_object_room_pin(&mut self, id: ItemId) {
+        if self.active_object_room == Some(id) {
+            self.close_object_room();
+            return;
+        }
+        self.close_object_room();
+        self.active_object_room = Some(id);
+    }
+
     /// The open room's panel view, or `None` when none is open. Searches every
     /// storey — a pin placed from the full-house 3D view can live on a storey
     /// other than the current one — plus the attic bucket.
@@ -543,6 +578,21 @@ impl AppController {
         let room_id = self.active_object_room?;
         let data = &self.current_record.as_ref()?.data;
         let room = data.object_rooms_iter().find(|r| r.id == room_id)?;
+        // The roof plane's derived compass facing at this pin — the PV
+        // controls' prefill (attic bucket has no pin, so no derivation).
+        let roof_facing = data
+            .storeys
+            .iter()
+            .position(|s| s.object_rooms.iter().any(|r| r.id == room_id))
+            .and_then(|si| {
+                data.pv_roof_facing(
+                    si,
+                    domain::points::Point2f64::new(
+                        room.plan_position.x as f64,
+                        room.plan_position.y as f64,
+                    ),
+                )
+            });
         Some(ActiveObjectRoomView {
             id: room.id,
             name: room.name.clone(),
@@ -560,6 +610,7 @@ impl AppController {
                 .collect(),
             categories_present: room.categories_present(),
             surface_pitch_deg: room.surface_pitch_deg,
+            roof_facing,
             is_attic: data.attic_room.as_ref().is_some_and(|a| a.id == room.id),
             external: data.object_pin_is_external(room.id),
         })
@@ -623,6 +674,10 @@ impl AppController {
             kwh_required: o.kind.kwh_required(),
             area_m2: o.area_m2,
             area_required: o.kind.area_required(),
+            pv: o.kind.is_pv(),
+            panel_wp: o.panel_wp,
+            roof_faces: o.roof_faces,
+            overshading: o.overshading,
             photos: o
                 .photos
                 .iter()
@@ -641,12 +696,16 @@ impl AppController {
     /// Apply the object edit: new count / note / kWh, and APPEND the picked
     /// photos to the object's evidence. One undoable action; the heating /
     /// ventilation rollups re-derive (count changes can matter there).
+    #[allow(clippy::too_many_arguments)]
     pub fn update_object(
         &mut self,
         count: u32,
         note: Option<String>,
         kwh: Option<f32>,
         area_m2: Option<f32>,
+        panel_wp: Option<f32>,
+        roof_faces: Option<ber_model::ber::objects::Compass8>,
+        overshading: Option<ber_model::ber::fenestration::Overshading>,
         photos: Vec<(std::path::PathBuf, PhotoQuality)>,
     ) -> Result<(), String> {
         let Some((room_id, object_id)) = self.object_edit else {
@@ -670,6 +729,11 @@ impl AppController {
         }
         if o.kind.area_required() {
             o.area_m2 = area_m2;
+        }
+        if o.kind.is_pv() {
+            o.panel_wp = panel_wp;
+            o.roof_faces = roof_faces;
+            o.overshading = overshading;
         }
         o.photos.extend(stored);
         self.object_edit = None;

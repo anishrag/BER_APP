@@ -33,7 +33,7 @@ pub type ParameterId = usize;
 pub type VertexId = u64;
 
 /// Axis along which a collinearity decision is being made.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Axis {
     /// Edge runs horizontal — its perpendicular coordinate is `y`.
     Horizontal,
@@ -90,6 +90,19 @@ impl CollinearitySuggestion {
         std::mem::swap(&mut self.edge_a, &mut self.edge_b);
         std::mem::swap(&mut self.coord_a, &mut self.coord_b);
     }
+}
+
+/// What a zero entered for a dimension prompt would collapse — see
+/// [`ParametricPlan::zero_collapse_kind`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZeroCollapseKind {
+    /// The wall is a TRIM remnant (touches a diagonal cut edge) — zero deletes
+    /// the remnant without changing the drawn shape's intent.
+    TrimCut,
+    /// The wall is a STEP (a jog between two same-direction parallel walls) —
+    /// zero merges the flanks into one exactly-collinear wall. Shape-changing,
+    /// so the UI confirms with the user first.
+    Step,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -798,6 +811,160 @@ impl ParametricPlan {
             self.recompute_active_parameter_count();
             return Err(e);
         }
+        Ok(())
+    }
+
+    /// The wall endpoint (vertex index `edge_start` or its successor) whose
+    /// coordinate carries `controlled_param` — the endpoint a dimension prompt
+    /// adjusts. `None` when neither endpoint references the param.
+    fn wall_adjustable_vertex(
+        &self,
+        ring: usize,
+        edge_start: usize,
+        controlled_param: ParameterId,
+    ) -> Option<usize> {
+        let n = self.rings.get(ring)?.len();
+        [edge_start, (edge_start + 1) % n].into_iter().find(|&i| {
+            self.vertex_x_param(ring, i) == Some(controlled_param)
+                || self.vertex_y_param(ring, i) == Some(controlled_param)
+        })
+    }
+
+    /// What entering 0 for the wall at `(ring, edge_start)` would collapse:
+    /// a TRIM remnant ([`collapse_trim_wall`](Self::collapse_trim_wall)), an
+    /// orthogonal STEP ([`collapse_step_wall`](Self::collapse_step_wall)), or
+    /// nothing (`None` — the zero must be rejected). Used by the dimensioning
+    /// loop to dispatch and by the UI to decide whether a step-removal
+    /// confirmation is due before applying.
+    pub fn zero_collapse_kind(
+        &self,
+        ring: usize,
+        edge_start: usize,
+        controlled_param: ParameterId,
+    ) -> Option<ZeroCollapseKind> {
+        let n = self.rings.get(ring)?.len();
+        let idx = self.wall_adjustable_vertex(ring, edge_start, controlled_param)?;
+        // Trim remnant: the adjustable vertex touches a diagonal edge.
+        let prev_of_idx = (idx + n - 1) % n;
+        if self.wall_axis(ring, idx).is_none() || self.wall_axis(ring, prev_of_idx).is_none() {
+            return Some(ZeroCollapseKind::TrimCut);
+        }
+        // Step: an axis-aligned wall whose two flanking walls are parallel to
+        // each other (perpendicular to it) and run the SAME direction — a jog
+        // in an otherwise straight run. Anti-parallel flanks (a U-turn) can't
+        // collapse: zeroing them would fold the ring back over itself.
+        let step_axis = self.wall_axis(ring, edge_start)?;
+        let i = edge_start;
+        let j = (i + 1) % n;
+        let prev_edge = (i + n - 1) % n;
+        let flank_axis = match step_axis {
+            Axis::Horizontal => Axis::Vertical,
+            Axis::Vertical => Axis::Horizontal,
+        };
+        if self.wall_axis(ring, prev_edge) != Some(flank_axis)
+            || self.wall_axis(ring, j) != Some(flank_axis)
+        {
+            return None;
+        }
+        let pts = self.ring_points(ring);
+        let along = |a: Point2f32, b: Point2f32| match flank_axis {
+            Axis::Horizontal => b.x - a.x,
+            Axis::Vertical => b.y - a.y,
+        };
+        if along(pts[prev_edge], pts[i]) * along(pts[j], pts[(j + 1) % n]) <= 0.0 {
+            return None;
+        }
+        Some(ZeroCollapseKind::Step)
+    }
+
+    /// Collapse an orthogonal STEP wall to zero: rewrite the adjustable side's
+    /// coordinate expression to the other side's, making the two flanking
+    /// walls exactly collinear (they merge into one straight wall), then drop
+    /// the step's two — now redundant — vertices. This is a deliberate
+    /// shape-changing operation (the caller confirms with the user first);
+    /// exact collinearity is the point — a typed length can never achieve it.
+    /// Only a genuine step qualifies ([`zero_collapse_kind`](Self::zero_collapse_kind)
+    /// == `Step`). Transactional: validates the result and leaves the plan
+    /// unchanged on any error.
+    pub fn collapse_step_wall(
+        &mut self,
+        ring: usize,
+        edge_start: usize,
+        controlled_param: ParameterId,
+    ) -> Result<(), Error> {
+        if self.zero_collapse_kind(ring, edge_start, controlled_param)
+            != Some(ZeroCollapseKind::Step)
+        {
+            return Err(Error::DimensionError(
+                "0 can only remove a step — a jog between two walls running the same way".into(),
+            ));
+        }
+        let n = self.rings[ring].len();
+        let i = edge_start;
+        let j = (i + 1) % n;
+        // The step's length axis is the axis its endpoints' coordinates differ
+        // on; the adjustable endpoint carries `controlled_param` there. The
+        // OTHER endpoint's expression is the anchor line the free side merges
+        // onto — the already-dimensioned (or origin-constant) side stays put.
+        let step_axis = self.wall_axis(ring, edge_start).expect("checked by kind");
+        let idx = self
+            .wall_adjustable_vertex(ring, edge_start, controlled_param)
+            .expect("checked by kind");
+        let other = if idx == i { j } else { i };
+        let anchor = match step_axis {
+            Axis::Horizontal => self.rings[ring][other].x_expr.clone(),
+            Axis::Vertical => self.rings[ring][other].y_expr.clone(),
+        };
+        if anchor == CoordinateExpression::Parameter(controlled_param) {
+            return Err(Error::DimensionError(
+                "step's two sides share one coordinate — nothing to merge".into(),
+            ));
+        }
+        let saved_rings = self.rings.clone();
+        // Substitute the controlled parameter with the anchor expression
+        // everywhere (all rings): the whole flanking wall — and anything
+        // legitimately sharing its coordinate — moves onto the anchor line.
+        // Substitution by parameter ID, never by coordinate value, so distant
+        // walls that merely sit at the same coordinate are untouched.
+        let from = CoordinateExpression::Parameter(controlled_param);
+        for r in &mut self.rings {
+            for v in r.iter_mut() {
+                match step_axis {
+                    Axis::Horizontal => {
+                        if v.x_expr == from {
+                            v.x_expr = anchor.clone();
+                        }
+                    }
+                    Axis::Vertical => {
+                        if v.y_expr == from {
+                            v.y_expr = anchor.clone();
+                        }
+                    }
+                }
+            }
+        }
+        // The step's endpoints are now coincident; drop both (by id — indices
+        // shift after the first removal).
+        let vid_i = self.rings[ring][i].id;
+        let vid_j = self.rings[ring][j].id;
+        for vid in [vid_i, vid_j] {
+            let Some((r_idx, idx)) = self.find_vertex(vid) else {
+                continue;
+            };
+            if !self.remove_vertex(r_idx, idx) {
+                self.rings = saved_rings;
+                self.recompute_active_parameter_count();
+                return Err(Error::DimensionError(
+                    "can't collapse — too few walls would remain".into(),
+                ));
+            }
+        }
+        if let Err(e) = self.validate_simple() {
+            self.rings = saved_rings;
+            self.recompute_active_parameter_count();
+            return Err(e);
+        }
+        self.recompute_active_parameter_count();
         Ok(())
     }
 
@@ -1873,6 +2040,77 @@ mod tests {
         let mut plan = ParametricPlan::from_points(&pts);
         plan.apply_orthogonal_constraints().unwrap();
         plan
+    }
+
+    /// Hazelton Road fixture: an outline whose right edge carries a small step
+    /// (x=100 below, x=104 above) — the drawn-then-mis-dimensioned jog that
+    /// left a 4mm residual in the field. Edge 2 (vertex 2 → 3) is the step.
+    fn step_plan() -> ParametricPlan {
+        build_plan(&[
+            (0.0, 0.0),
+            (100.0, 0.0),
+            (100.0, 50.0),
+            (104.0, 50.0),
+            (104.0, 120.0),
+            (0.0, 120.0),
+        ])
+    }
+
+    #[test]
+    fn zero_collapse_kind_flags_a_step_but_not_a_regular_wall() {
+        let plan = step_plan();
+        let step_param = plan.vertex_x_param(0, 3).expect("step's upper x param");
+        assert_eq!(
+            plan.zero_collapse_kind(0, 2, step_param),
+            Some(ZeroCollapseKind::Step),
+            "the jog between two same-direction walls is a step"
+        );
+        // The bottom wall's flanks run OPPOSITE directions (up the right side,
+        // down the left) — zeroing it would fold the ring, so no collapse.
+        let bottom_param = plan.vertex_x_param(0, 1).expect("bottom wall x param");
+        assert_eq!(plan.zero_collapse_kind(0, 0, bottom_param), None);
+    }
+
+    #[test]
+    fn collapse_step_wall_merges_the_flanks_exactly_collinear() {
+        let mut plan = step_plan();
+        let anchor_param = plan.vertex_x_param(0, 2).expect("lower-right x param");
+        let step_param = plan.vertex_x_param(0, 3).expect("upper-right x param");
+        plan.collapse_step_wall(0, 2, step_param).unwrap();
+        // The step's two vertices are gone; the flanks are one straight wall.
+        let pts = plan.ring_points(0);
+        assert_eq!(pts.len(), 4, "step vertices removed: {pts:?}");
+        // The free side moved EXACTLY onto the anchor side: the merged wall's
+        // endpoints share the anchor's parameter, not a nearby value.
+        assert_eq!(pts[1], Point2f32::new(100.0, 0.0));
+        assert_eq!(pts[2], Point2f32::new(100.0, 120.0));
+        assert_eq!(plan.vertex_x_param(0, 2), Some(anchor_param));
+        assert!(plan.validate_simple().is_ok());
+        assert!(
+            !plan.all_active_params().contains(&step_param),
+            "the collapsed step's parameter is no longer active"
+        );
+    }
+
+    #[test]
+    fn collapse_step_wall_rejects_a_notch_bottom() {
+        // A notch's floor is flanked by ANTI-parallel walls — a 0 there would
+        // fold the ring back over itself, so it must reject, plan unchanged.
+        let mut plan = build_plan(&[
+            (0.0, 0.0),
+            (100.0, 0.0),
+            (100.0, 100.0),
+            (60.0, 100.0),
+            (60.0, 80.0),
+            (40.0, 80.0),
+            (40.0, 100.0),
+            (0.0, 100.0),
+        ]);
+        let before = plan.ring_points(0);
+        let p = plan.vertex_x_param(0, 5).expect("notch x param");
+        assert_eq!(plan.zero_collapse_kind(0, 4, p), None);
+        assert!(plan.collapse_step_wall(0, 4, p).is_err());
+        assert_eq!(plan.ring_points(0), before);
     }
 
     #[test]

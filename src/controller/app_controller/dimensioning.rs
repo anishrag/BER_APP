@@ -729,6 +729,14 @@ impl AppController {
         )
     }
 
+    /// Would a 0 entered for the current dimension prompt remove a STEP
+    /// (merging its two flanking walls into one straight wall)? The UI asks
+    /// before applying, so the shape change gets an explicit confirmation —
+    /// see [`Document::zero_would_collapse_step`].
+    pub fn dimension_zero_is_step_collapse(&self) -> bool {
+        self.document.zero_would_collapse_step()
+    }
+
     /// Apply the user's entered length for the current dimension prompt, then
     /// persist + snapshot for undo. The model mutation (scale / set / repair /
     /// guardrail / rollback) lives in [`Document::apply_dimension`]; this owns

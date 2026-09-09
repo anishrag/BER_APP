@@ -197,6 +197,11 @@ pub enum SketchEvent {
     ResetView,
     /// User submitted a value for the current dimension prompt.
     ApplyDimension(f32),
+    /// User confirmed the pending step removal (a 0 entered on a step wall):
+    /// apply it — the flanking walls merge into one straight wall.
+    ConfirmStepCollapse,
+    /// User backed out of the pending step removal; the prompt stays up.
+    CancelStepCollapse,
     /// User skipped the current dimension prompt.
     SkipDimension,
     /// Toggle edit-dimension mode: tap a finalised outline wall, type its
@@ -863,6 +868,12 @@ pub enum SketchEvent {
         on_roof: bool,
         tol: f64,
     },
+    /// Phase-3 (Objects): a tap landing ON a room pin's 3D hotspot dot
+    /// (screen-space hit, single-storey and full-house 3D alike) — open that
+    /// pin's panel, or dismiss it if it's the one already open. Checked
+    /// BEFORE the surface pick so a floating dot doesn't fall through to the
+    /// surface behind it.
+    OpenObjectPin(ItemId),
     /// Close the open object room (the panel's "Done").
     CloseObjectRoom,
     /// Rename the open object room.
@@ -871,14 +882,18 @@ pub enum SketchEvent {
     /// it on first use. The usual entry panel then adds objects to it.
     OpenAtticRoom,
     /// Add an object to the open room: its kind, count, optional note,
-    /// capacity in kWh (batteries only), and photos (each with its capture
-    /// tier — see [`Self::PlaceOpening`]).
+    /// capacity in kWh (batteries only), the PV pin fields (photovoltaic
+    /// only: panel Wp, roof-facing side, overshading), and photos (each with
+    /// its capture tier — see [`Self::PlaceOpening`]).
     AddObject {
         kind: ObjectKind,
         count: u32,
         note: Option<String>,
         kwh: Option<f32>,
         area_m2: Option<f32>,
+        panel_wp: Option<f32>,
+        roof_faces: Option<ber_model::ber::objects::Compass8>,
+        overshading: Option<ber_model::ber::fenestration::Overshading>,
         photos: Vec<(std::path::PathBuf, crate::ui::widgets::PhotoQuality)>,
     },
     /// Delete one object from a room (the Delete panel).
@@ -900,6 +915,9 @@ pub enum SketchEvent {
         note: Option<String>,
         kwh: Option<f32>,
         area_m2: Option<f32>,
+        panel_wp: Option<f32>,
+        roof_faces: Option<ber_model::ber::objects::Compass8>,
+        overshading: Option<ber_model::ber::fenestration::Overshading>,
         photos: Vec<(std::path::PathBuf, crate::ui::widgets::PhotoQuality)>,
     },
     CancelEditObject,
@@ -1408,6 +1426,9 @@ pub struct SketchView<'a> {
     pub dim_input: &'a mut String,
     pub dim_scale_set: bool,
     pub dim_error: Option<&'a str>,
+    /// A 0 entered on a STEP wall awaits confirmation — the number box shows
+    /// the remove-step question instead of the length prompt.
+    pub dim_step_confirm: bool,
     /// Edit-dimension mode (re-dimension a finalised outline wall) + its open
     /// prompt: the picked wall, current length, and which end moves (the
     /// canvas marks that end; the number box holds the input + side toggle).
@@ -1924,9 +1945,10 @@ pub struct SketchView<'a> {
     /// overlay. Empty outside the Objects phase.
     pub object_pins: Vec<ObjectPinView>,
     /// Phase-3 (Objects): EVERY storey's pins as world-3D points (datum +
-    /// surface height) — the hotspot markers for the full-house 3D view.
+    /// surface height), each carrying its room id — the hotspot markers for
+    /// the full-house 3D view, and the canvas's screen-space dot hit-test.
     /// Empty outside the Objects phase.
-    pub object_pins_world: Vec<(f64, f64, f64)>,
+    pub object_pins_world: Vec<(ItemId, f64, f64, f64)>,
     /// The open object room's panel view (objects so far + categories present),
     /// or `None` when none is open.
     pub active_object_room: Option<ActiveObjectRoomView>,
@@ -1952,6 +1974,12 @@ pub struct SketchView<'a> {
     /// each kind's `photo_policy` to decide whether the next instance needs a
     /// photo (drives the auto-camera + OK gate). From `recorded_object_kinds`.
     pub object_recorded_kinds: &'a [ObjectKind],
+    /// PV entry buffers (photovoltaic objects only): the per-panel Wp text,
+    /// the roof-facing pick (`None` = accept the derived prefill), and the
+    /// overshading pick (`None` = the "Very little" default).
+    pub object_wp_input: &'a mut String,
+    pub object_faces_pick: &'a mut Option<ber_model::ber::objects::Compass8>,
+    pub object_overshading_pick: &'a mut Option<ber_model::ber::fenestration::Overshading>,
     /// The kind the camera was already auto-opened for (one-shot latch — see
     /// [`crate::ui::app::SketchState::object_auto_photo_for`]).
     pub object_auto_photo_for: &'a mut Option<ObjectKind>,

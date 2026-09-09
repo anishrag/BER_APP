@@ -282,8 +282,10 @@ fn outline_mid_loop_labels_only_confirmed_walls() {
     );
 }
 
-/// Zeroing a regular (orthogonal) wall is rejected — only a trim cut wall
-/// can be collapsed. Guards against silently deleting a drawn wall.
+/// Zeroing a regular (orthogonal) wall is rejected — only a trim cut wall or
+/// a step (a jog between two same-direction walls) can be collapsed. A plain
+/// square has neither: every wall's flanks run opposite directions. Guards
+/// against silently deleting a drawn wall.
 #[test]
 fn zero_rejected_for_a_regular_wall() {
     let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
@@ -304,7 +306,10 @@ fn zero_rejected_for_a_regular_wall() {
     let err = c
         .apply_dimension(0.0)
         .expect_err("0 on a regular wall must be rejected");
-    assert!(err.contains("trim cut"), "unexpected error: {err}");
+    assert!(
+        err.contains("trim remnant or a step"),
+        "unexpected error: {err}"
+    );
     // Shape untouched.
     assert_eq!(c.document.floor_plan.polygons()[0].len(), 4);
 }
@@ -20619,16 +20624,20 @@ fn objects_capture_pins_counts_and_undo() {
         None,
         None,
         None,
-        Vec::new(),
-    );
+        None,
+        None,
+        None,
+        Vec::new());
     c.add_object(
         ObjectKind::Radiator(RadiatorTrv::WithTrv),
         5,
         None,
         None,
         None,
-        Vec::new(),
-    );
+        None,
+        None,
+        None,
+        Vec::new());
     let pins = c.object_rooms_view();
     assert_eq!(pins.len(), 1, "one pin");
     assert_eq!(pins[0].count, 6, "1 boiler + 5 radiators");
@@ -20706,8 +20715,10 @@ fn objects_3d_placement_stores_surface_point_and_pitch() {
         None,
         None,
         None,
-        Vec::new(),
-    );
+        None,
+        None,
+        None,
+        Vec::new());
     assert_eq!(
         c.active_object_room_view().unwrap().objects.len(),
         1,
@@ -20718,11 +20729,12 @@ fn objects_3d_placement_stores_surface_point_and_pitch() {
     // 0's datum 0 + 2.3).
     let world = c.object_pin_world_points();
     assert_eq!(world.len(), 1);
-    assert!((world[0].0 - 2.0).abs() < 1e-6 && (world[0].1 - 3.0).abs() < 1e-6);
+    assert_eq!(world[0].0, room, "hotspot carries its room id");
+    assert!((world[0].1 - 2.0).abs() < 1e-6 && (world[0].2 - 3.0).abs() < 1e-6);
     assert!(
-        (world[0].2 - 2.3).abs() < 1e-6,
+        (world[0].3 - 2.3).abs() < 1e-6,
         "hotspot at the surface height, not the legacy 1 m (z={})",
-        world[0].2
+        world[0].3
     );
 
     // Back on the storey tab, the pin view carries the height too.
@@ -20780,8 +20792,10 @@ fn roof_pins_hidden_from_storey_views() {
         None,
         None,
         None,
-        Vec::new(),
-    );
+        None,
+        None,
+        None,
+        Vec::new());
     c.close_object_room();
 
     // Hidden from the storey's pin views (2D plan + single-storey 3D)…
@@ -20804,7 +20818,7 @@ fn roof_pins_hidden_from_storey_views() {
     // surface height, and a 3D near-tap reopens it.
     let world = c.object_pin_world_points();
     assert_eq!(world.len(), 1, "the roof pin keeps its world hotspot");
-    assert!((world[0].2 - 4.0).abs() < 1e-6);
+    assert!((world[0].3 - 4.0).abs() < 1e-6);
     c.set_current_storey(None).expect("All tab");
     c.objects_pointer_down_3d(0, 2.0, 3.0, 4.0, None, false, 0.5);
     assert_eq!(
@@ -20846,15 +20860,20 @@ fn attic_bucket_and_review_question() {
     // A normal room first, so the review has content. A gas boiler gives the
     // house a primary heat source (else the item-6 heating gate blocks confirm).
     c.objects_pointer_down(2.0, 2.0, 0.5);
-    c.add_object(ObjectKind::Thermostat, 1, None, None, None, Vec::new());
+    c.add_object(ObjectKind::Thermostat, 1, None, None, None,
+        None,
+        None,
+        None, Vec::new());
     c.add_object(
         ObjectKind::Boiler(ber_model::ber::objects::BoilerFuel::Gas),
         1,
         None,
         None,
         None,
-        Vec::new(),
-    );
+        None,
+        None,
+        None,
+        Vec::new());
     c.close_object_room();
 
     // Open the attic: created on demand, flagged for the UI, no plan pin and
@@ -20896,8 +20915,10 @@ fn attic_bucket_and_review_question() {
         None,
         None,
         None,
-        Vec::new(),
-    );
+        None,
+        None,
+        None,
+        Vec::new());
     c.close_object_room();
     assert!(!c.attic_unresolved(), "attic object resolves the promise");
     let rv = c.object_review_view().unwrap();
@@ -20918,7 +20939,10 @@ fn attic_bucket_and_review_question() {
     let mut c2 = dimensioned_square_controller();
     c2.materialize();
     c2.objects_pointer_down(2.0, 2.0, 0.5);
-    c2.add_object(ObjectKind::Thermostat, 1, None, None, None, Vec::new());
+    c2.add_object(ObjectKind::Thermostat, 1, None, None, None,
+        None,
+        None,
+        None, Vec::new());
     c2.close_object_room();
     c2.set_object_review_mode(true);
     c2.confirm_attic_absent();
@@ -20951,7 +20975,10 @@ fn object_photo_requirement_by_policy_and_first_instance() {
     let led = ObjectKind::Light(LightKind::Led);
     assert!(c.object_photo_required(&led), "first LED requires a photo");
     c.objects_pointer_down(2.0, 2.0, 0.5);
-    c.add_object(led.clone(), 1, None, None, None, Vec::new());
+    c.add_object(led.clone(), 1, None, None, None,
+        None,
+        None,
+        None, Vec::new());
     assert!(!c.object_photo_required(&led), "a later LED is optional");
     // A DIFFERENT first-instance kind is still on its own first instance.
     assert!(
@@ -20963,7 +20990,10 @@ fn object_photo_requirement_by_policy_and_first_instance() {
     assert!(!c.object_photo_required(&ObjectKind::Other("meter".into())));
 
     // Always-required stays required even after one is recorded.
-    c.add_object(boiler.clone(), 1, None, None, None, Vec::new());
+    c.add_object(boiler.clone(), 1, None, None, None,
+        None,
+        None,
+        None, Vec::new());
     assert!(
         c.object_photo_required(&boiler),
         "always-required stays required"
@@ -20999,8 +21029,10 @@ fn empty_object_pin_pruned_and_open_box_dismisses_on_tap() {
         None,
         None,
         None,
-        Vec::new(),
-    );
+        None,
+        None,
+        None,
+        Vec::new());
     c.close_object_room();
     assert_eq!(c.object_rooms_view().len(), 1, "a pin with an object stays");
 
@@ -21036,16 +21068,20 @@ fn object_review_totals_and_hotspots() {
         None,
         None,
         None,
-        Vec::new(),
-    );
+        None,
+        None,
+        None,
+        Vec::new());
     c.add_object(
         ObjectKind::Radiator(RadiatorTrv::WithTrv),
         3,
         None,
         None,
         None,
-        Vec::new(),
-    );
+        None,
+        None,
+        None,
+        Vec::new());
     c.close_object_room();
     // Room 2: 2 more radiators-with-TRV.
     c.objects_pointer_down(8.0, 8.0, 0.5);
@@ -21055,8 +21091,10 @@ fn object_review_totals_and_hotspots() {
         None,
         None,
         None,
-        Vec::new(),
-    );
+        None,
+        None,
+        None,
+        Vec::new());
     c.close_object_room();
 
     c.set_object_review_mode(true);
@@ -21161,8 +21199,10 @@ fn object_review_absence_confirmation() {
         None,
         None,
         None,
-        Vec::new(),
-    );
+        None,
+        None,
+        None,
+        Vec::new());
     c.close_object_room();
 
     c.set_object_review_mode(true);
@@ -21231,8 +21271,10 @@ fn object_review_flagged_present_blocks_confirm_until_added() {
         None,
         None,
         None,
-        Vec::new(),
-    );
+        None,
+        None,
+        None,
+        Vec::new());
     c.close_object_room();
 
     c.set_object_review_mode(true);
@@ -21265,8 +21307,10 @@ fn object_review_flagged_present_blocks_confirm_until_added() {
         None,
         None,
         None,
-        Vec::new(),
-    );
+        None,
+        None,
+        None,
+        Vec::new());
     c.close_object_room();
     assert!(
         c.unresolved_present_categories().is_empty(),
@@ -21301,12 +21345,17 @@ fn add_object_attaches_only_the_event_photos() {
         None,
         None,
         None,
+        None,
+        None,
+        None,
         vec![(
             std::path::PathBuf::from("/nonexistent/fan.jpg"),
             PhotoQuality::High,
-        )],
-    );
-    c.add_object(ObjectKind::Thermostat, 1, None, None, None, Vec::new());
+        )]);
+    c.add_object(ObjectKind::Thermostat, 1, None, None, None,
+        None,
+        None,
+        None, Vec::new());
 
     let rows = c.active_object_room_view().expect("room open").objects;
     assert_eq!(rows.len(), 2);
@@ -28862,8 +28911,10 @@ fn gas_boiler_add_sets_system_type_delete_reverts() {
         None,
         None,
         None,
-        Vec::new(),
-    );
+        None,
+        None,
+        None,
+        Vec::new());
     assert_eq!(
         c.current_record
             .as_ref()
@@ -28905,8 +28956,10 @@ fn boiler_separate_hw_control_sets_separate_hot_water() {
         None,
         None,
         None,
-        Vec::new(),
-    );
+        None,
+        None,
+        None,
+        Vec::new());
     let object_id = c.active_object_room_view().unwrap().objects[0].id;
     assert!(
         !c.current_record
@@ -28951,7 +29004,10 @@ fn heating_zones_prompt_sets_and_removal_clears_zones() {
     c.materialize();
     c.objects_pointer_down(2.0, 2.0, 0.5);
     let room = c.active_object_room().expect("a room opened");
-    c.add_object(ObjectKind::HeatingZones, 1, None, None, None, Vec::new());
+    c.add_object(ObjectKind::HeatingZones, 1, None, None, None,
+        None,
+        None,
+        None, Vec::new());
     assert!(
         c.heating_zones_prompt_open(),
         "zones object raises the prompt"
@@ -28971,7 +29027,10 @@ fn heating_zones_prompt_sets_and_removal_clears_zones() {
     );
     // A later object add/remove must NOT wipe zones (the sync doesn't own it).
     use ber_model::ber::objects::{BoilerFuel, ObjectKind as OK};
-    c.add_object(OK::Boiler(BoilerFuel::Oil), 1, None, None, None, Vec::new());
+    c.add_object(OK::Boiler(BoilerFuel::Oil), 1, None, None, None,
+        None,
+        None,
+        None, Vec::new());
     assert_eq!(
         c.current_record
             .as_ref()
@@ -29021,8 +29080,10 @@ fn heating_source_gate_blocks_review_until_boiler_or_panel() {
         None,
         None,
         None,
-        Vec::new(),
-    );
+        None,
+        None,
+        None,
+        Vec::new());
     c.close_object_room();
     assert!(
         c.heating_source_missing(),
@@ -29035,7 +29096,10 @@ fn heating_source_gate_blocks_review_until_boiler_or_panel() {
     // Add a panel heater → the gate clears; answering the panel question then
     // lets the review confirm.
     c.objects_pointer_down(3.0, 3.0, 0.5);
-    c.add_object(ObjectKind::PanelHeater, 1, None, None, None, Vec::new());
+    c.add_object(ObjectKind::PanelHeater, 1, None, None, None,
+        None,
+        None,
+        None, Vec::new());
     c.close_object_room();
     assert!(
         !c.heating_source_missing(),
@@ -29077,16 +29141,20 @@ fn multiple_sources_prompt_primary_pick_and_preserve() {
         None,
         None,
         None,
-        Vec::new(),
-    );
+        None,
+        None,
+        None,
+        Vec::new());
     c.add_object(
         ObjectKind::Boiler(BoilerFuel::HeatPump),
         1,
         None,
         None,
         None,
-        Vec::new(),
-    );
+        None,
+        None,
+        None,
+        Vec::new());
     c.close_object_room();
     c.set_object_review_mode(true);
     let opts = c.primary_pick_options();
@@ -29108,7 +29176,10 @@ fn multiple_sources_prompt_primary_pick_and_preserve() {
     );
     // A later object add must NOT clobber the chosen primary (sync preserves it).
     c.objects_pointer_down(6.0, 6.0, 0.5);
-    c.add_object(ObjectKind::Thermostat, 1, None, None, None, Vec::new());
+    c.add_object(ObjectKind::Thermostat, 1, None, None, None,
+        None,
+        None,
+        None, Vec::new());
     assert_eq!(
         c.current_record
             .as_ref()
@@ -29138,8 +29209,10 @@ fn vent_unit_add_sets_system_type_delete_reverts() {
         Some("Vent Axia Sentinel".into()),
         None,
         None,
-        Vec::new(),
-    );
+        None,
+        None,
+        None,
+        Vec::new());
     assert!(
         matches!(
             c.current_record
@@ -32773,8 +32846,10 @@ fn object_edit_updates_in_place_and_appends_photos() {
         Some("living room".into()),
         None,
         None,
-        vec![],
-    );
+        None,
+        None,
+        None,
+        vec![]);
     let (room_id, object_id) = {
         let room = c.active_object_room_view().expect("room open");
         (room.id, room.objects[0].id)
@@ -32789,8 +32864,10 @@ fn object_edit_updates_in_place_and_appends_photos() {
         Some("living room — behind the couch".into()),
         None,
         None,
-        vec![],
-    )
+        None,
+        None,
+        None,
+        vec![])
     .expect("edit applies");
     assert!(c.object_edit_view().is_none(), "edit closed");
     {
@@ -32988,7 +33065,10 @@ fn solar_tubes_record_and_edit_the_collector_area() {
     c.objects_pointer_down(5.0, 5.0, 0.5);
     let tubes = ObjectKind::SolarPanel(SolarPanelKind::SolarTubes);
     assert!(tubes.area_required(), "tubes demand the collector area");
-    c.add_object(tubes.clone(), 20, None, None, Some(3.8), Vec::new());
+    c.add_object(tubes.clone(), 20, None, None, Some(3.8),
+        None,
+        None,
+        None, Vec::new());
     let (room_id, object_id) = {
         let room = c.active_object_room_view().unwrap();
         (room.id, room.objects[0].id)
@@ -33009,7 +33089,10 @@ fn solar_tubes_record_and_edit_the_collector_area() {
     let v = c.object_edit_view().unwrap();
     assert!(v.area_required);
     assert_eq!(v.area_m2, Some(3.8));
-    c.update_object(20, None, None, Some(4.2), vec![]).unwrap();
+    c.update_object(20, None, None, Some(4.2),
+        None,
+        None,
+        None, vec![]).unwrap();
     let record = c.current_record.as_ref().unwrap();
     let o = &record
         .data

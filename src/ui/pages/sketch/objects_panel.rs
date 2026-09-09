@@ -14,7 +14,47 @@ use super::{SketchEvent, SketchView};
 use crate::controller::app_controller::AssessmentPhase;
 use crate::ui::pages::events::UiEvent;
 use crate::ui::widgets::{metre_input, photo_button_pair, text_input, HintExt, PhotoQuality};
-use ber_model::ber::objects::{ObjectCategory, ObjectKind};
+use ber_model::ber::fenestration::Overshading;
+use ber_model::ber::objects::{Compass8, ObjectCategory, ObjectKind};
+
+/// The PV pin controls (photovoltaic objects only): the roof-facing pick —
+/// prefilled with the roof-plane-derived side when the pin sits on a sloped
+/// roof — and the Table H3 overshading pick, defaulting to "Very little".
+fn pv_pin_controls(
+    ui: &mut egui::Ui,
+    faces_pick: &mut Option<Compass8>,
+    overshading_pick: &mut Option<Overshading>,
+    derived_facing: Option<Compass8>,
+) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label("faces");
+        let effective = faces_pick.or(derived_facing);
+        for c in Compass8::ALL {
+            if ui
+                .selectable_label(effective == Some(c), c.label())
+                .clicked()
+            {
+                *faces_pick = Some(c);
+            }
+        }
+        if faces_pick.is_none() && derived_facing.is_some() {
+            ui.label(
+                RichText::new("(from roof)")
+                    .small()
+                    .color(egui::Color32::from_gray(150)),
+            );
+        }
+    });
+    ui.horizontal_wrapped(|ui| {
+        ui.label("overshading");
+        let effective = overshading_pick.unwrap_or(Overshading::VeryLittle);
+        for o in Overshading::ALL {
+            if ui.selectable_label(effective == o, o.label()).clicked() {
+                *overshading_pick = Some(o);
+            }
+        }
+    });
+}
 
 /// A simple glyph per category for the big buttons. Emoji placeholders until a
 /// proper icon set is wired — some may render as a box depending on the font.
@@ -155,6 +195,9 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             *view.object_note_input = edit.note.clone();
             *view.object_kwh_input = edit.kwh.map(|k| k.to_string()).unwrap_or_default();
             *view.object_area_input = edit.area_m2.map(|a| a.to_string()).unwrap_or_default();
+            *view.object_wp_input = edit.panel_wp.map(|w| w.to_string()).unwrap_or_default();
+            *view.object_faces_pick = edit.roof_faces;
+            *view.object_overshading_pick = edit.overshading;
             view.object_edit_photos.clear();
         }
         egui::Window::new(format!("Edit {}", edit.label))
@@ -197,7 +240,19 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                         ui.label("area m²");
                         metre_input(ui, view.object_area_input, 48.0, "e.g. 4");
                     }
+                    if edit.pv {
+                        ui.label("Wp/panel");
+                        metre_input(ui, view.object_wp_input, 56.0, "e.g. 465");
+                    }
                 });
+                if edit.pv {
+                    pv_pin_controls(
+                        ui,
+                        view.object_faces_pick,
+                        view.object_overshading_pick,
+                        view.active_object_room.as_ref().and_then(|r| r.roof_facing),
+                    );
+                }
                 ui.horizontal_wrapped(|ui| {
                     for (p, _quality) in view.object_edit_photos.iter() {
                         let uri = format!("file://{}", p.to_string_lossy());
@@ -222,17 +277,28 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                         let kwh = view.object_kwh_input.trim().parse::<f32>().ok();
                         let area_m2 = view.object_area_input.trim().parse::<f32>().ok();
                         let photos = std::mem::take(view.object_edit_photos);
+                        let derived =
+                            view.active_object_room.as_ref().and_then(|r| r.roof_facing);
                         on_event(UiEvent::Sketch(SketchEvent::UpdateObject {
                             count,
                             note,
                             kwh,
                             area_m2,
+                            panel_wp: view.object_wp_input.trim().parse::<f32>().ok(),
+                            roof_faces: view.object_faces_pick.or(derived),
+                            overshading: Some(
+                                view.object_overshading_pick
+                                    .unwrap_or(Overshading::VeryLittle),
+                            ),
                             photos,
                         }));
                         view.object_count_input.clear();
                         view.object_note_input.clear();
                         view.object_kwh_input.clear();
                         view.object_area_input.clear();
+                        view.object_wp_input.clear();
+                        *view.object_faces_pick = None;
+                        *view.object_overshading_pick = None;
                     }
                     if ui.button("Cancel").clicked() {
                         view.object_edit_photos.clear();
@@ -240,6 +306,9 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                         view.object_note_input.clear();
                         view.object_kwh_input.clear();
                         view.object_area_input.clear();
+                        view.object_wp_input.clear();
+                        *view.object_faces_pick = None;
+                        *view.object_overshading_pick = None;
                         on_event(UiEvent::Sketch(SketchEvent::CancelEditObject));
                     }
                 });
@@ -364,7 +433,19 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                             ui.label("area m²");
                             metre_input(ui, view.object_area_input, 48.0, "e.g. 4");
                         }
+                        if kind.is_pv() {
+                            ui.label("Wp/panel");
+                            metre_input(ui, view.object_wp_input, 56.0, "e.g. 465");
+                        }
                     });
+                    if kind.is_pv() {
+                        pv_pin_controls(
+                            ui,
+                            view.object_faces_pick,
+                            view.object_overshading_pick,
+                            room.roof_facing,
+                        );
+                    }
                     let have_name = !view.object_note_input.trim().is_empty();
                     let kwh_value = view.object_kwh_input.trim().parse::<f32>().ok();
                     let area_value = view.object_area_input.trim().parse::<f32>().ok();
@@ -450,12 +531,29 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                         // the buffer); other kinds' / rooms' parked photos are
                         // untouched.
                         let photos = view.object_pending_photos.take(room_id, &kind);
+                        let pv = kind.is_pv();
                         on_event(UiEvent::Sketch(SketchEvent::AddObject {
                             kind,
                             count,
                             note,
                             kwh: if kwh_required { kwh_value } else { None },
                             area_m2: if area_required { area_value } else { None },
+                            panel_wp: pv
+                                .then(|| view.object_wp_input.trim().parse::<f32>().ok())
+                                .flatten(),
+                            roof_faces: if pv {
+                                view.object_faces_pick.or(room.roof_facing)
+                            } else {
+                                None
+                            },
+                            overshading: if pv {
+                                Some(
+                                    view.object_overshading_pick
+                                        .unwrap_or(Overshading::VeryLittle),
+                                )
+                            } else {
+                                None
+                            },
                             photos,
                         }));
                         *view.object_selected_category = None;
@@ -465,6 +563,9 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                         view.object_note_input.clear();
                         view.object_kwh_input.clear();
                         view.object_area_input.clear();
+                        view.object_wp_input.clear();
+                        *view.object_faces_pick = None;
+                        *view.object_overshading_pick = None;
                         view.object_other_name.clear();
                     }
                 }

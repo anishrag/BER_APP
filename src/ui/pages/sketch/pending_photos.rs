@@ -121,6 +121,10 @@ pub struct EntryCommit {
     pub note: Option<String>,
     pub kwh: Option<f32>,
     pub area_m2: Option<f32>,
+    /// PV pin fields (photovoltaic in-flight entries only).
+    pub panel_wp: Option<f32>,
+    pub roof_faces: Option<ber_model::ber::objects::Compass8>,
+    pub overshading: Option<ber_model::ber::fenestration::Overshading>,
     pub photos: Vec<(PathBuf, PhotoQuality)>,
 }
 
@@ -143,6 +147,7 @@ pub struct EntryCommit {
 /// Pure over the passed state so it's unit-testable; the caller clears the
 /// entry widgets and feeds each commit to `AppController::add_object`
 /// (mirroring the OK button in `objects_panel.rs`).
+#[allow(clippy::too_many_arguments)]
 pub fn take_dismiss_commits(
     room: ItemId,
     selected_kind: Option<&ObjectKind>,
@@ -150,6 +155,11 @@ pub fn take_dismiss_commits(
     note_input: &str,
     kwh_input: &str,
     area_input: &str,
+    // PV entry state (photovoltaic only): the Wp text and the effective
+    // faces / overshading the panel would have committed.
+    wp_input: &str,
+    roof_faces: Option<ber_model::ber::objects::Compass8>,
+    overshading: Option<ber_model::ber::fenestration::Overshading>,
     photo_required: impl Fn(&ObjectKind) -> bool,
     pending: &mut PendingObjectPhotos,
 ) -> Vec<EntryCommit> {
@@ -172,12 +182,20 @@ pub fn take_dismiss_commits(
                 && (!kind.kwh_required() || kwh.is_some())
                 && (!kind.area_required() || area.is_some());
             if entered && gates_met {
+                let pv = kind.is_pv();
                 commits.push(EntryCommit {
                     kind: kind.clone(),
                     count: count_txt.parse::<u32>().unwrap_or(1),
                     note: (!note_txt.is_empty()).then(|| note_txt.to_string()),
                     kwh: if kind.kwh_required() { kwh } else { None },
                     area_m2: if kind.area_required() { area } else { None },
+                    panel_wp: if pv {
+                        wp_input.trim().parse::<f32>().ok()
+                    } else {
+                        None
+                    },
+                    roof_faces: if pv { roof_faces } else { None },
+                    overshading: if pv { overshading } else { None },
                     photos: pending.take(room, kind),
                 });
             }
@@ -191,6 +209,9 @@ pub fn take_dismiss_commits(
             note: None,
             kwh: None,
             area_m2: None,
+            panel_wp: None,
+            roof_faces: None,
+            overshading: None,
             photos,
         });
     }
@@ -329,6 +350,9 @@ mod tests {
             "",
             "",
             "",
+            "",
+            None,
+            None,
             |_| false,
             &mut pending
         )
@@ -342,6 +366,9 @@ mod tests {
             " by door ",
             "",
             "",
+            "",
+            None,
+            None,
             |_| false,
             &mut pending,
         );
@@ -357,6 +384,9 @@ mod tests {
             "",
             "",
             "",
+            "",
+            None,
+            None,
             |_| true,
             &mut pending
         )
@@ -374,6 +404,9 @@ mod tests {
             "",
             "",
             "",
+            "",
+            None,
+            None,
             |_| true,
             &mut pending,
         );

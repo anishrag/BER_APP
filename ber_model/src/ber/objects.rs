@@ -396,6 +396,13 @@ impl ObjectKind {
         matches!(self, ObjectKind::SolarPanel(SolarPanelKind::SolarTubes))
     }
 
+    /// Whether this is a PHOTOVOLTAIC solar-panel object — the kind carrying
+    /// the per-pin PV fields (panel Wp rating, roof-facing side, overshading)
+    /// the renewables section reads.
+    pub fn is_pv(&self) -> bool {
+        matches!(self, ObjectKind::SolarPanel(SolarPanelKind::Photovoltaic))
+    }
+
     pub fn category(&self) -> ObjectCategory {
         match self {
             ObjectKind::Vent(_) => ObjectCategory::Vent,
